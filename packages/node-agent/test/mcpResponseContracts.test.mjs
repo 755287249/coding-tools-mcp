@@ -208,6 +208,25 @@ test('image results retain one encoded MCP payload and metadata-only structured 
   assert.equal(JSON.stringify(wrapped).split(data).length - 1, 1);
 });
 
+test('desktop screenshots promote top-level encoded payloads into MCP image content', () => {
+  const data = Buffer.from('desktop-image-bytes').toString('base64');
+  const wrapped = wrapMcpToolResult('desktop_screenshot', {}, {
+    ok: true,
+    mime_type: 'image/jpeg',
+    width: 1920,
+    height: 1080,
+    bytes: Buffer.from(data, 'base64').byteLength,
+    base64: data,
+    data_url: `data:image/jpeg;base64,${data}`
+  });
+
+  assert.deepEqual(wrapped.content, [{ type: 'image', data, mimeType: 'image/jpeg' }]);
+  assert.equal(wrapped.structuredContent.base64, undefined);
+  assert.equal(wrapped.structuredContent.data_url, undefined);
+  assert.equal(wrapped.structuredContent.mime_type, 'image/jpeg');
+  assert.equal(JSON.stringify(wrapped).split(data).length - 1, 1);
+});
+
 test('multiple image blocks fall back to bounded text instead of duplicating image payloads', () => {
   const image = { type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' };
   const wrapped = wrapMcpToolResult('view_image', {}, {

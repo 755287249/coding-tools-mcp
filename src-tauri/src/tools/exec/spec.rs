@@ -494,6 +494,17 @@ pub(super) fn resolve_post_checks_for_target(
         .iter()
         .enumerate()
         .map(|(index, check)| {
+            if check.get("job_timeout_ms").is_some() {
+                return Err(WorkspaceError::invalid_argument(
+                    "post_checks cannot use job_timeout_ms",
+                ));
+            }
+            let timeout_contract = crate::tools::execution_timeout::resolve_process_timeout(
+                check,
+                30_000,
+                ABSOLUTE_COMMAND_TIMEOUT_MAX_MS,
+                0,
+            )?;
             let exec = resolve_exec_spec_for_target(check, cwd, workspace_root, policy, target)?;
             let name = check
                 .get("name")
@@ -507,13 +518,7 @@ pub(super) fn resolve_post_checks_for_target(
                 .unwrap_or(0)
                 .clamp(i32::MIN as i64, i32::MAX as i64)
                 as i32;
-            let timeout = Duration::from_millis(
-                check
-                    .get("timeout_ms")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(30_000)
-                    .clamp(1, ABSOLUTE_COMMAND_TIMEOUT_MAX_MS),
-            );
+            let timeout = Duration::from_millis(timeout_contract.effective_timeout_ms);
             let max_output_bytes = check
                 .get("max_output_bytes")
                 .and_then(Value::as_u64)

@@ -1,0 +1,47 @@
+# syntax=docker/dockerfile:1.7
+
+ARG NODE_AGENT_BASE=coding-tools-node-agent:local
+FROM ${NODE_AGENT_BASE} AS dev
+
+ARG RUST_TOOLCHAIN=stable
+ENV CARGO_HOME=/home/node/.cargo \
+    RUSTUP_HOME=/home/node/.rustup \
+    PATH=/home/node/.cargo/bin:${PATH}
+
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        bash \
+        build-essential \
+        clang \
+        cmake \
+        file \
+        jq \
+        libayatana-appindicator3-dev \
+        libgtk-3-dev \
+        librsvg2-dev \
+        libssl-dev \
+        libwebkit2gtk-4.1-dev \
+        libxdo-dev \
+        pkg-config \
+        python3 \
+        python3-pip \
+        ripgrep \
+        unzip \
+        xz-utils \
+        zip \
+    && rm -rf /var/lib/apt/lists/*
+
+USER node
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | sh -s -- -y --profile minimal --default-toolchain "${RUST_TOOLCHAIN}" \
+    && rustup component add rustfmt clippy \
+    && cargo --version \
+    && rustc --version \
+    && rustfmt --version \
+    && cargo clippy --version \
+    && python3 --version \
+    && cmake --version \
+    && rg --version
+
+WORKDIR /workspace

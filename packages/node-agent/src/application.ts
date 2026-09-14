@@ -5,6 +5,7 @@ import {
   createOAuthClientId,
   loadConfigBundle,
   normalizeConfig,
+  recoverWorkspaceFolders,
   resolveConfigPath,
   validateConfig,
   writeConfigDocument,
@@ -14,7 +15,7 @@ import { ConfigStore, type RuntimeHotApplyTarget } from './management.js';
 import { generateAuthorizationPassword } from './secrets.js';
 import type { AgentConfigDocument, JsonObject, WorkspaceRegistryDocument } from './types.js';
 import { unwrapJson } from './protect.js';
-import { canonicalToAgentConfigDocument, parseWorkspacePack } from './workspaceDocument.js';
+import { canonicalToAgentConfigDocument, overlayAgentDocumentOnCanonical, parseWorkspacePack } from './workspaceDocument.js';
 import {
   findCounterpartSharedWorkspaceId,
   readSharedAgentSecrets,
@@ -40,6 +41,24 @@ async function activateSharedStore(loaded: LoadedConfig, id: string, name: strin
     else await writeSharedAgentSecrets(id, loaded.secrets);
     loaded.config = normalizeConfig(loaded.document, loaded.secrets);
     validateConfig(loaded.config);
+    const folderRecovery = await recoverWorkspaceFolders(loaded.config, loaded.document);
+    loaded.config = folderRecovery.config;
+    loaded.document = folderRecovery.document;
+    if (folderRecovery.removed.length) {
+      loaded.canonical = overlayAgentDocumentOnCanonical(loaded.document, {
+        id,
+        name: loaded.canonical.name || name
+      }, loaded.canonical);
+      await writeSharedWorkspace(id, loaded.canonical);
+      console.warn(
+        `[${name}] Removed unavailable shared workspace folder(s): ${folderRecovery.removed.map(folder => folder.path).join(', ')}`
+      );
+      if (folderRecovery.fallbackCreated) {
+        console.warn(
+          `[${name}] No shared workspace folders remained; created fallback workspace: ${loaded.config.folders[0]?.path ?? ''}`
+        );
+      }
+    }
   } else {
     loaded.canonical = { ...loaded.canonical, id, name: loaded.canonical.name || name };
     await writeSharedWorkspace(id, loaded.canonical);
@@ -490,6 +509,18 @@ export class ApplicationConfigStore {
       key,
       restartRequired: !applied,
       appliedImmediately: applied ? [key === 'oauthPassword' ? 'oauth' : 'tunnel'] : []
+    };
+  }
+
+  async replaceNamedSecret(id: string, reference: string, value: string): Promise<JsonObject> {
+    const workspace = this.workspace(id);
+    await workspace.store.replaceNamedSecret(reference, value);
+    return {
+      ok: true,
+      workspaceId: id,
+      key: reference,
+      restartRequired: false,
+      appliedImmediately: ['process-secrets']
     };
   }
 

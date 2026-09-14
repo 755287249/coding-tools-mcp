@@ -76,7 +76,7 @@ Node Agent 是 headless MCP 產品，不實作 Tauri shell、Actions/OpenAPI、F
 Public HTTPS client
   → reverse proxy
   → services/tunnel-server
-  → coding-tools-tunnel-v3 WebSocket workers
+  → coding-tools-tunnel-v4 WebSocket workers
   → Desktop builtin tunnel 或 Node BuiltinTunnelManager
   → local MCP / Actions listener
 ```

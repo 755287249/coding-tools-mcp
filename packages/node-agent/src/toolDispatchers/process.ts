@@ -15,6 +15,7 @@ import {
   touchSessionAttachment,
   WAIT_COMMAND_TIMEOUT_DEFAULT_MS,
   WAIT_COMMAND_TIMEOUT_MAX_MS,
+  WAIT_COMMAND_TRANSPORT_SAFE_MS,
   waitForSession
 } from '../processes.js';
 import { toolErrorResult } from '../toolContract.js';
@@ -131,8 +132,13 @@ async function waitCommand({ ctx, key, args }: ToolDispatchRequest): Promise<Jso
   const processCompleted = session.finalizedAt !== undefined;
   const terminal = processCompleted;
   const progressSinceLastWait = session.sequence > cursor || Boolean(session.endedAt) || processCompleted;
-  const nextWaitMs = terminal ? null : waitTimeoutMs || WAIT_COMMAND_TIMEOUT_DEFAULT_MS;
-  const result = processResult(session, { ...args, request_timed_out: requestTimedOut });
+  const nextWaitMs = terminal ? null : (waitTimeoutMs === 0 ? WAIT_COMMAND_TIMEOUT_DEFAULT_MS : Math.min(waitTimeoutMs, WAIT_COMMAND_TRANSPORT_SAFE_MS));
+  const eventDetail = String(args.event_detail ?? 'compact').trim().toLowerCase() === 'full' ? 'full' : 'compact';
+  const result = processResult(session, {
+    ...args,
+    event_detail: eventDetail,
+    request_timed_out: requestTimedOut
+  });
   Object.assign(result, {
     session_registry_wait_ms: sessionRegistryWaitMs,
     actual_wait_ms: waited.actualWaitMs,
@@ -156,9 +162,10 @@ async function waitCommand({ ctx, key, args }: ToolDispatchRequest): Promise<Jso
       arguments: {
         session_id: session.id,
         cursor: result.latest_cursor,
-        timeout_ms: waitTimeoutMs || WAIT_COMMAND_TIMEOUT_DEFAULT_MS,
+        timeout_ms: waitTimeoutMs === 0 ? WAIT_COMMAND_TIMEOUT_DEFAULT_MS : Math.min(waitTimeoutMs, WAIT_COMMAND_TRANSPORT_SAFE_MS),
         until: waitUntil,
-        output_mode: 'delta'
+        output_mode: 'delta',
+        event_detail: eventDetail
       }
     }];
   }

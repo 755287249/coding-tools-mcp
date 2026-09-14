@@ -9,14 +9,14 @@ use tokio::io::AsyncWriteExt;
 use crate::tools::workspace::{tool_ok, WorkspaceError};
 
 use super::output::{
-    align_output_start, bounded_output_end, decode_process_output_with_encoding, OutputMode,
-    OutputOptions,
+    align_output_start, bounded_output_end, decode_process_output_with_encoding, EventDetail,
+    OutputMode, OutputOptions,
 };
 #[cfg(windows)]
 use super::process_lifecycle::terminate_process;
 use super::{
     SessionStore, FINALIZED_SESSION_RETENTION, WAIT_COMMAND_TIMEOUT_DEFAULT_MS,
-    WAIT_COMMAND_TIMEOUT_MAX_MS,
+    WAIT_COMMAND_TIMEOUT_MAX_MS, WAIT_COMMAND_TRANSPORT_SAFE_MS,
 };
 
 pub(super) fn run_read_output(store: &SessionStore, args: &Value) -> Result<Value, WorkspaceError> {
@@ -206,12 +206,16 @@ pub(super) async fn run_wait_command_async(
         .and_then(Value::as_u64)
         .unwrap_or(0)
         .min(30_000);
-    let effective_wait_ms = timeout_ms;
+    let effective_wait_ms = timeout_ms.min(WAIT_COMMAND_TRANSPORT_SAFE_MS);
     let until = args
         .get("until")
         .and_then(Value::as_str)
         .unwrap_or("output_or_exit");
-    let options = OutputOptions::from_args(args, OutputMode::Delta);
+    let mut output_args = args.clone();
+    if output_args.get("event_detail").is_none() {
+        output_args["event_detail"] = json!("compact");
+    }
+    let options = OutputOptions::from_args(&output_args, OutputMode::Delta);
     let actual_wait_started = Instant::now();
     let changed = session
         .wait_for_change(
@@ -255,9 +259,10 @@ pub(super) async fn run_wait_command_async(
                     "arguments": {
                         "session_id": session_id,
                         "cursor": next_cursor,
-                        "timeout_ms": timeout_ms,
+                        "timeout_ms": if timeout_ms == 0 { WAIT_COMMAND_TIMEOUT_DEFAULT_MS } else { effective_wait_ms },
                         "until": until,
-                        "output_mode": "delta"
+                        "output_mode": "delta",
+                        "event_detail": options.event_detail.as_str()
                     }
                 }]),
             );
@@ -338,6 +343,7 @@ pub(super) async fn run_send_input_async(
 
     let mut payload = session.snapshot_with_options(OutputOptions {
         mode: OutputMode::None,
+        event_detail: EventDetail::Full,
         cursor: session.latest_cursor(),
         max_output_bytes: 1,
         tail_lines: 1,

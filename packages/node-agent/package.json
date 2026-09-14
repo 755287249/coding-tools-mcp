@@ -1,10 +1,10 @@
 {
   "name": "@coding-tools/node-agent",
-  "version": "0.29.26",
+  "version": "0.29.35",
   "private": true,
   "type": "module",
   "codingTools": {
-    "clientVersion": "0.1.53"
+    "clientVersion": "0.1.59"
   },
   "files": [
     "dist",
@@ -35,7 +35,9 @@
     "test:wss:production:unlocked": "pnpm run build:server:unlocked && node scripts/test-production-wss.mjs",
     "test:wslc:smoke": "pnpm run build:server && node -e \"const {spawnSync}=require('node:child_process'); const r=spawnSync(process.execPath,['--import','./test/setup.mjs','--test','--test-name-pattern=WSLC runtime smoke','test/sandboxWslc.test.mjs'],{stdio:'inherit',env:{...process.env,CTMCP_WSLC_SMOKE:'1'}}); process.exit(r.status ?? 1)\"",
     "sync:rust-contract": "node scripts/sync-rust-catalog.mjs",
+    "sync:rust-revisions": "node scripts/sync-generated-catalog-revisions.mjs",
     "check:rust-contract": "node scripts/sync-rust-catalog.mjs --check",
+    "check:rust-revisions": "node scripts/sync-generated-catalog-revisions.mjs --check",
     "check:client-version": "node ../../scripts/sync-version.mjs --check",
     "check:parity-todos": "node ../../scripts/check-node-agent-parity.mjs",
     "check:ui-parity": "node ../../scripts/check-node-agent-ui-parity.mjs",

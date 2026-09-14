@@ -4,7 +4,8 @@ use serde_json::{json, Value};
 
 use super::output::{
     complete_output_boundary, decode_output_event, decode_process_output_with_encoding,
-    summarize_stream, truncate_tail, OutputEvent, ProcessOutputEncoding, ProcessOutputSnapshot,
+    summarize_stream, truncate_tail, EventDetail, OutputEvent, ProcessOutputEncoding,
+    ProcessOutputSnapshot,
 };
 use super::{ExecSession, OutputMode, OutputOptions};
 
@@ -85,6 +86,7 @@ pub(super) fn build_summary(session: &ExecSession) -> Value {
         session,
         OutputOptions {
             mode: OutputMode::None,
+            event_detail: EventDetail::Full,
             cursor: session.latest_cursor(),
             max_output_bytes: 1,
             tail_lines: 1,
@@ -139,6 +141,29 @@ pub(super) fn build_snapshot_with_options(session: &ExecSession, options: Output
         (Some(execution), Some(verification)) => Some(execution && verification),
         _ => None,
     };
+    let failure_origin = if command_ok != Some(false) {
+        None
+    } else if execution_ok == Some(true) && verification_ok == Some(false) {
+        Some("post_check")
+    } else if reason == "exited" {
+        Some("child_process")
+    } else {
+        Some("process_lifecycle")
+    };
+    let diagnostic_summary = match failure_origin {
+        Some("post_check") => Some(
+            "Child process completed, but post-check verification failed. MCP policy did not block execution."
+                .to_string(),
+        ),
+        Some("child_process") => Some(format!(
+            "Child process started and exited with code {}. MCP policy did not block execution.",
+            exit_code.map_or_else(|| "unknown".to_string(), |code| code.to_string())
+        )),
+        Some("process_lifecycle") => Some(format!(
+            "Child process started but ended because of {reason}. MCP policy did not block execution."
+        )),
+        _ => None,
+    };
     let status = if !session.has_exited() {
         "running"
     } else if session.post_checks_pending() {
@@ -186,14 +211,22 @@ pub(super) fn build_snapshot_with_options(session: &ExecSession, options: Output
                     } else {
                         stdout_encoding
                     };
-                    json!({
-                        "sequence": event.sequence,
-                        "stream": event.stream,
-                        "stream_offset": event.stream_offset,
-                        "decoded_offset": event.stream_offset.saturating_sub(event.prefix.len()),
-                        "encoding": encoding.as_str(),
-                        "data": decode_output_event(event, encoding)
-                    })
+                    if options.event_detail == EventDetail::Compact {
+                        json!({
+                            "sequence": event.sequence,
+                            "stream": event.stream,
+                            "stream_offset": event.stream_offset
+                        })
+                    } else {
+                        json!({
+                            "sequence": event.sequence,
+                            "stream": event.stream,
+                            "stream_offset": event.stream_offset,
+                            "decoded_offset": event.stream_offset.saturating_sub(event.prefix.len()),
+                            "encoding": encoding.as_str(),
+                            "data": decode_output_event(event, encoding)
+                        })
+                    }
                 })
                 .collect::<Vec<_>>();
             let stdout_prefix = batch
@@ -337,6 +370,7 @@ pub(super) fn build_snapshot_with_options(session: &ExecSession, options: Output
         "post_checks_pending": session.post_checks_pending(),
         "post_checks": post_checks,
         "output_mode": options.mode.as_str(),
+        "event_detail": if options.mode == OutputMode::Delta { options.event_detail.as_str() } else { "none" },
         "cursor": options.cursor,
         "next_cursor": next_cursor,
         "latest_cursor": session.latest_cursor(),
@@ -374,6 +408,43 @@ pub(super) fn build_snapshot_with_options(session: &ExecSession, options: Output
         }
     });
     if let Some(object) = payload.as_object_mut() {
+        object.insert("failure_origin".into(), json!(failure_origin));
+        object.insert("policy_blocked".into(), Value::Bool(false));
+        object.insert("execution_attempted".into(), Value::Bool(true));
+        object.insert("process_started".into(), Value::Bool(true));
+        object.insert("diagnostic_summary".into(), json!(diagnostic_summary));
+        if let Some(contract) = &session.process_timeout {
+            object.insert("execution_mode".into(), json!(contract.execution_mode));
+            object.insert(
+                "requested_process_timeout_ms".into(),
+                json!(contract.requested_timeout_ms),
+            );
+            object.insert(
+                "effective_process_timeout_ms".into(),
+                json!(contract.effective_timeout_ms),
+            );
+            object.insert("process_timeout_limit_ms".into(), json!(contract.limit_ms));
+            object.insert(
+                "process_deadline_ts_ms".into(),
+                json!(session.process_deadline_ts_ms),
+            );
+            let remaining = if session.has_exited() {
+                0
+            } else {
+                session
+                    .process_deadline
+                    .map(|deadline| {
+                        deadline
+                            .saturating_duration_since(std::time::Instant::now())
+                            .as_millis()
+                    })
+                    .unwrap_or(0)
+            };
+            object.insert("process_timeout_remaining_ms".into(), json!(remaining));
+            object.insert("timeout_clamped".into(), json!(false));
+            object.insert("polling_extends_process_deadline".into(), json!(false));
+            object.insert("timeout_scope".into(), json!("process"));
+        }
         object.insert("process_id".into(), json!(session.process_id));
         object.insert(
             "process_tree_contained".into(),

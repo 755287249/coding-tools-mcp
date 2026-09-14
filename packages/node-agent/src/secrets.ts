@@ -46,7 +46,7 @@ export function secretStorePaths(dataDir: string): { storePath: string; keyPath:
 
 function cleanSecrets(value: AgentSecrets): AgentSecrets {
   const output: AgentSecrets = {};
-  const entries: Array<[keyof AgentSecrets, unknown, number]> = [
+  const entries: Array<[Exclude<keyof AgentSecrets, 'named'>, unknown, number]> = [
     ['oauthPassword', value.oauthPassword, 4096],
     ['oauthClientSecret', value.oauthClientSecret, 4096],
     ['oauthTokenSecret', value.oauthTokenSecret, 4096],
@@ -57,6 +57,21 @@ function cleanSecrets(value: AgentSecrets): AgentSecrets {
     if (typeof raw !== 'string') throw new Error(`Secret field ${key} must be a string`);
     if (raw.length > maximum) throw new Error(`Secret field ${key} exceeds ${maximum} characters`);
     output[key] = raw;
+  }
+  if (value.named !== undefined) {
+    if (!value.named || typeof value.named !== 'object' || Array.isArray(value.named)) {
+      throw new Error('Named secrets must be an object');
+    }
+    const entries = Object.entries(value.named);
+    if (entries.length > 256) throw new Error('Named secrets exceed 256 entries');
+    const named: Record<string, string> = {};
+    for (const [key, raw] of entries) {
+      if (!/^[A-Za-z0-9._-]{1,128}$/.test(key)) throw new Error(`Invalid named secret key: ${key}`);
+      if (typeof raw !== 'string' || raw.length === 0) continue;
+      if (raw.length > 4096) throw new Error(`Named secret ${key} exceeds 4096 characters`);
+      named[key] = raw;
+    }
+    if (Object.keys(named).length > 0) output.named = named;
   }
   if (output.oauthTokenSecret !== undefined && !output.oauthTokenSecret.trim()) {
     throw new Error('OAuth token secret is not configured');

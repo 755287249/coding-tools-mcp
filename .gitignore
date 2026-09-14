@@ -34,8 +34,10 @@ docs/history-session/
 
 dist-portable/
 /dist-node-portable/
+
 /dist-node-test-live/
 /dist-skills/
+/dist-run/
 
 # Local linked Git worktrees
 /.worktrees/

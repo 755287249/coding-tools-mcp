@@ -158,8 +158,10 @@ test('sensitive process sessions redact initial, delta, retained, resolved and l
     cursor: 0,
     timeout_ms: 30_000,
     until: 'finalized',
-    output_mode: 'delta'
+    output_mode: 'delta',
+    event_detail: 'full'
   }, meta);
+  assert.equal(waited.event_detail, 'full');
   assert.equal(waited.sensitive_data_redacted, true);
   assert.ok(waited.events.every(event => !event.data || event.data === REDACTED));
   assert.doesNotMatch(serialized(waited), /BARE_PROCESS_(?:SECRET|ERROR)/);

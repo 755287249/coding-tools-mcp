@@ -17,6 +17,7 @@ use crate::auth::{
     require_configured_secret, token_exchange, AuthorizeForm, AuthorizeParams, OAuthRuntime,
     TokenForm,
 };
+use crate::secret::SecretStore;
 use crate::tools::hub::{HubConfig, HubRouter};
 use crate::tools::{
     self, policy::PolicySettings, wrap_tool_result, ExecutionLimits, SharedRuntimeToolConfig,
@@ -55,6 +56,7 @@ pub fn spawn_listener(
     oauth_client_secret: Option<String>,
     oauth_password: Option<String>,
     oauth_token_secret: Option<String>,
+    use_shared_secrets: bool,
     policy: PolicySettings,
     sandbox: SandboxConfig,
     execution_limits: ExecutionLimits,
@@ -81,12 +83,22 @@ pub fn spawn_listener(
         } else {
             external_base_url(&HeaderMap::new(), actions_port, &configured_public_url)
         };
-        Some(Arc::new(OAuthRuntime::try_new(
+        let password_workspace_id = workspace_id.to_string();
+        let password_persister = Arc::new(move |value: &str| {
+            if use_shared_secrets {
+                SecretStore::set_shared("actions_oauth_password", value)
+            } else {
+                SecretStore::set(&password_workspace_id, "actions_oauth_password", value)
+            }
+            .map_err(|error| error.to_string())
+        });
+        Some(Arc::new(OAuthRuntime::try_new_with_password_persister(
             oauth_base,
             oauth_client_id,
             oauth_client_secret.clone(),
             oauth_password,
             oauth_token_secret,
+            Some(password_persister),
         )?))
     } else {
         None

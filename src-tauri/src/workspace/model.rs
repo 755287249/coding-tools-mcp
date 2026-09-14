@@ -145,6 +145,8 @@ pub struct AuthConfig {
     pub auth_type: String,
     #[serde(default = "default_oauth_client_id")]
     pub oauth_client_id: String,
+    #[serde(default = "default_oauth_token_ttl_seconds")]
+    pub oauth_token_ttl_seconds: u64,
     #[serde(default)]
     pub use_shared_secrets: bool,
 }
@@ -411,6 +413,12 @@ fn default_oauth_client_id() -> String {
     format!("chatgpt-client-{}", &uuid::Uuid::new_v4().to_string()[..12])
 }
 
+pub const DEFAULT_OAUTH_TOKEN_TTL_SECONDS: u64 = 7 * 24 * 60 * 60;
+
+pub fn default_oauth_token_ttl_seconds() -> u64 {
+    DEFAULT_OAUTH_TOKEN_TTL_SECONDS
+}
+
 fn default_mcp_port() -> u16 {
     28766
 }
@@ -536,6 +544,7 @@ impl Default for AuthConfig {
         Self {
             auth_type: default_auth_type(),
             oauth_client_id: default_oauth_client_id(),
+            oauth_token_ttl_seconds: default_oauth_token_ttl_seconds(),
             use_shared_secrets: false,
         }
     }

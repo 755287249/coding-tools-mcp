@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import type { JsonObject, ToolContext } from '../types.js';
 import type { SkillDescriptor, SkillSnapshot } from './types.js';
+import { applyEvolvedSkillRecord } from '../knowledge/evolvedSkills.js';
+import { rememberSkillSelection, type SkillCanaryAttribution } from '../knowledge/skillAttribution.js';
 
 const PROMPT_PREFIX = 'project-skill/';
 const RESOURCE_PREFIX = 'skill://coding-tools/';
@@ -64,6 +66,39 @@ async function findEntry(ctx: ToolContext, folderId: string, skillName: string):
   return skill ? { folderId, folderName: folder.name, skill, snapshot } : undefined;
 }
 
+async function consumedEntry(
+  ctx: ToolContext,
+  entry: CatalogEntry,
+  conversationKey?: string
+): Promise<CatalogEntry> {
+  if (!conversationKey) return entry;
+  const runtime = ctx.folderRuntimes.get(entry.folderId);
+  let canary: SkillCanaryAttribution | undefined;
+  let skill = entry.skill;
+  if (runtime) {
+    try {
+      const decision = await runtime.evolvedSkillCanaryEngine.decide(entry.skill, conversationKey);
+      if (decision) {
+        if (decision.applied && !decision.alreadyApplied) {
+          skill = applyEvolvedSkillRecord(entry.skill, decision.record);
+        }
+        canary = {
+          knowledgeId: decision.knowledgeId,
+          implementation: decision.implementation,
+          eligible: true,
+          applied: decision.applied,
+          bucket: decision.bucket
+        };
+      }
+    } catch {
+      skill = entry.skill;
+      canary = undefined;
+    }
+  }
+  rememberSkillSelection(ctx.conversations as object, conversationKey, entry.folderId, entry.skill, canary);
+  return skill === entry.skill ? entry : { ...entry, skill };
+}
+
 function skillMeta(entry: CatalogEntry): JsonObject {
   return {
     'coding-tools/workspace-folder-id': entry.folderId,
@@ -101,15 +136,16 @@ export async function listSkillPrompts(ctx: ToolContext): Promise<JsonObject> {
   };
 }
 
-export async function getSkillPrompt(ctx: ToolContext, name: string): Promise<JsonObject> {
+export async function getSkillPrompt(ctx: ToolContext, name: string, conversationKey?: string): Promise<JsonObject> {
   const parsed = parseNamespaced(name, PROMPT_PREFIX);
   if (!parsed) throw Object.assign(new Error(`Unknown prompt: ${name}`), { rpcCode: -32602 });
   const entry = await findEntry(ctx, parsed.folderId, parsed.skillName);
   if (!entry) throw Object.assign(new Error(`Skill not found: ${name}`), { rpcCode: -32602 });
+  const consumed = await consumedEntry(ctx, entry, conversationKey);
   return {
-    description: entry.skill.description,
-    messages: [{ role: 'user', content: { type: 'text', text: promptText(entry) } }],
-    _meta: skillMeta(entry)
+    description: consumed.skill.description,
+    messages: [{ role: 'user', content: { type: 'text', text: promptText(consumed) } }],
+    _meta: skillMeta(consumed)
   };
 }
 
@@ -128,13 +164,14 @@ export async function listSkillResources(ctx: ToolContext): Promise<JsonObject> 
   };
 }
 
-export async function readSkillResource(ctx: ToolContext, uri: string): Promise<JsonObject> {
+export async function readSkillResource(ctx: ToolContext, uri: string, conversationKey?: string): Promise<JsonObject> {
   const parsed = parseNamespaced(uri, RESOURCE_PREFIX);
   if (!parsed) throw Object.assign(new Error(`Resource not found: ${uri}`), { rpcCode: -32002 });
   const entry = await findEntry(ctx, parsed.folderId, parsed.skillName);
   if (!entry) throw Object.assign(new Error(`Resource not found: ${uri}`), { rpcCode: -32002 });
+  const consumed = await consumedEntry(ctx, entry, conversationKey);
   return {
-    contents: [{ uri, mimeType: 'text/markdown', text: entry.skill.content }],
-    _meta: skillMeta(entry)
+    contents: [{ uri, mimeType: 'text/markdown', text: consumed.skill.content }],
+    _meta: skillMeta(consumed)
   };
 }

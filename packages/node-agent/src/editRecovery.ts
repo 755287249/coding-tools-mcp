@@ -110,9 +110,35 @@ function normalizeNewlines(value: string): string {
   return value.replaceAll('\r\n', '\n');
 }
 
-export function adaptNewlinesToOriginal(value: string, original: string): string {
+function newlineAt(value: string, newlineIndex: number): '\r\n' | '\n' {
+  return newlineIndex > 0 && value[newlineIndex - 1] === '\r' ? '\r\n' : '\n';
+}
+
+export function preferredNewlineNearRange(original: string, start = 0, end = start): '\r\n' | '\n' {
+  const boundedStart = Math.max(0, Math.min(start, original.length));
+  const boundedEnd = Math.max(boundedStart, Math.min(end, original.length));
+
+  const inside = original.indexOf('\n', boundedStart);
+  if (inside >= 0 && inside < boundedEnd) return newlineAt(original, inside);
+
+  const after = original.indexOf('\n', boundedEnd);
+  if (after >= 0) return newlineAt(original, after);
+
+  const before = original.lastIndexOf('\n', Math.max(0, boundedStart - 1));
+  if (before >= 0) return newlineAt(original, before);
+
+  return '\n';
+}
+
+export function adaptNewlinesToRange(value: string, original: string, start = 0, end = start): string {
   const normalized = normalizeNewlines(value);
-  return original.includes('\r\n') ? normalized.replaceAll('\n', '\r\n') : normalized;
+  return preferredNewlineNearRange(original, start, end) === '\r\n'
+    ? normalized.replaceAll('\n', '\r\n')
+    : normalized;
+}
+
+export function adaptNewlinesToOriginal(value: string, original: string): string {
+  return adaptNewlinesToRange(value, original, 0, 0);
 }
 
 function escapeRegex(value: string): string {
@@ -188,19 +214,71 @@ function proposalDiff(file: string, expected: string, actual: string): string {
   ].join('\n');
 }
 
-function wholeFileDiff(file: string, original: string, updated: string): string {
+const EDIT_RESULT_DIFF_MAX_BYTES = 32 * 1024;
+const EDIT_RESULT_DIFF_CONTEXT_LINES = 3;
+
+export interface EditResultDiff {
+  content: string;
+  bytes: number;
+  truncated: boolean;
+}
+
+function truncateDiffUtf8(value: string, maxBytes: number): EditResultDiff {
+  const totalBytes = Buffer.byteLength(value);
+  if (totalBytes <= maxBytes) return { content: value, bytes: totalBytes, truncated: false };
+  let content = '';
+  let bytes = 0;
+  for (const character of value) {
+    const size = Buffer.byteLength(character);
+    if (bytes + size > maxBytes) break;
+    content += character;
+    bytes += size;
+  }
+  return { content, bytes, truncated: true };
+}
+
+function wholeFileDiff(file: string, original: string, updated: string): EditResultDiff {
   const before = normalizeNewlines(original);
   const after = normalizeNewlines(updated);
   const beforeLines = before === '' ? [] : before.replace(/\n$/, '').split('\n');
   const afterLines = after === '' ? [] : after.replace(/\n$/, '').split('\n');
-  return [
+  let commonPrefix = 0;
+  while (
+    commonPrefix < beforeLines.length
+    && commonPrefix < afterLines.length
+    && beforeLines[commonPrefix] === afterLines[commonPrefix]
+  ) commonPrefix += 1;
+
+  let commonSuffix = 0;
+  while (
+    commonSuffix < beforeLines.length - commonPrefix
+    && commonSuffix < afterLines.length - commonPrefix
+    && beforeLines[beforeLines.length - 1 - commonSuffix] === afterLines[afterLines.length - 1 - commonSuffix]
+  ) commonSuffix += 1;
+
+  const beforeStart = Math.max(0, commonPrefix - EDIT_RESULT_DIFF_CONTEXT_LINES);
+  const afterStart = Math.max(0, commonPrefix - EDIT_RESULT_DIFF_CONTEXT_LINES);
+  const beforeEnd = Math.min(beforeLines.length, beforeLines.length - commonSuffix + EDIT_RESULT_DIFF_CONTEXT_LINES);
+  const afterEnd = Math.min(afterLines.length, afterLines.length - commonSuffix + EDIT_RESULT_DIFF_CONTEXT_LINES);
+  const trailingBeforeStart = Math.max(commonPrefix, beforeLines.length - commonSuffix);
+  const trailingAfterStart = Math.max(commonPrefix, afterLines.length - commonSuffix);
+  const beforeChanged = beforeLines.slice(commonPrefix, trailingBeforeStart);
+  const afterChanged = afterLines.slice(commonPrefix, trailingAfterStart);
+  const leadingContext = beforeLines.slice(beforeStart, commonPrefix);
+  const trailingContext = beforeLines.slice(trailingBeforeStart, beforeEnd);
+  const beforeCount = beforeEnd - beforeStart;
+  const afterCount = afterEnd - afterStart;
+  const diff = [
     `--- a/${file}`,
     `+++ b/${file}`,
-    `@@ -1,${beforeLines.length} +1,${afterLines.length} @@`,
-    ...beforeLines.map(line => `-${line}`),
-    ...afterLines.map(line => `+${line}`),
+    `@@ -${beforeStart + 1},${beforeCount} +${afterStart + 1},${afterCount} @@`,
+    ...leadingContext.map(line => ` ${line}`),
+    ...beforeChanged.map(line => `-${line}`),
+    ...afterChanged.map(line => `+${line}`),
+    ...trailingContext.map(line => ` ${line}`),
     ''
   ].join('\n');
+  return truncateDiffUtf8(diff, EDIT_RESULT_DIFF_MAX_BYTES);
 }
 
 function pruneEditProposals(ctx: ToolContext, key: string): void {
@@ -244,8 +322,8 @@ export function buildEditProposal(
   if (candidates.length !== 1) return undefined;
 
   const requestedReplacement = String(edit.new_text ?? '');
-  const replacement = adaptNewlinesToOriginal(requestedReplacement, original);
   const [start, end] = candidates[0];
+  const replacement = adaptNewlinesToRange(requestedReplacement, original, start, end);
   const actualText = original.slice(start, end);
   const proposalId = randomUUID().replaceAll('-', '');
   const proposal: EditProposalRecord = {
@@ -390,7 +468,7 @@ export function applyEditProposal(
     replacement = proposal.replacement;
     applyFormat = 'accept';
   }
-  replacement = adaptNewlinesToOriginal(replacement, original);
+  replacement = adaptNewlinesToRange(replacement, original, proposal.start, proposal.end);
   return {
     updated: `${original.slice(0, proposal.start)}${replacement}${original.slice(proposal.end)}`,
     proposalId,
@@ -513,7 +591,14 @@ function nearbyContexts(lines: string[], positions: number[], radius = 3): JsonO
   });
 }
 
-function findHunkPosition(lines: string[], pattern: string[], preferred: number | undefined, hunkIndex: number, file: string): number {
+function findHunkPosition(
+  lines: string[],
+  pattern: string[],
+  replacement: string[],
+  preferred: number | undefined,
+  hunkIndex: number,
+  file: string
+): number {
   if (!pattern.length) return Math.min(lines.length, preferred ?? lines.length);
   if (preferred !== undefined && hunkMatchesAt(lines, pattern, preferred)) return preferred;
   const candidates: number[] = [];
@@ -568,14 +653,26 @@ function findHunkPosition(lines: string[], pattern: string[], preferred: number 
       nearby_contexts: nearbyContexts(lines, candidates),
       recommended_tool: 'edit',
       suggestion: 'Use edit with exact old_text and expected_sha256, or add unique surrounding lines to this hunk.',
-      recovery_actions: [{
-        action: 'select_candidate_range',
+      recovery_actions: candidates.slice(0, 8).map((position, candidateIndex) => ({
+        action: 'apply_candidate_range',
+        action_id: `patch-candidate-${hunkIndex}-${candidateIndex + 1}`,
         tool: 'edit',
-        required_arguments: ['files'],
-        arguments: { files: [{ path: file }] },
-        candidate_lines: candidates.map(position => position + 1),
+        required_arguments: [],
+        candidate_line: position + 1,
+        arguments: {
+          files: [{
+            path: file,
+            edits: [{
+              type: 'replace_lines',
+              start_line: position + 1,
+              end_line: position + pattern.length,
+              expected_text: pattern.join('\n'),
+              new_text: replacement.join('\n')
+            }]
+          }]
+        },
         reason: 'patch_context_ambiguous'
-      }]
+      }))
     }
   );
 }
@@ -588,12 +685,13 @@ function applyHunks(original: string, hunks: Hunk[], file: string): string {
   for (let hunkIndex = 0; hunkIndex < hunks.length; hunkIndex += 1) {
     const hunk = hunks[hunkIndex];
     const oldPattern = hunk.lines.filter(line => line.kind !== 'add').map(line => line.value);
+    const replacement = hunk.lines.filter(line => line.kind !== 'remove').map(line => line.value);
     const preferred = hunk.oldStart === undefined
       ? undefined
       : Math.min(lines.length, Math.max(0, hunk.oldStart - 1 + offset));
     let position: number;
     try {
-      position = findHunkPosition(lines, oldPattern, preferred, hunkIndex, file);
+      position = findHunkPosition(lines, oldPattern, replacement, preferred, hunkIndex, file);
     } catch (error) {
       if (error instanceof EditContractError) {
         issues.push(error);
@@ -781,6 +879,6 @@ export async function preflightPatch(ctx: ToolContext, key: string, args: JsonOb
   }
 }
 
-export function editResultDiff(file: string, original: string, updated: string): string {
+export function editResultDiff(file: string, original: string, updated: string): EditResultDiff {
   return wholeFileDiff(file, original, updated);
 }

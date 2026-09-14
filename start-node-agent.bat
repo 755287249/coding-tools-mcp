@@ -32,7 +32,7 @@ if errorlevel 1 (
 where pnpm >nul 2>nul
 if errorlevel 1 (
   echo ERROR: pnpm was not found in PATH.
-  echo Enable Corepack or install pnpm 10.19.0, then run this file again.
+  echo Install pnpm 12.0.0 or newer, then run this file again.
   goto :failed
 )
 
@@ -81,6 +81,8 @@ echo Each Workspace uses its own saved Port, OAuth, tunnel, policy, and folders.
 echo The Agent will print every MCP endpoint and the primary Management UI URL.
 echo Press Ctrl+C to stop.
 echo.
+
+set "CTMCP_RESTART_SUPERVISOR=active-v1"
 
 cd /d "%REPO_ROOT%"
 if errorlevel 1 (

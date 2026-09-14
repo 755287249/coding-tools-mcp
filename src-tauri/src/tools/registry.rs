@@ -158,6 +158,7 @@ mod tests {
     use serde_json::json;
 
     use super::{input_schema, list_tools_for_profile, P0_TOOLS};
+    use crate::tools::execution_timeout::ABSOLUTE_JOB_TIMEOUT_MAX_MS;
     use crate::tools::ABSOLUTE_COMMAND_TIMEOUT_MAX_MS;
 
     #[test]
@@ -226,7 +227,7 @@ mod tests {
             .collect();
         let unique: HashSet<_> = names.iter().copied().collect();
 
-        assert_eq!(tools.len(), 36);
+        assert_eq!(tools.len(), 37);
         assert_eq!(unique.len(), tools.len());
         assert!(names.contains(&"history_session_bootstrap"));
         assert!(names.contains(&"history_session_checkpoint"));
@@ -268,8 +269,8 @@ mod tests {
     fn guarded_core_adds_only_permission_requests() {
         let trusted = list_tools_for_profile("trusted-core");
         let guarded = list_tools_for_profile("guarded-core");
-        assert_eq!(trusted.len(), 36);
-        assert_eq!(guarded.len(), 37);
+        assert_eq!(trusted.len(), 37);
+        assert_eq!(guarded.len(), 38);
         assert!(guarded
             .iter()
             .any(|tool| tool["name"] == "request_permissions"));
@@ -337,6 +338,15 @@ mod tests {
             ABSOLUTE_COMMAND_TIMEOUT_MAX_MS
         );
         assert_eq!(
+            exec_schema["properties"]["job_timeout_ms"]["maximum"],
+            ABSOLUTE_JOB_TIMEOUT_MAX_MS
+        );
+        assert!(
+            exec_schema["properties"]["post_checks"]["items"]["properties"]
+                .get("job_timeout_ms")
+                .is_none()
+        );
+        assert_eq!(
             exec_schema["properties"]["post_checks"]["items"]["properties"]["timeout_ms"]
                 ["maximum"],
             ABSOLUTE_COMMAND_TIMEOUT_MAX_MS
@@ -349,6 +359,19 @@ mod tests {
                 ["maximum"],
             ABSOLUTE_COMMAND_TIMEOUT_MAX_MS
         );
+        assert_eq!(
+            exec_many_schema["properties"]["commands"]["items"]["properties"]["job_timeout_ms"]
+                ["maximum"],
+            ABSOLUTE_JOB_TIMEOUT_MAX_MS
+        );
+        assert_eq!(
+            exec_many_schema["properties"]["commands"]["items"]["properties"]["run_if"]["enum"],
+            json!(["success", "failure", "always"])
+        );
+        assert_eq!(
+            exec_many_schema["properties"]["commands"]["items"]["properties"]["run_if"]["default"],
+            "success"
+        );
         assert_eq!(exec_many_schema["properties"]["action"]["default"], "run");
         assert_eq!(
             exec_many_schema["properties"]["action"]["enum"],
@@ -360,6 +383,15 @@ mod tests {
         );
         assert_eq!(
             exec_many_schema["properties"]["yield_time_ms"]["default"],
+            20_000
+        );
+        assert_eq!(
+            exec_many_schema["properties"]["yield_time_ms"]["maximum"],
+            300_000
+        );
+        assert_eq!(
+            exec_many_schema["properties"]["commands"]["items"]["properties"]["yield_time_ms"]
+                ["maximum"],
             30_000
         );
 

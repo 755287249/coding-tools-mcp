@@ -13,19 +13,25 @@ use sha2::{Digest, Sha256};
 use super::bearer::constant_time_eq_str;
 
 pub const OAUTH_CODE_TTL_SECONDS: u64 = 300;
-pub const OAUTH_TOKEN_TTL_SECONDS: i64 = 60 * 60 * 24 * 30;
+pub const OAUTH_TOKEN_TTL_SECONDS: i64 = 60 * 60 * 24 * 7;
+pub const OAUTH_TOKEN_TTL_MAX_SECONDS: i64 = 60 * 60 * 24 * 30;
 #[allow(dead_code)]
 pub const OAUTH_MAX_BODY_BYTES: usize = 8_192;
 
 const OAUTH_REDIRECT_ORIGINS: &[&str] = &["https://chatgpt.com", "https://chat.openai.com"];
 
+pub type PasswordPersister = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
+
 #[derive(Clone)]
 pub struct OAuthRuntime {
     pub client_id: String,
     pub client_secret: Option<String>,
-    pub password: String,
+    password: Arc<Mutex<String>>,
     pub token_secret: String,
+    token_ttl_seconds: i64,
     pending: Arc<Mutex<HashMap<String, PendingCode>>>,
+    password_persister: Option<PasswordPersister>,
+    authorization_lock: Arc<Mutex<()>>,
 }
 
 #[derive(Clone)]
@@ -50,11 +56,29 @@ struct TokenClaims {
 
 impl OAuthRuntime {
     pub fn try_new(
+        base_url: String,
+        client_id: String,
+        client_secret: Option<String>,
+        password: Option<String>,
+        token_secret: Option<String>,
+    ) -> Result<Self, String> {
+        Self::try_new_with_password_persister(
+            base_url,
+            client_id,
+            client_secret,
+            password,
+            token_secret,
+            None,
+        )
+    }
+
+    pub fn try_new_with_password_persister(
         _base_url: String,
         client_id: String,
         client_secret: Option<String>,
         password: Option<String>,
         token_secret: Option<String>,
+        password_persister: Option<PasswordPersister>,
     ) -> Result<Self, String> {
         let client_id = client_id.trim().to_string();
         if client_id.is_empty() {
@@ -66,10 +90,21 @@ impl OAuthRuntime {
         Ok(Self {
             client_id,
             client_secret,
-            password,
+            password: Arc::new(Mutex::new(password)),
             token_secret,
+            token_ttl_seconds: OAUTH_TOKEN_TTL_SECONDS,
             pending: Arc::new(Mutex::new(HashMap::new())),
+            password_persister,
+            authorization_lock: Arc::new(Mutex::new(())),
         })
+    }
+
+    pub fn with_token_ttl_seconds(mut self, token_ttl_seconds: u64) -> Result<Self, String> {
+        if token_ttl_seconds == 0 {
+            return Err("OAuth token TTL must be greater than zero".into());
+        }
+        self.token_ttl_seconds = token_ttl_seconds.min(OAUTH_TOKEN_TTL_MAX_SECONDS as u64) as i64;
+        Ok(self)
     }
 
     pub fn client_id_allowed(&self, client_id: &str) -> bool {
@@ -236,7 +271,12 @@ pub fn authorize_post(oauth: &OAuthRuntime, form: AuthorizeForm, server_url: &st
         ))
         .into_response();
     }
-    if !constant_time_eq_str(&form.password, &oauth.password) {
+    let _authorization_guard = oauth
+        .authorization_lock
+        .lock()
+        .expect("oauth authorization lock");
+    let current_password = oauth.password.lock().expect("oauth password lock").clone();
+    if !constant_time_eq_str(&form.password, &current_password) {
         return (
             StatusCode::UNAUTHORIZED,
             Html(login_page(
@@ -251,6 +291,27 @@ pub fn authorize_post(oauth: &OAuthRuntime, form: AuthorizeForm, server_url: &st
         )
             .into_response();
     }
+
+    let next_password =
+        format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4()).replace('-', "");
+    if let Some(persist) = oauth.password_persister.as_ref() {
+        if persist(&next_password).is_err() {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Html(login_page(
+                    &form.client_id,
+                    &form.redirect_uri,
+                    &form.code_challenge,
+                    &form.code_challenge_method,
+                    &form.state,
+                    "Authorization password rotation failed; try again later",
+                    None,
+                )),
+            )
+                .into_response();
+        }
+    }
+    *oauth.password.lock().expect("oauth password lock") = next_password;
 
     let server_url = server_url.trim_end_matches('/').to_string();
     let code = uuid::Uuid::new_v4().to_string().replace('-', "");
@@ -358,14 +419,14 @@ pub fn token_exchange(
         &issuer,
         &audience,
         &oauth.token_secret,
-        OAUTH_TOKEN_TTL_SECONDS,
+        oauth.token_ttl_seconds,
     ) {
         Ok(access_token) => (
             StatusCode::OK,
             axum::Json(json!({
                 "access_token": access_token,
                 "token_type": "Bearer",
-                "expires_in": OAUTH_TOKEN_TTL_SECONDS
+                "expires_in": oauth.token_ttl_seconds
             })),
         )
             .into_response(),
@@ -653,6 +714,144 @@ mod tests {
         );
         assert_eq!(post_response.status(), StatusCode::BAD_REQUEST);
         assert!(oauth.pending.lock().expect("lock").is_empty());
+    }
+
+    fn authorize_form(password: &str, state: &str) -> AuthorizeForm {
+        AuthorizeForm {
+            client_id: "chatgpt-client-test".into(),
+            redirect_uri: "https://chatgpt.com/connector/oauth/test".into(),
+            code_challenge: "challenge".into(),
+            code_challenge_method: "S256".into(),
+            state: state.into(),
+            password: password.into(),
+        }
+    }
+
+    #[test]
+    fn authorization_password_is_single_use_under_concurrency() {
+        let persisted = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let persisted_for_callback = persisted.clone();
+        let oauth = OAuthRuntime::try_new_with_password_persister(
+            "https://lb.example.com".into(),
+            "chatgpt-client-test".into(),
+            None,
+            Some("test-password".into()),
+            Some("token-signing-secret".into()),
+            Some(std::sync::Arc::new(move |value: &str| {
+                persisted_for_callback
+                    .lock()
+                    .expect("persisted lock")
+                    .push(value.to_string());
+                Ok(())
+            })),
+        )
+        .expect("valid OAuth runtime");
+
+        let first_runtime = oauth.clone();
+        let second_runtime = oauth.clone();
+        let first = std::thread::spawn(move || {
+            authorize_post(
+                &first_runtime,
+                authorize_form("test-password", "first"),
+                "https://lb.example.com",
+            )
+            .status()
+        });
+        let second = std::thread::spawn(move || {
+            authorize_post(
+                &second_runtime,
+                authorize_form("test-password", "second"),
+                "https://lb.example.com",
+            )
+            .status()
+        });
+        let statuses = [
+            first.join().expect("first join"),
+            second.join().expect("second join"),
+        ];
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|status| **status == StatusCode::SEE_OTHER)
+                .count(),
+            1
+        );
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|status| **status == StatusCode::UNAUTHORIZED)
+                .count(),
+            1
+        );
+        assert_eq!(persisted.lock().expect("persisted lock").len(), 1);
+        assert_ne!(
+            oauth.password.lock().expect("password lock").as_str(),
+            "test-password"
+        );
+    }
+
+    #[test]
+    fn authorization_password_persistence_failure_preserves_current_password() {
+        let oauth = OAuthRuntime::try_new_with_password_persister(
+            "https://lb.example.com".into(),
+            "chatgpt-client-test".into(),
+            None,
+            Some("test-password".into()),
+            Some("token-signing-secret".into()),
+            Some(std::sync::Arc::new(|_| {
+                Err("simulated persistence failure".into())
+            })),
+        )
+        .expect("valid OAuth runtime");
+        let response = authorize_post(
+            &oauth,
+            authorize_form("test-password", "persist-failure"),
+            "https://lb.example.com",
+        );
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            oauth.password.lock().expect("password lock").as_str(),
+            "test-password"
+        );
+        assert!(oauth.pending.lock().expect("pending lock").is_empty());
+    }
+
+    #[test]
+    fn oauth_token_ttl_is_configurable_with_a_thirty_day_cap() {
+        let oauth = OAuthRuntime::try_new(
+            "https://lb.example.com".into(),
+            "chatgpt-client-test".into(),
+            None,
+            Some("test-password".into()),
+            Some("token-signing-secret".into()),
+        )
+        .expect("valid OAuth runtime")
+        .with_token_ttl_seconds(60 * 60)
+        .expect("custom TTL");
+        assert_eq!(oauth.token_ttl_seconds, 60 * 60);
+
+        let capped = OAuthRuntime::try_new(
+            "https://lb.example.com".into(),
+            "chatgpt-client-test".into(),
+            None,
+            Some("test-password".into()),
+            Some("token-signing-secret".into()),
+        )
+        .expect("valid OAuth runtime")
+        .with_token_ttl_seconds(365 * 24 * 60 * 60)
+        .expect("capped TTL");
+        assert_eq!(capped.token_ttl_seconds, OAUTH_TOKEN_TTL_MAX_SECONDS);
+
+        let zero = OAuthRuntime::try_new(
+            "https://lb.example.com".into(),
+            "chatgpt-client-test".into(),
+            None,
+            Some("test-password".into()),
+            Some("token-signing-secret".into()),
+        )
+        .expect("valid OAuth runtime")
+        .with_token_ttl_seconds(0);
+        assert!(zero.is_err());
     }
 
     #[test]

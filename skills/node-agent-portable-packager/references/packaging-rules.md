@@ -37,14 +37,9 @@ Every deliverable Node portable release must be tied to one immutable repository
 
 ## 3. Required edition layout
 
-A normal release produces two ZIPs. Each ZIP contains one top-level directory whose name includes the Node Agent version, Portable version, and edition:
+A normal release produces two ZIPs. The portable contents must live directly at the ZIP root; do not add a wrapper directory around the package.
 
-```text
-Coding.Tools.Node.Agent_<agent>_portable-<portable>_bundled-node_win-x64/
-Coding.Tools.Node.Agent_<agent>_portable-<portable>_system-node_win-x64/
-```
-
-Both editions require:
+Both editions require these ZIP-root entries:
 
 ```text
 app/dist/
@@ -55,6 +50,7 @@ data/
 logs/
 start-node-agent.bat
 open-management-ui.bat
+update-handoff.ps1
 README-PORTABLE.txt
 portable-manifest.json
 SHA256SUMS.txt
@@ -72,6 +68,7 @@ The `system-node` edition must not contain either runtime file.
 ## 4. Build invariants
 
 - Build deliverable ZIPs only from the clean, tagged `HEAD` defined by the Git release identity contract.
+- Compress the contents of each finalized edition directory directly into the ZIP root; do not archive the edition directory itself as a wrapper folder.
 - Build `dist` once before staging.
 - Create common staging in a new temporary directory.
 - Deploy the workspace package once with `pnpm --filter @coding-tools/node-agent deploy --prod <staging>` to create common production staging.
@@ -90,8 +87,8 @@ Both `start-node-agent.bat` variants must:
 
 - Resolve all paths relative to `%~dp0`.
 - Default `CTMCP_DATA_DIR` to `%LOCALAPPDATA%\CodingToolsMCPNode` without overriding an existing value.
-- Default `CTMCP_PORT` to `3789` without overriding an existing value.
-- Pass `--restart-supervised` explicitly to `app\dist\cli.js`; do not infer supervision from an ambient environment variable.
+- Use a launcher-only `CTMCP_LAUNCH_PORT` default of `3789` for health checks, port preflight, and browser opening. If the caller explicitly supplies `CTMCP_PORT`, mirror that value into `CTMCP_LAUNCH_PORT`, but do **not** synthesize `CTMCP_PORT` in the launcher: it is an Agent configuration override and would otherwise force every saved workspace onto the same port.
+- Pass `--restart-supervised` explicitly to `app\dist\cli.js` and set the child-scoped `CTMCP_RESTART_SUPERVISOR=active-v1` contract in the launcher. The Agent enables Web UI restart only when both are present, so a detached/direct Node process cannot accidentally advertise restart support from the flag alone.
 - Forward remaining command-line arguments to `app\dist\cli.js` after the supervision flag.
 - Restart when the Agent exits with code `75`.
 - Support `--no-browser` as a launcher-only first argument.
@@ -117,9 +114,10 @@ Before delivery:
 7. Start each with `--no-browser` on a distinct unused port and isolated data directory.
 8. Poll `/health`, require HTTP success, and confirm the reported Agent version.
 9. Fetch `/ui` and its JavaScript/CSS assets successfully for both editions.
-10. Stop both processes and verify no child or test port remains.
-11. Validate every line in each `SHA256SUMS.txt`.
-12. Record both final ZIP sizes and SHA-256 values.
+10. Confirm `update-handoff.ps1` is present at ZIP root and covered by `SHA256SUMS.txt` in both editions.
+11. Stop both processes and verify no child or test port remains.
+12. Validate every line in each `SHA256SUMS.txt`.
+13. Record both final ZIP sizes and SHA-256 values.
 
 ## 7. Release decision examples
 

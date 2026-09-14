@@ -151,7 +151,8 @@ pub(crate) fn descriptor(name: &str) -> ToolRuntimeDescriptor {
         "apply_patch" | "edit" | "file_ops" | "format_files" => WORKSPACE_CONTENT_LOCK,
         "git_restore" | "git_worktree" => GIT_AND_WORKSPACE_LOCK,
         "git_branch" | "git_stage" | "git_commit" | "git_push" => GIT_LOCK,
-        "start_task" | "update_task" | "pause_task" | "resume_task" | "finish_task" => TASK_LOCK,
+        "start_task" | "update_task" | "pause_task" | "resume_task" | "fail_task"
+        | "close_failed_task" | "rollback_task" | "finish_task" => TASK_LOCK,
         "set_default_cwd" => CWD_LOCK,
         _ => NO_LOCKS,
     };
@@ -182,6 +183,9 @@ pub(crate) fn descriptor(name: &str) -> ToolRuntimeDescriptor {
         | "update_task"
         | "pause_task"
         | "resume_task"
+        | "fail_task"
+        | "close_failed_task"
+        | "rollback_task"
         | "finish_task" => ToolMutationPolicy::Always,
         "desktop_click" | "desktop_drag" | "desktop_scroll" | "desktop_type" | "desktop_key" => {
             ToolMutationPolicy::Always

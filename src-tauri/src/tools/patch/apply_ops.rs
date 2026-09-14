@@ -145,7 +145,7 @@ pub(super) fn run_patch(ctx: &ToolContext, args: &Value) -> Result<Value, Worksp
             continue;
         }
 
-        let updated = apply_hunks(&original, &fp.hunks)?;
+        let updated = apply_hunks(&original, &fp.hunks, Some(&fp.path))?;
         if updated == original {
             return Err(patch_failed(format!(
                 "Patch produced no changes for {}",

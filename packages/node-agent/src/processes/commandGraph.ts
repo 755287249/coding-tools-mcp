@@ -2,14 +2,21 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { FolderRuntime, JsonObject, ProcessSession, SandboxConfig, ToolContext } from '../types.js';
 import { currentFolderRuntime } from '../folderRuntime.js';
 import { normalizeCommandGraphCommands, validateCommandGraphStructure } from '../policy.js';
-import { sleep } from '../runtime.js';
+import { Semaphore, sleep } from '../runtime.js';
 import { normalizedSandboxConfig } from '../sandbox.js';
 import { processResult } from './output.js';
 
 const AUTO_DEDUPE_COMPLETED_GRACE_MS = 30_000;
 
-export const COMMAND_GRAPH_RETENTION_MS = 900_000;
+export const COMMAND_GRAPH_RETENTION_MS = 60 * 60_000;
 export const MAX_RETAINED_COMMAND_GRAPHS = 128;
+export const EXEC_MANY_AUTO_COMPACT_OUTPUT_BYTES = 16 * 1024;
+export const EXEC_MANY_GRAPH_YIELD_MAX_MS = 300_000;
+export const EXEC_MANY_TRANSPORT_SAFE_YIELD_MS = 20_000;
+export const EXEC_MANY_REATTACH_YIELD_MS = EXEC_MANY_TRANSPORT_SAFE_YIELD_MS;
+const CHILD_PROCESS_ADMISSION_TIMEOUT_MS = 30_000;
+const IO_HEAVY_ADMISSION_LIMIT = 1;
+const ioHeavyAdmission = new Semaphore(IO_HEAVY_ADMISSION_LIMIT);
 
 interface RetainedCommandGraphRecord {
   id: string;
@@ -59,6 +66,7 @@ interface RetainedCommandGraph {
   schedulerError?: JsonObject;
   abortController: AbortController;
   completion: Promise<void>;
+  preserveDurableChildrenOnAbort: boolean;
 }
 
 const retainedCommandGraphs = new WeakMap<FolderRuntime, Map<string, RetainedCommandGraph>>();
@@ -116,7 +124,10 @@ export interface CommandGraphProcessDependencies {
 export function abortRetainedCommandGraphs(runtimes: FolderRuntime[], reason = 'server restart'): Array<Promise<void>> {
   const graphs = runtimes.flatMap(runtime => [...(retainedCommandGraphs.get(runtime)?.values() ?? [])]);
   for (const graph of graphs) {
-    if (!graph.completedAt && !graph.abortController.signal.aborted) graph.abortController.abort(new Error(reason));
+    if (!graph.completedAt && !graph.abortController.signal.aborted) {
+      graph.preserveDurableChildrenOnAbort = true;
+      graph.abortController.abort(new Error(reason));
+    }
   }
   return graphs.map(graph => graph.completion);
 }
@@ -173,6 +184,31 @@ function commandGraphConfiguration(ctx: ToolContext, commands: Array<JsonObject 
   return { requestedMode, mode, stopOnError, maxParallel };
 }
 
+type CommandRunIf = 'success' | 'failure' | 'always';
+
+function commandRunIf(command: JsonObject): CommandRunIf {
+  const value = String(command.run_if ?? 'success');
+  return value === 'failure' || value === 'always' ? value : 'success';
+}
+
+function commandGraphResultSucceeded(result: JsonObject | undefined): boolean {
+  if (!result || result.skipped === true) return false;
+  if (result.command_ok !== undefined && result.command_ok !== null) return result.command_ok === true;
+  return result.ok === true;
+}
+
+function conditionalSkipResult(id: string, runIf: CommandRunIf): JsonObject {
+  return {
+    id,
+    ok: true,
+    command_ok: null,
+    skipped: true,
+    conditional_skip: true,
+    skip_reason: 'run_condition_not_met',
+    run_if: runIf
+  };
+}
+
 function skipPendingGraphCommands(graph: RetainedCommandGraph, reason: string): void {
   for (const [id] of graph.pending) {
     graph.results.set(id, { id, ok: false, skipped: true, skip_reason: reason });
@@ -184,10 +220,60 @@ function commandGraphExplicitlyDeduplicable(commands: Array<JsonObject & { id: s
   return commands.every(command => Boolean(String(command.operation_id ?? '').trim()) || command.deduplicate === true);
 }
 
+async function acquireChildProcessAdmission(
+  ctx: ToolContext,
+  runtime: FolderRuntime,
+  signal?: AbortSignal
+): Promise<{ release: () => void; globalWaitMs: number; workspaceWaitMs: number }> {
+  const startedAt = Date.now();
+  const globalStartedAt = Date.now();
+  const releaseGlobal = await ctx.hubAdmission.process.acquire(CHILD_PROCESS_ADMISSION_TIMEOUT_MS, signal);
+  const globalWaitMs = Date.now() - globalStartedAt;
+  let releaseWorkspace: (() => void) | undefined;
+  try {
+    const remainingMs = Math.max(1, CHILD_PROCESS_ADMISSION_TIMEOUT_MS - (Date.now() - startedAt));
+    const workspaceStartedAt = Date.now();
+    releaseWorkspace = await runtime.admission.process.acquire(remainingMs, signal);
+    const workspaceWaitMs = Date.now() - workspaceStartedAt;
+    let released = false;
+    return {
+      globalWaitMs,
+      workspaceWaitMs,
+      release: () => {
+        if (released) return;
+        released = true;
+        releaseWorkspace?.();
+        releaseGlobal();
+      }
+    };
+  } catch (error) {
+    releaseGlobal();
+    throw error;
+  }
+}
+
+async function acquireIoHeavyAdmission(
+  command: JsonObject,
+  signal?: AbortSignal
+): Promise<{ release?: () => void; waitMs: number; resourceClass: 'default' | 'io_heavy' }> {
+  const resourceClass = command.resource_class === 'io_heavy' ? 'io_heavy' : 'default';
+  if (resourceClass !== 'io_heavy') return { waitMs: 0, resourceClass };
+  const startedAt = Date.now();
+  const release = await ioHeavyAdmission.acquire(CHILD_PROCESS_ADMISSION_TIMEOUT_MS, signal);
+  return { release, waitMs: Date.now() - startedAt, resourceClass };
+}
+
+function preserveGraphSessionOnAbort(graph: RetainedCommandGraph, session: ProcessSession): boolean {
+  return graph.preserveDurableChildrenOnAbort
+    && graph.ownedSessionIds.has(session.id)
+    && Boolean(session.durableDirectory)
+    && !session.finalizedAt;
+}
+
 async function waitForGraphSession(dependencies: CommandGraphProcessDependencies, graph: RetainedCommandGraph, session: ProcessSession): Promise<void> {
   while (!session.finalizedAt) {
     if (graph.abortController.signal.aborted) {
-      if (!graph.ownedSessionIds.has(session.id)) return;
+      if (!graph.ownedSessionIds.has(session.id) || preserveGraphSessionOnAbort(graph, session)) return;
       await dependencies.waitForSession(session, session.sequence, 5_000, 'finalized');
       continue;
     }
@@ -209,46 +295,84 @@ async function waitForGraphSession(dependencies: CommandGraphProcessDependencies
 }
 
 async function scheduleCommandGraph(dependencies: CommandGraphProcessDependencies, ctx: ToolContext, key: string, graph: RetainedCommandGraph): Promise<void> {
+  const runtime = currentFolderRuntime(ctx, key);
   const launch = (id: string, command: JsonObject & { id: string }) => {
     graph.pending.delete(id);
     graph.startedIds.add(id);
     const task = (async () => {
+      let releaseAdmission: (() => void) | undefined;
+      let releaseIoHeavyAdmission: (() => void) | undefined;
       try {
-        const started = await dependencies.startProcess(ctx, key, command, graph.abortController.signal);
+        const admission = await acquireChildProcessAdmission(ctx, runtime, graph.abortController.signal);
+        releaseAdmission = admission.release;
+        const ioAdmission = await acquireIoHeavyAdmission(command, graph.abortController.signal);
+        releaseIoHeavyAdmission = ioAdmission.release;
+        const processArgs: JsonObject = { ...command };
+        delete processArgs.id;
+        delete processArgs.depends_on;
+        delete processArgs.run_if;
+        const started = await dependencies.startProcess(ctx, key, processArgs, graph.abortController.signal);
         const session = started.session;
         graph.sessionIds.set(id, session.id);
         if (!started.deduplicated) graph.ownedSessionIds.add(session.id);
-        if (graph.abortController.signal.aborted && graph.ownedSessionIds.has(session.id) && !session.finalizedAt) {
+        if (graph.abortController.signal.aborted && graph.ownedSessionIds.has(session.id) && !session.finalizedAt
+          && !preserveGraphSessionOnAbort(graph, session)) {
           await dependencies.killProcessTree(session, 'KILL', 'graph_cancelled');
         }
         await waitForGraphSession(dependencies, graph, session);
-        if (graph.abortController.signal.aborted && !graph.ownedSessionIds.has(session.id) && !session.finalizedAt) {
+        const durableSessionPreserved = preserveGraphSessionOnAbort(graph, session);
+        if (graph.abortController.signal.aborted
+          && (!graph.ownedSessionIds.has(session.id) || durableSessionPreserved)
+          && !session.finalizedAt) {
           graph.results.set(id, {
             id,
             ok: false,
             command_ok: false,
             skipped: true,
-            skip_reason: 'graph_cancelled_shared_session_preserved',
+            skip_reason: durableSessionPreserved ? 'graph_restart_durable_session_preserved' : 'graph_cancelled_shared_session_preserved',
             session_id: session.id,
-            shared_session_preserved: true,
+            shared_session_preserved: !durableSessionPreserved,
+            durable_session_preserved: durableSessionPreserved,
             deduplicated: started.deduplicated,
-            attached_to_session_id: started.attachedToSessionId
+            attached_to_session_id: started.attachedToSessionId,
+            admission_lane: 'process',
+            admission_mode: 'child',
+            admission_scope: 'global_and_workspace',
+            global_admission_wait_ms: admission.globalWaitMs,
+            workspace_admission_wait_ms: admission.workspaceWaitMs,
+            admission_queue_wait_ms: admission.globalWaitMs + admission.workspaceWaitMs,
+            resource_class: ioAdmission.resourceClass,
+            io_heavy_admission_limit: ioAdmission.resourceClass === 'io_heavy' ? IO_HEAVY_ADMISSION_LIMIT : 0,
+            io_heavy_admission_wait_ms: ioAdmission.waitMs
           });
           return;
         }
         graph.results.set(id, {
           id,
+          run_if: commandRunIf(command),
+          depends_on: Array.isArray(command.depends_on) ? command.depends_on.map(String) : [],
           ...processResult(session, {
-            ...command,
+            ...processArgs,
             deduplicated: started.deduplicated,
             attached_to_session_id: started.attachedToSessionId,
             operation_lock_wait_ms: started.operationLockWaitMs
-          })
+          }),
+          admission_lane: 'process',
+          admission_mode: 'child',
+          admission_scope: 'global_and_workspace',
+          global_admission_wait_ms: admission.globalWaitMs,
+          workspace_admission_wait_ms: admission.workspaceWaitMs,
+          admission_queue_wait_ms: admission.globalWaitMs + admission.workspaceWaitMs,
+          resource_class: ioAdmission.resourceClass,
+          io_heavy_admission_limit: ioAdmission.resourceClass === 'io_heavy' ? IO_HEAVY_ADMISSION_LIMIT : 0,
+          io_heavy_admission_wait_ms: ioAdmission.waitMs
         });
       } catch (error) {
         const structured = dependencies.normalizeError(error);
         graph.results.set(id, {
           id,
+          run_if: commandRunIf(command),
+          depends_on: Array.isArray(command.depends_on) ? command.depends_on.map(String) : [],
           ok: false,
           command_ok: false,
           error: {
@@ -259,11 +383,15 @@ async function scheduleCommandGraph(dependencies: CommandGraphProcessDependencie
             details: structured.details
           }
         });
+      } finally {
+        releaseIoHeavyAdmission?.();
+        releaseAdmission?.();
       }
     })().finally(() => graph.running.delete(id));
     graph.running.set(id, task);
   };
 
+  let stopOnErrorTriggered = false;
   try {
     while (graph.pending.size || graph.running.size) {
       if (graph.abortController.signal.aborted) {
@@ -278,12 +406,22 @@ async function scheduleCommandGraph(dependencies: CommandGraphProcessDependencie
         const dependencies = Array.isArray(command.depends_on) ? command.depends_on.map(String) : [];
         const unresolved = dependencies.some(dependency => !graph.results.has(dependency));
         if (unresolved) continue;
-        const failedDependency = dependencies.some(dependency => {
-          const dependencyResult = graph.results.get(dependency);
-          return dependencyResult?.command_ok === false || dependencyResult?.ok === false;
-        });
-        if (failedDependency) {
-          graph.results.set(id, { id, ok: false, skipped: true, skip_reason: 'dependency_failed' });
+        const failedDependency = dependencies.some(dependency => !commandGraphResultSucceeded(graph.results.get(dependency)));
+        const runIf = commandRunIf(command);
+        if (runIf === 'success' && failedDependency) {
+          graph.results.set(id, { id, ok: false, command_ok: false, skipped: true, skip_reason: 'dependency_failed', run_if: runIf });
+          graph.pending.delete(id);
+          launched = true;
+          continue;
+        }
+        if (runIf === 'failure' && !failedDependency) {
+          graph.results.set(id, conditionalSkipResult(id, runIf));
+          graph.pending.delete(id);
+          launched = true;
+          continue;
+        }
+        if (stopOnErrorTriggered && runIf === 'success') {
+          graph.results.set(id, { id, ok: false, command_ok: false, skipped: true, skip_reason: 'stopped_after_failure', run_if: runIf });
           graph.pending.delete(id);
           launched = true;
           continue;
@@ -302,9 +440,7 @@ async function scheduleCommandGraph(dependencies: CommandGraphProcessDependencie
 
       if (graph.stopOnError && [...graph.results.values()].some(result =>
         (result.command_ok === false || result.ok === false) && !result.skipped)) {
-        skipPendingGraphCommands(graph, 'stopped_after_failure');
-        if (graph.running.size) await Promise.allSettled([...graph.running.values()]);
-        break;
+        stopOnErrorTriggered = true;
       }
     }
   } catch (error) {
@@ -319,12 +455,21 @@ async function scheduleCommandGraph(dependencies: CommandGraphProcessDependencie
   }
 }
 
-async function waitForCommandGraph(graph: RetainedCommandGraph, requestedYieldMs: unknown): Promise<{ yieldMs: number; waitMs: number }> {
-  const yieldMs = boundedInteger(requestedYieldMs, 30_000, 0, 30_000);
-  if (graph.completedAt !== undefined || yieldMs <= 0) return { yieldMs, waitMs: 0 };
+async function waitForCommandGraph(graph: RetainedCommandGraph, requestedYieldMs: unknown): Promise<{ requestedYieldMs: number; yieldMs: number; waitMs: number }> {
+  const requested = boundedInteger(requestedYieldMs, EXEC_MANY_TRANSPORT_SAFE_YIELD_MS, 0, EXEC_MANY_GRAPH_YIELD_MAX_MS);
+  const yieldMs = Math.min(requested, EXEC_MANY_TRANSPORT_SAFE_YIELD_MS);
+  if (graph.completedAt !== undefined || yieldMs <= 0) return { requestedYieldMs: requested, yieldMs, waitMs: 0 };
   const startedAt = Date.now();
-  await Promise.race([graph.completion, sleep(yieldMs)]);
-  return { yieldMs, waitMs: Date.now() - startedAt };
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      graph.completion,
+      new Promise<void>(resolve => { timeout = setTimeout(resolve, yieldMs); })
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+  return { requestedYieldMs: requested, yieldMs, waitMs: Date.now() - startedAt };
 }
 
 async function cancelCommandGraph(dependencies: CommandGraphProcessDependencies, runtime: FolderRuntime, graph: RetainedCommandGraph, reason: string): Promise<{ accepted: boolean }> {
@@ -353,6 +498,39 @@ function commandGraphResultMode(dependencies: CommandGraphProcessDependencies, a
   return graphAction === 'run' ? 'full' : 'summary';
 }
 
+interface CommandGraphResultProjection {
+  mode: 'full' | 'summary' | 'none';
+  reason: 'explicit' | 'running' | 'control_action' | 'large_output' | 'default';
+  autoCompactedOutputBytes: number;
+}
+
+function commandGraphCompletedOutputBytes(graph: RetainedCommandGraph): number {
+  return [...graph.results.values()].reduce((total, result) =>
+    total + Number(result.stdout_bytes ?? 0) + Number(result.stderr_bytes ?? 0), 0);
+}
+
+function commandGraphSnapshotResultProjection(
+  args: JsonObject,
+  graphAction: string,
+  graph: RetainedCommandGraph,
+  defaultMode: 'full' | 'summary' | 'none'
+): CommandGraphResultProjection {
+  if (String(args.result_mode ?? '').trim() !== '') {
+    return { mode: defaultMode, reason: 'explicit', autoCompactedOutputBytes: 0 };
+  }
+  if (graphAction === 'run' && graph.completedAt === undefined) {
+    return { mode: 'summary', reason: 'running', autoCompactedOutputBytes: 0 };
+  }
+  if (graphAction !== 'run') {
+    return { mode: defaultMode, reason: 'control_action', autoCompactedOutputBytes: 0 };
+  }
+  const outputBytes = commandGraphCompletedOutputBytes(graph);
+  if (defaultMode === 'full' && outputBytes > EXEC_MANY_AUTO_COMPACT_OUTPUT_BYTES) {
+    return { mode: 'summary', reason: 'large_output', autoCompactedOutputBytes: outputBytes };
+  }
+  return { mode: defaultMode, reason: 'default', autoCompactedOutputBytes: 0 };
+}
+
 function compactCommandGraphResult(result: JsonObject): JsonObject {
   const error = result.error && typeof result.error === 'object' && !Array.isArray(result.error)
     ? result.error as JsonObject
@@ -366,6 +544,8 @@ function compactCommandGraphResult(result: JsonObject): JsonObject {
     pending: result.pending === true,
     skipped: result.skipped === true,
     skip_reason: result.skip_reason ?? null,
+    conditional_skip: result.conditional_skip === true,
+    run_if: result.run_if ?? 'success',
     shared_session_preserved: result.shared_session_preserved === true,
     deduplicated: result.deduplicated === true,
     attached_to_session_id: result.attached_to_session_id ?? null,
@@ -373,9 +553,19 @@ function compactCommandGraphResult(result: JsonObject): JsonObject {
     exit_code: result.exit_code ?? result.process_exit_code ?? null,
     termination_reason: result.termination_reason ?? null,
     process_still_running: result.process_still_running ?? false,
+    execution_mode: result.execution_mode ?? null,
+    requested_process_timeout_ms: result.requested_process_timeout_ms ?? null,
+    effective_process_timeout_ms: result.effective_process_timeout_ms ?? null,
+    process_timeout_limit_ms: result.process_timeout_limit_ms ?? null,
+    process_deadline_ts_ms: result.process_deadline_ts_ms ?? null,
+    process_timeout_remaining_ms: result.process_timeout_remaining_ms ?? null,
+    timeout_clamped: result.timeout_clamped ?? null,
+    polling_extends_process_deadline: result.polling_extends_process_deadline ?? null,
+    timeout_scope: result.timeout_scope ?? null,
     elapsed_ms: result.elapsed_ms ?? null,
     stdout_bytes: result.stdout_bytes ?? 0,
     stderr_bytes: result.stderr_bytes ?? 0,
+    output_refs: result.output_refs ?? null,
     error_code: error?.code ?? null,
     error_message: error?.message ?? null
   };
@@ -388,8 +578,10 @@ function commandGraphSnapshot(
   yieldMs: number,
   waitMs: number,
   graphAction = 'run',
-  resultMode: 'full' | 'summary' | 'none' = 'full'
+  projection: CommandGraphResultProjection = { mode: 'full', reason: 'default', autoCompactedOutputBytes: 0 },
+  requestedYieldMs = yieldMs
 ): JsonObject {
+  const resultMode = projection.mode;
   const ordered = graph.commands.map(command => {
     const id = String(command.id);
     const completed = graph.results.get(id);
@@ -414,7 +606,8 @@ function commandGraphSnapshot(
         command_ok: null,
         status: 'pending',
         pending: true,
-        depends_on: Array.isArray(command.depends_on) ? command.depends_on.map(String) : []
+        depends_on: Array.isArray(command.depends_on) ? command.depends_on.map(String) : [],
+        run_if: commandRunIf(command)
       };
     }
     return { id, ok: false, skipped: true, skip_reason: 'graph_state_unavailable' };
@@ -422,8 +615,11 @@ function commandGraphSnapshot(
   const completedResults = [...graph.results.values()];
   const failed = completedResults.filter(result => (result.command_ok === false || result.ok === false) && !result.skipped);
   const skipped = completedResults.filter(result => result.skipped);
+  const conditionalSkipped = skipped.filter(result => result.conditional_skip === true || result.skip_reason === 'run_condition_not_met');
+  const blockingSkipped = skipped.filter(result => !conditionalSkipped.includes(result));
   const failedCommandIds = failed.map(result => String(result.id));
   const skippedCommandIds = skipped.map(result => String(result.id));
+  const conditionalSkippedCommandIds = conditionalSkipped.map(result => String(result.id));
   const runningCommandIds = graph.commands.map(command => String(command.id)).filter(id => graph.running.has(id));
   const pendingCommandIds = graph.commands.map(command => String(command.id)).filter(id => graph.pending.has(id));
   const completedCommandIds = graph.commands.map(command => String(command.id)).filter(id => graph.results.has(id));
@@ -445,10 +641,11 @@ function commandGraphSnapshot(
     required_arguments: ['commands'],
     suggestion: 'Correct the first failure, then retry only the failed command definitions instead of rerunning successful commands.'
   });
-  if (graphCompleted && !cancelRequested && skippedCommandIds.length) recoveryActions.push({
+  const blockingSkippedCommandIds = blockingSkipped.map(result => String(result.id));
+  if (graphCompleted && !cancelRequested && blockingSkippedCommandIds.length) recoveryActions.push({
     action: failedCommandIds.length ? 'retry_affected_subgraph' : 'fix_command_dependencies',
     tool: 'exec_many',
-    command_ids: skippedCommandIds,
+    command_ids: blockingSkippedCommandIds,
     failed_command_ids: failedCommandIds,
     required_arguments: ['commands'],
     suggestion: failedCommandIds.length
@@ -459,18 +656,25 @@ function commandGraphSnapshot(
     tool: 'exec_many',
     arguments: {
       operation_id: graph.id,
-      yield_time_ms: 30_000,
+      yield_time_ms: EXEC_MANY_REATTACH_YIELD_MS,
       result_mode: 'summary'
     }
   }];
   const results = resultMode === 'none' ? [] : resultMode === 'summary' ? ordered.map(compactCommandGraphResult) : ordered;
   const retentionExpiresAt = graph.completedAt === undefined ? null : graph.completedAt + COMMAND_GRAPH_RETENTION_MS;
   const graphProgressOk = failed.length === 0 && !graph.schedulerError;
-  const graphExecutionOk = graphCompleted ? graphProgressOk && skipped.length === 0 && !cancelRequested : null;
+  const graphExecutionOk = graphCompleted ? graphProgressOk && blockingSkipped.length === 0 && !cancelRequested : null;
   const controlOk = graphAction !== 'run';
   return {
-    ok: controlOk ? true : (graphExecutionOk ?? graphProgressOk),
+    // Child command failures are expected in TDD/debugging workflows. Keep
+    // them in graph_execution_ok/failed_command_ids instead of promoting a
+    // successfully orchestrated exec_many request into an MCP tool failure.
+    // This matches the Rust exec_many contract, which returns tool_ok while
+    // reporting command_ok/all_commands_ok separately.
+    ok: controlOk ? true : !graph.schedulerError,
     control_ok: controlOk ? true : null,
+    command_ok: graphExecutionOk,
+    all_commands_ok: graphExecutionOk,
     graph_execution_ok: graphExecutionOk,
     graph_progress_ok: graphProgressOk,
     operation_id: graph.id,
@@ -490,9 +694,12 @@ function commandGraphSnapshot(
     retention_expires_ts_ms: retentionExpiresAt,
     retention_remaining_ms: retentionExpiresAt === null ? null : Math.max(0, retentionExpiresAt - Date.now()),
     result_mode: resultMode,
+    result_mode_reason: projection.reason,
+    auto_compacted_output_bytes: projection.autoCompactedOutputBytes,
     results_included: resultMode !== 'none',
     result_output_included: resultMode === 'full',
     results_omitted_count: resultMode === 'none' ? graph.commands.length : 0,
+    graph_requested_yield_ms: requestedYieldMs,
     graph_yield_ms: yieldMs,
     graph_wait_ms: waitMs,
     requested_mode: graph.requestedMode,
@@ -506,6 +713,8 @@ function commandGraphSnapshot(
     pending_command_count: pendingCommandIds.length,
     failed_command_count: failed.length,
     skipped_command_count: skipped.length,
+    conditional_skipped_command_count: conditionalSkipped.length,
+    conditional_skipped_command_ids: conditionalSkippedCommandIds,
     completed_command_ids: completedCommandIds,
     running_command_ids: runningCommandIds,
     pending_command_ids: pendingCommandIds,
@@ -562,7 +771,7 @@ export async function runCommandGraph(
         throw dependencies.error('INVALID_ARGUMENT', `exec_many action=${graphAction} does not accept commands.`, 'invalid_argument', false);
       }
       if (graphAction === 'status') {
-        return commandGraphSnapshot(runtime, existing, true, 0, 0, graphAction, resultMode);
+        return commandGraphSnapshot(runtime, existing, true, 0, 0, graphAction, commandGraphSnapshotResultProjection(args, graphAction, existing, resultMode));
       }
       if (graphAction === 'cancel') {
         const cancelled = await cancelCommandGraph(dependencies, runtime, existing, String(args.reason ?? '').trim());
@@ -571,7 +780,7 @@ export async function runCommandGraph(
           .map(sessionId => runtime.sessions.get(sessionId))
           .filter(session => session?.terminationReason === 'graph_cancelled').length;
         return {
-          ...commandGraphSnapshot(runtime, existing, true, waited.yieldMs, waited.waitMs, graphAction, resultMode),
+          ...commandGraphSnapshot(runtime, existing, true, waited.yieldMs, waited.waitMs, graphAction, commandGraphSnapshotResultProjection(args, graphAction, existing, resultMode), waited.requestedYieldMs),
           cancel_accepted: cancelled.accepted,
           cancelled_session_count: cancelledSessionCount
         };
@@ -612,7 +821,7 @@ export async function runCommandGraph(
         }
       }
       const waited = await waitForCommandGraph(existing, args.yield_time_ms);
-      return commandGraphSnapshot(runtime, existing, true, waited.yieldMs, waited.waitMs, graphAction, resultMode);
+      return commandGraphSnapshot(runtime, existing, true, waited.yieldMs, waited.waitMs, graphAction, commandGraphSnapshotResultProjection(args, graphAction, existing, resultMode), waited.requestedYieldMs);
     }
     if (graphAction !== 'run' || !commands.length) {
       throw dependencies.error('COMMAND_GRAPH_OPERATION_NOT_FOUND', 'Retained exec_many graph operation was not found or expired.', 'not_found', false, {
@@ -656,7 +865,7 @@ export async function runCommandGraph(
     if (reusable) {
       const waited = await waitForCommandGraph(existingGraph, args.yield_time_ms);
       return {
-        ...commandGraphSnapshot(runtime, existingGraph, true, waited.yieldMs, waited.waitMs, graphAction, resultMode),
+        ...commandGraphSnapshot(runtime, existingGraph, true, waited.yieldMs, waited.waitMs, graphAction, commandGraphSnapshotResultProjection(args, graphAction, existingGraph, resultMode), waited.requestedYieldMs),
         graph_deduplicated: true,
         retained_graph_count: graphs.size
       };
@@ -681,14 +890,15 @@ export async function runCommandGraph(
     startedIds: new Set(),
     createdAt: Date.now(),
     abortController: new AbortController(),
-    completion: Promise.resolve()
+    completion: Promise.resolve(),
+    preserveDurableChildrenOnAbort: false,
   };
   graphs.set(operationId, graph);
   if (!requestedOperationId && graphDeduplicable) graphFingerprints.set(fingerprintValue, operationId);
   graph.completion = scheduleCommandGraph(dependencies, ctx, key, graph);
   const waited = await waitForCommandGraph(graph, args.yield_time_ms);
   return {
-    ...commandGraphSnapshot(runtime, graph, false, waited.yieldMs, waited.waitMs, graphAction, resultMode),
+    ...commandGraphSnapshot(runtime, graph, false, waited.yieldMs, waited.waitMs, graphAction, commandGraphSnapshotResultProjection(args, graphAction, graph, resultMode), waited.requestedYieldMs),
     capacity_evicted_graph_count: capacityEvictedGraphCount,
     retained_graph_count: graphs.size
   };

@@ -54,7 +54,16 @@ export function containsSensitivePath(value: string): boolean {
   return namedSecret || envFile;
 }
 
+function referencesSecretInput(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(referencesSecretInput);
+  if (!isRecord(value)) return false;
+  if (typeof value.stdin_secret === 'string' && value.stdin_secret.trim()) return true;
+  if (isRecord(value.secret_env) && Object.keys(value.secret_env).length > 0) return true;
+  return Object.values(value).some(referencesSecretInput);
+}
+
 export function argumentsReferenceSensitiveSource(argumentsValue: unknown): boolean {
+  if (referencesSecretInput(argumentsValue)) return true;
   try {
     return containsSensitivePath(JSON.stringify(argumentsValue));
   } catch {

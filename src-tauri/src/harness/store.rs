@@ -1,6 +1,8 @@
+use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use super::model::{ChangeSet, HarnessEvent, OperationRecord, TaskSession, WorkspaceHarnessState};
 
@@ -29,13 +31,19 @@ pub type HarnessResult<T> = Result<T, HarnessError>;
 #[derive(Debug, Clone)]
 pub struct HarnessStore {
     root: PathBuf,
+    ready_dirs: Arc<Mutex<HashSet<PathBuf>>>,
 }
 
 impl HarnessStore {
     pub fn new(root: PathBuf) -> HarnessResult<Self> {
         fs::create_dir_all(&root)
             .map_err(|e| HarnessError::new("STORE_UNAVAILABLE", e.to_string()))?;
-        Ok(Self { root })
+        let mut ready_dirs = HashSet::new();
+        ready_dirs.insert(root.clone());
+        Ok(Self {
+            root,
+            ready_dirs: Arc::new(Mutex::new(ready_dirs)),
+        })
     }
 
     pub fn root(&self) -> &Path {
@@ -62,9 +70,28 @@ impl HarnessStore {
         self.workspace_dir(workspace_id).join("operations.jsonl")
     }
 
+    fn ensure_dir(&self, dir: &Path) -> HarnessResult<()> {
+        {
+            let ready = self.ready_dirs.lock().map_err(|_| {
+                HarnessError::new("STORE_UNAVAILABLE", "harness directory cache poisoned")
+            })?;
+            if ready.contains(dir) {
+                return Ok(());
+            }
+        }
+        fs::create_dir_all(dir).map_err(io_error)?;
+        self.ready_dirs
+            .lock()
+            .map_err(|_| {
+                HarnessError::new("STORE_UNAVAILABLE", "harness directory cache poisoned")
+            })?
+            .insert(dir.to_path_buf());
+        Ok(())
+    }
+
     pub fn save_task(&self, task: &TaskSession) -> HarnessResult<()> {
         let dir = self.tasks_dir(&task.workspace_id);
-        fs::create_dir_all(&dir).map_err(io_error)?;
+        self.ensure_dir(&dir)?;
         atomic_write_json(&dir.join(format!("{}.json", task.id)), task)
     }
 
@@ -72,9 +99,32 @@ impl HarnessStore {
         read_json(&self.tasks_dir(workspace_id).join(format!("{task_id}.json")))
     }
 
+    pub fn load_workspace_state(
+        &self,
+        workspace_id: &str,
+    ) -> HarnessResult<Option<WorkspaceHarnessState>> {
+        let path = self.workspace_dir(workspace_id).join("state.json");
+        if !path.exists() {
+            return Ok(None);
+        }
+        read_json(&path).map(Some)
+    }
+
+    pub fn workspace_state_covers_task_entries(&self, workspace_id: &str) -> bool {
+        let state_path = self.workspace_dir(workspace_id).join("state.json");
+        let state_modified = fs::metadata(state_path).and_then(|meta| meta.modified());
+        let tasks_modified =
+            fs::metadata(self.tasks_dir(workspace_id)).and_then(|meta| meta.modified());
+        match (state_modified, tasks_modified) {
+            (Ok(state), Ok(tasks)) => state > tasks,
+            (Ok(_), Err(error)) if error.kind() == std::io::ErrorKind::NotFound => true,
+            _ => false,
+        }
+    }
+
     pub fn save_change(&self, workspace_id: &str, change: &ChangeSet) -> HarnessResult<()> {
         let dir = self.changes_dir(workspace_id);
-        fs::create_dir_all(&dir).map_err(io_error)?;
+        self.ensure_dir(&dir)?;
         atomic_write_json(&dir.join(format!("{}.json", change.id)), change)
     }
 
@@ -116,7 +166,7 @@ impl HarnessStore {
         state: &WorkspaceHarnessState,
     ) -> HarnessResult<()> {
         let dir = self.workspace_dir(workspace_id);
-        fs::create_dir_all(&dir).map_err(io_error)?;
+        self.ensure_dir(&dir)?;
         atomic_write_json(&dir.join("state.json"), state)
     }
 
@@ -126,7 +176,7 @@ impl HarnessStore {
         event: &HarnessEvent,
     ) -> HarnessResult<()> {
         let dir = self.events_dir(workspace_id);
-        fs::create_dir_all(&dir).map_err(io_error)?;
+        self.ensure_dir(&dir)?;
         let path = dir.join(format!("{}.jsonl", event.task_id));
         let mut file = OpenOptions::new()
             .create(true)
@@ -144,7 +194,7 @@ impl HarnessStore {
         operation: &OperationRecord,
     ) -> HarnessResult<()> {
         let dir = self.workspace_dir(workspace_id);
-        fs::create_dir_all(&dir).map_err(io_error)?;
+        self.ensure_dir(&dir)?;
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)

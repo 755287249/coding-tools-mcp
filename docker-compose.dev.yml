@@ -1,0 +1,38 @@
+services:
+  node-agent-runtime:
+    image: ${CTMCP_NODE_AGENT_IMAGE:-coding-tools-node-agent:local}
+    build:
+      context: .
+      dockerfile: packages/node-agent/Dockerfile
+
+  dev:
+    image: ${CTMCP_DEV_IMAGE:-coding-tools-node-agent-dev:local}
+    build:
+      context: .
+      dockerfile: packages/node-agent/Dockerfile.dev
+      additional_contexts:
+        node-agent-base: service:node-agent-runtime
+      args:
+        NODE_AGENT_BASE: node-agent-base
+        RUST_TOOLCHAIN: ${RUST_TOOLCHAIN:-stable}
+    init: true
+    user: "0:0"
+    restart: unless-stopped
+    working_dir: /app
+    ports:
+      - "127.0.0.1:${CTMCP_DEV_PORT:-3790}:3789"
+    environment:
+      CTMCP_DATA_DIR: /data
+      CTMCP_HOST: 0.0.0.0
+      CTMCP_PORT: 3789
+      CTMCP_UI_ENABLED: "true"
+      CTMCP_UI_TRUST_PRIVATE_PROXY: "true"
+      CTMCP_OAUTH_PASSWORD: ${CTMCP_OAUTH_PASSWORD:?Set CTMCP_OAUTH_PASSWORD before starting the dev stack}
+      DOCKER_HOST: unix:///var/run/docker.sock
+    volumes:
+      - .local/dev-data:/data
+      - "${CTMCP_WORKSPACE:-.}:/workspace"
+      - /var/run/docker.sock:/var/run/docker.sock
+    stdin_open: true
+    tty: true
+    command: []

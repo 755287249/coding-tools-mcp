@@ -47,4 +47,5 @@ if [ ! -f "$config_file" ]; then
 EOF
 fi
 
+export CTMCP_RESTART_SUPERVISOR=active-v1
 exec node dist/cli.js --restart-supervised "$@"

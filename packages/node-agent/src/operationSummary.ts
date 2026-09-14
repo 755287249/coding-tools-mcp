@@ -4,11 +4,12 @@ const OPERATION_RESULT_BOOLEAN_FIELDS = [
   'transport_ok', 'execution_ok', 'command_ok', 'verification_ok',
   'process_timed_out', 'request_timed_out', 'recoverable', 'truncated',
   'stdout_truncated', 'stderr_truncated', 'cursor_expired', 'post_checks_pending',
-  'detached', 'deduplicated'
+  'detached', 'deduplicated', 'timeout_clamped', 'polling_extends_process_deadline'
 ] as const;
 
 const OPERATION_RESULT_TOKEN_FIELDS = [
-  'status', 'termination_reason', 'execution_lane', 'outcome_class'
+  'status', 'termination_reason', 'execution_lane', 'outcome_class',
+  'execution_mode', 'timeout_scope'
 ] as const;
 
 const OPERATION_RESULT_INTEGER_FIELDS = [
@@ -16,7 +17,8 @@ const OPERATION_RESULT_INTEGER_FIELDS = [
   'stdout_bytes', 'stderr_bytes', 'blocking_queue_wait_ms', 'workspace_admission_wait_ms',
   'global_admission_wait_ms', 'admission_queue_wait_ms', 'workspace_lock_wait_ms',
   'operation_lock_wait_ms', 'resource_lock_wait_ms', 'history_lock_wait_ms',
-  'session_registry_wait_ms'
+  'session_registry_wait_ms', 'requested_process_timeout_ms', 'effective_process_timeout_ms',
+  'process_timeout_limit_ms', 'process_deadline_ts_ms', 'process_timeout_remaining_ms'
 ] as const;
 
 function operationSummaryToken(value: unknown): string | undefined {

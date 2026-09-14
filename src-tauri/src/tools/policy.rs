@@ -606,13 +606,13 @@ pub fn validate_command_for_workspace(
         policy.security_policy.protect_environment_variables,
         policy.security_policy.enforce_resource_limits,
     )?;
-    if policy.security_policy.enforce_resource_limits {
-        if let Some(timeout_ms) = arguments.get("timeout_ms").and_then(Value::as_u64) {
-            if timeout_ms > ABSOLUTE_COMMAND_TIMEOUT_MAX_MS {
-                return Err(PolicyError("Command timeout exceeds 60 minutes".into()));
-            }
-        }
-    }
+    crate::tools::execution_timeout::resolve_process_timeout(
+        arguments,
+        30_000,
+        ABSOLUTE_COMMAND_TIMEOUT_MAX_MS,
+        crate::tools::execution_timeout::configured_job_timeout_max_ms(),
+    )
+    .map_err(|error| PolicyError(error.to_string()))?;
     if let Some(post_checks) = arguments.get("post_checks") {
         let post_checks = post_checks
             .as_array()
@@ -624,6 +624,11 @@ pub fn validate_command_for_workspace(
             let object = check
                 .as_object()
                 .ok_or_else(|| PolicyError(format!("post_checks[{index}] must be an object")))?;
+            if object.contains_key("job_timeout_ms") {
+                return Err(PolicyError(
+                    "post_checks cannot use job_timeout_ms; use a separate managed command".into(),
+                ));
+            }
             if object.contains_key("post_checks") {
                 return Err(PolicyError("nested post_checks are not allowed".into()));
             }
@@ -674,6 +679,64 @@ fn validate_environment_arguments(
             }
         }
     }
+    if let Some(secret_env) = arguments.get("secret_env") {
+        let secret_env = secret_env.as_object().ok_or_else(|| {
+            PolicyError(
+                "secret_env must be an object mapping environment names to secret references"
+                    .into(),
+            )
+        })?;
+        if enforce_resource_limits && secret_env.len() > 64 {
+            return Err(PolicyError("secret_env contains too many entries".into()));
+        }
+        let direct_env = arguments.get("env").and_then(Value::as_object);
+        let removed_env = arguments.get("remove_env").and_then(Value::as_array);
+        for (key, reference) in secret_env {
+            validate_environment_key(key)?;
+            if protect_environment_variables
+                && blocked.iter().any(|item| item.eq_ignore_ascii_case(key))
+            {
+                return Err(PolicyError(format!(
+                    "Environment variable is protected: {key}"
+                )));
+            }
+            let reference = reference.as_str().ok_or_else(|| {
+                PolicyError("secret_env values must be secret reference strings".into())
+            })?;
+            validate_secret_reference(reference)?;
+            let direct_conflict = direct_env.is_some_and(|values| {
+                values
+                    .keys()
+                    .any(|candidate| candidate.eq_ignore_ascii_case(key))
+            });
+            let remove_conflict = removed_env.is_some_and(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .any(|candidate| candidate.eq_ignore_ascii_case(key))
+            });
+            if direct_conflict || remove_conflict {
+                return Err(PolicyError(format!(
+                    "Environment variable {key} cannot be configured by both env/remove_env and secret_env"
+                )));
+            }
+        }
+    }
+    if let Some(reference) = arguments.get("stdin_secret") {
+        let reference = reference
+            .as_str()
+            .ok_or_else(|| PolicyError("stdin_secret must be a secret reference string".into()))?;
+        validate_secret_reference(reference)?;
+        if arguments
+            .get("stdin")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty())
+        {
+            return Err(PolicyError(
+                "stdin and stdin_secret cannot both be provided".into(),
+            ));
+        }
+    }
     if let Some(remove_env) = arguments.get("remove_env") {
         let remove_env = remove_env
             .as_array()
@@ -687,6 +750,20 @@ fn validate_environment_arguments(
                 .ok_or_else(|| PolicyError("remove_env entries must be strings".into()))?;
             validate_environment_key(key)?;
         }
+    }
+    Ok(())
+}
+
+fn validate_secret_reference(reference: &str) -> Result<(), PolicyError> {
+    if reference.is_empty()
+        || reference.len() > 128
+        || !reference
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+    {
+        return Err(PolicyError(
+            "Secret references must use 1-128 letters, numbers, dot, underscore, or hyphen".into(),
+        ));
     }
     Ok(())
 }

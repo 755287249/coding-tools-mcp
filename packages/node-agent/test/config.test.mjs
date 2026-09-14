@@ -396,3 +396,64 @@ test('loadConfig rejects a future canonical schemaVersion', async () => {
   }));
   await assert.rejects(loadConfig(configFile), /Unsupported workspace schemaVersion/);
 });
+
+test('loadConfigBundle seeds a missing config with the environment workspace before canonical migration', async () => {
+  const { root, dataDir, configFile } = await fixture('ctmcp-fresh-config');
+  const previousWorkspaces = process.env.CTMCP_WORKSPACES;
+  const previousDataDir = process.env.CTMCP_DATA_DIR;
+  process.env.CTMCP_WORKSPACES = root;
+  process.env.CTMCP_DATA_DIR = dataDir;
+  try {
+    const loaded = await loadConfigBundle(configFile);
+    assert.equal(loaded.config.folders.length, 1);
+    assert.equal(await realpath(loaded.config.folders[0].path), await realpath(root));
+    assert.equal(await realpath(loaded.canonical.folders[0].path), await realpath(root));
+    const onDisk = JSON.parse(await readFile(configFile, 'utf8'));
+    assert.equal(onDisk.schemaVersion, CANONICAL_SCHEMA_VERSION);
+    assert.equal(onDisk.folders.length, 1);
+    assert.equal(await realpath(onDisk.folders[0].path), await realpath(root));
+  } finally {
+    if (previousWorkspaces === undefined) delete process.env.CTMCP_WORKSPACES;
+    else process.env.CTMCP_WORKSPACES = previousWorkspaces;
+    if (previousDataDir === undefined) delete process.env.CTMCP_DATA_DIR;
+    else process.env.CTMCP_DATA_DIR = previousDataDir;
+  }
+});
+
+test('loadConfig falls back to one workspace folder when CTMCP_WORKSPACES contains only separators', async () => {
+  const { root, dataDir, configFile } = await fixture('ctmcp-empty-workspaces-env');
+  await writeFile(configFile, `${JSON.stringify(legacyDocument(root, dataDir), null, 2)}\n`);
+  const previous = process.env.CTMCP_WORKSPACES;
+  process.env.CTMCP_WORKSPACES = path.delimiter;
+  try {
+    const loaded = await loadConfigBundle(configFile);
+    assert.equal(loaded.config.folders.length, 1);
+    assert.ok(loaded.config.folders[0].path.length > 0);
+  } finally {
+    if (previous === undefined) delete process.env.CTMCP_WORKSPACES;
+    else process.env.CTMCP_WORKSPACES = previous;
+  }
+});
+
+test('loadConfig repairs and persists canonical workspaces with no folders', async () => {
+  const { dataDir, configFile } = await fixture('ctmcp-empty-canonical-folders');
+  const canonical = {
+    schemaVersion: CANONICAL_SCHEMA_VERSION,
+    id: 'empty-canonical',
+    name: 'Empty Canonical',
+    folders: [],
+    activeFolderId: '',
+    bind: { host: '127.0.0.1', port: 43119 },
+    auth: { type: 'oauth', oauthClientId: 'chatgpt' },
+    host: { desktop: {}, node: { dataDir } }
+  };
+  await writeFile(configFile, `${JSON.stringify(canonical, null, 2)}\n`);
+
+  const loaded = await loadConfigBundle(configFile);
+  assert.equal(loaded.config.folders.length, 1);
+  assert.equal(loaded.migrationApplied, true);
+
+  const persisted = JSON.parse(await readFile(configFile, 'utf8'));
+  assert.equal(persisted.folders.length, 1);
+  assert.equal(persisted.activeFolderId, persisted.folders[0].id);
+});

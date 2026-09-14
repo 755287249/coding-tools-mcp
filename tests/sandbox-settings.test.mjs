@@ -158,6 +158,13 @@ test("desktop sandbox restart never force-closes its own Windows listener", asyn
   assert.match(rustHandoff, /Profile\.bind\.host/);
   assert.match(rustHandoff, /Profile\.bind\.port/);
   assert.match(rustHandoff, /Profile\.host\.desktop\.actions/);
+  assert.match(rustHandoff, /rev-parse --path-format=absolute --git-common-dir/);
+  assert.match(rustHandoff, /\[System\.IO\.File\]::ReadAllText\(\$Path, \[System\.Text\.Encoding\]::UTF8\) \| ConvertFrom-Json/);
+  assert.match(rustHandoff, /\$canonicalDir = Join-Path \$stableWorkspace 'dist-portable\\ctmcp-win64'/);
+  assert.match(rustHandoff, /Move-Item -LiteralPath \$canonicalDir -Destination \$canonicalPrevious/);
+  assert.match(rustHandoff, /Move-Item -LiteralPath \$canonicalPrevious -Destination \$canonicalDir/);
+  assert.doesNotMatch(rustHandoff, /Remove-Item -LiteralPath \$canonicalDir/);
+  assert.doesNotMatch(rustHandoff, /\$canonicalDir = Join-Path \(Split-Path -Parent \$PackageZip\)/);
   assert.match(portRuntime, /if !port_free \{\s*handle\.abort\(\);/);
   assert.match(portRuntime, /if !port_free \{\s*let _ = wait_for_port_free_blocking\(port, Duration::from_secs\(2\)\);/);
 });

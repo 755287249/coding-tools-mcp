@@ -3,8 +3,9 @@ use serde_json::{Map, Value};
 
 use super::location::ExecutionTarget;
 use super::model::{
-    ActionsConfig, AuthConfig, RuntimeConfig, SandboxConfig, SandboxPathAccess, SandboxPathGrant,
-    SecurityPolicy, TunnelConfig, WorkspaceFolder, WorkspaceProfile,
+    default_oauth_token_ttl_seconds, ActionsConfig, AuthConfig, RuntimeConfig, SandboxConfig,
+    SandboxPathAccess, SandboxPathGrant, SecurityPolicy, TunnelConfig, WorkspaceFolder,
+    WorkspaceProfile,
 };
 
 pub const CANONICAL_SCHEMA_VERSION: u32 = 2;
@@ -32,6 +33,8 @@ pub struct CanonicalAuth {
     #[serde(rename = "type")]
     pub auth_type: String,
     pub oauth_client_id: String,
+    #[serde(default = "default_oauth_token_ttl_seconds")]
+    pub oauth_token_ttl_seconds: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -609,6 +612,7 @@ pub fn canonical_from_desktop_profile(profile: &WorkspaceProfile) -> CanonicalWo
         auth: CanonicalAuth {
             auth_type: "oauth".into(),
             oauth_client_id: profile.auth.oauth_client_id.clone(),
+            oauth_token_ttl_seconds: profile.auth.oauth_token_ttl_seconds,
         },
         tool_profile: profile.runtime.tool_profile.clone(),
         permission_mode: profile.runtime.permission_mode.clone(),
@@ -713,7 +717,8 @@ pub fn canonical_from_node_v1(
         "publicBaseUrl": object.get("publicBaseUrl").and_then(Value::as_str).unwrap_or(""),
         "auth": {
             "type": "oauth",
-            "oauthClientId": oauth.get("clientId").and_then(Value::as_str).unwrap_or("")
+            "oauthClientId": oauth.get("clientId").and_then(Value::as_str).unwrap_or(""),
+            "oauthTokenTtlSeconds": oauth.get("tokenTtlSeconds").and_then(Value::as_u64).unwrap_or_else(default_oauth_token_ttl_seconds)
         },
         "toolProfile": object.get("toolProfile").and_then(Value::as_str).unwrap_or("core"),
         "permissionMode": object.get("permissionMode").and_then(Value::as_str).unwrap_or("trusted"),
@@ -817,6 +822,7 @@ pub fn desktop_profile_from_canonical(document: &CanonicalWorkspace) -> Workspac
             auth_type: map_str(&desktop, "authType")
                 .unwrap_or_else(|| document.auth.auth_type.clone()),
             oauth_client_id: document.auth.oauth_client_id.clone(),
+            oauth_token_ttl_seconds: document.auth.oauth_token_ttl_seconds,
             use_shared_secrets: map_bool(&desktop, "useSharedSecrets", false),
         },
         runtime: RuntimeConfig {

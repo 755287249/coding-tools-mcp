@@ -10,6 +10,14 @@ use crate::workspace::WorkspaceFolder;
 const MAX_SKILL_BYTES: u64 = 256 * 1024;
 const MAX_SKILL_FILES: usize = 256;
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillEvolution {
+    pub knowledge_id: String,
+    pub generation: u64,
+    pub base_content_sha256: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct SkillDescriptor {
     pub key: String,
@@ -24,6 +32,7 @@ pub struct SkillDescriptor {
     pub body: String,
     pub folder_id: Option<String>,
     pub folder_name: Option<String>,
+    pub evolution: Option<SkillEvolution>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -401,6 +410,7 @@ fn discover_root(
                 body,
                 folder_id: root.folder_id.clone(),
                 folder_name: root.folder_name.clone(),
+                evolution: None,
             },
         ));
     }

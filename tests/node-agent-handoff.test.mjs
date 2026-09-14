@@ -19,9 +19,12 @@ test("Node Agent handoff is detached and validates the new portable before stopp
   assert.match(script, /Start-Sleep -Seconds \(\[Math\]::Max\(0, \$DelaySeconds\)\)/);
   assert.match(script, /Stop-ExistingNodeAgents/);
   assert.match(script, /Start-PortableAgent/);
+  assert.match(script, /Assert-PortableSupervisorRunning/);
   assert.match(script, /Wait-NewAgentHealthy/);
   assert.match(script, /health\.version -eq \$ExpectedVersion/);
   assert.match(script, /health\.buildGitSha -eq \$ExpectedGitCommit/);
+  assert.match(script, /Get-CimInstance Win32_Process -Filter/);
+  assert.match(script, /Portable supervisor exited before handoff completed/);
   assert.match(script, /Start-Process -FilePath 'taskkill\.exe'/);
   assert.match(script, /\$taskkill\.ExitCode -ne 0/);
   assert.match(script, /dist-node-portable/);

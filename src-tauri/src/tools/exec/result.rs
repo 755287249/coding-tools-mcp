@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 
 use crate::tools::context::ToolContext;
 use crate::tools::process_start::{ProcessStartError, StartupDiagnostics};
-use crate::tools::session::WAIT_COMMAND_TIMEOUT_MAX_MS;
+use crate::tools::session::WAIT_COMMAND_TIMEOUT_DEFAULT_MS;
 use crate::tools::workspace::WorkspaceError;
 
 use super::spec::ExecSpec;
@@ -192,7 +192,7 @@ pub(super) fn merge_exec_result(
                         "arguments": {
                             "session_id": session_id,
                             "cursor": cursor,
-                            "timeout_ms": WAIT_COMMAND_TIMEOUT_MAX_MS,
+                            "timeout_ms": WAIT_COMMAND_TIMEOUT_DEFAULT_MS,
                             "until": "output_or_exit",
                             "output_mode": "delta"
                         }

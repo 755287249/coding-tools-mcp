@@ -112,8 +112,14 @@ function runCommand(env) {
     const packageManagerExecPath = String(env.npm_execpath ?? '').trim();
     const packageManagerCommand = ['npm', 'pnpm'].includes(command[0].toLowerCase())
       && packageManagerExecPath.length > 0;
-    const executable = packageManagerCommand ? process.execPath : command[0];
-    const args = packageManagerCommand ? [packageManagerExecPath, ...command.slice(1)] : command.slice(1);
+    const packageManagerExt = path.extname(packageManagerExecPath).toLowerCase();
+    const packageManagerIsNodeScript = ['.js', '.cjs', '.mjs'].includes(packageManagerExt);
+    const executable = packageManagerCommand
+      ? (packageManagerIsNodeScript ? process.execPath : packageManagerExecPath)
+      : command[0];
+    const args = packageManagerCommand && packageManagerIsNodeScript
+      ? [packageManagerExecPath, ...command.slice(1)]
+      : command.slice(1);
     const child = spawn(executable, args, {
       cwd: process.cwd(),
       env,

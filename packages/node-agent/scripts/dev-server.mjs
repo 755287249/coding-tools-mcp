@@ -183,7 +183,7 @@ async function startAgent() {
   const logFd = openSync(agentLogPath, 'a');
   managedChild = spawn(process.execPath, [path.join(packageRoot, 'dist', 'cli.js'), '--config', configPath, '--restart-supervised'], {
     cwd: repoRoot,
-    env: process.env,
+    env: { ...process.env, CTMCP_RESTART_SUPERVISOR: 'active-v1' },
     stdio: ['ignore', logFd, logFd],
     windowsHide: true
   });

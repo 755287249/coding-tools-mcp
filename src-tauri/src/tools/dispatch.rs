@@ -1,6 +1,10 @@
 mod exec_many;
 mod tracking;
 
+use crate::knowledge::{
+    knowledge_store_for_context, CanaryImpactStore, CanaryStrategyEngine, KnowledgeCanaryDecision,
+    ToolStrategyImplementationId,
+};
 use std::borrow::Cow;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -34,32 +38,79 @@ fn policy_tool_err(
     arguments: &Value,
     err: PolicyError,
 ) -> Value {
-    let dangerous = err
-        .0
-        .strip_prefix("DANGEROUS_OPERATION_REQUIRES_CONFIRMATION: ");
-    let protected = err.0.strip_prefix("PROTECTED_REPOSITORY_ASSET: ");
+    let raw = err.0.as_str();
+    let dangerous = raw.strip_prefix("DANGEROUS_OPERATION_REQUIRES_CONFIRMATION: ");
+    let protected = raw.strip_prefix("PROTECTED_REPOSITORY_ASSET: ");
+    let workspace_path = raw.strip_prefix("WORKSPACE_PATH_PROTECTED: ");
+    let external_execution = raw.strip_prefix("EXTERNAL_EXECUTION_NOT_ALLOWED: ");
     let code = if protected.is_some() {
         "PROTECTED_REPOSITORY_ASSET"
     } else if dangerous.is_some() {
         "DANGEROUS_OPERATION_REQUIRES_CONFIRMATION"
+    } else if workspace_path.is_some() {
+        "WORKSPACE_PATH_PROTECTED"
+    } else if external_execution.is_some() {
+        "EXTERNAL_EXECUTION_NOT_ALLOWED"
+    } else if raw.contains("Network-looking commands are blocked") {
+        "NETWORK_COMMAND_BLOCKED"
+    } else if raw.contains("allowlisted") {
+        "COMMAND_REJECTED"
+    } else if raw == "workdir must stay inside the configured workspace" {
+        "PATH_OUTSIDE_WORKSPACE"
+    } else if raw.contains("Environment variable is protected") {
+        "ENVIRONMENT_VARIABLE_PROTECTED"
+    } else if raw.contains("Shell chaining, redirection and expansion") {
+        "SHELL_MODE_REQUIRED"
     } else {
         "POLICY_REJECTED"
     };
-    let message = protected.or(dangerous).unwrap_or(&err.0).to_string();
-    let (reason, suggestion) = if dangerous.is_some() {
-        (
+    let policy_rule = match code {
+        "NETWORK_COMMAND_BLOCKED" => Some("block_network_commands"),
+        "WORKSPACE_PATH_PROTECTED"
+        | "EXTERNAL_EXECUTION_NOT_ALLOWED"
+        | "PATH_OUTSIDE_WORKSPACE" => Some("enforce_workspace_boundary"),
+        "COMMAND_REJECTED" => Some("enforce_command_allowlist"),
+        "DANGEROUS_OPERATION_REQUIRES_CONFIRMATION" => Some("require_dangerous_confirmation"),
+        "PROTECTED_REPOSITORY_ASSET" => Some("protect_repository_metadata"),
+        "ENVIRONMENT_VARIABLE_PROTECTED" => Some("protect_environment_variables"),
+        _ => None,
+    };
+    let message = protected
+        .or(dangerous)
+        .or(workspace_path)
+        .or(external_execution)
+        .unwrap_or(raw)
+        .to_string();
+    let (reason, suggestion) = match code {
+        "DANGEROUS_OPERATION_REQUIRES_CONFIRMATION" => (
             "confirmation_required",
-            "为危险操作补充 confirm=true，确认后再重试",
-        )
-    } else if message.contains("allowlisted") {
-        ("command_rejected", "改用允许的命令，或调整工作区命令白名单")
-    } else if message.contains("Shell chaining") {
-        (
-            "shell_syntax_rejected",
-            "移除未加引号的 shell 操作符；引号内的程序参数可以保留",
-        )
-    } else {
-        ("policy_rejected", "根据错误信息修正参数后重试")
+            "Retry with confirm=true only after the destructive action has been explicitly approved.",
+        ),
+        "NETWORK_COMMAND_BLOCKED" => (
+            "network_blocked",
+            "Disable block_network_commands for this workspace if network access is intended, then retry.",
+        ),
+        "WORKSPACE_PATH_PROTECTED" | "EXTERNAL_EXECUTION_NOT_ALLOWED" | "PATH_OUTSIDE_WORKSPACE" => (
+            "workspace_boundary",
+            "Keep the operation inside the workspace, or disable enforce_workspace_boundary if host access is explicitly intended.",
+        ),
+        "COMMAND_REJECTED" => (
+            "command_rejected",
+            "Add the executable to the workspace command allowlist or disable enforce_command_allowlist.",
+        ),
+        "PROTECTED_REPOSITORY_ASSET" => (
+            "protected_repository_asset",
+            "Do not directly overwrite or recursively delete protected .git/.github metadata.",
+        ),
+        "ENVIRONMENT_VARIABLE_PROTECTED" => (
+            "environment_protected",
+            "Avoid overriding protected process/loader variables, or disable protect_environment_variables if explicitly intended.",
+        ),
+        "SHELL_MODE_REQUIRED" => (
+            "shell_mode_required",
+            "Use an explicit shell mode for chaining, redirection, or expansion.",
+        ),
+        _ => ("policy_rejected", "Correct the rejected arguments and retry."),
     };
     let permission = permission_kind(&message);
     let pending = permission.map(|permission| {
@@ -72,6 +123,10 @@ fn policy_tool_err(
         )
     });
     let recoverable = pending.is_some() || reason != "confirmation_required";
+    let diagnostic_summary = policy_rule.map_or_else(
+        || "Request was rejected by MCP policy before child-process startup.".to_string(),
+        |rule| format!("Request was rejected by MCP policy before child-process startup ({rule})."),
+    );
     tool_err(WorkspaceError::ToolDetails {
         code,
         message,
@@ -80,6 +135,12 @@ fn policy_tool_err(
         details: json!({
             "stage": "policy",
             "reason": reason,
+            "failure_origin": "policy_preflight",
+            "execution_attempted": false,
+            "process_started": false,
+            "policy_blocked": true,
+            "policy_rule": policy_rule,
+            "diagnostic_summary": diagnostic_summary,
             "recoverable": recoverable,
             "suggestion": suggestion,
             "permission_request": pending.map(|operation| json!({
@@ -107,14 +168,42 @@ fn permission_kind(message: &str) -> Option<&'static str> {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+struct ToolCallExecutionContext {
+    canary_sample_key: Option<String>,
+}
+
 /// **唯一工具执行入口**。MCP `tools/call` 与 Actions `POST /actions/{tool}` 必须且只能调用此函数。
 /// 策略校验、分发、错误格式在此统一，两路传输层不得另做执行前校验（Actions 仅允许额外的暴露层 `validate_actions_exposure`）。
 pub fn call_tool(ctx: &ToolContext, name: &str, args: &Value) -> Value {
+    call_tool_with_execution_context(ctx, name, args, &ToolCallExecutionContext::default())
+}
+
+fn call_tool_with_execution_context(
+    ctx: &ToolContext,
+    name: &str,
+    args: &Value,
+    execution: &ToolCallExecutionContext,
+) -> Value {
     let policy = ctx.runtime_config().policy.security_policy;
-    redact_tool_output_with_policy(name, args, call_tool_inner(ctx, name, args, false), &policy)
+    redact_tool_output_with_policy(
+        name,
+        args,
+        call_tool_inner(ctx, name, args, false, execution),
+        &policy,
+    )
 }
 
 pub async fn call_tool_async(ctx: SharedToolContext, name: String, args: Value) -> Value {
+    call_tool_async_with_canary_sample_key(ctx, name, args, None).await
+}
+
+pub(crate) async fn call_tool_async_with_canary_sample_key(
+    ctx: SharedToolContext,
+    name: String,
+    args: Value,
+    canary_sample_key: Option<String>,
+) -> Value {
     let policy = ctx.runtime_config().policy.security_policy;
     let redaction = OutputRedactionContext::new_with_policy(&name, &args, &policy);
     let lock_groups = mutation_lock_groups(ctx.as_ref(), &name, &args);
@@ -124,7 +213,8 @@ pub async fn call_tool_async(ctx: SharedToolContext, name: String, args: Value) 
         mutation_guards.push(ctx.mutation_lock_for(*group).lock_owned().await);
     }
     let workspace_lock_wait_ms = lock_started.elapsed().as_millis();
-    let mut output = call_tool_async_inner(ctx, name, args).await;
+    let execution = ToolCallExecutionContext { canary_sample_key };
+    let mut output = call_tool_async_inner(ctx, name, args, execution).await;
     if let Some(object) = output.as_object_mut() {
         let lock_names = lock_groups
             .iter()
@@ -160,7 +250,12 @@ fn mutation_lock_groups(ctx: &ToolContext, name: &str, args: &Value) -> Vec<Muta
     tool_runtime(&effective_name).lock_groups.to_vec()
 }
 
-async fn call_tool_async_inner(ctx: SharedToolContext, name: String, args: Value) -> Value {
+async fn call_tool_async_inner(
+    ctx: SharedToolContext,
+    name: String,
+    args: Value,
+    execution: ToolCallExecutionContext,
+) -> Value {
     if name == "exec_many" {
         return call_exec_many_async(ctx, &args).await;
     }
@@ -184,7 +279,7 @@ async fn call_tool_async_inner(ctx: SharedToolContext, name: String, args: Value
         global_admission,
     )) = ctx.admission_for(&name)
     else {
-        let mut value = call_tool(ctx.as_ref(), &name, &args);
+        let mut value = call_tool_with_execution_context(ctx.as_ref(), &name, &args, &execution);
         if let Some(object) = value.as_object_mut() {
             object.insert("execution_lane".into(), json!("inline_fast"));
             object.insert("blocking_queue_wait_ms".into(), json!(0));
@@ -298,7 +393,7 @@ async fn call_tool_async_inner(ctx: SharedToolContext, name: String, args: Value
         let _global_permit = global_permit;
         let _permit = permit;
         let queue_wait_ms = queued_at.elapsed().as_millis();
-        let mut value = call_tool(ctx.as_ref(), &name, &args);
+        let mut value = call_tool_with_execution_context(ctx.as_ref(), &name, &args, &execution);
         if let Some(object) = value.as_object_mut() {
             object.insert("execution_lane".into(), json!("blocking_worker"));
             object.insert("blocking_queue_wait_ms".into(), json!(queue_wait_ms));
@@ -527,7 +622,13 @@ async fn resume_pending_operation_async(
         let tool_name = operation.tool_name.clone();
         let worker_args = resumed_args.clone();
         match tokio::task::spawn_blocking(move || {
-            call_tool_inner(worker_ctx.as_ref(), &tool_name, &worker_args, true)
+            call_tool_inner(
+                worker_ctx.as_ref(),
+                &tool_name,
+                &worker_args,
+                true,
+                &ToolCallExecutionContext::default(),
+            )
         })
         .await
         {
@@ -615,6 +716,7 @@ fn call_tool_inner(
     name: &str,
     args: &Value,
     permission_override: bool,
+    execution: &ToolCallExecutionContext,
 ) -> Value {
     let effective_args = apply_default_cwd(ctx, name, args);
     let runtime = ctx.runtime_config();
@@ -687,7 +789,12 @@ fn call_tool_inner(
         "read_many" => file::read_many(ws, &effective_args),
         "project_map" => project::project_map(ws, &effective_args),
         "list_files" => file::list_files(ws, &effective_args),
-        "search_text" => file::search_text(ws, &effective_args),
+        "search_text" => search_text_with_knowledge_canary(
+            ctx,
+            ws,
+            &effective_args,
+            execution.canary_sample_key.as_deref(),
+        ),
         "patch_check" => patch::patch_check(ctx, &effective_args),
         "apply_patch" => patch::apply_patch(ctx, &effective_args),
         "edit" => patch::edit(ctx, &effective_args),
@@ -738,6 +845,74 @@ fn call_tool_inner(
     finish_tracked_call(ctx, name, args, tracking, output)
 }
 
+fn search_text_with_knowledge_canary(
+    ctx: &ToolContext,
+    ws: &crate::tools::workspace::Workspace,
+    args: &Value,
+    request_sample_key: Option<&str>,
+) -> Result<Value, WorkspaceError> {
+    let decision = knowledge_search_canary_decision(ctx, args, request_sample_key);
+    let exact_total_fast_tail = decision.as_ref().is_some_and(|decision| {
+        decision.applied
+            && decision.implementation == ToolStrategyImplementationId::SearchExactTotalFastTail
+    });
+    let mut value = file::search_text_with_options(
+        ws,
+        args,
+        file::SearchTextExecutionOptions {
+            exact_total_fast_tail,
+        },
+    )?;
+    if let (Some(decision), Some(object)) = (decision, value.as_object_mut()) {
+        object.insert("knowledge_canary_id".into(), json!(decision.knowledge_id));
+        object.insert(
+            "knowledge_canary_implementation".into(),
+            serde_json::to_value(decision.implementation).unwrap_or(Value::Null),
+        );
+        object.insert("knowledge_canary_eligible".into(), json!(decision.eligible));
+        object.insert(
+            "knowledge_canary_stage".into(),
+            serde_json::to_value(decision.stage).unwrap_or(Value::Null),
+        );
+        object.insert("knowledge_canary_selected".into(), json!(true));
+        object.insert("knowledge_canary_applied".into(), json!(decision.applied));
+        object.insert("knowledge_canary_bucket".into(), json!(decision.bucket));
+    }
+    Ok(value)
+}
+
+fn knowledge_search_canary_decision(
+    ctx: &ToolContext,
+    args: &Value,
+    request_sample_key: Option<&str>,
+) -> Option<KnowledgeCanaryDecision> {
+    let scope_root = ctx.harness.scope_root_for(&ctx.default_cwd_path());
+    let task_id = ctx
+        .harness
+        .current_task_for_root(&scope_root)
+        .ok()
+        .flatten()
+        .map(|task| task.id);
+    let sample_key = canary_sample_key(task_id.as_deref(), request_sample_key, &ctx.profile_id);
+    let store = knowledge_store_for_context(ctx);
+    let impact = CanaryImpactStore::new(store.root());
+    CanaryStrategyEngine::new(store, impact)
+        .decide("search_text", args, sample_key)
+        .ok()
+        .flatten()
+}
+
+fn canary_sample_key<'a>(
+    task_id: Option<&'a str>,
+    request_sample_key: Option<&'a str>,
+    profile_id: &'a str,
+) -> &'a str {
+    task_id
+        .filter(|value| !value.is_empty())
+        .or_else(|| request_sample_key.filter(|value| !value.is_empty()))
+        .unwrap_or(profile_id)
+}
+
 fn request_permissions(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
     let runtime = ctx.runtime_config();
     if let Some(resume_id) = args.get("resume_id").and_then(Value::as_str) {
@@ -774,7 +949,13 @@ fn request_permissions(ctx: &ToolContext, args: &Value) -> Result<Value, Workspa
                 object.insert("confirm".into(), Value::Bool(true));
             }
         }
-        let mut resumed = call_tool_inner(ctx, &operation.tool_name, &resumed_args, true);
+        let mut resumed = call_tool_inner(
+            ctx,
+            &operation.tool_name,
+            &resumed_args,
+            true,
+            &ToolCallExecutionContext::default(),
+        );
         if let Some(object) = resumed.as_object_mut() {
             object.insert("resumed".into(), Value::Bool(true));
             object.insert("resume_id".into(), Value::String(operation.resume_id));
@@ -871,21 +1052,11 @@ fn apply_default_cwd<'a>(ctx: &ToolContext, name: &str, args: &'a Value) -> Cow<
                 );
             }
         }
-        "git_diff" => {
-            if let Some(path) = effective.get("path").and_then(Value::as_str) {
-                effective["path"] = Value::String(prefix_relative_path(&base, path));
-            }
-            if let Some(paths) = effective.get("paths").and_then(Value::as_array).cloned() {
-                effective["paths"] = Value::Array(
-                    paths
-                        .iter()
-                        .map(|path| {
-                            path.as_str()
-                                .map(|value| Value::String(prefix_relative_path(&base, value)))
-                                .unwrap_or_else(|| path.clone())
-                        })
-                        .collect(),
-                );
+        "git_diff" | "git_show" => {
+            // Git read targets use the same coordinate contract as Git mutators:
+            // repo_path is workspace-relative and pathspecs are repo-relative.
+            if effective.get("repo_path").is_none() {
+                effective["repo_path"] = Value::String(base.clone());
             }
         }
         "format_files" => {
@@ -953,22 +1124,10 @@ fn apply_default_cwd<'a>(ctx: &ToolContext, name: &str, args: &'a Value) -> Cow<
             );
         }
         "git_branch" | "git_worktree" | "git_stage" | "git_commit" | "git_push" | "git_restore" => {
-            if let Some(repo_path) = effective.get("repo_path").and_then(Value::as_str) {
-                effective["repo_path"] = Value::String(prefix_relative_path(&base, repo_path));
-            } else if name == "git_push" {
+            // Git mutator repo_path is workspace-relative; pathspecs are repo-relative.
+            // Only an omitted repo_path inherits the conversation default cwd.
+            if effective.get("repo_path").is_none() {
                 effective["repo_path"] = Value::String(base.clone());
-            }
-            if let Some(paths) = effective.get("paths").and_then(Value::as_array).cloned() {
-                effective["paths"] = Value::Array(
-                    paths
-                        .into_iter()
-                        .map(|path| {
-                            path.as_str()
-                                .map(|value| Value::String(prefix_relative_path(&base, value)))
-                                .unwrap_or(path)
-                        })
-                        .collect(),
-                );
             }
         }
         _ => {}
@@ -1066,8 +1225,7 @@ fn canonical(path: impl AsRef<Path>) -> Option<PathBuf> {
     fs::canonicalize(path).ok()
 }
 
-fn git_metadata_for_workspace(root: &Path) -> Option<GitMetadata> {
-    let workspace = canonical(root)?;
+fn git_metadata_for_canonical_workspace(workspace: &Path) -> Option<GitMetadata> {
     let marker = workspace.join(".git");
     if marker.is_dir() {
         let git_dir = canonical(&marker)?;
@@ -1107,6 +1265,11 @@ fn git_metadata_for_workspace(root: &Path) -> Option<GitMetadata> {
     })
 }
 
+fn git_metadata_for_workspace(root: &Path) -> Option<GitMetadata> {
+    let workspace = canonical(root)?;
+    git_metadata_for_canonical_workspace(&workspace)
+}
+
 fn valid_git_hash(value: &str) -> bool {
     matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
@@ -1119,21 +1282,56 @@ fn valid_git_ref(value: &str) -> bool {
             .all(|part| !part.is_empty() && part != "." && part != "..")
 }
 
-fn fast_workspace_git_head(root: &Path) -> Option<String> {
+fn valid_git_head_marker(head: &str) -> bool {
+    let reference = head.strip_prefix("ref: ").map(str::trim);
+    reference
+        .map(valid_git_ref)
+        .unwrap_or_else(|| valid_git_hash(head))
+}
+
+pub(crate) fn fast_containing_git_root(workspace_root: &Path, cwd: &Path) -> Option<PathBuf> {
+    let workspace = canonical(workspace_root)?;
+    let mut current = canonical(cwd)?;
+    if !current.starts_with(&workspace) {
+        return None;
+    }
+    loop {
+        if let Some(metadata) = git_metadata_for_canonical_workspace(&current) {
+            if let Ok(head) = fs::read_to_string(metadata.git_dir.join("HEAD")) {
+                if valid_git_head_marker(head.trim()) {
+                    return Some(current);
+                }
+            }
+        }
+        if current == workspace {
+            return None;
+        }
+        current = current.parent()?.to_path_buf();
+        if !current.starts_with(&workspace) {
+            return None;
+        }
+    }
+}
+
+pub(crate) fn fast_workspace_git_identity(root: &Path) -> Option<(String, String)> {
     let metadata = git_metadata_for_workspace(root)?;
     let head = fs::read_to_string(metadata.git_dir.join("HEAD")).ok()?;
     let head = head.trim();
     let Some(reference) = head.strip_prefix("ref: ").map(str::trim) else {
-        return valid_git_hash(head).then(|| head.to_ascii_lowercase());
+        return valid_git_hash(head).then(|| ("HEAD".into(), head.to_ascii_lowercase()));
     };
     if !valid_git_ref(reference) {
         return None;
     }
+    let branch = reference
+        .strip_prefix("refs/heads/")
+        .unwrap_or(reference)
+        .to_string();
     for base in [&metadata.git_dir, &metadata.common_dir] {
         if let Ok(value) = fs::read_to_string(base.join(reference)) {
             let value = value.trim();
             if valid_git_hash(value) {
-                return Some(value.to_ascii_lowercase());
+                return Some((branch.clone(), value.to_ascii_lowercase()));
             }
         }
     }
@@ -1149,11 +1347,15 @@ fn fast_workspace_git_head(root: &Path) -> Option<String> {
                 continue;
             };
             if name.trim() == reference && valid_git_hash(value.trim()) {
-                return Some(value.trim().to_ascii_lowercase());
+                return Some((branch.clone(), value.trim().to_ascii_lowercase()));
             }
         }
     }
     None
+}
+
+fn fast_workspace_git_head(root: &Path) -> Option<String> {
+    fast_workspace_git_identity(root).map(|(_, head)| head)
 }
 
 fn is_runtime_source_workspace(root: &Path) -> bool {
@@ -1295,6 +1497,11 @@ pub fn server_info(ctx: &ToolContext) -> Result<Value, WorkspaceError> {
                 "system_command_allowlist": runtime.policy.allowed_commands.iter().cloned().collect::<Vec<_>>()
             }
         },
+        "learning": crate::knowledge::learning_bootstrap_summary(ctx).unwrap_or_else(|_| json!({
+            "state": "metadata_unavailable",
+            "runtime_policy": "read_only_rust_parity",
+            "knowledge_loading_policy": "Persistent knowledge is not injected into inference context."
+        })),
         "tools": tools,
         "tool_count": tools.len()
     })))
@@ -1328,11 +1535,29 @@ mod tests {
     use crate::tools::ToolContext;
 
     use super::{
-        apply_default_cwd, begin_tracked_call, call_tool, call_tool_async,
+        apply_default_cwd, begin_tracked_call, call_tool, call_tool_async, canary_sample_key,
         collect_parallelism_observations, command_parallel_signature,
         default_exec_many_parallelism, finish_tracked_call, parallel_pair_key,
         parse_exec_batch_commands, resolve_exec_many_decision_with_history,
     };
+
+    #[test]
+    fn canary_sample_key_prefers_task_then_request_session_then_profile() {
+        assert_eq!(
+            canary_sample_key(Some("task"), Some("session"), "profile"),
+            "task"
+        );
+        assert_eq!(
+            canary_sample_key(None, Some("session"), "profile"),
+            "session"
+        );
+        assert_eq!(canary_sample_key(None, None, "profile"), "profile");
+        assert_eq!(
+            canary_sample_key(Some(""), Some("session"), "profile"),
+            "session"
+        );
+        assert_eq!(canary_sample_key(None, Some(""), "profile"), "profile");
+    }
 
     #[test]
     fn fast_workspace_git_head_reads_repo_local_refs_and_rejects_external_pointers() {
@@ -1346,8 +1571,39 @@ mod tests {
         )
         .expect("ref");
         assert_eq!(
+            super::fast_workspace_git_identity(workspace.path()),
+            Some((
+                "main".into(),
+                "0123456789abcdef0123456789abcdef01234567".into()
+            ))
+        );
+        assert_eq!(
             super::fast_workspace_git_head(workspace.path()).as_deref(),
             Some("0123456789abcdef0123456789abcdef01234567")
+        );
+        let deep = workspace.path().join("src/deep");
+        std::fs::create_dir_all(&deep).expect("deep workspace path");
+        let workspace_canonical =
+            std::fs::canonicalize(workspace.path()).expect("workspace canonical");
+        assert_eq!(
+            super::fast_containing_git_root(workspace.path(), &deep).as_deref(),
+            Some(workspace_canonical.as_path())
+        );
+
+        let nested = workspace.path().join("packages/nested");
+        let nested_git = nested.join(".git");
+        let nested_deep = nested.join("src/deep");
+        std::fs::create_dir_all(&nested_git).expect("nested git dir");
+        std::fs::create_dir_all(&nested_deep).expect("nested deep path");
+        std::fs::write(
+            nested_git.join("HEAD"),
+            "89abcdef0123456789abcdef0123456789abcdef\n",
+        )
+        .expect("nested head");
+        let nested_canonical = std::fs::canonicalize(&nested).expect("nested canonical");
+        assert_eq!(
+            super::fast_containing_git_root(workspace.path(), &nested_deep).as_deref(),
+            Some(nested_canonical.as_path())
         );
 
         let repository = tempfile::tempdir().expect("repository tempdir");
@@ -1370,8 +1626,22 @@ mod tests {
         )
         .expect("linked ref");
         assert_eq!(
+            super::fast_workspace_git_identity(&linked),
+            Some((
+                "linked".into(),
+                "fedcba9876543210fedcba9876543210fedcba98".into()
+            ))
+        );
+        assert_eq!(
             super::fast_workspace_git_head(&linked).as_deref(),
             Some("fedcba9876543210fedcba9876543210fedcba98")
+        );
+        let linked_deep = linked.join("src/deep");
+        std::fs::create_dir_all(&linked_deep).expect("linked deep path");
+        let linked_canonical = std::fs::canonicalize(&linked).expect("linked canonical");
+        assert_eq!(
+            super::fast_containing_git_root(repository.path(), &linked_deep).as_deref(),
+            Some(linked_canonical.as_path())
         );
 
         let malicious = tempfile::tempdir().expect("malicious workspace");
@@ -1387,6 +1657,10 @@ mod tests {
         )
         .expect("malicious pointer");
         assert_eq!(super::fast_workspace_git_head(malicious.path()), None);
+        assert_eq!(
+            super::fast_containing_git_root(malicious.path(), malicious.path()),
+            None
+        );
     }
 
     #[test]
@@ -1415,6 +1689,42 @@ mod tests {
         let repaired = apply_default_cwd(&ctx, "read_file", &root_read);
         assert!(matches!(repaired, Cow::Borrowed(_)));
         assert_eq!(ctx.default_cwd_display(), ".");
+    }
+
+    #[test]
+    fn default_cwd_keeps_git_pathspecs_repo_relative_and_only_defaults_missing_repo_path() {
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        let harness = tempfile::tempdir().expect("harness tempdir");
+        let nested = workspace.path().join("nested-repo");
+        std::fs::create_dir(&nested).expect("nested repo fixture");
+        let ctx =
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .expect("tool context");
+        ctx.set_default_cwd(nested);
+
+        let explicit_args = json!({"repo_path": "nested-repo", "paths": ["tracked.txt"]});
+        let explicit = apply_default_cwd(&ctx, "git_stage", &explicit_args);
+        assert_eq!(explicit["repo_path"], "nested-repo");
+        assert_eq!(explicit["paths"], json!(["tracked.txt"]));
+
+        let implicit_args = json!({"paths": ["tracked.txt"]});
+        let implicit = apply_default_cwd(&ctx, "git_stage", &implicit_args);
+        assert_eq!(implicit["repo_path"], "nested-repo");
+        assert_eq!(implicit["paths"], json!(["tracked.txt"]));
+
+        let explicit_diff_args = json!({"repo_path": "nested-repo", "paths": ["tracked.txt"]});
+        let explicit_diff = apply_default_cwd(&ctx, "git_diff", &explicit_diff_args);
+        assert_eq!(explicit_diff["repo_path"], "nested-repo");
+        assert_eq!(explicit_diff["paths"], json!(["tracked.txt"]));
+
+        let implicit_diff_args = json!({"paths": ["tracked.txt"]});
+        let implicit_diff = apply_default_cwd(&ctx, "git_diff", &implicit_diff_args);
+        assert_eq!(implicit_diff["repo_path"], "nested-repo");
+        assert_eq!(implicit_diff["paths"], json!(["tracked.txt"]));
+
+        let implicit_show_args = json!({"rev": "HEAD"});
+        let implicit_show = apply_default_cwd(&ctx, "git_show", &implicit_show_args);
+        assert_eq!(implicit_show["repo_path"], "nested-repo");
     }
 
     #[test]
@@ -1534,6 +1844,15 @@ mod tests {
                 "verification_ok": false,
                 "termination_reason": "exited",
                 "process_exit_code": 7,
+                "execution_mode": "job",
+                "timeout_scope": "process",
+                "timeout_clamped": false,
+                "polling_extends_process_deadline": false,
+                "requested_process_timeout_ms": 7_200_000,
+                "effective_process_timeout_ms": 7_200_000,
+                "process_timeout_limit_ms": 21_600_000,
+                "process_deadline_ts_ms": 123_456_789,
+                "process_timeout_remaining_ms": 7_199_000,
                 "warnings": ["bounded warning"],
                 "command": "must-not-persist",
                 "stdout": "must-not-persist"
@@ -1558,6 +1877,20 @@ mod tests {
         assert_eq!(terminal.result_summary["verification_ok"], false);
         assert_eq!(terminal.result_summary["termination_reason"], "exited");
         assert_eq!(terminal.result_summary["process_exit_code"], 7);
+        assert_eq!(terminal.result_summary["execution_mode"], "job");
+        assert_eq!(terminal.result_summary["timeout_scope"], "process");
+        assert_eq!(
+            terminal.result_summary["polling_extends_process_deadline"],
+            false
+        );
+        assert_eq!(
+            terminal.result_summary["effective_process_timeout_ms"],
+            7_200_000
+        );
+        assert_eq!(
+            terminal.result_summary["process_timeout_limit_ms"],
+            21_600_000
+        );
         assert_eq!(terminal.result_summary["warning_count"], 1);
         assert!(terminal.result_summary.get("command").is_none());
         assert!(terminal.result_summary.get("stdout").is_none());
@@ -1792,6 +2125,228 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(process_runtime)]
+    async fn exec_many_rejects_invalid_child_timeout_before_starting_any_process() {
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        let harness = tempfile::tempdir().expect("harness tempdir");
+        let ctx = Arc::new(
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .expect("tool context"),
+        );
+
+        let result = call_tool_async(
+            ctx.clone(),
+            "exec_many".into(),
+            json!({
+                "mode": "sequential",
+                "commands": [
+                    { "id": "valid", "program": "cargo", "args": ["--version"] },
+                    { "id": "invalid", "program": "cargo", "args": ["--version"], "job_timeout_ms": 2_000 }
+                ]
+            }),
+        )
+        .await;
+
+        assert_eq!(result["ok"], false, "{result}");
+        assert!(
+            result
+                .to_string()
+                .contains("commands[1] rejected before scheduling"),
+            "{result}"
+        );
+        let sessions =
+            crate::tools::session::list_sessions(&ctx.sessions, &json!({})).expect("list sessions");
+        assert_eq!(sessions["count"], 0, "{sessions}");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_runtime)]
+    async fn exec_many_detaches_long_graph_and_reattaches_without_duplicate_children() {
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        let harness = tempfile::tempdir().expect("harness tempdir");
+        let ctx = Arc::new(
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .expect("tool context"),
+        );
+        let operation_id = "rust-retained-long-graph";
+        #[cfg(windows)]
+        let slow = json!({
+            "id": "slow",
+            "program": "powershell",
+            "args": ["-NoProfile", "-Command", "Start-Sleep -Milliseconds 2000; Write-Output slow-done"],
+            "timeout_ms": 5_000
+        });
+        #[cfg(unix)]
+        let slow = json!({
+            "id": "slow",
+            "program": "sh",
+            "args": ["-c", "sleep 2; printf slow-done"],
+            "timeout_ms": 5_000
+        });
+
+        let started_at = std::time::Instant::now();
+        let started = call_tool_async(
+            ctx.clone(),
+            "exec_many".into(),
+            json!({
+                "operation_id": operation_id,
+                "yield_time_ms": 10,
+                "mode": "sequential",
+                "commands": [slow]
+            }),
+        )
+        .await;
+
+        assert!(
+            started_at.elapsed() < std::time::Duration::from_millis(1_500),
+            "{started}"
+        );
+        assert_eq!(started["ok"], true, "{started}");
+        assert_eq!(started["graph_operation_id"], operation_id, "{started}");
+        assert_eq!(started["graph_completed"], false, "{started}");
+        assert_eq!(started["graph_status"], "running", "{started}");
+        assert_eq!(started["detached"], true, "{started}");
+        assert_eq!(started["graph_requested_yield_ms"], 10, "{started}");
+        assert_eq!(started["graph_yield_ms"], 10, "{started}");
+        assert_eq!(started["next_actions"][0]["tool"], "exec_many", "{started}");
+        assert_eq!(
+            started["next_actions"][0]["arguments"]["operation_id"], operation_id,
+            "{started}"
+        );
+        assert_eq!(
+            started["next_actions"][0]["arguments"]["yield_time_ms"], 20_000,
+            "{started}"
+        );
+
+        let finalized = call_tool_async(
+            ctx.clone(),
+            "exec_many".into(),
+            json!({
+                "operation_id": operation_id,
+                "yield_time_ms": 5_000,
+                "result_mode": "full"
+            }),
+        )
+        .await;
+        assert_eq!(finalized["ok"], true, "{finalized}");
+        assert_eq!(finalized["graph_completed"], true, "{finalized}");
+        assert_eq!(finalized["reattached"], true, "{finalized}");
+        assert_eq!(finalized["commands_executed"], 1, "{finalized}");
+        assert!(
+            finalized["results"][0]["result"]["stdout"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("slow-done"),
+            "{finalized}"
+        );
+
+        let sessions =
+            crate::tools::session::list_sessions(&ctx.sessions, &json!({})).expect("list sessions");
+        assert_eq!(sessions["count"], 1, "{sessions}");
+    }
+    #[tokio::test]
+    #[serial_test::serial(process_runtime)]
+    async fn exec_many_status_cancel_and_forget_do_not_leave_orphan_child() {
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        let harness = tempfile::tempdir().expect("harness tempdir");
+        let ctx = Arc::new(
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .expect("tool context"),
+        );
+        let operation_id = "rust-retained-cancel-graph";
+        #[cfg(windows)]
+        let slow = json!({
+            "id": "slow",
+            "program": "powershell",
+            "args": ["-NoProfile", "-Command", "Start-Sleep -Seconds 30; Write-Output should-not-complete"],
+            "timeout_ms": 60_000
+        });
+        #[cfg(unix)]
+        let slow = json!({
+            "id": "slow",
+            "program": "sh",
+            "args": ["-c", "sleep 30; printf should-not-complete"],
+            "timeout_ms": 60_000
+        });
+
+        let mut slow_two = slow.clone();
+        slow_two["id"] = json!("slow-2");
+        let started = call_tool_async(
+            ctx.clone(),
+            "exec_many".into(),
+            json!({
+                "operation_id": operation_id,
+                "yield-time_ms": 10,
+                "mode": "sequential",
+                "commands": [slow, slow_two]
+            }),
+        )
+        .await;
+        assert_eq!(started["graph_completed"], false, "{started}");
+
+        let status_started = std::time::Instant::now();
+        let status = call_tool_async(
+            ctx.clone(),
+            "exec_many".into(),
+            json!({"operation_id": operation_id, "action": "status"}),
+        )
+        .await;
+        assert!(
+            status_started.elapsed() < std::time::Duration::from_millis(1_000),
+            "{status}"
+        );
+        assert_eq!(status["ok"], true, "{status}");
+        assert_eq!(status["control_ok"], true, "{status}");
+        assert_eq!(status["graph_status"], "running", "{status}");
+
+        let cancelled = call_tool_async(
+            ctx.clone(),
+            "exec_many".into(),
+            json!({
+                "operation_id": operation_id,
+                "action": "cancel",
+                "yield-time_ms": 5_000,
+                "reason": "regression test"
+            }),
+        )
+        .await;
+        assert_eq!(cancelled["ok"], true, "{cancelled}");
+        assert_eq!(cancelled["control_ok"], true, "{cancelled}");
+        assert_eq!(cancelled["cancel_requested"], true, "{cancelled}");
+        assert_eq!(cancelled["graph_completed"], true, "{cancelled}");
+        assert_eq!(cancelled["graph_status"], "cancelled", "{cancelled}");
+
+        let sessions =
+            crate::tools::session::list_sessions(&ctx.sessions, &json!({})).expect("list sessions");
+        assert_eq!(sessions["count"], 1, "{sessions}");
+        let session = sessions["sessions"]
+            .as_array()
+            .and_then(|items| items.first())
+            .expect("retained child session");
+        assert_eq!(session["process_still_running"], false, "{sessions}");
+
+        let forgotten = call_tool_async(
+            ctx.clone(),
+            "exec_many".into(),
+            json!({"operation_id": operation_id, "action": "forget"}),
+        )
+        .await;
+        assert_eq!(forgotten["ok"], true, "{forgotten}");
+        assert_eq!(forgotten["forgotten"], true, "{forgotten}");
+
+        let missing = call_tool_async(
+            ctx,
+            "exec_many".into(),
+            json!({"operation_id": operation_id, "action": "status"}),
+        )
+        .await;
+        assert_eq!(missing["ok"], false, "{missing}");
+        assert_eq!(
+            missing["error"]["code"], "COMMAND_GRAPH_OPERATION_NOT_FOUND",
+            "{missing}"
+        );
+    }
+    #[tokio::test]
+    #[serial_test::serial(process_runtime)]
     async fn exec_many_parallel_runs_independent_commands_concurrently() {
         let workspace = tempfile::tempdir().expect("workspace tempdir");
         let harness = tempfile::tempdir().expect("harness tempdir");
@@ -1804,7 +2359,6 @@ mod tests {
         #[cfg(unix)]
         let sleep = json!({"program": "sh", "args": ["-c", "sleep 1"]});
 
-        let started = std::time::Instant::now();
         let result = call_tool_async(
             ctx,
             "exec_many".into(),
@@ -1819,15 +2373,14 @@ mod tests {
 
         assert_eq!(result["all_commands_ok"], true, "{result}");
         assert_eq!(result["mode"], "parallel");
-        let batch_elapsed_ms = started.elapsed().as_millis() as u64;
-        let individual_elapsed_ms = result["results"]
+        let observation = result["parallelism_observations"]
             .as_array()
-            .expect("batch results")
-            .iter()
-            .filter_map(|item| item["result"]["elapsed_ms"].as_u64())
-            .sum::<u64>();
+            .and_then(|items| items.first())
+            .expect("parallel overlap observation");
+        assert_eq!(observation["same_lock_group"], false, "{result}");
+        assert_eq!(observation["outcome"], "success", "{result}");
         assert!(
-            individual_elapsed_ms > batch_elapsed_ms.saturating_add(500),
+            observation["overlap_ms"].as_u64().unwrap_or(0) >= 500,
             "parallel commands did not overlap enough: {result}"
         );
     }
@@ -1877,6 +2430,57 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(process_runtime)]
+    async fn exec_many_io_heavy_resource_class_serializes_host_io() {
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        let harness = tempfile::tempdir().expect("harness tempdir");
+        let ctx = Arc::new(
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .expect("tool context"),
+        );
+        #[cfg(windows)]
+        let sleep = json!({"program": "powershell", "args": ["-NoProfile", "-Command", "Start-Sleep -Milliseconds 500"], "resource_class": "io_heavy"});
+        #[cfg(unix)]
+        let sleep =
+            json!({"program": "sh", "args": ["-c", "sleep 0.5"], "resource_class": "io_heavy"});
+
+        let started = std::time::Instant::now();
+        let result = call_tool_async(
+            ctx,
+            "exec_many".into(),
+            json!({
+                "mode": "parallel",
+                "max_parallel": 2,
+                "stop_on_error": false,
+                "commands": [sleep.clone(), sleep]
+            }),
+        )
+        .await;
+
+        assert_eq!(result["all_commands_ok"], true, "{result}");
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(900),
+            "{result}"
+        );
+        let results = result["results"].as_array().expect("batch results");
+        assert!(
+            results
+                .iter()
+                .all(|item| item["result"]["resource_class"] == "io_heavy"),
+            "{result}"
+        );
+        assert!(
+            results.iter().any(|item| {
+                item["result"]["io_heavy_admission_wait_ms"]
+                    .as_u64()
+                    .unwrap_or(0)
+                    >= 400
+            }),
+            "{result}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_runtime)]
     async fn exec_many_dag_skips_failed_dependencies_but_runs_independent_work() {
         let workspace = tempfile::tempdir().expect("workspace tempdir");
         let harness = tempfile::tempdir().expect("harness tempdir");
@@ -1912,6 +2516,121 @@ mod tests {
         );
         assert_eq!(result["results"][1]["id"], "blocked");
         assert_eq!(result["results"][1]["skip_reason"], "dependency_failed");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_runtime)]
+    async fn exec_many_dag_run_if_runs_generic_finalizers_after_failure() {
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        let harness = tempfile::tempdir().expect("harness tempdir");
+        let ctx = Arc::new(
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .expect("tool context"),
+        );
+
+        let result = call_tool_async(
+            ctx,
+            "exec_many".into(),
+            json!({
+                "mode": "dag",
+                "max_parallel": 4,
+                "stop_on_error": true,
+                "commands": [
+                    {"id": "fail", "program": "coding-tools-command-that-does-not-exist"},
+                    {"id": "cleanup", "depends_on": ["fail"], "run_if": "always", "program": "git", "args": ["--version"]},
+                    {"id": "on-failure", "depends_on": ["fail"], "run_if": "failure", "program": "git", "args": ["--version"]},
+                    {"id": "success-only", "depends_on": ["fail"], "program": "git", "args": ["--version"]}
+                ]
+            }),
+        )
+        .await;
+
+        assert_eq!(result["successful_command_count"], 2, "{result}");
+        assert_eq!(result["failed_command_count"], 1, "{result}");
+        assert_eq!(result["skipped_command_count"], 1, "{result}");
+        assert_eq!(result["failed_command_ids"], json!(["fail"]), "{result}");
+        assert_eq!(result["results"][1]["id"], "cleanup", "{result}");
+        assert_eq!(result["results"][1]["command_ok"], true, "{result}");
+        assert_eq!(result["results"][1]["run_if"], "always", "{result}");
+        assert_eq!(result["results"][2]["id"], "on-failure", "{result}");
+        assert_eq!(result["results"][2]["command_ok"], true, "{result}");
+        assert_eq!(result["results"][2]["run_if"], "failure", "{result}");
+        assert_eq!(
+            result["results"][3]["skip_reason"], "dependency_failed",
+            "{result}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_runtime)]
+    async fn exec_many_dag_failure_branch_is_neutral_when_dependencies_succeed() {
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        let harness = tempfile::tempdir().expect("harness tempdir");
+        let ctx = Arc::new(
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .expect("tool context"),
+        );
+
+        let result = call_tool_async(
+            ctx,
+            "exec_many".into(),
+            json!({
+                "mode": "dag",
+                "commands": [
+                    {"id": "pass", "program": "git", "args": ["--version"]},
+                    {"id": "cleanup", "depends_on": ["pass"], "run_if": "always", "program": "git", "args": ["--version"]},
+                    {"id": "on-failure", "depends_on": ["pass"], "run_if": "failure", "program": "git", "args": ["--version"]}
+                ]
+            }),
+        )
+        .await;
+
+        assert_eq!(result["command_ok"], true, "{result}");
+        assert_eq!(result["successful_command_count"], 2, "{result}");
+        assert_eq!(result["skipped_command_count"], 1, "{result}");
+        assert_eq!(result["conditional_skipped_command_count"], 1, "{result}");
+        assert_eq!(
+            result["conditional_skipped_command_ids"],
+            json!(["on-failure"]),
+            "{result}"
+        );
+        assert_eq!(
+            result["results"][2]["skip_reason"], "run_condition_not_met",
+            "{result}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_runtime)]
+    async fn exec_many_conditional_run_if_requires_dag_mode() {
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        let harness = tempfile::tempdir().expect("harness tempdir");
+        let ctx = Arc::new(
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .expect("tool context"),
+        );
+
+        let result = call_tool_async(
+            ctx,
+            "exec_many".into(),
+            json!({
+                "mode": "sequential",
+                "commands": [
+                    {"id": "first", "program": "git", "args": ["--version"]},
+                    {"id": "cleanup", "depends_on": ["first"], "run_if": "always", "program": "git", "args": ["--version"]}
+                ]
+            }),
+        )
+        .await;
+
+        assert_eq!(result["ok"], false, "{result}");
+        assert!(
+            result["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("requires dag mode"),
+            "{result}"
+        );
     }
 
     #[tokio::test]
@@ -2022,7 +2741,7 @@ mod tests {
         );
         assert_eq!(
             result["next_actions"][0]["arguments"]["timeout_ms"],
-            60 * 60_000,
+            crate::tools::session::WAIT_COMMAND_TRANSPORT_SAFE_MS,
             "{result}"
         );
         assert_eq!(

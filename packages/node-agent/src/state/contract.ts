@@ -1,6 +1,6 @@
 export type StateJsonObject = Record<string, unknown>;
 
-export type TaskStatus = 'active' | 'paused' | 'verifying' | 'failed' | 'completed' | 'completed_unverified' | 'rolled_back';
+export type TaskStatus = 'active' | 'paused' | 'verifying' | 'failed' | 'failed_final' | 'completed' | 'completed_unverified' | 'rolled_back';
 
 export interface ProjectBaseline {
   branch?: string;

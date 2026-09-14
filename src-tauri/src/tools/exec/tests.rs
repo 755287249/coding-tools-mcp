@@ -1253,6 +1253,16 @@ fn delayed_output_command() -> &'static str {
 }
 
 #[cfg(windows)]
+fn immediate_success_command() -> &'static str {
+    "cmd.exe /D /C \"exit /B 0\""
+}
+
+#[cfg(unix)]
+fn immediate_success_command() -> &'static str {
+    "sh -c \"true\""
+}
+
+#[cfg(windows)]
 fn sleeping_command() -> &'static str {
     "powershell -NoProfile -Command \"Start-Sleep -Milliseconds 1200\""
 }
@@ -1340,6 +1350,90 @@ fn automatic_cargo_dedupe_uses_request_shape_after_executable_resolution() {
     );
 }
 
+#[test]
+#[serial_test::serial(process_runtime)]
+fn automatic_dedupe_only_reattaches_active_sessions() {
+    let workspace = tempdir().expect("workspace");
+    let harness = tempdir().expect("harness");
+    let ctx = ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+        .expect("context");
+
+    let completed_request = json!({
+        "cmd": immediate_success_command(),
+        "deduplicate": true,
+        "timeout_ms": 5000,
+        "yield_time_ms": 5000,
+        "output_mode": "none"
+    });
+    let first = call_tool(&ctx, "exec_command", &completed_request);
+    assert_eq!(first["process_still_running"], false, "{first}");
+    assert_eq!(first["deduplicated"], false, "{first}");
+    let second = call_tool(&ctx, "exec_command", &completed_request);
+    assert_ne!(second["session_id"], first["session_id"], "{second}");
+    assert_eq!(second["deduplicated"], false, "{second}");
+
+    let active_request = json!({
+        "cmd": sleeping_command(),
+        "deduplicate": true,
+        "timeout_ms": 5000,
+        "yield_time_ms": 0,
+        "output_mode": "none"
+    });
+    let active = call_tool(&ctx, "exec_command", &active_request);
+    assert_eq!(active["process_still_running"], true, "{active}");
+    let active_session_id = active["session_id"].as_str().expect("session id");
+    let duplicate = call_tool(&ctx, "exec_command", &active_request);
+    assert_eq!(duplicate["session_id"], active_session_id, "{duplicate}");
+    assert_eq!(duplicate["deduplicated"], true, "{duplicate}");
+    assert_eq!(
+        duplicate["attached_to_session_id"], active_session_id,
+        "{duplicate}"
+    );
+    let _ = call_tool(
+        &ctx,
+        "kill_session",
+        &json!({"session_id": active_session_id, "wait_ms": 5000}),
+    );
+}
+
+#[test]
+#[serial_test::serial(process_runtime)]
+fn wait_command_caps_long_requested_wait_to_transport_safe_chunk() {
+    let workspace = tempdir().expect("workspace");
+    let harness = tempdir().expect("harness");
+    let ctx = ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+        .expect("context");
+    let started = call_tool(
+        &ctx,
+        "exec_command",
+        &json!({
+            "cmd": sleeping_command(),
+            "timeout_ms": 10_000,
+            "yield_time_ms": 0,
+            "output_mode": "none"
+        }),
+    );
+    let session_id = started["session_id"].as_str().expect("session id");
+    let waited_at = std::time::Instant::now();
+    let waited = call_tool(
+        &ctx,
+        "wait_command",
+        &json!({
+            "session_id": session_id,
+            "cursor": started["next_cursor"],
+            "timeout_ms": 60 * 60_000,
+            "until": "exit",
+            "output_mode": "none"
+        }),
+    );
+    assert!(
+        waited_at.elapsed() < std::time::Duration::from_secs(5),
+        "{waited}"
+    );
+    assert_eq!(waited["wait_timeout_ms"], 60 * 60_000, "{waited}");
+    assert_eq!(waited["effective_wait_ms"], 20_000, "{waited}");
+    assert_eq!(waited["process_still_running"], false, "{waited}");
+}
 #[test]
 #[serial_test::serial(process_runtime)]
 fn duplicate_operations_reattach_and_ignore_legacy_wait_heartbeats() {
@@ -1473,6 +1567,8 @@ fn wait_command_returns_only_new_sequence_events() {
         }),
     );
     assert_eq!(first["request_timed_out"], false, "{first}");
+    assert_eq!(first["event_detail"], "compact", "{first}");
+    assert!(first["events"][0].get("data").is_none(), "{first}");
     assert!(
         first["session_registry_wait_ms"].as_u64().is_some(),
         "{first}"
@@ -1496,10 +1592,19 @@ fn wait_command_returns_only_new_sequence_events() {
             "cursor": cursor,
             "timeout_ms": 5000,
             "until": "finalized",
-            "output_mode": "delta"
+            "output_mode": "delta",
+            "event_detail": "full"
         }),
     );
     let stdout = second["stdout"].as_str().unwrap_or_default();
+    assert_eq!(second["event_detail"], "full", "{second}");
+    assert!(
+        second["events"][0]["data"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("beta"),
+        "{second}"
+    );
     assert!(stdout.contains("beta"), "{second}");
     assert!(
         !stdout.contains("alpha"),

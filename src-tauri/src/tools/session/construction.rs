@@ -70,6 +70,9 @@ impl ExecSession {
             telemetry_profile_id: None,
             telemetry_command_kind: "process".to_string(),
             started_ts_ms: unix_timestamp_ms(),
+            process_timeout: None,
+            process_deadline_ts_ms: None,
+            process_deadline: None,
             operation_id: None,
             harness_operations: Mutex::new(Vec::new()),
             harness_operation_recorded: Mutex::new(HashSet::new()),
@@ -84,6 +87,23 @@ impl ExecSession {
             attachment_generation: AtomicU64::new(1),
             detached_generation: AtomicU64::new(0),
         }
+    }
+
+    pub(crate) fn with_process_timeout(
+        mut self,
+        contract: crate::tools::execution_timeout::ProcessTimeoutContract,
+        start: Instant,
+    ) -> Self {
+        self.started_at = start;
+        self.started_ts_ms = unix_timestamp_ms().saturating_sub(start.elapsed().as_millis() as u64);
+        self.process_deadline_ts_ms = Some(
+            self.started_ts_ms
+                .saturating_add(contract.effective_timeout_ms),
+        );
+        self.process_deadline =
+            Some(start + std::time::Duration::from_millis(contract.effective_timeout_ms));
+        self.process_timeout = Some(contract);
+        self
     }
 
     pub fn with_execution_identity(

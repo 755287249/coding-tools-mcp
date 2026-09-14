@@ -58,7 +58,8 @@ async function fixture(t) {
   ]);
   await Promise.all([
     writeFile(path.join(first, 'marker.txt'), 'first workspace', 'utf8'),
-    writeFile(path.join(second, 'marker.txt'), 'second workspace', 'utf8')
+    writeFile(path.join(second, 'marker.txt'), 'second workspace', 'utf8'),
+    writeFile(path.join(second, 'alternate-only.txt'), 'alternate workspace only', 'utf8')
   ]);
   const folders = [
     { id: 'first', name: 'First', path: first },
@@ -162,6 +163,41 @@ test('workspace_folder_id routes one call without changing conversation selectio
   assert.deepEqual(selected.folders.map(folder => folder.selected), [true, false]);
 });
 
+test('NOT_FOUND returns a complete one-call retry for a unique alternate workspace match', async t => {
+  const state = await fixture(t);
+  const meta = { 'openai/session': 'alternate-workspace-recovery' };
+  await callTool(state.ctx, 'switch_workspace_folder', { folder_id: 'first' }, meta);
+
+  const missing = await callTool(state.ctx, 'read_file', { path: 'alternate-only.txt' }, meta);
+  assert.equal(missing.ok, false, JSON.stringify(missing));
+  assert.equal(missing.error.code, 'NOT_FOUND');
+  assert.equal(missing.error.retryable, true);
+  assert.equal(missing.error.details.alternate_workspace_match_count, 1);
+  assert.deepEqual(missing.error.details.alternate_workspace_matches, [
+    { folder_id: 'second', folder_name: 'Second' }
+  ]);
+  assert.deepEqual(missing.error.details.recovery_actions, [{
+    action: 'retry_in_workspace',
+    action_id: 'workspace-retry-second',
+    tool: 'read_file',
+    required_arguments: [],
+    arguments: { path: 'alternate-only.txt', workspace_folder_id: 'second' },
+    reason: 'alternate_workspace_match'
+  }]);
+
+  const recovered = await callTool(
+    state.ctx,
+    missing.error.details.recovery_actions[0].tool,
+    missing.error.details.recovery_actions[0].arguments,
+    meta
+  );
+  assert.equal(recovered.ok, true, JSON.stringify(recovered));
+  assert.equal(recovered.content, 'alternate workspace only');
+  assert.equal(recovered.workspace_route_source, 'explicit');
+  const selectionAfterRecovery = await callTool(state.ctx, 'list_workspace_folders', {}, meta);
+  assert.equal(selectionAfterRecovery.selected_folder_id, 'first');
+});
+
 test('recovery metadata is stripped from execution and yields stable failure ids', async t => {
   const state = await fixture(t);
   const meta = { 'openai/session': 'recovery-routing' };
@@ -251,12 +287,57 @@ test('conversation_bootstrap returns choices when ambiguous then binds and boots
   assert.equal(bootstrapped.needs_folder_selection, false);
   assert.equal(bootstrapped.response_mode, 'compact');
   assert.equal(bootstrapped.startup_flow, 'workspace_and_history_bootstrapped');
+  assert.equal(bootstrapped.learning.runtime_policy, 'adaptive_rollout_phase_2e');
+  assert.equal(bootstrapped.learning.ingestion.failed, 0);
+  assert.equal(bootstrapped.learning.ingestion.dropped, 0);
+  assert.equal(bootstrapped.learning.shadow_impact_count, 0);
+  assert.equal(bootstrapped.learning.canary_impact_count, 0);
+  assert.equal(bootstrapped.learning.canary_promoted_count, 0);
+  assert.equal(bootstrapped.learning.canary_rolled_back_count, 0);
+  assert.equal(bootstrapped.learning.validated_tool_strategy_count, 0);
+  assert.equal(bootstrapped.learning.promoted_tool_strategy_count, 0);
+  assert.equal(bootstrapped.learning.validated_tool_evolution_count, 0);
+  assert.match(bootstrapped.learning.shadow_impact_revision, /^[a-f0-9]{64}$/);
+  assert.match(bootstrapped.learning.canary_impact_revision, /^[a-f0-9]{64}$/);
+  assert.match(bootstrapped.learning.knowledge_revision, /^[a-f0-9]{64}$/);
+  assert.match(bootstrapped.learning.tool_strategy_implementation_revision, /^[a-f0-9]{64}$/);
+  assert.equal(bootstrapped.learning.tool_strategy_implementation_count, 1);
+  assert.equal(bootstrapped.learning.tool_strategy_count, 0);
+  assert.equal(bootstrapped.learning.tool_evolution_candidate_count, 0);
+  assert.equal(bootstrapped.learning.promoted_evolved_skill_count, 0);
+  assert.equal('records' in bootstrapped.learning, false);
+  assert.equal('candidates' in bootstrapped.learning, false);
   assert.equal(bootstrapped.current_path.replaceAll('\\', '/'), 'docs/history-session/1.md');
 
   const resumed = await callTool(state.ctx, 'conversation_bootstrap', {}, meta);
   assert.equal(resumed.selected_folder_id, 'first');
   assert.equal(resumed.current_path, bootstrapped.current_path);
   assert.equal(resumed.resumed, true);
+});
+
+test('conversation_bootstrap keeps workspace usable when history initialization fails', async t => {
+  const state = await fixture(t);
+  const meta = { 'openai/session': 'bootstrap-history-degraded' };
+
+  const degraded = await callTool(state.ctx, 'conversation_bootstrap', {
+    folder_id: 'first',
+    history_dir: 'marker.txt'
+  }, meta);
+  assert.equal(degraded.ok, true, JSON.stringify(degraded));
+  assert.equal(degraded.selected_folder_id, 'first');
+  assert.equal(degraded.needs_folder_selection, false);
+  assert.equal(degraded.startup_flow, 'workspace_bootstrapped_history_degraded');
+  assert.equal(degraded.history_bootstrap_ok, false);
+  assert.equal(degraded.history_bootstrap_error.code, 'NOT_A_DIRECTORY');
+  assert.equal(degraded.recovery_actions[0].tool, 'history_session_bootstrap');
+
+  const readable = await callTool(state.ctx, 'read_file', { path: 'marker.txt' }, meta);
+  assert.equal(readable.ok, true);
+  assert.equal(readable.content, 'first workspace');
+
+  const directHistory = await callTool(state.ctx, 'history_session_bootstrap', { history_dir: 'marker.txt' }, meta);
+  assert.equal(directHistory.ok, false);
+  assert.equal(directHistory.error.code, 'NOT_A_DIRECTORY');
 });
 
 test('switching back to a folder restores that conversation folder cwd', async t => {

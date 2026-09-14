@@ -25,7 +25,8 @@ pub use software::{install_software, list_software, uninstall_software, Software
 #[allow(unused_imports)]
 pub use supervisor::{
     append_profile_log, append_profile_log_buffered, append_profile_log_rotating,
-    log_dir_for_profile, TunnelServiceKind, TunnelStatus, TunnelSupervisor,
+    append_profile_log_rotating_checked, log_dir_for_profile, TunnelServiceKind, TunnelStatus,
+    TunnelSupervisor,
 };
 
 pub(crate) use builtin::behavioral_parity_fixture as builtin_behavioral_parity_fixture;

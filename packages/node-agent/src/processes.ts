@@ -5,7 +5,7 @@ import path from 'node:path';
 import type { FolderRuntime, JsonObject, ProcessSession, SandboxConfig, ToolContext } from './types.js';
 import { relativeInside, resolveExistingDirectory, rootAndCwd } from './workspace.js';
 import { sleep } from './runtime.js';
-import { argumentsReferenceSensitiveSource } from './redaction.js';
+import { argumentsReferenceSensitiveSource, isSensitiveKey, redactSensitiveText } from './redaction.js';
 import { resolveCommandSpec, resolvePortableCommandSpec } from './policy.js';
 import { classifyCommandKind } from './toolUsage.js';
 import { wslInvocationForPath } from './wsl.js';
@@ -13,10 +13,10 @@ import { allFolderRuntimes, currentFolderRuntime, runtimeForFolderId } from './f
 import { processStartupController } from './processStartup.js';
 import { appendOutput, processResult, retainedNextActions, terminationReason } from './processes/output.js';
 import { nativeLaunchSpec } from './processes/nativeLaunch.js';
-import { cargoTargetLock, commandFingerprint, safeAutomaticDedup } from './processes/identity.js';
-import { boundedInteger, commandTimeoutMaxMs, resolvedCommandTimeoutMs } from './processes/timeoutPolicy.js';
+import { cargoTargetLock, commandFingerprint, nodeGeneratedLock, safeAutomaticDedup } from './processes/identity.js';
+import { boundedInteger, commandTimeoutMaxMs, resolveProcessTimeout } from './processes/timeoutPolicy.js';
 import { ProcessToolError, startupToolError } from './processes/errors.js';
-import { commandEnvironment, explicitEnvironment, removedEnvironment } from './processes/environment.js';
+import { commandEnvironment, explicitEnvironment, removedEnvironment, resolveSecretInputs } from './processes/environment.js';
 import {
   FINALIZED_SESSION_RETENTION_MS,
   MAX_RETAINED_FINALIZED_SESSIONS,
@@ -29,6 +29,14 @@ import {
 import { attachHarnessOperation, recordHarnessOperationFinalization } from './processes/harnessTracking.js';
 import { waitForChildStreams } from './processes/childStreams.js';
 import { runProcessPostChecks } from './processes/postChecks.js';
+import {
+  launchDurableWorker,
+  monitorDurableSession,
+  persistDurableSession,
+  restoreDurableSessions,
+  type DurableWorkerResult
+} from './processes/durableSession.js';
+import { preflightTestRunnerCapabilities, testWorkflow } from './processes/testRunnerCapabilities.js';
 import {
   abortRetainedCommandGraphs,
   COMMAND_GRAPH_RETENTION_MS,
@@ -47,7 +55,7 @@ import {
 
 export { processResult, processStatus, readSessionOutput } from './processes/output.js';
 export { nativeLaunchSpec } from './processes/nativeLaunch.js';
-export { cargoTargetLock } from './processes/identity.js';
+export { cargoTargetLock, nodeGeneratedLock } from './processes/identity.js';
 export { resolvedCommandTimeoutMs } from './processes/timeoutPolicy.js';
 export { ProcessToolError } from './processes/errors.js';
 export { attachHarnessOperation } from './processes/harnessTracking.js';
@@ -67,9 +75,11 @@ export {
 } from './processes/commandGraph.js';
 
 export const DETACHED_SESSION_GRACE_MS = 90_000;
-export const AUTO_DEDUPE_COMPLETED_GRACE_MS = 30_000;
-export const WAIT_COMMAND_TIMEOUT_DEFAULT_MS = 30_000;
+export const WAIT_COMMAND_TRANSPORT_SAFE_MS = 20_000;
+export const WAIT_COMMAND_TIMEOUT_DEFAULT_MS = WAIT_COMMAND_TRANSPORT_SAFE_MS;
 export const WAIT_COMMAND_TIMEOUT_MAX_MS = 60 * 60_000;
+
+const WINDOWS_TASKKILL_TIMEOUT_MS = 10_000;
 
 interface CommandSpec { program: string; argv: string[]; display: string; shell: boolean }
 
@@ -78,6 +88,8 @@ interface StartedProcess {
   deduplicated: boolean;
   attachedToSessionId: string | null;
   operationLockWaitMs: number;
+  testRunnerCapability?: JsonObject;
+  testWorkflow?: JsonObject;
 }
 
 export class ProcessRequestLifecycle {
@@ -110,20 +122,41 @@ export class ProcessRequestLifecycle {
   get signal(): AbortSignal { return this.#abortController.signal; }
 }
 
+function fallbackKillChild(child: ChildProcessWithoutNullStreams): void {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  try { child.kill('SIGKILL'); } catch { /* best effort */ }
+}
+
+async function terminateWindowsProcessTree(child: ChildProcessWithoutNullStreams): Promise<void> {
+  if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
+  await new Promise<void>(resolve => {
+    let settled = false;
+    let timer: NodeJS.Timeout | undefined;
+    const killer = spawn('taskkill.exe', ['/pid', String(child.pid), '/t', '/f'], {
+      windowsHide: true,
+      stdio: 'ignore'
+    });
+    const finish = (success: boolean) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (!success) fallbackKillChild(child);
+      resolve();
+    };
+    killer.once('exit', code => finish(code === 0));
+    killer.once('error', () => finish(false));
+    timer = setTimeout(() => {
+      try { killer.kill('SIGKILL'); } catch { /* best effort */ }
+      finish(false);
+    }, WINDOWS_TASKKILL_TIMEOUT_MS);
+    timer.unref();
+  });
+}
+
 async function terminateUntrackedChild(child: ChildProcessWithoutNullStreams): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return;
   if (process.platform === 'win32' && child.pid) {
-    await new Promise<void>(resolve => {
-      const killer = spawn('taskkill.exe', ['/pid', String(child.pid), '/t', '/f'], {
-        windowsHide: true,
-        stdio: 'ignore'
-      });
-      killer.once('exit', () => resolve());
-      killer.once('error', () => {
-        try { child.kill('SIGKILL'); } catch { /* best effort */ }
-        resolve();
-      });
-    });
+    await terminateWindowsProcessTree(child);
     return;
   }
   try {
@@ -161,6 +194,7 @@ async function finalizeSession(ctx: ToolContext, session: ProcessSession, verifi
   session.lockRelease = undefined;
   session.events.emit('change');
   session.events.emit('finalized');
+  await persistDurableSession(session);
 }
 
 export function markSessionDetached(ctx: ToolContext, session: ProcessSession, graceMs = DETACHED_SESSION_GRACE_MS): number {
@@ -168,6 +202,11 @@ export function markSessionDetached(ctx: ToolContext, session: ProcessSession, g
   session.attachmentGeneration = generation;
   session.detachedGeneration = generation;
   if (session.detachedTimer) clearTimeout(session.detachedTimer);
+  if (session.durableDirectory) {
+    void persistDurableSession(session).catch(() => { /* best effort; worker remains authoritative */ });
+    session.events.emit('change');
+    return generation;
+  }
   session.detachedTimer = setTimeout(() => {
     void (async () => {
       if (session.detachedGeneration !== generation || session.attachmentGeneration !== generation || session.finalizedAt) return;
@@ -187,6 +226,33 @@ export function markSessionDetached(ctx: ToolContext, session: ProcessSession, g
   return generation;
 }
 
+async function completeDurableSession(ctx: ToolContext, session: ProcessSession, result: DurableWorkerResult): Promise<void> {
+  if (session.finalizedAt) return;
+  session.exitCode = result.exitCode;
+  session.signal = result.signal;
+  session.endedAt = result.endedAt;
+  session.stdinOpen = false;
+  if (!session.terminationReason || session.terminationReason === 'running') session.terminationReason = result.terminationReason;
+  if (result.error) appendOutput(ctx, session, 'stderr', Buffer.from(`${result.error}\n`));
+  session.timedOut = session.terminationReason === 'process_timeout';
+  session.events.emit('change');
+  session.events.emit('exit');
+  await finalizeSession(ctx, session, result.exitCode === 0 && terminationReason(session) === 'exited');
+}
+
+function attachDurableSessionMonitor(ctx: ToolContext, session: ProcessSession): void {
+  if (session.finalizedAt) return;
+  monitorDurableSession(ctx, session, result => completeDurableSession(ctx, session, result));
+}
+
+export async function restoreProcessSessions(ctx: ToolContext): Promise<void> {
+  const restored = await restoreDurableSessions(ctx);
+  for (const session of restored) {
+    if (!session.finalizedAt) attachDurableSessionMonitor(ctx, session);
+  }
+  for (const runtime of allFolderRuntimes(ctx)) pruneProcessSessions(runtime);
+}
+
 export async function startProcess(
   ctx: ToolContext,
   key: string,
@@ -196,9 +262,10 @@ export async function startProcess(
   const runtime = currentFolderRuntime(ctx, key);
   pruneProcessSessions(runtime);
   const { folder, root, cwd: defaultCwd } = rootAndCwd(ctx, key);
+  const requestedWorkdir = String(args.workdir ?? args.cwd ?? relativeInside(root, defaultCwd));
   const resolvedCwd = await resolveExistingDirectory(
     root,
-    String(args.workdir ?? args.cwd ?? relativeInside(root, defaultCwd)),
+    requestedWorkdir,
     'Command workdir must be a directory'
   );
   const cwd = resolvedCwd.full;
@@ -206,9 +273,58 @@ export async function startProcess(
   const spec = sandbox.enabled && sandboxUsesPortableCommand(sandbox.backendId)
     ? await resolvePortableCommandSpec(ctx, key, args)
     : await resolveCommandSpec(ctx, key, args);
-  const timeoutMaxMs = commandTimeoutMaxMs(ctx);
-  const timeoutMs = resolvedCommandTimeoutMs(args, spec.display, timeoutMaxMs);
-  const commandFingerprintValue = commandFingerprint(cwd, spec, args, timeoutMs, ctx.config.sandbox);
+  const testRunnerCapability = sandbox.enabled ? undefined : await preflightTestRunnerCapabilities(
+    { program: spec.program, args: spec.argv },
+    cwd,
+    async (program, helpArgs, probeCwd) => runBuffered(
+      program,
+      helpArgs,
+      probeCwd,
+      undefined,
+      5_000,
+      commandEnvironment(args),
+      {
+        routeWsl: Boolean(wslInvocationForPath(
+          probeCwd,
+          program,
+          helpArgs,
+          explicitEnvironment(args),
+          removedEnvironment(args)
+        )),
+        environment: explicitEnvironment(args),
+        removeEnvironment: removedEnvironment(args)
+      }
+    )
+  );
+  const testRunnerWorkflow = testWorkflow({ program: spec.program, args: spec.argv }, requestedWorkdir);
+  const timeoutContract = resolveProcessTimeout(args, spec.display, commandTimeoutMaxMs(ctx));
+  const timeoutMs = timeoutContract.effectiveTimeoutMs;
+  if (timeoutContract.executionMode === 'job') {
+    const unsupported: string[] = [];
+    if (sandbox.enabled) unsupported.push('sandbox');
+    if (args.tty === true) unsupported.push('tty');
+    if (args.secret_env && typeof args.secret_env === 'object') unsupported.push('secret_env');
+    if (Object.hasOwn(args, 'stdin') && String(args.stdin ?? '').length) unsupported.push('stdin');
+    if (argumentsReferenceSensitiveSource(args)) unsupported.push('sensitive_source');
+    const explicitEnv = args.env && typeof args.env === 'object' && !Array.isArray(args.env) ? args.env as JsonObject : undefined;
+    if (explicitEnv && Object.keys(explicitEnv).some(isSensitiveKey)) unsupported.push('sensitive_env');
+    if (redactSensitiveText([spec.program, ...spec.argv].join(' ')).count > 0) unsupported.push('sensitive_command');
+    if (Array.isArray(args.post_checks) && args.post_checks.length) unsupported.push('post_checks');
+    if (unsupported.length) {
+      throw new ProcessToolError(
+        'DURABLE_JOB_UNSUPPORTED',
+        `Restart-persistent managed jobs do not support: ${unsupported.join(', ')}.`,
+        'validation',
+        false,
+        { process_started: false, execution_mode: 'job', restart_recoverable: false, unsupported_features: unsupported }
+      );
+    }
+  }
+  const resolvedSecrets = resolveSecretInputs(ctx, args);
+  const commandFingerprintValue = commandFingerprint(cwd, spec, args, timeoutMs, ctx.config.sandbox, {
+    ...resolvedSecrets.fingerprint,
+    stdin: resolvedSecrets.stdin
+  });
   const explicitOperationId = String(args.operation_id ?? '').trim();
   const deduplicate = Boolean(explicitOperationId) || args.deduplicate === true || (args.deduplicate === undefined && safeAutomaticDedup(spec));
   const operationId = explicitOperationId || (deduplicate ? `auto:${commandFingerprintValue.slice(0, 32)}` : undefined);
@@ -228,10 +344,10 @@ export async function startProcess(
             requested_fingerprint: commandFingerprintValue
           });
         }
-        const reusable = explicitOperationId || !existing.finalizedAt || Date.now() - existing.finalizedAt <= AUTO_DEDUPE_COMPLETED_GRACE_MS;
+        const reusable = explicitOperationId || !existing.finalizedAt;
         if (reusable) {
           touchSessionAttachment(existing);
-          return { session: existing, deduplicated: true, attachedToSessionId: existing.id, operationLockWaitMs };
+          return { session: existing, deduplicated: true, attachedToSessionId: existing.id, operationLockWaitMs, testRunnerCapability, testWorkflow: testRunnerWorkflow };
         }
         removeProcessSession(runtime, existing.id);
       }
@@ -240,10 +356,10 @@ export async function startProcess(
       const existingId = runtime.operationsByFingerprint.get(commandFingerprintValue);
       const existing = existingId ? runtime.sessions.get(existingId) : undefined;
       if (existing) {
-        const reusable = !existing.finalizedAt || Date.now() - existing.finalizedAt <= AUTO_DEDUPE_COMPLETED_GRACE_MS;
+        const reusable = !existing.finalizedAt;
         if (reusable) {
           touchSessionAttachment(existing);
-          return { session: existing, deduplicated: true, attachedToSessionId: existing.id, operationLockWaitMs };
+          return { session: existing, deduplicated: true, attachedToSessionId: existing.id, operationLockWaitMs, testRunnerCapability, testWorkflow: testRunnerWorkflow };
         }
         removeProcessSession(runtime, existing.id);
       }
@@ -259,9 +375,11 @@ export async function startProcess(
     }
 
     const automaticCargoLock = cargoTargetLock(cwd, spec, args);
+    const automaticNodeLock = nodeGeneratedLock(cwd, spec);
+    const automaticResourceLock = automaticCargoLock ?? automaticNodeLock;
     const explicitLockGroup = String(args.lock_group ?? '').trim();
-    const lockGroup = explicitLockGroup || automaticCargoLock?.group || '';
-    const lockTarget = explicitLockGroup ? cwd : automaticCargoLock?.target;
+    const lockGroup = explicitLockGroup || automaticResourceLock?.group || '';
+    const lockTarget = explicitLockGroup ? cwd : automaticResourceLock?.target;
     const resourceLockStarted = Date.now();
     const lockRelease = lockGroup ? await runtime.admission.locks.acquire([`process:${lockGroup}`]) : undefined;
     const resourceLockWaitMs = Date.now() - resourceLockStarted;
@@ -277,7 +395,7 @@ export async function startProcess(
           ctx.config.dataDir,
           cwd,
           spec,
-          explicitEnvironment(args),
+          explicitEnvironment(args, resolvedSecrets.environment),
           removedEnvironment(args),
           signal,
           timeoutMs
@@ -292,13 +410,96 @@ export async function startProcess(
     const deadlineMs = processStartedAt + timeoutMs;
     const wsl = sandboxLaunch
       ? undefined
-      : wslInvocationForPath(cwd, spec.program, spec.argv, explicitEnvironment(args), removedEnvironment(args));
-    const launchEnvironment = sandboxLaunch?.environmentMode === 'forwarded' || wsl ? process.env : commandEnvironment(args);
+      : wslInvocationForPath(cwd, spec.program, spec.argv, explicitEnvironment(args, resolvedSecrets.environment), removedEnvironment(args));
+    const launchEnvironment = sandboxLaunch?.environmentMode === 'forwarded' || wsl ? process.env : commandEnvironment(args, resolvedSecrets.environment);
     const nativeLaunch = sandboxLaunch || wsl
       ? undefined
       : nativeLaunchSpec(spec.program, spec.argv, cwd, launchEnvironment);
     const launchProgram = sandboxLaunch?.program ?? wsl?.program ?? nativeLaunch?.program ?? spec.program;
     const launchArgs = sandboxLaunch?.args ?? wsl?.args ?? nativeLaunch?.args ?? spec.argv;
+    if (timeoutContract.executionMode === 'job' && wsl) {
+      lockRelease?.();
+      throw new ProcessToolError(
+        'DURABLE_JOB_UNSUPPORTED',
+        'Restart-persistent managed jobs do not yet support WSL path routing.',
+        'validation',
+        false,
+        { process_started: false, execution_mode: 'job', restart_recoverable: false, unsupported_features: ['wsl'] }
+      );
+    }
+    if (timeoutContract.executionMode === 'job') {
+      const session: ProcessSession = {
+        id,
+        folderId: folder.id,
+        workspacePath: folder.path,
+        operationId,
+        fingerprint: commandFingerprintValue,
+        command: spec.display,
+        program: spec.program,
+        argv: [...spec.argv],
+        shell: spec.shell,
+        cwd,
+        startupDiagnostics: {
+          attempts: 1,
+          gateWaitMs: 0,
+          retryDelaysMs: [],
+          errorDialogSuppressed: false,
+          startupSlots: 0,
+          startIntervalMs: 0
+        },
+        startedAt: processStartedAt,
+        timeoutContract,
+        processDeadlineMs: deadlineMs,
+        stdout: '',
+        stderr: '',
+        stdoutBytes: 0,
+        stderrBytes: 0,
+        stdoutStart: 0,
+        stderrStart: 0,
+        sequence: 0,
+        outputEvents: [],
+        outputEventBytes: 0,
+        interactive: false,
+        stdinOpen: false,
+        timedOut: false,
+        killed: false,
+        sandboxEnforced: false,
+        executionBoundary: 'durable_worker',
+        processTreeContained: true,
+        processTreeControl: process.platform === 'win32' ? 'durable_worker_taskkill_tree' : 'durable_worker_process_group',
+        telemetryCommandKind: classifyCommandKind(args),
+        testRunnerCapability,
+        testWorkflow: testRunnerWorkflow,
+        sensitiveOutput: argumentsReferenceSensitiveSource(args),
+        postChecks: [],
+        postChecksPending: false,
+        resourceLockGroup: lockGroup || undefined,
+        resourceLockTarget: lockTarget,
+        operationLockWaitMs,
+        resourceLockWaitMs,
+        lockRelease,
+        attachmentGeneration: 1,
+        detachedGeneration: 0,
+        events: new EventEmitter()
+      };
+      runtime.sessions.set(id, session);
+      runtime.operationsByFingerprint.set(commandFingerprintValue, id);
+      try {
+        await launchDurableWorker(ctx, session, {
+          program: launchProgram,
+          args: launchArgs,
+          cwd,
+          shell: spec.shell,
+          windowsVerbatimArguments: nativeLaunch?.windowsVerbatimArguments,
+          environment: launchEnvironment
+        });
+      } catch (error) {
+        removeProcessSession(runtime, id);
+        throw startupToolError(error);
+      }
+      attachDurableSessionMonitor(ctx, session);
+      return { session, deduplicated: false, attachedToSessionId: null, operationLockWaitMs, testRunnerCapability, testWorkflow: testRunnerWorkflow };
+    }
     const startupOutput = new WeakMap<ChildProcessWithoutNullStreams, {
       stdout: Buffer[];
       stderr: Buffer[];
@@ -367,6 +568,8 @@ export async function startProcess(
       cwd,
       startupDiagnostics: controlled.diagnostics,
       startedAt: processStartedAt,
+      timeoutContract,
+      processDeadlineMs: deadlineMs,
       stdout: '',
       stderr: '',
       stdoutBytes: 0,
@@ -390,6 +593,8 @@ export async function startProcess(
       processTreeControl: sandboxLaunch?.processTreeControl ?? (process.platform === 'win32' ? 'taskkill_tree' : 'process_group'),
       backendKill: sandboxLaunch?.kill,
       telemetryCommandKind: classifyCommandKind(args),
+      testRunnerCapability,
+      testWorkflow: testRunnerWorkflow,
       sensitiveOutput: argumentsReferenceSensitiveSource(args),
       postChecks: [],
       postChecksPending: false,
@@ -452,7 +657,7 @@ export async function startProcess(
     child.once('close', closeChild);
     for (const startupError of controlled.handoff()) onChildError(startupError);
 
-    const stdin = typeof args.stdin === 'string' ? args.stdin : '';
+    const stdin = resolvedSecrets.stdin;
     if (controlled.earlyExit) {
       session.stdinOpen = false;
       try { child.stdin.end(); } catch { /* child already exited */ }
@@ -483,7 +688,7 @@ export async function startProcess(
       session.timeoutTimer.unref();
       session.events.once('exit', () => { if (session.timeoutTimer) clearTimeout(session.timeoutTimer); });
     }
-    return { session, deduplicated: false, attachedToSessionId: null, operationLockWaitMs };
+    return { session, deduplicated: false, attachedToSessionId: null, operationLockWaitMs, testRunnerCapability, testWorkflow: testRunnerWorkflow };
   } finally {
     operationRelease?.();
   }
@@ -501,8 +706,9 @@ export async function startAndYield(ctx: ToolContext, key: string, args: JsonObj
     attached_to_session_id: started.attachedToSessionId,
     operation_lock_wait_ms: started.operationLockWaitMs
   });
-  const nextActions = retainedNextActions(session, WAIT_COMMAND_TIMEOUT_MAX_MS);
+  const nextActions = retainedNextActions(session, WAIT_COMMAND_TIMEOUT_DEFAULT_MS);
   if (nextActions.length) result.next_actions = nextActions;
+  if (started.testRunnerCapability) result.test_runner_capability = started.testRunnerCapability;
   return result;
 }
 
@@ -525,7 +731,7 @@ export async function waitForSession(
     0,
     WAIT_COMMAND_TIMEOUT_MAX_MS
   );
-  const effectiveWaitMs = boundedTimeout;
+  const effectiveWaitMs = Math.min(boundedTimeout, WAIT_COMMAND_TRANSPORT_SAFE_MS);
   if (satisfied() || effectiveWaitMs <= 0) return { heartbeat: false, changed: satisfied(), actualWaitMs: 0, effectiveWaitMs };
   return new Promise(resolve => {
     let changed = false;
@@ -552,21 +758,30 @@ export async function killProcessTree(session: ProcessSession, signal: 'TERM' | 
   session.terminationReason = reason;
   session.killed = reason === 'killed';
   session.events.emit('change');
+  void persistDurableSession(session).catch(() => { /* best effort */ });
   let backendError: unknown;
   if (session.backendKill) {
     try { await session.backendKill(); } catch (error) { backendError = error; }
+  }
+  if (!child?.pid && session.processId) {
+    if (process.platform === 'win32') {
+      await new Promise<void>(resolve => {
+        const killer = spawn('taskkill.exe', ['/pid', String(session.processId), '/t', '/f'], { windowsHide: true, stdio: 'ignore' });
+        killer.once('exit', () => resolve());
+        killer.once('error', () => resolve());
+      });
+    } else {
+      const mappedSignal = signal === 'INT' ? 'SIGINT' : signal === 'KILL' ? 'SIGKILL' : 'SIGTERM';
+      try { process.kill(-session.processId, mappedSignal); }
+      catch { try { process.kill(session.processId, mappedSignal); } catch { /* already exited */ } }
+    }
   }
   if (child?.pid) {
     if (process.platform === 'win32') {
       // Windows cannot reliably deliver POSIX TERM/INT semantics to arbitrary console
       // process trees. Match the Rust runtime: every kill_session signal terminates
       // the managed Windows tree forcefully so the control call completes reliably.
-      const args = ['/pid', String(child.pid), '/t', '/f'];
-      await new Promise<void>(resolve => {
-        const killer = spawn('taskkill.exe', args, { windowsHide: true, stdio: 'ignore' });
-        killer.once('exit', () => resolve());
-        killer.once('error', () => { child.kill('SIGKILL'); resolve(); });
-      });
+      await terminateWindowsProcessTree(child);
     } else {
       try { process.kill(-child.pid, signal === 'INT' ? 'SIGINT' : signal === 'KILL' ? 'SIGKILL' : 'SIGTERM'); }
       catch { child.kill(signal === 'INT' ? 'SIGINT' : signal === 'KILL' ? 'SIGKILL' : 'SIGTERM'); }
@@ -581,6 +796,12 @@ export async function disposeProcessSessions(ctx: ToolContext): Promise<void> {
   const sessions = runtimes.flatMap(runtime => [...runtime.sessions.values()]);
   await Promise.all(sessions.map(async session => {
     if (session.finalizedAt) return;
+    if (session.durableDirectory) {
+      if (session.durableMonitor) clearInterval(session.durableMonitor);
+      session.durableMonitor = undefined;
+      await persistDurableSession(session);
+      return;
+    }
     session.terminationReason = 'server_restart';
     if (!session.endedAt) {
       await killProcessTree(session, 'KILL', 'server_restart');

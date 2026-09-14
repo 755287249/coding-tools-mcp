@@ -7,6 +7,7 @@ import type { JsonObject } from './types.js';
 import { requestMutates, toolUsageFamily } from './toolRuntime.js';
 import type {
   AsyncSessionUsageInput,
+  DiagnosticEventInput,
   ToolRequestTiming,
   ToolUsageInput,
   ToolUsageStoreContract
@@ -15,16 +16,23 @@ import { ToolUsageLogStore } from './toolUsage/logStore.js';
 
 export type {
   AsyncSessionUsageInput,
+  DiagnosticEventInput,
+  DiagnosticEventType,
   ToolRequestTiming,
   ToolUsageInput,
   ToolUsageStoreContract
 } from './toolUsage/contract.js';
 
+export const DIAGNOSTICS_LOG_FILE = 'diagnostics.jsonl';
 export const TOOL_USAGE_LOG_FILE = 'mcp-tool-usage.jsonl';
+export const DIAGNOSTICS_LEGACY_WRITE_ENV = 'CODING_TOOLS_DIAGNOSTICS_LEGACY_WRITE';
 export const TOOL_USAGE_SCHEMA_VERSION = 7;
+export const DIAGNOSTICS_SCHEMA_VERSION = 1;
+export const DIAGNOSTICS_HOST_KIND = 'node_agent';
 export const TOOL_USAGE_LOG_MAX_BYTES = 20 * 1024 * 1024;
 export const TOOL_USAGE_RETAINED_FILES = 5;
 export const TOOL_USAGE_QUEUE_CAPACITY = 1_024;
+export const TOOL_USAGE_RECORD_CURSOR_MAX = 10_000;
 export const DEFAULT_BURST_IDLE_MS = 120_000;
 
 const MAX_LOG_STRING_CHARS = 4 * 1024;
@@ -41,6 +49,7 @@ const PHASE_METRICS = [
   ['commit', 'phase_commit_ms'],
   ['total', 'phase_total_ms'],
   ['baseline_capture', 'phase_baseline_capture_ms'],
+  ['baseline_refresh', 'phase_baseline_refresh_ms'],
   ['error_enrichment', 'phase_error_enrichment_ms'],
   ['harness_begin', 'phase_harness_begin_ms'],
   ['dispatch', 'phase_dispatch_ms'],
@@ -55,16 +64,20 @@ const STRUCTURED_FIELDS = [
   'stdout_truncated', 'stderr_truncated', 'has_more_output', 'cursor_expired', 'cursor',
   'next_cursor', 'latest_cursor', 'output_mode', 'operation_id', 'session_id',
   'harness_mode', 'execution_mode', 'execution_lane', 'resumed_execution_lane',
-  'blocking_queue_wait_ms', 'admission_lane', 'admission_limit', 'global_admission_limit',
+  'blocking_queue_wait_ms', 'admission_lane', 'admission_mode', 'admission_limit', 'global_admission_limit',
   'admission_scope', 'workspace_admission_wait_ms', 'global_admission_wait_ms',
-  'admission_queue_wait_ms', 'workspace_lock_scope', 'workspace_lock_groups',
+  'admission_queue_wait_ms', 'resource_class', 'io_heavy_admission_limit', 'io_heavy_admission_wait_ms',
+  'workspace_lock_scope', 'workspace_lock_groups',
   'workspace_lock_wait_ms', 'operation_lock_wait_ms', 'resource_lock_wait_ms',
   'resource_lock_group', 'resource_lock_target', 'session_registry_wait_ms',
   'actual_wait_ms', 'snapshot_ms', 'active_session_limit', 'active_session_slots_available',
   'execution_boundary', 'sandbox_enforced', 'program', 'shell', 'resolved_cwd',
   'child_process', 'interactive', 'stdin_open', 'elapsed_ms', 'first_output_ms',
   'returned_count', 'total_matches', 'total_matches_exact', 'calculate_total', 'matched_files',
-  'files_considered', 'scanned_files', 'scan_completed', 'early_stop_reason', 'skipped_large_files', 'bytes_read',
+  'files_considered', 'scanned_files', 'scan_excluded_worktree_container_count', 'scan_completed', 'early_stop_reason', 'skipped_large_files', 'bytes_read',
+  'exact_total_forced_full_scan', 'exact_total_fast_tail', 'exact_total_fast_tail_skipped_match_details',
+  'knowledge_canary_id', 'knowledge_canary_implementation', 'knowledge_canary_eligible', 'knowledge_canary_stage',
+  'knowledge_canary_selected', 'knowledge_canary_applied', 'knowledge_canary_bucket',
   'total_bytes', 'total_lines', 'total_stream_bytes', 'total_retained_bytes',
   'retained_start_offset', 'requested_offset', 'offset', 'limit', 'clean', 'applied',
   'dry_run', 'proposal_ttl_seconds', 'candidate_start_line', 'candidate_end_line',
@@ -93,7 +106,7 @@ const STRUCTURED_FIELDS = [
   'workspace_route_changed', 'conversation_selection_changed',
   'failure_id', 'retry_of_call_sequence', 'recovery_of_operation_id_hash',
   'recovery_action_id', 'recovery_attempt', 'recovery_succeeded',
-  'redaction_count'
+  'baseline_refresh_mode', 'baseline_refresh_file_count', 'redaction_count'
 ] as const;
 
 const ARRAY_COUNTS: ReadonlyArray<readonly [string, string]> = [
@@ -116,6 +129,11 @@ const ARRAY_COUNTS: ReadonlyArray<readonly [string, string]> = [
   ['would_delete', 'would_delete_count']
 ];
 
+function legacyCompatWriteEnabled(value = process.env[DIAGNOSTICS_LEGACY_WRITE_ENV]): boolean {
+  const normalized = value?.trim().toLowerCase();
+  return !['0', 'false', 'no', 'off'].includes(normalized ?? '');
+}
+
 export interface ToolUsageStoreOptions {
   profileId?: string;
   runtimeBootId?: string;
@@ -124,6 +142,7 @@ export interface ToolUsageStoreOptions {
   retainedFiles?: number;
   queueCapacity?: number;
   redactTelemetry?: boolean;
+  legacyWriteEnabled?: boolean;
   now?: () => number;
 }
 
@@ -137,6 +156,8 @@ interface PhaseStats {
 interface ToolStats {
   calls: number;
   errors: number;
+  toolErrors: number;
+  transportErrors: number;
   warnings: number;
   durationMs: number;
   queueWaitMs: number;
@@ -389,6 +410,7 @@ function copyResultMetrics(record: JsonObject, tool: string, result: JsonObject,
         'patch_bytes', 'replacement_bytes', 'path', 'file_index', 'edit_index',
         'start_line', 'end_line', 'actual_sha256', 'expected_sha256',
         'actual_occurrences', 'expected_occurrences', 'recovery_reason',
+        'direct_recovery_action_count',
         'transaction_stage', 'selected_path_count', 'staged_path_count_before',
         'staged_path_count', 'index_clean_before', 'staged_by_tool', 'index_restored'
       ]) {
@@ -415,6 +437,7 @@ function classifyOutcome(record: JsonObject, outcome: string): string {
     if (Number(record.process_exit_code ?? 0) !== 0) return 'process_failure';
     return 'command_failure';
   }
+  if (outcome === 'rpc_error') return 'transport_error';
   if (outcome === 'success') return 'success';
   if (code === 'UNKNOWN_TOOL') return 'catalog_mismatch';
   if (['policy', 'permission', 'security'].includes(category)
@@ -482,7 +505,15 @@ function buildToolCallRecord(store: ToolUsageStore, input: ToolUsageInput): Json
   const outcome = input.result.ok === true ? 'success' : 'tool_error';
   const record: JsonObject = {
     schema_version: TOOL_USAGE_SCHEMA_VERSION,
+    diagnostic_schema_version: DIAGNOSTICS_SCHEMA_VERSION,
     event: 'tool_call',
+    event_type: 'tool_call',
+    host_kind: DIAGNOSTICS_HOST_KIND,
+    host_version: store.serverVersion,
+    timestamp_ms: input.startedTsMs,
+    conversation_operation_id: typeof input.result.harness_operation_id === 'string'
+      ? input.result.harness_operation_id
+      : null,
     started_ts_ms: input.startedTsMs,
     completed_ts_ms: input.startedTsMs + input.durationMs,
     workspace_id: store.profileId,
@@ -549,6 +580,8 @@ function buildToolCallRecord(store: ToolUsageStore, input: ToolUsageInput): Json
   for (const field of ['reason', 'workdir', 'path', 'output_mode']) if (input.arguments[field] !== undefined) record[`argument_${field}`] = sanitizeValue(input.arguments[field], field, store.redactTelemetry);
   copyResultMetrics(record, input.tool, input.result, store.redactTelemetry);
   record.outcome_class = classifyOutcome(record, outcome);
+  record.failure_domain = outcome === 'success' ? 'none' : 'tool';
+  record.severity = record.failure_domain === 'none' ? 'info' : 'error';
   return record;
 }
 
@@ -559,6 +592,7 @@ function newPhaseLatency(): Record<PhaseName, PhaseStats> {
     commit: { totalMs: 0, durations: [] },
     total: { totalMs: 0, durations: [] },
     baseline_capture: { totalMs: 0, durations: [] },
+    baseline_refresh: { totalMs: 0, durations: [] },
     error_enrichment: { totalMs: 0, durations: [] },
     harness_begin: { totalMs: 0, durations: [] },
     dispatch: { totalMs: 0, durations: [] },
@@ -569,7 +603,7 @@ function newPhaseLatency(): Record<PhaseName, PhaseStats> {
 
 function newToolStats(): ToolStats {
   return {
-    calls: 0, errors: 0, warnings: 0, durationMs: 0, queueWaitMs: 0,
+    calls: 0, errors: 0, toolErrors: 0, transportErrors: 0, warnings: 0, durationMs: 0, queueWaitMs: 0,
     workspaceAdmissionWaitMs: 0, globalAdmissionWaitMs: 0, blockingQueueWaitMs: 0,
     workspaceLockWaitMs: 0, historyLockWaitMs: 0, sessionRegistryWaitMs: 0,
     actualWaitMs: 0, snapshotMs: 0, resourceLockWaitMs: 0, operationLockWaitMs: 0,
@@ -601,11 +635,21 @@ function isErrorRecord(record: JsonObject): boolean {
   return ['rpc_error', 'tool_error', 'worker_failed', 'legacy_error'].includes(normalizedOutcome(record));
 }
 
+function isTransportErrorRecord(record: JsonObject): boolean {
+  return record.failure_domain === 'transport' || normalizedOutcome(record) === 'rpc_error';
+}
+
+function isToolErrorRecord(record: JsonObject): boolean {
+  return isErrorRecord(record) && !isTransportErrorRecord(record);
+}
+
 function addStats(record: JsonObject, stats: ToolStats): void {
   const duration = metric(record, 'duration_ms');
   const queueWait = metric(record, 'admission_queue_wait_ms') + metric(record, 'blocking_queue_wait_ms');
   stats.calls += 1;
   stats.errors += isErrorRecord(record) ? 1 : 0;
+  stats.toolErrors += isToolErrorRecord(record) ? 1 : 0;
+  stats.transportErrors += isTransportErrorRecord(record) ? 1 : 0;
   stats.warnings += metric(record, 'warning_count');
   stats.durationMs += duration;
   stats.queueWaitMs += queueWait;
@@ -672,6 +716,63 @@ function percentage(value: number, total: number): number { return total ? value
 function round3(value: number): number { return Math.round(value * 1000) / 1000; }
 function mapObject<T>(map: Map<string, T>): Record<string, T> { return Object.fromEntries([...map.entries()].sort(([left], [right]) => left.localeCompare(right))); }
 
+function diagnosticEventType(record: JsonObject, legacyEvent: string): string {
+  if (typeof record.event_type === 'string' && record.event_type) return record.event_type;
+  if (legacyEvent === 'async_session_finalized') return 'process_session';
+  if (legacyEvent === 'tool_call' && isTransportErrorRecord(record)) return 'transport_event';
+  return legacyEvent === 'tool_call' ? 'tool_call' : legacyEvent;
+}
+
+function topErrorCounts(counts: Map<string, number>, limit = 5): JsonObject[] {
+  return [...counts.entries()]
+    .sort(([leftCode, leftCount], [rightCode, rightCount]) => rightCount - leftCount || leftCode.localeCompare(rightCode))
+    .slice(0, limit)
+    .map(([code, count]) => ({ code, count }));
+}
+
+function diagnosticsSummaryValue(
+  hostKind: string,
+  hostVersion: string,
+  scope: string,
+  stats: ToolStats,
+  invalidCompleteLines: number,
+  persistedDroppedRecords: number,
+  toolErrorCounts: Map<string, number>,
+  transportErrorCounts: Map<string, number>,
+  repeatedIdenticalErrorCount: number,
+  eventsByType: Map<string, number>,
+  standaloneTransportErrors: number,
+  logHealth: JsonObject
+): JsonObject {
+  return {
+    schema_version: DIAGNOSTICS_SCHEMA_VERSION,
+    host_kind: hostKind,
+    host_version: hostVersion,
+    scope,
+    calls: stats.calls,
+    tool_errors: stats.toolErrors,
+    transport_errors: stats.transportErrors + standaloneTransportErrors,
+    warnings: stats.warnings,
+    invalid_complete_lines: invalidCompleteLines,
+    persisted_dropped_records: persistedDroppedRecords,
+    top_tool_errors: topErrorCounts(toolErrorCounts),
+    top_transport_errors: topErrorCounts(transportErrorCounts),
+    latency: {
+      p50_ms: percentile(stats.durations, 50),
+      p95_ms: percentile(stats.durations, 95),
+      max_ms: stats.durations.length ? Math.max(...stats.durations) : 0
+    },
+    wait: {
+      actual_wait_ms: stats.actualWaitMs,
+      empty_wait_timeouts: stats.emptyWaitTimeouts
+    },
+    recovery: { repeated_identical_error_count: repeatedIdenticalErrorCount },
+    events_by_type: mapObject(eventsByType),
+    log_health: logHealth,
+    sanitized: true
+  };
+}
+
 function formattingStats(stats: ToolStats): JsonObject {
   return {
     files_requested: stats.formatFilesRequested,
@@ -717,7 +818,9 @@ function phaseLatencyStats(stats: ToolStats): JsonObject {
 
 function statsRecord(tool: string, stats: ToolStats): JsonObject {
   return {
-    tool, calls: stats.calls, errors: stats.errors, warnings: stats.warnings,
+    tool, calls: stats.calls, errors: stats.errors,
+    tool_errors: stats.toolErrors, transport_errors: stats.transportErrors,
+    warnings: stats.warnings,
     duration_ms: stats.durationMs, queue_wait_ms: stats.queueWaitMs,
     workspace_admission_wait_ms: stats.workspaceAdmissionWaitMs,
     global_admission_wait_ms: stats.globalAdmissionWaitMs,
@@ -748,6 +851,8 @@ function versionScopeStats(stats: ToolStats): JsonObject {
   return {
     calls: stats.calls,
     errors: stats.errors,
+    tool_errors: stats.toolErrors,
+    transport_errors: stats.transportErrors,
     warnings: stats.warnings,
     duration_ms: stats.durationMs,
     avg_ms: average(stats.durationMs, stats.calls),
@@ -864,26 +969,43 @@ function accumulateRepeatedFailure(record: JsonObject, stats: RepeatedFailureSta
   stats.groups.set(signature, group);
 }
 
+function deterministicFailureWeight(errorCode: string): number {
+  return /(?:INVALID|MISMATCH|NOT_FOUND|PATH_|POLICY|CONTRACT|EXPECTED_|PROTECTED|PATCH_)/i.test(errorCode) ? 2 : 1;
+}
+
+function repeatedFailureFrictionScore(retryCount: number, wastedDurationMs: number, errorCode: string): number {
+  return retryCount * Math.max(1, wastedDurationMs) * deterministicFailureWeight(errorCode);
+}
+
 function repeatedFailureReport(stats: RepeatedFailureStats, legacyAdjacentRetryCount: number, top: number): JsonObject {
-  const groups = [...stats.groups.values()]
-    .sort((left, right) => right.retryCount - left.retryCount
-      || right.wastedDurationMs - left.wastedDurationMs
-      || left.signature.localeCompare(right.signature))
+  const scored = [...stats.groups.values()].map(group => ({
+    group,
+    frictionScore: repeatedFailureFrictionScore(group.retryCount, group.wastedDurationMs, group.errorCode)
+  }));
+  const frictionScore = scored.reduce((sum, item) => sum + item.frictionScore, 0);
+  const groups = scored
+    .sort((left, right) => right.frictionScore - left.frictionScore
+      || right.group.retryCount - left.group.retryCount
+      || right.group.wastedDurationMs - left.group.wastedDurationMs
+      || left.group.signature.localeCompare(right.group.signature))
     .slice(0, top)
-    .map(group => ({
+    .map(({ group, frictionScore: groupFrictionScore }) => ({
       signature: group.signature,
       tool: group.tool,
       error_code: group.errorCode,
       retry_count: group.retryCount,
       chain_count: group.chainCount,
       wasted_duration_ms: group.wastedDurationMs,
-      max_attempt_count: group.maxAttemptCount
+      max_attempt_count: group.maxAttemptCount,
+      deterministic_error_weight: deterministicFailureWeight(group.errorCode),
+      friction_score: groupFrictionScore
     }));
   return {
     retry_count: stats.retryCount,
     chain_count: stats.chainCount,
     wasted_duration_ms: stats.wastedDurationMs,
     max_attempt_count: stats.maxAttemptCount,
+    friction_score: frictionScore,
     legacy_adjacent_retry_count: legacyAdjacentRetryCount,
     top: groups,
     recovery_hint: stats.retryCount > 0
@@ -1132,16 +1254,22 @@ export class ToolUsageStore implements ToolUsageStoreContract {
   readonly runtimeBootId: string;
   readonly serverVersion: string;
   readonly logDir: string;
+  readonly diagnosticsLogFile: string;
   readonly logFile: string;
   readonly maxBytes: number;
   readonly retainedFiles: number;
   readonly queueCapacity: number;
+  readonly legacyWriteEnabled: boolean;
   redactTelemetry: boolean;
   readonly now: () => number;
   #queue: JsonObject[] = [];
   #drainPromise?: Promise<void>;
   #droppedRecords = 0;
   #lastWriteError?: string;
+  #writeFailures = 0;
+  #legacyWriteFailures = 0;
+  #lastSuccessfulWriteTsMs = 0;
+  #lastWriteFailureTsMs = 0;
   #lastCompletedTsMs = 0;
   #burstId = 0;
   #burstSequence = 0;
@@ -1150,6 +1278,7 @@ export class ToolUsageStore implements ToolUsageStoreContract {
   #failureCountsByBurst = new Map<string, number>();
   #failureBurstId = 0;
   #dashboardCache?: { createdAt: number; value: JsonObject };
+  readonly #diagnosticsLogStore: ToolUsageLogStore;
   readonly #logStore: ToolUsageLogStore;
 
   constructor(dataDir: string, options: ToolUsageStoreOptions = {}) {
@@ -1159,12 +1288,20 @@ export class ToolUsageStore implements ToolUsageStoreContract {
     this.runtimeBootId = options.runtimeBootId ?? randomUUID();
     this.serverVersion = options.serverVersion ?? AGENT_VERSION;
     this.logDir = path.join(dataDir, 'logs');
+    this.diagnosticsLogFile = path.join(this.logDir, DIAGNOSTICS_LOG_FILE);
     this.logFile = path.join(this.logDir, TOOL_USAGE_LOG_FILE);
     this.maxBytes = Math.max(1, Math.trunc(options.maxBytes ?? TOOL_USAGE_LOG_MAX_BYTES));
     this.retainedFiles = Math.max(0, Math.trunc(options.retainedFiles ?? TOOL_USAGE_RETAINED_FILES));
     this.queueCapacity = Math.max(1, Math.trunc(options.queueCapacity ?? TOOL_USAGE_QUEUE_CAPACITY));
+    this.legacyWriteEnabled = options.legacyWriteEnabled ?? legacyCompatWriteEnabled();
     this.redactTelemetry = options.redactTelemetry ?? true;
     this.now = options.now ?? Date.now;
+    this.#diagnosticsLogStore = new ToolUsageLogStore({
+      logDir: this.logDir,
+      logFile: this.diagnosticsLogFile,
+      maxBytes: this.maxBytes,
+      retainedFiles: this.retainedFiles
+    });
     this.#logStore = new ToolUsageLogStore({
       logDir: this.logDir,
       logFile: this.logFile,
@@ -1224,13 +1361,39 @@ export class ToolUsageStore implements ToolUsageStoreContract {
     this.#lastCompletedTsMs = Math.max(this.#lastCompletedTsMs, input.startedTsMs + input.durationMs);
     this.#activeRequests = Math.max(0, this.#activeRequests - 1);
     this.enqueue(record);
+    if (record.recovery_attempt === true) {
+      const fields: JsonObject = {
+        linked_diagnostic_event_id: record.diagnostic_event_id,
+        tool: input.tool,
+        recovery_succeeded: input.result.ok === true
+      };
+      for (const field of ['retry_of_call_sequence', 'recovery_of_operation_id_hash', 'recovery_action_id']) {
+        if (record[field] !== undefined) fields[field] = record[field];
+      }
+      this.recordDiagnosticEvent({
+        eventType: 'recovery_event',
+        event: 'recovery_attempt',
+        severity: input.result.ok === true ? 'info' : 'warning',
+        failureDomain: input.result.ok === true ? 'none' : 'tool',
+        timestampMs: input.startedTsMs + input.durationMs,
+        fields
+      });
+    }
     return record;
   }
 
   recordAsyncSession(input: AsyncSessionUsageInput): JsonObject {
     const record: JsonObject = {
       schema_version: TOOL_USAGE_SCHEMA_VERSION,
+      diagnostic_schema_version: DIAGNOSTICS_SCHEMA_VERSION,
       event: 'async_session_finalized',
+      event_type: 'process_session',
+      host_kind: DIAGNOSTICS_HOST_KIND,
+      host_version: this.serverVersion,
+      timestamp_ms: input.startedTsMs,
+      conversation_operation_id: null,
+      severity: (input.exitCode ?? 0) === 0 ? 'info' : 'error',
+      failure_domain: (input.exitCode ?? 0) === 0 ? 'none' : 'process',
       workspace_id: this.profileId,
       runtime_boot_id: this.runtimeBootId,
       server_version: this.serverVersion,
@@ -1249,8 +1412,36 @@ export class ToolUsageStore implements ToolUsageStoreContract {
     return record;
   }
 
+  recordDiagnosticEvent(input: DiagnosticEventInput): JsonObject {
+    const timestampMs = input.timestampMs ?? this.now();
+    const fields = sanitizeValue(input.fields ?? {}, undefined, this.redactTelemetry) as JsonObject;
+    const record: JsonObject = {
+      ...fields,
+      schema_version: TOOL_USAGE_SCHEMA_VERSION,
+      diagnostic_schema_version: DIAGNOSTICS_SCHEMA_VERSION,
+      event: input.event,
+      event_type: input.eventType,
+      host_kind: DIAGNOSTICS_HOST_KIND,
+      host_version: this.serverVersion,
+      timestamp_ms: timestampMs,
+      conversation_operation_id: null,
+      severity: input.severity ?? 'info',
+      failure_domain: input.failureDomain ?? 'none',
+      workspace_id: this.profileId,
+      runtime_boot_id: this.runtimeBootId,
+      server_version: this.serverVersion,
+      started_ts_ms: timestampMs,
+      completed_ts_ms: timestampMs
+    };
+    this.enqueue(record);
+    return record;
+  }
+
   enqueue(record: JsonObject): void {
     this.#dashboardCache = undefined;
+    if (typeof record.diagnostic_event_id !== 'string' || !record.diagnostic_event_id) {
+      record.diagnostic_event_id = randomUUID();
+    }
     if (this.#queue.length >= this.queueCapacity) {
       this.#droppedRecords += 1;
       return;
@@ -1279,11 +1470,22 @@ export class ToolUsageStore implements ToolUsageStoreContract {
     while (this.#queue.length) {
       const record = this.#queue.shift();
       if (!record) continue;
+      const sanitized = sanitizeValue(record);
       try {
-        await this.#logStore.append(sanitizeValue(record));
+        await this.#diagnosticsLogStore.append(sanitized);
         this.#lastWriteError = undefined;
+        this.#lastSuccessfulWriteTsMs = this.now();
       } catch (error) {
         this.#lastWriteError = error instanceof Error ? error.message : String(error);
+        this.#writeFailures += 1;
+        this.#lastWriteFailureTsMs = this.now();
+      }
+      if (this.legacyWriteEnabled) {
+        try {
+          await this.#logStore.append(sanitized);
+        } catch {
+          this.#legacyWriteFailures += 1;
+        }
       }
     }
   }
@@ -1325,6 +1527,7 @@ export class ToolUsageStore implements ToolUsageStoreContract {
   async query(args: JsonObject): Promise<JsonObject> {
     await this.flush();
     const limit = integer(args.limit, 100, 1, 1000);
+    const cursor = integer(args.cursor, 0, 0, TOOL_USAGE_RECORD_CURSOR_MAX);
     const top = integer(args.top, 20, 1, 100);
     const scope = typeof args.scope === 'string' ? args.scope : 'current_runtime';
     const sortBy = typeof args.sort_by === 'string' ? args.sort_by : 'calls';
@@ -1344,6 +1547,8 @@ export class ToolUsageStore implements ToolUsageStoreContract {
     const excludeTools = new Set(Array.isArray(args.exclude_tools) && args.exclude_tools.length ? args.exclude_tools.map(String) : ['query_tool_usage']);
     const outcomes = new Set(Array.isArray(args.outcomes) ? args.outcomes.map(String) : []);
     const recent: JsonObject[] = [];
+    let recentStart = 0;
+    const recordWindowLimit = cursor + limit;
     const totals = newToolStats();
     const currentVersionTotals = newToolStats();
     const previousVersionTotals = newToolStats();
@@ -1351,6 +1556,9 @@ export class ToolUsageStore implements ToolUsageStoreContract {
     const byTool = new Map<string, ToolStats>();
     const outcomeCounts = new Map<string, number>();
     const errorCounts = new Map<string, number>();
+    const toolErrorCounts = new Map<string, number>();
+    const transportErrorCounts = new Map<string, number>();
+    const eventsByType = new Map<string, number>();
     const slowest: JsonObject[] = [];
     const largest: JsonObject[] = [];
     const performance = newPerformanceStats();
@@ -1361,10 +1569,34 @@ export class ToolUsageStore implements ToolUsageStoreContract {
     let matchedLines = 0;
     let matchedAsync = 0;
     let repeatedIdenticalErrorCount = 0;
+    let standaloneTransportErrors = 0;
+    let persistedDroppedRecords = 0;
+    let duplicateRecordsIgnored = 0;
     let previousError: string | undefined;
+    const seenDiagnosticEventIds = new Set<string>();
 
-    const scan = await this.#logStore.visitCompleteRecords(record => {
+    const visitRecord = (record: JsonObject): void => {
+      const diagnosticEventId = typeof record.diagnostic_event_id === 'string' ? record.diagnostic_event_id : undefined;
+      if (diagnosticEventId) {
+        if (seenDiagnosticEventIds.has(diagnosticEventId)) {
+          duplicateRecordsIgnored += 1;
+          return;
+        }
+        seenDiagnosticEventIds.add(diagnosticEventId);
+      }
       const event = typeof record.event === 'string' ? record.event : 'tool_call';
+      if (matchesScope(record, scope, sinceTsMs, this.runtimeBootId, this.serverVersion)) {
+        const eventType = diagnosticEventType(record, event);
+        eventsByType.set(eventType, (eventsByType.get(eventType) ?? 0) + 1);
+        if (eventType === 'transport_event' && event !== 'tool_call'
+          && (record.failure_domain === 'transport' || record.severity === 'error')) {
+          standaloneTransportErrors += 1;
+          const errorCode = typeof record.error_code === 'string'
+            ? record.error_code
+            : typeof record.rpc_error_code === 'string' ? record.rpc_error_code : undefined;
+          if (errorCode) transportErrorCounts.set(errorCode, (transportErrorCounts.get(errorCode) ?? 0) + 1);
+        }
+      }
       if (event === 'async_session_finalized') {
         const execRequested = !tools.size || tools.has('exec_command') || tools.has('exec_many');
         const execExcluded = excludeTools.has('exec_command') || excludeTools.has('exec_many');
@@ -1394,6 +1626,7 @@ export class ToolUsageStore implements ToolUsageStoreContract {
       if (!matchesScope(record, scope, sinceTsMs, this.runtimeBootId, this.serverVersion)
         || !matchesRequestedFilters) return;
       matchedLines += 1;
+      persistedDroppedRecords += metric(record, 'telemetry_dropped_before');
       accumulateParallelHistory(parallelHistory, record);
       const signature = errorSignature(record);
       if (signature !== undefined && signature === previousError) repeatedIdenticalErrorCount += 1;
@@ -1411,7 +1644,11 @@ export class ToolUsageStore implements ToolUsageStoreContract {
         byTool.set(tool, current);
         outcomeCounts.set(outcome, (outcomeCounts.get(outcome) ?? 0) + 1);
         const errorCode = typeof record.error_code === 'string' ? record.error_code : typeof record.rpc_error_code === 'string' ? record.rpc_error_code : undefined;
-        if (errorCode) errorCounts.set(errorCode, (errorCounts.get(errorCode) ?? 0) + 1);
+        if (errorCode) {
+          errorCounts.set(errorCode, (errorCounts.get(errorCode) ?? 0) + 1);
+          const domainCounts = isTransportErrorRecord(record) ? transportErrorCounts : isToolErrorRecord(record) ? toolErrorCounts : undefined;
+          if (domainCounts) domainCounts.set(errorCode, (domainCounts.get(errorCode) ?? 0) + 1);
+        }
       }
       const compact = compactRecord(record);
       if (includeSlowest) {
@@ -1426,16 +1663,34 @@ export class ToolUsageStore implements ToolUsageStoreContract {
       }
       if (includeRecords) {
         recent.push(includePayloads ? structuredClone(record) : compact);
-        if (recent.length > limit) recent.shift();
+        if (recent.length - recentStart > recordWindowLimit) recentStart += 1;
+        if (recentStart >= 1024 && recentStart * 2 >= recent.length) {
+          recent.splice(0, recentStart);
+          recentStart = 0;
+        }
       }
-    });
-    const { scannedLines, invalidLines, bytesRead: logBytesRead } = scan;
+    };
+    const legacyScan = await this.#logStore.visitCompleteRecords(visitRecord);
+    const canonicalScan = await this.#diagnosticsLogStore.visitCompleteRecords(visitRecord);
+    const scannedLines = legacyScan.scannedLines + canonicalScan.scannedLines;
+    const invalidLines = legacyScan.invalidLines + canonicalScan.invalidLines;
+    const logBytesRead = legacyScan.bytesRead + canonicalScan.bytesRead;
+    const recordWindow = includeRecords ? recent.slice(recentStart) : [];
+    const pageEnd = Math.max(0, recordWindow.length - Math.min(cursor, recordWindow.length));
+    const pageStart = Math.max(0, pageEnd - limit);
+    const recordPage = includeRecords ? recordWindow.slice(pageStart, pageEnd) : [];
+    const nextCursorCandidate = cursor + recordPage.length;
+    const hasOlderRecords = includeRecords && matchedLines > nextCursorCandidate;
+    const cursorLimitReached = hasOlderRecords && nextCursorCandidate > TOOL_USAGE_RECORD_CURSOR_MAX;
+    const nextCursor = hasOlderRecords && !cursorLimitReached ? nextCursorCandidate : null;
 
     const toolStats = [...byTool.entries()].map(([tool, stats]) => statsRecord(tool, stats));
     toolStats.sort((left, right) => sortMetric(right, sortBy) - sortMetric(left, sortBy) || String(left.tool).localeCompare(String(right.tool)));
     toolStats.splice(top);
     const aggregate = aggregateEnabled ? {
-      calls: totals.calls, errors: totals.errors, warnings: totals.warnings,
+      calls: totals.calls, errors: totals.errors,
+      tool_errors: totals.toolErrors, transport_errors: totals.transportErrors,
+      warnings: totals.warnings,
       duration_ms: totals.durationMs, queue_wait_ms: totals.queueWaitMs,
       workspace_admission_wait_ms: totals.workspaceAdmissionWaitMs,
       global_admission_wait_ms: totals.globalAdmissionWaitMs,
@@ -1451,14 +1706,68 @@ export class ToolUsageStore implements ToolUsageStoreContract {
       p95_ms: percentile(totals.durations, 95), max_ms: totals.durations.length ? Math.max(...totals.durations) : 0,
       phase_latency: phaseLatencyStats(totals),
       request_bytes: totals.requestBytes, response_bytes: totals.responseBytes,
-      outcomes: mapObject(outcomeCounts), errors_by_code: mapObject(errorCounts), tools: toolStats
+      outcomes: mapObject(outcomeCounts), errors_by_code: mapObject(errorCounts),
+      tool_errors_by_code: mapObject(toolErrorCounts), transport_errors_by_code: mapObject(transportErrorCounts),
+      tools: toolStats
     } : null;
+    const diagnosticsSummary = diagnosticsSummaryValue(
+      DIAGNOSTICS_HOST_KIND,
+      this.serverVersion,
+      scope,
+      totals,
+      invalidLines,
+      persistedDroppedRecords,
+      toolErrorCounts,
+      transportErrorCounts,
+      repeatedIdenticalErrorCount,
+      eventsByType,
+      standaloneTransportErrors,
+      {
+        queue_capacity: this.queueCapacity,
+        pending_records: this.#queue.length,
+        pending_dropped_records: this.#droppedRecords,
+        write_failures: this.#writeFailures,
+        legacy_compat_write_failures: this.#legacyWriteFailures,
+        write_error_present: this.#lastWriteError !== undefined,
+        last_successful_write_ts_ms: this.#lastSuccessfulWriteTsMs || null,
+        last_write_failure_ts_ms: this.#lastWriteFailureTsMs || null,
+        writer_state: this.#lastWriteError ? 'degraded' : 'ready'
+      }
+    );
     return {
       ok: true,
       workspace_id: this.profileId,
       scope,
       runtime_boot_id: this.runtimeBootId,
       server_version: this.serverVersion,
+      diagnostics_contract: {
+        schema_version: DIAGNOSTICS_SCHEMA_VERSION,
+        host_kind: DIAGNOSTICS_HOST_KIND,
+        host_version: this.serverVersion,
+        structured_log_file: DIAGNOSTICS_LOG_FILE,
+        structured_log: {
+          file: DIAGNOSTICS_LOG_FILE,
+          max_bytes: this.maxBytes,
+          retained_files: this.retainedFiles,
+          queue_capacity: this.queueCapacity
+        },
+        compatibility: {
+          legacy_file: TOOL_USAGE_LOG_FILE,
+          dual_write: this.legacyWriteEnabled,
+          dual_write_default: true,
+          legacy_write_env: DIAGNOSTICS_LEGACY_WRITE_ENV,
+          legacy_read_preserved: true,
+          retirement_requires_compatibility_window: true,
+          query_deduplicates_by: 'diagnostic_event_id'
+        },
+        migration: {
+          duplicate_records_ignored: duplicateRecordsIgnored,
+          legacy_scanned_lines: legacyScan.scannedLines,
+          canonical_scanned_lines: canonicalScan.scannedLines
+        },
+        legacy_errors_include_transport: true
+      },
+      diagnostics_summary: aggregateEnabled ? diagnosticsSummary : null,
       log_dir: this.logDir,
       scanned_lines: scannedLines,
       matched_lines: matchedLines,
@@ -1472,7 +1781,16 @@ export class ToolUsageStore implements ToolUsageStoreContract {
         largest: includeLargest,
         activity_bursts: includeBursts
       },
-      records: recent,
+      records_pagination: includeRecords ? {
+        cursor,
+        next_cursor: nextCursor,
+        total: matchedLines,
+        limit,
+        cursor_origin: 'latest',
+        page_order: 'oldest_to_newest',
+        cursor_limit_reached: cursorLimitReached
+      } : null,
+      records: recordPage,
       slowest: includeSlowest ? slowest : null,
       largest: includeLargest ? largest : null,
       aggregate,

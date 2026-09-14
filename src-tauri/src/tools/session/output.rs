@@ -11,6 +11,29 @@ pub enum OutputMode {
     Summary,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EventDetail {
+    Compact,
+    Full,
+}
+
+impl EventDetail {
+    fn parse(value: Option<&str>, default: Self) -> Self {
+        match value {
+            Some("compact") => Self::Compact,
+            Some("full") => Self::Full,
+            _ => default,
+        }
+    }
+
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::Compact => "compact",
+            Self::Full => "full",
+        }
+    }
+}
+
 impl OutputMode {
     fn parse(value: Option<&str>, default: Self) -> Self {
         match value {
@@ -37,6 +60,7 @@ impl OutputMode {
 #[derive(Clone, Copy, Debug)]
 pub struct OutputOptions {
     pub mode: OutputMode,
+    pub event_detail: EventDetail,
     pub cursor: u64,
     pub max_output_bytes: usize,
     pub tail_lines: usize,
@@ -48,6 +72,10 @@ impl OutputOptions {
             mode: OutputMode::parse(
                 args.get("output_mode").and_then(Value::as_str),
                 default_mode,
+            ),
+            event_detail: EventDetail::parse(
+                args.get("event_detail").and_then(Value::as_str),
+                EventDetail::Full,
             ),
             cursor: args.get("cursor").and_then(Value::as_u64).unwrap_or(0),
             max_output_bytes: args
@@ -66,6 +94,7 @@ impl OutputOptions {
     pub fn tail(max_output_bytes: usize) -> Self {
         Self {
             mode: OutputMode::Tail,
+            event_detail: EventDetail::Full,
             cursor: 0,
             max_output_bytes,
             tail_lines: 100,

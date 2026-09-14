@@ -14,6 +14,7 @@ export type ToolDomain =
   | 'desktop';
 
 export type ToolExecutionLane = 'blocking' | 'process' | 'control';
+export type ToolAdmissionMode = 'request' | 'children' | 'none';
 export type ToolLockGroup = 'history' | 'workspace_content' | 'git' | 'task' | 'cwd';
 export type ToolPermissionKind = 'workspace_mutation' | 'process_execution' | 'network' | 'privileged_operation';
 export type ToolUsageFamily = 'filesystem' | 'search' | 'quality' | 'process' | 'git' | 'history' | 'runtime' | 'other';
@@ -26,6 +27,7 @@ export interface ToolRuntimeDescriptor {
   readonly domain: ToolDomain;
   readonly usageFamily: ToolUsageFamily;
   readonly lane: ToolExecutionLane;
+  readonly admission: ToolAdmissionMode;
   readonly lockGroups: readonly ToolLockGroup[];
   readonly harnessTool: boolean;
   readonly guardedPermission?: ToolPermissionKind;
@@ -35,7 +37,7 @@ export interface ToolRuntimeDescriptor {
 }
 
 type ToolRuntimeOverrides = Partial<Pick<ToolRuntimeDescriptor,
-  'usageFamily' | 'lane' | 'lockGroups' | 'harnessTool' | 'guardedPermission' | 'coalescing' | 'mutation' | 'workspaceSelector'
+  'usageFamily' | 'lane' | 'admission' | 'lockGroups' | 'harnessTool' | 'guardedPermission' | 'coalescing' | 'mutation' | 'workspaceSelector'
 >>;
 
 interface ToolRuntimeModule {
@@ -102,6 +104,9 @@ const TOOL_RUNTIME_MODULES: readonly ToolRuntimeModule[] = [
       update_task: { lockGroups: TASK_LOCK, mutation: 'always' },
       pause_task: { lockGroups: TASK_LOCK, mutation: 'always' },
       resume_task: { lockGroups: TASK_LOCK, mutation: 'always' },
+      fail_task: { lockGroups: TASK_LOCK, mutation: 'always' },
+      close_failed_task: { lockGroups: TASK_LOCK, mutation: 'always' },
+      rollback_task: { lockGroups: TASK_LOCK, mutation: 'always' },
       finish_task: { lockGroups: TASK_LOCK, mutation: 'always' },
       task_context: {},
       list_task_events: {},
@@ -179,6 +184,7 @@ const TOOL_RUNTIME_MODULES: readonly ToolRuntimeModule[] = [
       },
       exec_many: {
         lane: 'process',
+        admission: 'children',
         guardedPermission: 'process_execution',
         mutation: 'always'
       },
@@ -239,12 +245,14 @@ for (const moduleDefinition of TOOL_RUNTIME_MODULES) {
   for (const [name, overrides] of Object.entries(moduleDefinition.tools)) {
     if (runtimeByName.has(name)) throw new Error(`Duplicate Node tool runtime metadata: ${name}`);
     const configured = { ...moduleDefinition.defaults, ...overrides };
+    const lane = configured.lane ?? 'blocking';
     runtimeByName.set(name, Object.freeze({
       name,
       canonicalName: name,
       domain: moduleDefinition.domain,
       usageFamily: configured.usageFamily ?? moduleDefinition.usageFamily,
-      lane: configured.lane ?? 'blocking',
+      lane,
+      admission: configured.admission ?? (lane === 'control' ? 'none' : 'request'),
       lockGroups: Object.freeze([...(configured.lockGroups ?? [])]),
       harnessTool: configured.harnessTool ?? false,
       guardedPermission: configured.guardedPermission,
@@ -275,6 +283,7 @@ const unknownRuntimeDefaults = Object.freeze({
   domain: 'runtime' as const,
   usageFamily: 'other' as const,
   lane: 'blocking' as const,
+  admission: 'request' as const,
   lockGroups: Object.freeze([]) as readonly ToolLockGroup[],
   harnessTool: false,
   coalescing: 'never' as const,

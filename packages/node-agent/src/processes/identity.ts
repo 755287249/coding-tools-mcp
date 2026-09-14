@@ -35,21 +35,24 @@ export function commandFingerprint(
   spec: ProcessCommandIdentitySpec,
   args: JsonObject,
   timeoutMs: number,
-  sandboxConfig?: SandboxConfig
+  sandboxConfig?: SandboxConfig,
+  resolvedSecrets?: { environment: Array<[string, string, string]>; stdinSha256: string | null; stdin: string }
 ): string {
   const env = Object.fromEntries(Object.entries((args.env as Record<string, unknown> | undefined) ?? {})
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([name, value]) => [name, String(value)]));
   const removeEnv = Array.isArray(args.remove_env) ? args.remove_env.map(String).sort() : [];
-  const stdin = typeof args.stdin === 'string' ? args.stdin : '';
+  const stdin = resolvedSecrets?.stdin ?? (typeof args.stdin === 'string' ? args.stdin : '');
   const material = stableValue({
     cwd,
     program: spec.program,
     argv: spec.argv,
     shell: spec.shell,
     env,
+    secret_env: resolvedSecrets?.environment ?? [],
     remove_env: removeEnv,
     timeout_ms: timeoutMs,
+    ...(Object.hasOwn(args, 'job_timeout_ms') ? { execution_mode: 'job' } : {}),
     tty: args.tty === true,
     stdin_sha256: createHash('sha256').update(stdin).digest('hex'),
     post_checks: Array.isArray(args.post_checks) ? args.post_checks.slice(0, 16) : [],
@@ -78,6 +81,37 @@ function isCargoCommand(spec: ProcessCommandIdentitySpec): boolean {
   const executable = (spec.program.split(/[\\/]/).at(-1) ?? '').toLowerCase().replace(/\.exe$/, '').replace(/\.cmd$/, '');
   const display = spec.display.toLowerCase();
   return executable === 'cargo' || display.includes('cargo ') || display.includes('tauri build');
+}
+
+function executableName(spec: ProcessCommandIdentitySpec): string {
+  return (spec.program.split(/[\\/]/).at(-1) ?? '').toLowerCase().replace(/\.exe$/, '').replace(/\.cmd$/, '');
+}
+
+export function nodeGeneratedLock(
+  cwd: string,
+  spec: ProcessCommandIdentitySpec
+): { group: string; target: string } | undefined {
+  const executable = executableName(spec);
+  const commandText = `${spec.display}\n${spec.argv.join('\n')}`.toLowerCase().replaceAll('\\', '/');
+  const cwdNormalized = path.resolve(cwd);
+  const cwdSlashes = cwdNormalized.replaceAll('\\', '/').toLowerCase();
+  const cwdIsPackage = cwdSlashes.endsWith('/packages/node-agent');
+  const referencesPackage = cwdIsPackage
+    || commandText.includes('@coding-tools/node-agent')
+    || commandText.includes('packages/node-agent/');
+  if (!referencesPackage) return undefined;
+
+  const packageManager = ['pnpm', 'npm', 'yarn', 'bun'].includes(executable);
+  const nodeConsumer = executable === 'node'
+    && (commandText.includes('packages/node-agent/test/') || commandText.includes('packages/node-agent/dist/'));
+  const packageBuild = packageManager
+    && (commandText.includes('build:server') || commandText.includes('node-agent:build'));
+  if (!packageBuild && !nodeConsumer) return undefined;
+
+  const packageRoot = cwdIsPackage ? cwdNormalized : path.resolve(cwdNormalized, 'packages/node-agent');
+  const target = path.resolve(packageRoot, 'dist');
+  const digest = createHash('sha256').update(target).digest('hex');
+  return { group: `node-generated:${digest.slice(0, 24)}`, target };
 }
 
 export function cargoTargetLock(

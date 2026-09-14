@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { ApplicationConfigStore, loadApplication } from '../dist/application.js';
@@ -133,6 +133,49 @@ test('application initialization persists a Rust-style random OAuth client ID an
   assert.equal(second.workspaces[0].loaded.config.oauth.password, first.workspaces[0].loaded.config.oauth.password);
 });
 
+test('application startup removes missing workspace folders and persists the repaired config', async () => {
+  const { base, root, dataDir, configPath } = await fixture('ctmcp-application-stale-folder');
+  const validRoot = path.join(base, 'valid-root');
+  const missingRoot = path.join(base, 'missing-root');
+  await mkdir(validRoot, { recursive: true });
+  await writeFile(configPath, `${JSON.stringify(configDocument(root, dataDir, 43125, {
+    folders: [
+      { id: 'valid', name: 'Valid', path: validRoot },
+      { id: 'missing', name: 'Missing', path: missingRoot }
+    ]
+  }), null, 2)}\n`);
+
+  const application = await loadApplication(configPath);
+  assert.deepEqual(application.workspaces[0].loaded.config.folders.map(folder => folder.id), ['valid']);
+  assert.equal(application.workspaces[0].loaded.config.folders[0].path, await realpath(validRoot));
+
+  const saved = JSON.parse(await readFile(configPath, 'utf8'));
+  assert.deepEqual(saved.folders.map(folder => folder.id), ['valid']);
+  assert.equal(saved.folders[0].path, await realpath(validRoot));
+  assert.equal(saved.folders.some(folder => folder.path === missingRoot), false);
+});
+
+test('application startup creates and persists a safe fallback when every workspace folder is missing', async () => {
+  const { base, dataDir, configPath } = await fixture('ctmcp-application-all-stale-folders');
+  const missingRoot = path.join(base, 'missing-root');
+  await writeFile(configPath, `${JSON.stringify(configDocument(missingRoot, dataDir, 43126), null, 2)}\n`);
+
+  const application = await loadApplication(configPath);
+  const fallbackRoot = path.join(dataDir, 'workspace');
+  const fallbackCanonical = await realpath(fallbackRoot);
+  const metadata = await stat(fallbackRoot);
+  assert.equal(metadata.isDirectory(), true);
+  assert.equal(application.workspaces[0].loaded.config.folders.length, 1);
+  assert.equal(application.workspaces[0].loaded.config.folders[0].id, 'default');
+  assert.equal(application.workspaces[0].loaded.config.folders[0].path, fallbackCanonical);
+
+  const saved = JSON.parse(await readFile(configPath, 'utf8'));
+  assert.equal(saved.folders.length, 1);
+  assert.equal(saved.folders[0].id, 'default');
+  assert.equal(saved.folders[0].path, fallbackCanonical);
+  assert.equal(saved.folders.some(folder => folder.path === missingRoot), false);
+});
+
 test('workspace registry keeps settings, secrets, ports and multiple folders independent', async () => {
   const primary = await fixture('ctmcp-application-primary');
   const secondary = await fixture('ctmcp-application-secondary');
@@ -232,7 +275,11 @@ test('workspace management API scopes settings, dashboards and authorization pas
     workspaceStore: store,
     runtimeRegistry: runtimes
   });
-  const secondaryRuntime = await createAgentRuntime(secondaryProfile.loaded.config, { runtimeRegistry: runtimes });
+  const secondaryConfigStore = store.workspace('secondary').store;
+  const secondaryRuntime = await createAgentRuntime(secondaryProfile.loaded.config, {
+    runtimeRegistry: runtimes,
+    secretResolver: reference => secondaryConfigStore.secretValue(reference)
+  });
   const secondaryTunnelReconfigurations = [];
   const secondaryRuntimeRecord = runtimes.get('secondary');
   assert.ok(secondaryRuntimeRecord);
@@ -296,6 +343,28 @@ test('workspace management API scopes settings, dashboards and authorization pas
   const persistedSecondary = await loadConfigBundle(secondary.configPath);
   assert.equal(persistedSecondary.config.tunnel.enrollmentUrl, enrollmentUrl);
   assert.doesNotMatch(await readFile(secondary.configPath, 'utf8'), /enroll\/once/);
+
+  const namedSecretValue = 'named-secret-test-value-12345';
+  const namedSecretUrl = `${base}/admin/api/workspaces/secondary/secrets/named/admin_api_key`;
+  const namedSecretResponse = await fetch(namedSecretUrl, {
+    method: 'PUT',
+    headers: { ...headers, 'content-type': 'application/json', origin: base },
+    body: JSON.stringify({ value: namedSecretValue })
+  });
+  assert.equal(namedSecretResponse.status, 200);
+  const namedSecretResult = await namedSecretResponse.json();
+  assert.equal(namedSecretResult.restartRequired, false);
+  assert.deepEqual(namedSecretResult.appliedImmediately, ['process-secrets']);
+  assert.doesNotMatch(JSON.stringify(namedSecretResult), new RegExp(namedSecretValue));
+  assert.equal(secondaryConfigStore.secretValue('admin_api_key'), namedSecretValue);
+  assert.equal(secondaryRuntime.context.resolveSecret?.('admin_api_key'), namedSecretValue);
+  const namedSecretStorePath = secondaryConfigStore.snapshot().secretStorePath;
+  assert.doesNotMatch(await readFile(namedSecretStorePath, 'utf8'), new RegExp(namedSecretValue));
+  const reloadedNamedSecretApplication = await loadApplication(primary.configPath);
+  const reloadedNamedSecretStore = new ApplicationConfigStore(reloadedNamedSecretApplication);
+  assert.equal(reloadedNamedSecretStore.workspace('secondary').store.secretValue('admin_api_key'), namedSecretValue);
+  const namedSecretReadResponse = await fetch(namedSecretUrl, { headers });
+  assert.equal(namedSecretReadResponse.status, 405);
 
   const secondarySnapshot = snapshot.workspaces.find(workspace => workspace.id === 'secondary');
   const saveResponse = await fetch(`${base}/admin/api/workspaces/secondary/config`, {

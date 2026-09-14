@@ -96,7 +96,11 @@ function Publish-PortablePackage {
     if (Test-Path -LiteralPath $zipPath) {
         Remove-Item -LiteralPath $zipPath -Force
     }
-    Compress-Archive -LiteralPath $PackagePath -DestinationPath $zipPath -CompressionLevel Optimal
+    $tarExecutable = (Get-Command tar.exe -ErrorAction Stop).Source
+    & $tarExecutable -a -c -f $zipPath -C $PackagePath .
+    if ($LASTEXITCODE -ne 0) {
+        throw "Portable ZIP creation failed with exit code ${LASTEXITCODE}: $zipPath"
+    }
 
     try {
         Copy-Item -LiteralPath $PackagePath -Destination $expandedStagingPath -Recurse
@@ -180,7 +184,14 @@ $NodeExecutable = (Resolve-Path -LiteralPath $NodeExecutable).Path
 $pnpmExecutable = (Get-Command pnpm.cmd -ErrorAction Stop).Source
 $cargoExecutable = (Get-Command cargo.exe -ErrorAction Stop).Source
 $protectManifest = Join-Path $repositoryRoot 'src-tauri\Cargo.toml'
-$protectHelper = Join-Path $repositoryRoot 'src-tauri\target\release\ctmcp-protect.exe'
+$protectTargetRoot = if ([string]::IsNullOrWhiteSpace($env:CARGO_TARGET_DIR)) {
+    Join-Path $repositoryRoot 'src-tauri\target'
+} elseif ([System.IO.Path]::IsPathRooted($env:CARGO_TARGET_DIR)) {
+    [System.IO.Path]::GetFullPath($env:CARGO_TARGET_DIR)
+} else {
+    [System.IO.Path]::GetFullPath((Join-Path $packageRoot $env:CARGO_TARGET_DIR))
+}
+$protectHelper = Join-Path $protectTargetRoot 'release\ctmcp-protect.exe'
 
 $nodeInfo = & $NodeExecutable -p "JSON.stringify({version:process.version,major:Number(process.versions.node.split('.')[0]),platform:process.platform,arch:process.arch})" | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0) {
@@ -325,8 +336,16 @@ if not defined CTMCP_DATA_DIR (
     set "CTMCP_DATA_DIR=%USERPROFILE%\AppData\Local\CodingToolsMCPNode"
   )
 )
-if not defined CTMCP_PORT set "CTMCP_PORT=3789"
+set "CTMCP_LAUNCH_PORT=3789"
+if defined CTMCP_PORT set "CTMCP_LAUNCH_PORT=%CTMCP_PORT%"
 if not exist "%CTMCP_DATA_DIR%" mkdir "%CTMCP_DATA_DIR%" >nul 2>nul
+set "CTMCP_DEFAULT_WORKSPACE=%CTMCP_DATA_DIR%\workspace"
+if not defined CTMCP_WORKSPACES (
+  if not exist "%CTMCP_DATA_DIR%\agent.json" if not exist "%CTMCP_DATA_DIR%\workspace-profiles.json" (
+    if not exist "%CTMCP_DEFAULT_WORKSPACE%" mkdir "%CTMCP_DEFAULT_WORKSPACE%" >nul 2>nul
+    set "CTMCP_WORKSPACES=%CTMCP_DEFAULT_WORKSPACE%"
+  )
+)
 if not exist "%PORTABLE_ROOT%\logs" mkdir "%PORTABLE_ROOT%\logs" >nul 2>nul
 
 set "OPEN_BROWSER=1"
@@ -339,19 +358,19 @@ echo [Coding Tools MCP] Node Agent portable
 echo Edition: __EDITION__
 echo Runtime: %NODE_EXE%
 echo Data:    %CTMCP_DATA_DIR%
-echo MCP:     http://127.0.0.1:%CTMCP_PORT%/mcp
-echo UI:      http://127.0.0.1:%CTMCP_PORT%/ui
-powershell.exe -NoProfile -NonInteractive -Command "$port=$env:CTMCP_PORT; try{$r=Invoke-RestMethod -Uri ('http://127.0.0.1:'+$port+'/health') -Method Get -TimeoutSec 1; if($r.ok -eq $true -and [string]$r.server -eq 'coding-tools-mcp-node'){exit 0}}catch{}; exit 1" >nul 2>nul
+echo MCP:     http://127.0.0.1:%CTMCP_LAUNCH_PORT%/mcp
+echo UI:      http://127.0.0.1:%CTMCP_LAUNCH_PORT%/ui
+powershell.exe -NoProfile -NonInteractive -Command "$port=$env:CTMCP_LAUNCH_PORT; try{$r=Invoke-RestMethod -Uri ('http://127.0.0.1:'+$port+'/health') -Method Get -TimeoutSec 1; if($r.ok -eq $true -and [string]$r.server -eq 'coding-tools-mcp-node'){exit 0}}catch{}; exit 1" >nul 2>nul
 if not errorlevel 1 (
-  echo Node Agent is already running on port %CTMCP_PORT%.
+  echo Node Agent is already running on port %CTMCP_LAUNCH_PORT%.
   echo Reusing the running instance.
-  if "%OPEN_BROWSER%"=="1" start "" "http://127.0.0.1:%CTMCP_PORT%/ui"
+  if "%OPEN_BROWSER%"=="1" start "" "http://127.0.0.1:%CTMCP_LAUNCH_PORT%/ui"
   exit /b 0
 )
 
-powershell.exe -NoProfile -NonInteractive -Command "$port=[int]$env:CTMCP_PORT; try{$client=[System.Net.Sockets.TcpClient]::new(); $pending=$client.BeginConnect('127.0.0.1',$port,$null,$null); if($pending.AsyncWaitHandle.WaitOne(350)){try{$client.EndConnect($pending)}catch{}; $connected=$client.Connected; $client.Close(); if($connected){exit 0}}; $client.Close()}catch{}; exit 1" >nul 2>nul
+powershell.exe -NoProfile -NonInteractive -Command "$port=[int]$env:CTMCP_LAUNCH_PORT; try{$client=[System.Net.Sockets.TcpClient]::new(); $pending=$client.BeginConnect('127.0.0.1',$port,$null,$null); if($pending.AsyncWaitHandle.WaitOne(350)){try{$client.EndConnect($pending)}catch{}; $connected=$client.Connected; $client.Close(); if($connected){exit 0}}; $client.Close()}catch{}; exit 1" >nul 2>nul
 if not errorlevel 1 (
-  echo ERROR: Port %CTMCP_PORT% is already in use by another process.
+  echo ERROR: Port %CTMCP_LAUNCH_PORT% is already in use by another process.
   echo Stop that process or set CTMCP_PORT to a free port, then try again.
   goto :failed
 )
@@ -359,7 +378,9 @@ if not errorlevel 1 (
 echo Press Ctrl+C to stop.
 echo.
 
-if "%OPEN_BROWSER%"=="1" start "" powershell.exe -NoProfile -WindowStyle Hidden -Command "$port=$env:CTMCP_PORT; for($i=0;$i -lt 80;$i++){try{$r=Invoke-WebRequest -UseBasicParsing -TimeoutSec 1 ('http://127.0.0.1:'+$port+'/health'); if($r.StatusCode -eq 200){Start-Process ('http://127.0.0.1:'+$port+'/ui'); exit 0}}catch{}; Start-Sleep -Milliseconds 250}"
+set "CTMCP_RESTART_SUPERVISOR=active-v1"
+
+if "%OPEN_BROWSER%"=="1" start "" powershell.exe -NoProfile -WindowStyle Hidden -Command "$port=$env:CTMCP_LAUNCH_PORT; for($i=0;$i -lt 80;$i++){try{$r=Invoke-WebRequest -UseBasicParsing -TimeoutSec 1 ('http://127.0.0.1:'+$port+'/health'); if($r.StatusCode -eq 200){Start-Process ('http://127.0.0.1:'+$port+'/ui'); exit 0}}catch{}; Start-Sleep -Milliseconds 250}"
 
 :run_agent
 "%NODE_EXE%" "%AGENT_ENTRY%" --restart-supervised %*
@@ -427,6 +448,7 @@ if errorlevel 1 goto :failed
         $startBat = $startBatTemplate.Replace('__RUNTIME_SETUP__', $runtimeSetup).Replace('__EDITION__', [string]$definition.edition)
         Write-Utf8NoBom -Path (Join-Path $editionPackage 'start-node-agent.bat') -Content $startBat
         Write-Utf8NoBom -Path (Join-Path $editionPackage 'open-management-ui.bat') -Content $openBat
+        Copy-Item -LiteralPath (Join-Path $repositoryRoot 'scripts\switch-node-agent-to-latest.ps1') -Destination (Join-Path $editionPackage 'update-handoff.ps1') -Force
 
         $readme = @"
 Coding Tools MCP Node Agent Portable

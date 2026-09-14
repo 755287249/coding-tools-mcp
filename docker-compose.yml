@@ -1,5 +1,6 @@
 services:
   node-agent:
+    image: ${CTMCP_NODE_AGENT_IMAGE:-coding-tools-node-agent:local}
     build:
       context: .
       dockerfile: packages/node-agent/Dockerfile

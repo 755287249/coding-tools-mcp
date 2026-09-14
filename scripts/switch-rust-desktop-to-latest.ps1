@@ -15,6 +15,24 @@ param(
 $ErrorActionPreference = 'Stop'
 $workspace = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 
+function Resolve-StableWorkspaceRoot {
+    param([Parameter(Mandatory = $true)][string]$CurrentWorkspace)
+
+    try {
+        $gitCommonDir = (& git -C $CurrentWorkspace rev-parse --path-format=absolute --git-common-dir 2>$null | Select-Object -First 1)
+        if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace([string]$gitCommonDir)) {
+            $resolvedCommonDir = [System.IO.Path]::GetFullPath(([string]$gitCommonDir).Trim())
+            if ((Split-Path -Leaf $resolvedCommonDir) -eq '.git') {
+                return (Split-Path -Parent $resolvedCommonDir)
+            }
+        }
+    } catch {}
+
+    return $CurrentWorkspace
+}
+
+$stableWorkspace = Resolve-StableWorkspaceRoot -CurrentWorkspace $workspace
+
 function Write-Log {
     param([string]$Message)
     $line = "[$([DateTime]::Now.ToString('s'))] $Message"
@@ -82,7 +100,7 @@ function Get-RuntimeSnapshot {
         return [pscustomobject]@{ mcpWorkspaceIds = @(); actionsWorkspaceIds = @(); endpoints = @() }
     }
 
-    $data = Get-Content -Raw -LiteralPath $Path | ConvertFrom-Json
+    $data = [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
     foreach ($id in @($data.mcp_enabled_workspace_ids)) {
         if (-not [string]::IsNullOrWhiteSpace([string]$id)) { [void]$mcpIds.Add([string]$id) }
     }
@@ -212,7 +230,14 @@ if ([string]::IsNullOrWhiteSpace($ResultPath)) { $ResultPath = Join-Path $dataDi
 
 if (-not $Worker) {
     if (-not (Test-Path -LiteralPath $PackageZip -PathType Leaf)) { throw "Rust portable package not found: $PackageZip" }
-    $zipHash = (Get-FileHash -LiteralPath $PackageZip -Algorithm SHA256).Hash.ToLowerInvariant()
+    $stream = [System.IO.File]::OpenRead($PackageZip)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $zipHash = ([System.BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+    } finally {
+        $sha.Dispose()
+        $stream.Dispose()
+    }
     $stageRoot = Join-Path $env:LOCALAPPDATA "CTMCP\u\${ExpectedVersion}-$($zipHash.Substring(0, 8))"
     if (-not (Test-Path -LiteralPath $stageRoot -PathType Container)) {
         $tempStage = "$stageRoot.next-$([guid]::NewGuid().ToString('N'))"
@@ -316,20 +341,47 @@ try {
     # Keep the stable portable entry point current, but only after the new
     # process is healthy. Directory replacement therefore does not lengthen the
     # service interruption window or compromise rollback during handoff.
-    $canonicalDir = Join-Path (Split-Path -Parent $PackageZip) 'ctmcp-win64'
+    $canonicalDir = Join-Path $stableWorkspace 'dist-portable\ctmcp-win64'
     $canonicalNext = "$canonicalDir.next-$([guid]::NewGuid().ToString('N'))"
+    $canonicalPrevious = "$canonicalDir.previous-$([guid]::NewGuid().ToString('N'))"
+    $canonicalMovedAside = $false
     try {
         Copy-Item -LiteralPath (Split-Path -Parent $StagedExe) -Destination $canonicalNext -Recurse
         if (Test-Path -LiteralPath $canonicalDir) {
-            Remove-Item -LiteralPath $canonicalDir -Recurse -Force
+            Move-Item -LiteralPath $canonicalDir -Destination $canonicalPrevious
+            $canonicalMovedAside = $true
         }
-        Move-Item -LiteralPath $canonicalNext -Destination $canonicalDir
+        try {
+            Move-Item -LiteralPath $canonicalNext -Destination $canonicalDir
+        } catch {
+            if ($canonicalMovedAside -and (Test-Path -LiteralPath $canonicalPrevious) -and -not (Test-Path -LiteralPath $canonicalDir)) {
+                Move-Item -LiteralPath $canonicalPrevious -Destination $canonicalDir
+                $canonicalMovedAside = $false
+            }
+            throw
+        }
+        if ($canonicalMovedAside -and (Test-Path -LiteralPath $canonicalPrevious)) {
+            Remove-Item -LiteralPath $canonicalPrevious -Recurse -Force -ErrorAction SilentlyContinue
+            $canonicalMovedAside = Test-Path -LiteralPath $canonicalPrevious
+        }
         Write-Log "Canonical portable folder updated: $canonicalDir"
     } catch {
+        if ($canonicalMovedAside -and (Test-Path -LiteralPath $canonicalPrevious) -and -not (Test-Path -LiteralPath $canonicalDir)) {
+            try {
+                Move-Item -LiteralPath $canonicalPrevious -Destination $canonicalDir
+                $canonicalMovedAside = $false
+                Write-Log "Canonical portable folder restored after refresh failure: $canonicalDir"
+            } catch {
+                Write-Log "Warning: canonical portable restore failed; previous folder retained at $canonicalPrevious"
+            }
+        }
         Write-Log "Warning: replacement is healthy, but canonical portable folder could not be refreshed: $($_.Exception.Message)"
     } finally {
         if (Test-Path -LiteralPath $canonicalNext) {
             Remove-Item -LiteralPath $canonicalNext -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        if (-not $canonicalMovedAside -and (Test-Path -LiteralPath $canonicalPrevious)) {
+            Remove-Item -LiteralPath $canonicalPrevious -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
 

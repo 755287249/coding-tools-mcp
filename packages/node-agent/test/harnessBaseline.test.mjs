@@ -114,27 +114,77 @@ test('start_task captures Git-visible file entries and reports a matching baseli
   assert.equal(status.head, started.task.baseline.head);
 });
 
-test('baseline follows Git ignore rules and does not descend into linked worktrees', async () => {
+test('baseline follows Git ignore rules and excludes nested worktree management containers from untracked state', async () => {
   const state = await fixture({
     '.gitignore': 'runtime-data/\ncache/\n',
-    'tracked.txt': 'initial\n'
+    'tracked.txt': 'initial\n',
+    'managed-worktrees/keep.txt': 'tracked sibling\n'
   });
   await mkdir(path.join(state.root, 'runtime-data'), { recursive: true });
   await writeFile(path.join(state.root, 'runtime-data', 'state.json'), '{"version":1}\n');
-  const linked = path.join(state.root, 'linked-worktree');
+  const container = path.join(state.root, 'managed-worktrees');
+  const linked = path.join(container, 'linked-worktree');
   const linkedBranch = `linked-${Math.random().toString(36).slice(2)}`;
   await git(state.root, 'worktree', 'add', '-b', linkedBranch, linked);
+  await mkdir(path.join(container, 'cargo-target', 'release'), { recursive: true });
+  await writeFile(path.join(container, 'cargo-target', 'release', 'artifact.bin'), 'generated\n');
 
   const started = await callTool(state.ctx, 'start_task', { objective: 'Ignore runtime-owned files' }, state.meta);
   assert.equal(started.ok, true);
   assert.equal(started.task.baseline.entries.some(entry => entry.path.startsWith('runtime-data/')), false);
-  assert.equal(started.task.baseline.entries.some(entry => entry.path.startsWith('linked-worktree/')), false);
+  assert.equal(started.task.baseline.entries.some(entry => entry.path.startsWith('managed-worktrees/linked-worktree/')), false);
+  assert.equal(started.task.baseline.entries.some(entry => entry.path === 'managed-worktrees/cargo-target/release/artifact.bin'), false);
+  assert.equal(started.task.baseline.entries.some(entry => entry.path === 'managed-worktrees/keep.txt'), true);
 
   await writeFile(path.join(state.root, 'runtime-data', 'state.json'), '{"version":2}\n');
   await writeFile(path.join(linked, 'tracked.txt'), 'linked change\n');
+  await writeFile(path.join(container, 'cargo-target', 'release', 'artifact.bin'), 'generated again\n');
   const status = await callTool(state.ctx, 'harness_status', {}, state.meta);
   assert.equal(status.baseline_matches, true);
   assert.equal(status.writable, true);
+});
+
+test('broad workspace scans exclude wholly-untracked worktree containers but explicit paths remain accessible', async () => {
+  const state = await fixture({ 'tracked.txt': 'visible marker\n' });
+  const container = path.join(state.root, 'scan-worktrees');
+  const linked = path.join(container, 'linked-worktree');
+  const linkedBranch = `scan-linked-${Math.random().toString(36).slice(2)}`;
+  await git(state.root, 'worktree', 'add', '-b', linkedBranch, linked);
+  const scratch = path.join(container, 'cargo-target', 'release');
+  await mkdir(scratch, { recursive: true });
+  await writeFile(path.join(scratch, 'artifact.txt'), 'scratch-only-marker\n');
+
+  const broadSearch = await callTool(state.ctx, 'search_text', { query: 'scratch-only-marker' }, state.meta);
+  assert.equal(broadSearch.ok, true);
+  assert.equal(broadSearch.returned_count, 0);
+  assert.equal(broadSearch.scan_excluded_worktree_container_count, 1);
+
+  const broadList = await callTool(state.ctx, 'list_files', { recursive: true, max_results: 100 }, state.meta);
+  assert.equal(broadList.ok, true);
+  assert.equal(broadList.entries.some(entry => entry.path.startsWith('scan-worktrees/')), false);
+  assert.equal(broadList.scan_excluded_worktree_container_count, 1);
+
+  const project = await callTool(state.ctx, 'project_map', { max_depth: 4 }, state.meta);
+  assert.equal(project.ok, true);
+  assert.equal(project.tree.some(entry => entry.path.startsWith('scan-worktrees/')), false);
+  assert.equal(project.scan_excluded_worktree_container_count, 1);
+
+  const explicitSearch = await callTool(state.ctx, 'search_text', {
+    path: 'scan-worktrees/cargo-target',
+    query: 'scratch-only-marker'
+  }, state.meta);
+  assert.equal(explicitSearch.ok, true);
+  assert.equal(explicitSearch.returned_count, 1);
+  assert.equal(explicitSearch.scan_excluded_worktree_container_count, 0);
+
+  const explicitList = await callTool(state.ctx, 'list_files', {
+    path: 'scan-worktrees/cargo-target',
+    recursive: true,
+    max_results: 100
+  }, state.meta);
+  assert.equal(explicitList.ok, true);
+  assert.equal(explicitList.entries.some(entry => entry.path.endsWith('artifact.txt')), true);
+  assert.equal(explicitList.scan_excluded_worktree_container_count, 0);
 });
 
 test('non-ignored untracked file drift remains visible without blocking writes', async () => {
@@ -265,6 +315,9 @@ test('successful tracked mutations refresh expected state and persist change evi
   }, state.meta);
   assert.equal(edited.ok, true);
   assert.match(edited.operation_id, /^[0-9a-f]{32}$/);
+  assert.equal(edited.baseline_refresh_mode, 'incremental_verified_edit');
+  assert.equal(edited.baseline_refresh_file_count, 1);
+  assert.ok(Number(edited.phase_durations_ms?.baseline_refresh_ms ?? -1) >= 0);
 
   const files = await callTool(state.ctx, 'file_ops', {
     operations: [
@@ -411,6 +464,103 @@ test('finish_task finalizes a verifying task without recapturing its immutable c
   assert.equal(completed.change_summary.why.text, 'Captured before verification');
 });
 
+test('active task operations automatically feed task credit into shadow knowledge', async () => {
+  const state = await fixture({ 'tracked.txt': 'initial\n' });
+  const runtime = state.ctx.folderRuntimes.get('repo');
+  assert.ok(runtime);
+  const learned = await runtime.knowledgeStore.upsert({
+    id: '', schemaVersion: 1, scope: 'runtime', target: 'tool_strategy', status: 'shadow',
+    trigger: { tool: 'read_file' },
+    hypothesis: 'Read operations inside tasks provide a task-attribution fixture.',
+    recommendedAction: { recommendation: 'observe_only' },
+    evidence: {
+      observations: 5, successes: 5, failures: 0,
+      totalDurationMs: 5, totalRequestBytes: 5, totalResponseBytes: 5,
+      firstSeenAtMs: 1, lastSeenAtMs: 5
+    },
+    confidence: 0.5,
+    sourceEventIds: ['seed-1', 'seed-2', 'seed-3', 'seed-4', 'seed-5'],
+    counterexampleEventIds: [], createdAtMs: 1, updatedAtMs: 5
+  });
+
+  const started = await callTool(state.ctx, 'start_task', { objective: 'Credit shadow task' }, state.meta);
+  const read = await callTool(state.ctx, 'read_file', { path: 'tracked.txt' }, state.meta);
+  assert.equal(read.ok, true);
+  await runtime.knowledgeIngestor.flush();
+  let impact = (await runtime.knowledgeImpactStore.list()).find(item => item.knowledgeId === learned.id);
+  assert.ok(impact);
+  assert.deepEqual(impact.matchedTaskIds, [started.task.id]);
+  assert.deepEqual(impact.creditedTaskIds, []);
+
+  const verifying = await callTool(state.ctx, 'finish_task', { task_id: started.task.id }, state.meta);
+  assert.equal(verifying.task.status, 'verifying');
+  const completed = await callTool(state.ctx, 'finish_task', { task_id: started.task.id }, state.meta);
+  assert.equal(completed.task.status, 'completed');
+  await runtime.knowledgeIngestor.flush();
+
+  impact = (await runtime.knowledgeImpactStore.list()).find(item => item.knowledgeId === learned.id);
+  assert.ok(impact);
+  assert.deepEqual(impact.creditedTaskIds, [started.task.id]);
+  assert.equal(impact.taskVerifiedSuccesses, 1);
+  assert.equal(impact.taskFailures, 0);
+});
+
+test('recoverable task failure is credited only after close_failed_task terminalizes it', async () => {
+  const state = await fixture({ 'tracked.txt': 'initial\n' });
+  const runtime = state.ctx.folderRuntimes.get('repo');
+  assert.ok(runtime);
+  const learned = await runtime.knowledgeStore.upsert({
+    id: '', schemaVersion: 1, scope: 'runtime', target: 'tool_strategy', status: 'shadow',
+    trigger: { tool: 'read_file' },
+    hypothesis: 'Recoverable task failures must not be treated as terminal learning outcomes.',
+    recommendedAction: { recommendation: 'observe_only' },
+    evidence: {
+      observations: 5, successes: 5, failures: 0,
+      totalDurationMs: 5, totalRequestBytes: 5, totalResponseBytes: 5,
+      firstSeenAtMs: 1, lastSeenAtMs: 5
+    },
+    confidence: 0.5,
+    sourceEventIds: ['fail-seed-1', 'fail-seed-2', 'fail-seed-3', 'fail-seed-4', 'fail-seed-5'],
+    counterexampleEventIds: [], createdAtMs: 1, updatedAtMs: 5
+  });
+
+  const started = await callTool(state.ctx, 'start_task', { objective: 'Recoverable failure credit' }, state.meta);
+  assert.equal((await callTool(state.ctx, 'read_file', { path: 'tracked.txt' }, state.meta)).ok, true);
+  const failed = await callTool(state.ctx, 'fail_task', { task_id: started.task.id }, state.meta);
+  assert.equal(failed.task.status, 'failed');
+  await runtime.knowledgeIngestor.flush();
+  let impact = (await runtime.knowledgeImpactStore.list()).find(item => item.knowledgeId === learned.id);
+  assert.ok(impact);
+  assert.deepEqual(impact.creditedTaskIds, []);
+  assert.equal(impact.taskFailures, 0);
+
+  const closed = await callTool(state.ctx, 'close_failed_task', { task_id: started.task.id }, state.meta);
+  assert.equal(closed.task.status, 'failed_final');
+  await runtime.knowledgeIngestor.flush();
+  impact = (await runtime.knowledgeImpactStore.list()).find(item => item.knowledgeId === learned.id);
+  assert.ok(impact);
+  assert.deepEqual(impact.creditedTaskIds, [started.task.id]);
+  assert.equal(impact.taskFailures, 1);
+});
+
+test('rollback_task requires the original task baseline before terminalizing rollback', async () => {
+  const state = await fixture({ 'tracked.txt': 'initial\n' });
+  const started = await callTool(state.ctx, 'start_task', { objective: 'Verified rollback' }, state.meta);
+  await writeFile(path.join(state.root, 'tracked.txt'), 'changed\n');
+  const failed = await callTool(state.ctx, 'fail_task', { task_id: started.task.id }, state.meta);
+  assert.equal(failed.task.status, 'failed');
+
+  const rejected = await callTool(state.ctx, 'rollback_task', { task_id: started.task.id }, state.meta);
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.error.code, 'ROLLBACK_NOT_VERIFIED');
+
+  await writeFile(path.join(state.root, 'tracked.txt'), 'initial\n');
+  const rolledBack = await callTool(state.ctx, 'rollback_task', { task_id: started.task.id }, state.meta);
+  assert.equal(rolledBack.ok, true);
+  assert.equal(rolledBack.task.status, 'rolled_back');
+  assert.equal(rolledBack.baseline_verified, true);
+});
+
 test('start_task can safely finalize a completed verifying task before starting the next task', async () => {
   const state = await fixture();
   const first = await callTool(state.ctx, 'start_task', { objective: 'First task' }, state.meta);
@@ -432,7 +582,7 @@ test('operation logs persist bounded execution diagnostics without raw process p
   const outputMarker = 'OPERATION_OUTPUT_MUST_NOT_PERSIST';
   const executed = await callTool(state.ctx, 'exec_command', {
     program: nodeProgram,
-    args: ['-e', `setTimeout(() => { process.stderr.write('${outputMarker}'); process.exit(7); }, 1_000)`],
+    args: ['-e', `setTimeout(() => { process.stderr.write('${outputMarker}'); process.exit(7); }, 5_000)`],
     deduplicate: true,
     yield_time_ms: 0,
     timeout_ms: 10_000
@@ -440,7 +590,7 @@ test('operation logs persist bounded execution diagnostics without raw process p
   assert.ok(executed.command_ok === null || executed.command_ok === false, JSON.stringify(executed));
   const reattached = await callTool(state.ctx, 'exec_command', {
     program: nodeProgram,
-    args: ['-e', `setTimeout(() => { process.stderr.write('${outputMarker}'); process.exit(7); }, 1_000)`],
+    args: ['-e', `setTimeout(() => { process.stderr.write('${outputMarker}'); process.exit(7); }, 5_000)`],
     deduplicate: true,
     yield_time_ms: 0,
     timeout_ms: 10_000
@@ -460,8 +610,11 @@ test('operation logs persist bounded execution diagnostics without raw process p
         until: 'finalized',
         output_mode: 'delta'
       }, state.meta);
-  assert.equal(finalized.ok, false, JSON.stringify(finalized));
+  assert.equal(finalized.ok, true, JSON.stringify(finalized));
+  assert.equal(finalized.transport_ok, true, JSON.stringify(finalized));
   assert.equal(finalized.command_ok, false, JSON.stringify(finalized));
+  assert.equal(finalized.failure_origin, 'child_process', JSON.stringify(finalized));
+  assert.equal(finalized.policy_blocked, false, JSON.stringify(finalized));
   assert.equal(finalized.process_exit_code, 7, JSON.stringify(finalized));
 
   const log = await callTool(state.ctx, 'operation_log', { cursor: 0, limit: 100 }, state.meta);
@@ -597,6 +750,21 @@ test('active tasks are scoped to the current linked worktree while operation his
   const selected = await callTool(state.ctx, 'set_default_cwd', { path: '.worktrees/scoped-task' }, state.meta);
   assert.equal(selected.ok, true);
 
+  const linkedStatusBeforeTask = await callTool(state.ctx, 'git_status', {}, state.meta);
+  assert.equal(linkedStatusBeforeTask.ok, true, JSON.stringify(linkedStatusBeforeTask));
+  assert.equal(linkedStatusBeforeTask.is_repo, true);
+  assert.equal(linkedStatusBeforeTask.branch, branch);
+  assert.equal(linkedStatusBeforeTask.repo.repo_root.replaceAll('\\', '/'), linked.replaceAll('\\', '/'));
+  const linkedHead = (await git(linked, 'rev-parse', 'HEAD')).stdout.trim();
+  const linkedCommitDryRun = await callTool(state.ctx, 'git_commit', {
+    message: 'linked worktree dry run',
+    paths: ['tracked.txt'],
+    expected_head: linkedHead,
+    dry_run: true
+  }, state.meta);
+  assert.equal(linkedCommitDryRun.ok, true, JSON.stringify(linkedCommitDryRun));
+  assert.equal(linkedCommitDryRun.repo.repo_root.replaceAll('\\', '/'), linked.replaceAll('\\', '/'));
+
   const linkedTask = await callTool(state.ctx, 'start_task', { objective: 'Linked worktree task' }, state.meta);
   assert.equal(linkedTask.ok, true, JSON.stringify(linkedTask));
   assert.notEqual(linkedTask.task.id, rootTask.task.id);
@@ -614,6 +782,10 @@ test('active tasks are scoped to the current linked worktree while operation his
     edits: [{ type: 'replace', old_text: 'initial\n', new_text: 'linked\n' }]
   }, state.meta);
   assert.equal(edited.ok, true, JSON.stringify(edited));
+  const linkedDiff = await callTool(state.ctx, 'git_diff', {}, state.meta);
+  assert.equal(linkedDiff.ok, true, JSON.stringify(linkedDiff));
+  assert.match(linkedDiff.diff, /linked/);
+  assert.ok(linkedDiff.files.some(file => file.path === 'tracked.txt'));
   const operations = await callTool(state.ctx, 'operation_log', { cursor: 0, limit: 100 }, state.meta);
   assert.ok(operations.operations.some(row => row.tool === 'edit' && row.task_id === linkedTask.task.id));
   assert.equal(operations.operations.some(row => row.tool === 'edit' && row.task_id === rootTask.task.id), false);

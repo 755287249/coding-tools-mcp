@@ -98,6 +98,23 @@ impl DataStore {
         Ok(result)
     }
 
+    pub fn read_workspace_secret_latest(profile_id: &str, key: &str) -> AppResult<Option<String>> {
+        let _guard = lock_data_file()?;
+        let data = load_or_migrate()?;
+        workspace_secret_value(&data, profile_id, key)
+    }
+
+    pub fn write_workspace_secret_latest(
+        profile_id: &str,
+        key: &str,
+        value: &str,
+    ) -> AppResult<()> {
+        let _guard = lock_data_file()?;
+        let mut data = load_or_migrate()?;
+        update_workspace_secret_value(&mut data, profile_id, key, value)?;
+        save(&data)
+    }
+
     pub fn data(&self) -> &AppData {
         &self.data
     }
@@ -387,22 +404,7 @@ impl DataStore {
     }
 
     pub fn get_workspace_secret(&self, profile_id: &str, key: &str) -> AppResult<Option<String>> {
-        if shared_live_store_enabled() {
-            let path = shared_secrets_file_next_to(&shared_workspace_file(profile_id));
-            if path.is_file() {
-                return Ok(shared_secret_values(&read_maybe_wrapped_json(&path)?)
-                    .get(key)
-                    .filter(|value| !value.is_empty())
-                    .cloned());
-            }
-        }
-        Ok(self
-            .data
-            .workspace_secrets
-            .get(profile_id)
-            .and_then(|secrets| secrets.get(key))
-            .filter(|value| !value.is_empty())
-            .cloned())
+        workspace_secret_value(&self.data, profile_id, key)
     }
 
     pub fn set_workspace_secret(
@@ -411,29 +413,7 @@ impl DataStore {
         key: &str,
         value: &str,
     ) -> AppResult<()> {
-        let mut latest = if shared_live_store_enabled() {
-            let path = shared_secrets_file_next_to(&shared_workspace_file(profile_id));
-            if path.is_file() {
-                shared_secret_values(&read_maybe_wrapped_json(&path)?)
-            } else {
-                self.data
-                    .workspace_secrets
-                    .get(profile_id)
-                    .cloned()
-                    .unwrap_or_default()
-            }
-        } else {
-            self.data
-                .workspace_secrets
-                .get(profile_id)
-                .cloned()
-                .unwrap_or_default()
-        };
-        latest.insert(key.to_string(), value.to_string());
-        self.data
-            .workspace_secrets
-            .insert(profile_id.to_string(), latest.clone());
-        write_shared_secret_values(profile_id, &latest)?;
+        update_workspace_secret_value(&mut self.data, profile_id, key, value)?;
         self.save()
     }
 
@@ -499,6 +479,74 @@ impl DataStore {
         }
         self.save()
     }
+}
+
+fn workspace_secret_value(
+    data: &AppData,
+    profile_id: &str,
+    key: &str,
+) -> AppResult<Option<String>> {
+    let shared_root = shared_live_store_enabled().then(shared_workspaces_root);
+    workspace_secret_value_at(data, profile_id, key, shared_root.as_deref())
+}
+
+fn workspace_secret_value_at(
+    data: &AppData,
+    profile_id: &str,
+    key: &str,
+    shared_root: Option<&Path>,
+) -> AppResult<Option<String>> {
+    if let Some(root) = shared_root {
+        let path = shared_secrets_file_next_to(&shared_workspace_file_in(root, profile_id));
+        if path.is_file() {
+            return Ok(shared_secret_values(&read_maybe_wrapped_json(&path)?)
+                .get(key)
+                .filter(|value| !value.is_empty())
+                .cloned());
+        }
+    }
+    Ok(data
+        .workspace_secrets
+        .get(profile_id)
+        .and_then(|secrets| secrets.get(key))
+        .filter(|value| !value.is_empty())
+        .cloned())
+}
+
+fn update_workspace_secret_value(
+    data: &mut AppData,
+    profile_id: &str,
+    key: &str,
+    value: &str,
+) -> AppResult<()> {
+    let shared_root = shared_live_store_enabled().then(shared_workspaces_root);
+    update_workspace_secret_value_at(data, profile_id, key, value, shared_root.as_deref())
+}
+
+fn update_workspace_secret_value_at(
+    data: &mut AppData,
+    profile_id: &str,
+    key: &str,
+    value: &str,
+    shared_root: Option<&Path>,
+) -> AppResult<()> {
+    let shared_path = shared_root
+        .map(|root| shared_secrets_file_next_to(&shared_workspace_file_in(root, profile_id)));
+    let mut latest = if let Some(path) = shared_path.as_ref().filter(|path| path.is_file()) {
+        shared_secret_values(&read_maybe_wrapped_json(path)?)
+    } else {
+        data.workspace_secrets
+            .get(profile_id)
+            .cloned()
+            .unwrap_or_default()
+    };
+    latest.insert(key.to_string(), value.to_string());
+    data.workspace_secrets
+        .insert(profile_id.to_string(), latest.clone());
+    if let Some(path) = shared_path {
+        write_shared_secret_values_at(&path, &latest)?;
+    }
+    Ok(())
 }
 
 fn shared_live_store_enabled() -> bool {
@@ -986,6 +1034,45 @@ mod tests {
             .expect("get");
         assert_eq!(loaded.as_deref(), Some("roundtrip-secret"));
         store.remove_workspace_secrets(&id).expect("remove");
+    }
+
+    #[test]
+    fn workspace_secret_helpers_prefer_and_update_shared_live_store() {
+        let root = tempfile::tempdir().expect("shared root");
+        let profile_id = "shared-secret-workspace";
+        let key = "builtin_tunnel_device_identity";
+        let shared_path =
+            shared_secrets_file_next_to(&shared_workspace_file_in(root.path(), profile_id));
+        write_shared_secret_values_at(
+            &shared_path,
+            &std::collections::HashMap::from([(key.into(), "shared-enrolled".into())]),
+        )
+        .expect("seed shared secret");
+
+        let mut data = AppData::default();
+        data.workspace_secrets.insert(
+            profile_id.into(),
+            std::collections::HashMap::from([(key.into(), "stale-local".into())]),
+        );
+        assert_eq!(
+            workspace_secret_value_at(&data, profile_id, key, Some(root.path()))
+                .expect("read shared secret")
+                .as_deref(),
+            Some("shared-enrolled")
+        );
+
+        update_workspace_secret_value_at(
+            &mut data,
+            profile_id,
+            key,
+            "updated-enrolled",
+            Some(root.path()),
+        )
+        .expect("update shared secret");
+        assert_eq!(data.workspace_secrets[profile_id][key], "updated-enrolled");
+        let persisted =
+            shared_secret_values(&read_maybe_wrapped_json(&shared_path).expect("read persisted"));
+        assert_eq!(persisted[key], "updated-enrolled");
     }
 
     #[test]

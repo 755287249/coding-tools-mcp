@@ -2,11 +2,25 @@ import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { EventEmitter } from 'node:events';
 import type { KeyedMutex, Semaphore } from './runtime.js';
 import type { SkillRegistry } from './skills/registry.js';
+import type { EvolvedSkillRegistry, ToolEvolutionRegistry, ToolStrategyRegistry } from './knowledge/registries.js';
+import type { KnowledgeIngestor } from './knowledge/ingestor.js';
+import type { KnowledgeImpactStore } from './knowledge/impact.js';
+import type { KnowledgeStore } from './knowledge/store.js';
+import type { CanaryImpactStore, CanaryStrategyEngine } from './knowledge/canary.js';
+import type { EvolvedSkillCanaryEngine } from './knowledge/evolvedSkillCanary.js';
+import type {
+  ToolEvolutionCandidateClaimer,
+  ToolEvolutionExperimentStore,
+  ToolEvolutionPlanner,
+  ToolEvolutionProposalStore
+} from './knowledge/toolEvolution.js';
+import type { ToolEvolutionBenchmarkCollector } from './knowledge/toolEvolutionCollector.js';
 import type { ExtensionRegistry } from './extensions/registry.js';
 import type { OperationRecord, StateStoreContract } from './state/contract.js';
 import type { ToolUsageStoreContract } from './toolUsage/contract.js';
 import type { WorkerPolicy } from './tunnelPolicy.js';
 import type { StartupDiagnostics } from './processStartup.js';
+import type { ProcessTimeoutContract } from './processes/timeoutPolicy.js';
 import type { ConversationStoreContract, MutableStringMap } from './conversation/contract.js';
 
 export type {
@@ -115,6 +129,7 @@ export interface AgentConfig {
     clientSecret?: string;
     password: string;
     tokenSecret: string;
+    tokenTtlSeconds?: number;
   };
   folders: WorkspaceFolder[];
   limits: {
@@ -166,6 +181,7 @@ export interface AgentConfigDocument {
   };
   oauth?: {
     clientId?: string;
+    tokenTtlSeconds?: number;
   };
   folders?: WorkspaceFolderDocument[];
   limits?: Partial<AgentConfig['limits']>;
@@ -192,6 +208,7 @@ export interface AgentSecrets {
   oauthClientSecret?: string;
   oauthTokenSecret?: string;
   tunnelEnrollmentUrl?: string;
+  named?: Record<string, string>;
 }
 
 export interface ToolDefinition {
@@ -230,6 +247,20 @@ export interface FolderRuntime {
   pendingOperations: Map<string, PendingOperation>;
   editProposals: Map<string, EditProposalRecord>;
   skillRegistry: SkillRegistry;
+  knowledgeStore: KnowledgeStore;
+  knowledgeImpactStore: KnowledgeImpactStore;
+  knowledgeIngestor: KnowledgeIngestor;
+  canaryImpactStore: CanaryImpactStore;
+  canaryStrategyEngine: CanaryStrategyEngine;
+  evolvedSkillCanaryEngine: EvolvedSkillCanaryEngine;
+  toolEvolutionExperimentStore: ToolEvolutionExperimentStore;
+  toolEvolutionProposalStore: ToolEvolutionProposalStore;
+  toolEvolutionCandidateClaimer: ToolEvolutionCandidateClaimer;
+  toolEvolutionPlanner: ToolEvolutionPlanner;
+  toolEvolutionBenchmarkCollector: ToolEvolutionBenchmarkCollector;
+  toolStrategyRegistry: ToolStrategyRegistry;
+  toolEvolutionRegistry: ToolEvolutionRegistry;
+  evolvedSkillRegistry: EvolvedSkillRegistry;
   admission: { blocking: Semaphore; process: Semaphore; locks: KeyedMutex };
 }
 
@@ -245,6 +276,7 @@ export interface ToolContext {
   usage: UsageRecord[];
   usageStore: ToolUsageStoreContract;
   state: StateStoreContract;
+  resolveSecret?: (name: string) => string | undefined;
   tunnelStatus?: TunnelStatus;
 }
 
@@ -268,6 +300,8 @@ export interface ProcessSession {
   cwd: string;
   startupDiagnostics: StartupDiagnostics;
   startedAt: number;
+  timeoutContract?: ProcessTimeoutContract;
+  processDeadlineMs?: number;
   firstOutputAt?: number;
   endedAt?: number;
   finalizedAt?: number;
@@ -283,6 +317,10 @@ export interface ProcessSession {
   outputEvents: ProcessOutputEvent[];
   outputEventBytes: number;
   child?: ChildProcessWithoutNullStreams;
+  processId?: number;
+  durableDirectory?: string;
+  durableWorkerPid?: number;
+  durableMonitor?: NodeJS.Timeout;
   interactive: boolean;
   stdinOpen: boolean;
   timedOut: boolean;
@@ -298,6 +336,8 @@ export interface ProcessSession {
   backendKill?: () => Promise<void>;
   terminationReason?: string;
   telemetryCommandKind: string;
+  testRunnerCapability?: JsonObject;
+  testWorkflow?: JsonObject;
   telemetryRecorded?: boolean;
   harnessOperations?: Map<string, OperationRecord>;
   harnessOperationRecordedIds?: Set<string>;
@@ -344,4 +384,8 @@ export interface TunnelStatus {
   lastRequestTimeout?: 'connect' | 'overall';
   lastRequestTimeoutAt?: number;
   startedAt?: number;
+  updateId?: string;
+  updateTargetVersion?: string;
+  updateState?: 'idle' | 'downloading' | 'verified' | 'scheduled' | 'failed';
+  updateError?: string;
 }

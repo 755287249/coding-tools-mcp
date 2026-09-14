@@ -18,7 +18,10 @@ export const workspaceToolHandlers = {
   read_many: ({ ctx, key, args }) => readManyTool(ctx, key, args),
   project_map: ({ ctx, key, args }) => projectMapTool(ctx, key, args),
   list_files: ({ ctx, key, args }) => listFilesTool(ctx, key, args),
-  search_text: ({ ctx, key, args }) => searchTextTool(ctx, key, args),
+  search_text: ({ ctx, key, args, knowledgeCanary }) => searchTextTool(ctx, key, args, {
+    exactTotalFastTail: knowledgeCanary?.applied === true
+      && knowledgeCanary.implementation === 'search_exact_total_fast_tail'
+  }),
   apply_patch: ({ ctx, key, args }) => applyPatchTool(ctx, key, args),
   edit: ({ ctx, key, args }) => editTool(ctx, key, args),
   file_ops: ({ ctx, key, args }) => fileOpsTool(ctx, key, args),

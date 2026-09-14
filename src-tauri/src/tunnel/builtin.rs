@@ -14,7 +14,7 @@ use std::time::Duration;
 use coding_tools_tunnel_protocol::{
     ControlMessage, TunnelService, WorkerDemand, WorkerPolicy, MAX_REQUEST_BODY_BYTES,
 };
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
@@ -28,7 +28,7 @@ use crate::workspace::WorkspaceProfile;
 use super::TunnelServiceKind;
 use connection::{connect_authenticated_worker, AuthenticatedWorkerConnection};
 use endpoint::{builtin_endpoint_for_client, parse_builtin_endpoint};
-use identity::{decode_signing_key, load_or_enroll_device_identity};
+use identity::{decode_server_verifying_key, decode_signing_key, load_or_enroll_device_identity};
 pub use metrics::BuiltinTunnelSnapshot;
 use metrics::{BuiltinTunnelMetrics, ConnectedWorkerGuard};
 use pool_policy::{
@@ -65,6 +65,8 @@ pub struct BuiltinTunnelConfig {
     pub local_base_url: String,
     device_id: String,
     signing_key: Arc<SigningKey>,
+    server_id: String,
+    server_verifying_key: Arc<VerifyingKey>,
     log_path: PathBuf,
 }
 
@@ -158,6 +160,7 @@ pub async fn spawn_builtin_tunnel(
     let endpoint =
         builtin_endpoint_for_client(&base.public_url, base.service, &identity.client_id)?;
     let signing_key = decode_signing_key(&identity.private_key)?;
+    let server_verifying_key = decode_server_verifying_key(&identity.server_public_key)?;
     let config = BuiltinTunnelConfig {
         public_url: endpoint.public_url,
         websocket_url: endpoint.websocket_url,
@@ -167,6 +170,8 @@ pub async fn spawn_builtin_tunnel(
         local_base_url: base.local_base_url,
         device_id: identity.device_id,
         signing_key: Arc::new(signing_key),
+        server_id: identity.server_id,
+        server_verifying_key: Arc::new(server_verifying_key),
         log_path: base.log_path,
     };
     let public_url = config.public_url.clone();

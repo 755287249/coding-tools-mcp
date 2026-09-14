@@ -224,12 +224,26 @@
             <div class="metric"><span class="muted">可用服務</span><strong id="client-services">—</strong></div>
             <div class="metric"><span class="muted">註冊裝置</span><strong id="client-device-count">—</strong></div>
             <div class="metric"><span class="muted">最後活動</span><strong id="client-last-seen">—</strong></div>
+            <div class="metric"><span class="muted">Node Agent 版本</span><strong id="client-agent-version">—</strong></div>
+            <div class="metric"><span class="muted">更新狀態</span><strong id="client-update-state">—</strong></div>
           </div>
+        </section>
+
+        <section class="panel" id="client-update-panel">
+          <div class="toolbar-copy" style="margin-bottom:14px"><h2>Node Agent 更新派送</h2><span class="muted">更新包必須先通過 Client 端 SHA-256 與 Ed25519 簽章驗證才會套用</span></div>
+          <form id="client-update-form" class="log-filters">
+            <label>版本<input id="client-update-version" maxlength="64" placeholder="0.29.34" required></label>
+            <label>HTTPS URL<input id="client-update-url" type="url" maxlength="2048" placeholder="https://updates.example.com/ctnode.zip" required></label>
+            <label>SHA-256<input id="client-update-sha256" maxlength="64" pattern="[0-9A-Fa-f]{64}" placeholder="64 位十六進位" required></label>
+            <label>Ed25519 Signature<input id="client-update-signature" maxlength="128" placeholder="Base64URL（無 padding）" required></label>
+            <button id="client-update-submit" type="submit">派送更新</button>
+          </form>
+          <div id="client-update-notice" class="notice" role="status"></div>
         </section>
 
         <section class="panel compact-table">
           <div class="toolbar"><div class="toolbar-copy"><h2>Client Worker</h2><span class="muted">只顯示目前選取 Client</span></div></div>
-          <div class="table-wrap"><table><thead><tr><th>Worker</th><th>Service</th><th>狀態</th><th>完成請求</th><th>連線時間</th><th>最後活動</th><th>最後錯誤</th></tr></thead><tbody id="client-workers"></tbody></table></div>
+          <div class="table-wrap"><table><thead><tr><th>Worker</th><th>Service</th><th>狀態</th><th>版本 / Build</th><th>更新</th><th>完成請求</th><th>連線時間</th><th>最後活動</th><th>最後錯誤</th></tr></thead><tbody id="client-workers"></tbody></table></div>
         </section>
 
         <section class="panel" id="client-log-search">
@@ -444,6 +458,13 @@
       }
       const status = cell(row, "");
       status.appendChild(badge(worker.state, worker.state === "idle" ? "online" : worker.state === "busy" ? "warning" : ""));
+      if (clientView) {
+        cell(row, worker.agent_version ? `${worker.agent_version} / ${(worker.build_git_sha || "—").slice(0, 8)}` : "—");
+        const updateText = worker.update_state
+          ? `${worker.update_state}${worker.update_target_version ? ` → ${worker.update_target_version}` : ""}${worker.update_message ? ` · ${worker.update_message}` : ""}`
+          : "—";
+        cell(row, updateText);
+      }
       cell(row, worker.requests_completed.toLocaleString());
       if (clientView) cell(row, formatTime(worker.connected_at_unix_ms));
       cell(row, formatTime(worker.last_seen_at_unix_ms));
@@ -453,7 +474,7 @@
     if (!workers.length) {
       const row = document.createElement("tr");
       const empty = cell(row, clientView ? "此 Client 目前沒有已連線 Worker" : "目前沒有已連線 Worker");
-      empty.colSpan = clientView ? 7 : 6;
+      empty.colSpan = clientView ? 9 : 6;
       body.appendChild(row);
     }
   }
@@ -546,7 +567,8 @@
       $("client-subtitle").textContent = "請先在管理設定建立註冊連結";
       $("client-status-badge").className = "badge offline";
       $("client-status-badge").textContent = "未設定";
-      for (const id of ["client-worker-count", "client-worker-balance", "client-services", "client-device-count", "client-last-seen"]) $(id).textContent = "—";
+      for (const id of ["client-worker-count", "client-worker-balance", "client-services", "client-device-count", "client-last-seen", "client-agent-version", "client-update-state"]) $(id).textContent = "—";
+      $("client-update-submit").disabled = true;
       renderWorkerRows("client-workers", [], true);
       renderLogs("client-logs", [], "選擇 Client 後顯示專屬 Log");
       return;
@@ -562,6 +584,12 @@
     $("client-services").textContent = [...client.services].map((value) => value.toUpperCase()).join(" + ") || "—";
     $("client-device-count").textContent = client.devices.length;
     $("client-last-seen").textContent = formatShortTime(client.lastSeen);
+    const nodeWorkers = client.workers.filter((worker) => worker.service === "mcp" && worker.agent_version);
+    const versions = [...new Set(nodeWorkers.map((worker) => worker.agent_version))];
+    $("client-agent-version").textContent = versions.length ? versions.join(", ") : "—";
+    const updateStates = [...new Set(nodeWorkers.filter((worker) => worker.update_state).map((worker) => `${worker.update_state}${worker.update_target_version ? ` → ${worker.update_target_version}` : ""}`))];
+    $("client-update-state").textContent = updateStates.length ? updateStates.join(", ") : "—";
+    $("client-update-submit").disabled = !client.workers.some((worker) => worker.service === "mcp");
     renderWorkerRows("client-workers", client.workers, true);
   }
 
@@ -803,6 +831,34 @@
     } catch (error) {
       $("device-notice").textContent = error.message;
       $("purge-revoked").disabled = false;
+    }
+  });
+
+  $("client-update-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const client = state.clients.find((entry) => entry.clientId === state.activeClientId);
+    if (!client) return;
+    const button = $("client-update-submit");
+    button.disabled = true;
+    $("client-update-notice").textContent = "";
+    try {
+      const result = await api(`/api/clients/${encodeURIComponent(client.clientId)}/update`, {
+        method: "POST",
+        body: JSON.stringify({
+          version: $("client-update-version").value.trim(),
+          url: $("client-update-url").value.trim(),
+          sha256: $("client-update-sha256").value.trim(),
+          signature: $("client-update-signature").value.trim()
+        })
+      });
+      $("client-update-notice").style.color = "#65d39a";
+      $("client-update-notice").textContent = `已派送 ${result.version} 至 ${result.target_workers} 個 Worker，update id: ${result.update_id}`;
+      await loadObservability();
+    } catch (error) {
+      $("client-update-notice").style.color = "";
+      $("client-update-notice").textContent = error.message;
+    } finally {
+      renderClientDetail();
     }
   });
 

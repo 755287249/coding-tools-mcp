@@ -20,6 +20,8 @@ const MAX_LOG_STRING_CHARS: usize = 4 * 1024;
 const MAX_ARGUMENT_RECORD_BYTES: usize = 4 * 1024;
 const MAX_ARGUMENT_PREVIEW_BYTES: usize = 512;
 const TOOL_USAGE_LOG_SCHEMA_VERSION: u64 = 7;
+const DIAGNOSTICS_SCHEMA_VERSION: u64 = 1;
+const DIAGNOSTICS_HOST_KIND: &str = "rust_desktop";
 const ACTIVITY_BURST_IDLE_MS: u64 = 120_000;
 static TOOL_USAGE_CALL_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static RUNTIME_BOOT_ID: OnceLock<String> = OnceLock::new();
@@ -121,6 +123,7 @@ pub(crate) struct ToolUsageInput<'a> {
     pub outcome: &'a str,
     pub response: Option<&'a Value>,
     pub worker_error: Option<&'a str>,
+    pub host_session_key: Option<&'a str>,
     pub redact_telemetry: bool,
 }
 
@@ -254,8 +257,87 @@ pub(crate) fn record_tool_usage(input: ToolUsageInput<'_>) {
     let completed_ts_ms = input.started_ts_ms.saturating_add(input.duration_ms);
     let mut record = build_tool_usage_record(&input);
     annotate_repeated_failure(input.profile_id, &mut record);
+    let diagnostic_event_id = uuid::Uuid::new_v4().to_string();
+    if let Some(object) = record.as_object_mut() {
+        object.insert(
+            "diagnostic_event_id".into(),
+            json!(diagnostic_event_id.clone()),
+        );
+    }
+    let recovery_fields = recovery_event_fields(
+        &record,
+        &diagnostic_event_id,
+        input.tool_name,
+        input.outcome,
+    );
+    let selection = record
+        .get("selected_workspace_id")
+        .and_then(Value::as_str)
+        .and_then(|folder_id| {
+            crate::workspace_features::selected_skill_learning_attribution(
+                input.profile_id,
+                input.host_session_key,
+                folder_id,
+            )
+        });
+    crate::knowledge::enqueue_tool_usage_record(
+        input.profile_id,
+        &record,
+        crate::knowledge::ExperienceAttribution {
+            conversation_context_id: input.host_session_key.map(str::to_string),
+            skill: selection.as_ref().map(|value| value.skill.clone()),
+            canary: selection.and_then(|value| value.canary),
+            ..crate::knowledge::ExperienceAttribution::default()
+        },
+    );
     append_tool_usage_log(input.profile_id, record);
+    if let Some(fields) = recovery_fields {
+        record_diagnostic_event(
+            input.profile_id,
+            "recovery_event",
+            "recovery_attempt",
+            if input.outcome == "success" {
+                "info"
+            } else {
+                "warning"
+            },
+            if input.outcome == "success" {
+                "none"
+            } else {
+                "tool"
+            },
+            fields,
+        );
+    }
     complete_tool_request(input.profile_id, completed_ts_ms);
+}
+
+fn recovery_event_fields(
+    record: &Value,
+    diagnostic_event_id: &str,
+    tool_name: &str,
+    outcome: &str,
+) -> Option<Value> {
+    if record.get("recovery_attempt").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let mut fields = Map::new();
+    fields.insert(
+        "linked_diagnostic_event_id".into(),
+        json!(diagnostic_event_id),
+    );
+    fields.insert("tool".into(), json!(tool_name));
+    fields.insert("recovery_succeeded".into(), json!(outcome == "success"));
+    for field in [
+        "retry_of_call_sequence",
+        "recovery_of_operation_id_hash",
+        "recovery_action_id",
+    ] {
+        if let Some(value) = record.get(field) {
+            fields.insert(field.to_string(), value.clone());
+        }
+    }
+    Some(Value::Object(fields))
 }
 
 pub(crate) fn record_async_session_finalized(input: AsyncSessionTelemetry<'_>) {
@@ -265,10 +347,56 @@ pub(crate) fn record_async_session_finalized(input: AsyncSessionTelemetry<'_>) {
     );
 }
 
+pub(crate) fn record_diagnostic_event(
+    profile_id: &str,
+    event_type: &str,
+    event: &str,
+    severity: &str,
+    failure_domain: &str,
+    fields: Value,
+) {
+    let timestamp_ms = unix_timestamp_ms();
+    let mut record = sanitize_log_value(&fields, None)
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    record.insert(
+        "schema_version".into(),
+        json!(TOOL_USAGE_LOG_SCHEMA_VERSION),
+    );
+    record.insert(
+        "diagnostic_schema_version".into(),
+        json!(DIAGNOSTICS_SCHEMA_VERSION),
+    );
+    record.insert("event".into(), json!(event));
+    record.insert("event_type".into(), json!(event_type));
+    record.insert("host_kind".into(), json!(DIAGNOSTICS_HOST_KIND));
+    record.insert("host_version".into(), json!(env!("CARGO_PKG_VERSION")));
+    record.insert("timestamp_ms".into(), json!(timestamp_ms));
+    record.insert("conversation_operation_id".into(), Value::Null);
+    record.insert("severity".into(), json!(severity));
+    record.insert("failure_domain".into(), json!(failure_domain));
+    record.insert("workspace_id".into(), json!(profile_id));
+    record.insert("runtime_boot_id".into(), json!(runtime_boot_id()));
+    record.insert("server_version".into(), json!(env!("CARGO_PKG_VERSION")));
+    record.insert("started_ts_ms".into(), json!(timestamp_ms));
+    record.insert("completed_ts_ms".into(), json!(timestamp_ms));
+    append_tool_usage_log(profile_id, Value::Object(record));
+}
+
 fn build_async_session_record(input: &AsyncSessionTelemetry<'_>, completed_ts_ms: u64) -> Value {
+    let failed = input.exit_code.is_some_and(|code| code != 0);
     json!({
         "schema_version": TOOL_USAGE_LOG_SCHEMA_VERSION,
+        "diagnostic_schema_version": DIAGNOSTICS_SCHEMA_VERSION,
         "event": "async_session_finalized",
+        "event_type": "process_session",
+        "host_kind": DIAGNOSTICS_HOST_KIND,
+        "host_version": env!("CARGO_PKG_VERSION"),
+        "timestamp_ms": input.started_ts_ms,
+        "conversation_operation_id": Value::Null,
+        "severity": if failed { "error" } else { "info" },
+        "failure_domain": if failed { "process" } else { "none" },
         "workspace_id": input.profile_id,
         "runtime_boot_id": runtime_boot_id(),
         "server_version": env!("CARGO_PKG_VERSION"),
@@ -283,6 +411,18 @@ fn build_async_session_record(input: &AsyncSessionTelemetry<'_>, completed_ts_ms
         "stdout_bytes": input.stdout_bytes,
         "stderr_bytes": input.stderr_bytes
     })
+}
+
+pub(crate) fn tool_usage_log_health() -> Value {
+    log_writer::tool_usage_log_health()
+}
+
+pub(crate) fn legacy_compat_write_enabled() -> bool {
+    log_writer::legacy_compat_write_enabled()
+}
+
+pub(crate) fn legacy_compat_write_env() -> &'static str {
+    log_writer::LEGACY_COMPAT_WRITE_ENV
 }
 
 fn unix_timestamp_ms() -> u64 {
@@ -492,6 +632,14 @@ fn semantic_tool_arguments(arguments: &Value) -> Value {
     semantic
 }
 
+fn conversation_operation_id(response: Option<&Value>) -> Option<&str> {
+    response
+        .and_then(|value| value.get("result"))
+        .and_then(|value| value.get("structuredContent"))
+        .and_then(|value| value.get("harness_operation_id"))
+        .and_then(Value::as_str)
+}
+
 fn build_tool_usage_record(input: &ToolUsageInput<'_>) -> Value {
     let sanitized_arguments = if input.redact_telemetry {
         sanitize_log_value(input.arguments, None)
@@ -513,13 +661,45 @@ fn build_tool_usage_record(input: &ToolUsageInput<'_>) -> Value {
         "schema_version".into(),
         json!(TOOL_USAGE_LOG_SCHEMA_VERSION),
     );
+    record.insert(
+        "diagnostic_schema_version".into(),
+        json!(DIAGNOSTICS_SCHEMA_VERSION),
+    );
+    record.insert(
+        "event_type".into(),
+        json!(if input.outcome == "rpc_error" {
+            "transport_event"
+        } else {
+            "tool_call"
+        }),
+    );
+    record.insert("host_kind".into(), json!(DIAGNOSTICS_HOST_KIND));
+    record.insert("host_version".into(), json!(env!("CARGO_PKG_VERSION")));
     record.insert("event".into(), json!("tool_call"));
+    record.insert("timestamp_ms".into(), json!(input.started_ts_ms));
+    record.insert(
+        "conversation_operation_id".into(),
+        conversation_operation_id(input.response)
+            .map(|value| json!(value))
+            .unwrap_or(Value::Null),
+    );
     record.insert("started_ts_ms".into(), json!(input.started_ts_ms));
     record.insert(
         "completed_ts_ms".into(),
         json!(input.started_ts_ms.saturating_add(input.duration_ms)),
     );
     record.insert("workspace_id".into(), json!(input.profile_id));
+    if let Some(folder_id) = input
+        .response
+        .and_then(|response| response.get("result"))
+        .and_then(|result| result.get("structuredContent"))
+        .and_then(|structured| structured.get("resolved_workspace_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        record.insert("selected_workspace_id".into(), json!(folder_id));
+    }
     record.insert("runtime_boot_id".into(), json!(runtime_boot_id()));
     record.insert("server_version".into(), json!(env!("CARGO_PKG_VERSION")));
     record.insert("transport_mode".into(), json!(input.transport_mode));
@@ -564,6 +744,20 @@ fn build_tool_usage_record(input: &ToolUsageInput<'_>) -> Value {
     );
     record.insert("duration_ms".into(), json!(input.duration_ms));
     record.insert("outcome".into(), json!(input.outcome));
+    let failure_domain = match input.outcome {
+        "success" => "none",
+        "rpc_error" => "transport",
+        _ => "tool",
+    };
+    record.insert("failure_domain".into(), json!(failure_domain));
+    record.insert(
+        "severity".into(),
+        json!(if failure_domain == "none" {
+            "info"
+        } else {
+            "error"
+        }),
+    );
     record.insert("request_json_bytes".into(), json!(input.request_json_bytes));
     record.insert("arguments_json_bytes".into(), json!(arguments_bytes.len()));
     record.insert("arguments_sha256".into(), json!(arguments_sha256));
@@ -779,6 +973,9 @@ fn build_tool_usage_record(input: &ToolUsageInput<'_>) -> Value {
                     "workspace_admission_wait_ms",
                     "global_admission_wait_ms",
                     "admission_queue_wait_ms",
+                    "resource_class",
+                    "io_heavy_admission_limit",
+                    "io_heavy_admission_wait_ms",
                     "workspace_lock_scope",
                     "workspace_lock_groups",
                     "workspace_lock_wait_ms",
@@ -805,6 +1002,15 @@ fn build_tool_usage_record(input: &ToolUsageInput<'_>) -> Value {
                     "scanned_files",
                     "total_matches_exact",
                     "calculate_total",
+                    "exact_total_fast_tail",
+                    "exact_total_fast_tail_skipped_match_details",
+                    "knowledge_canary_id",
+                    "knowledge_canary_implementation",
+                    "knowledge_canary_eligible",
+                    "knowledge_canary_stage",
+                    "knowledge_canary_selected",
+                    "knowledge_canary_applied",
+                    "knowledge_canary_bucket",
                     "matched_files",
                     "files_considered",
                     "scan_completed",
@@ -1104,6 +1310,8 @@ fn classify_outcome(record: &Map<String, Value>, outcome: &str) -> &'static str 
         } else {
             "command_failure"
         }
+    } else if outcome == "rpc_error" {
+        "transport_error"
     } else if outcome == "success" {
         "success"
     } else if code == "UNKNOWN_TOOL" {
@@ -1166,13 +1374,13 @@ fn classify_outcome(record: &Map<String, Value>, outcome: &str) -> &'static str 
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     use super::{
         annotate_repeated_failure, begin_tool_request, build_async_session_record,
         build_tool_usage_record, classify_command_text, classify_outcome, complete_tool_request,
-        format_log_value, format_request_log_value, AsyncSessionTelemetry, ToolRequestTiming,
-        ToolUsageInput,
+        format_log_value, format_request_log_value, recovery_event_fields, AsyncSessionTelemetry,
+        ToolRequestTiming, ToolUsageInput,
     };
 
     #[test]
@@ -1295,6 +1503,8 @@ mod tests {
         assert_eq!(record["command_kind"], "cargo_test");
         assert_eq!(record["started_ts_ms"], 1_000);
         assert_eq!(record["completed_ts_ms"], 6_250);
+        assert_eq!(record["timestamp_ms"], 1_000);
+        assert_eq!(record["conversation_operation_id"], Value::Null);
         assert_eq!(record["child_process_total_ms"], 5_250);
         assert_eq!(record["first_output_ms"], 420);
         assert_eq!(record["termination_reason"], "exited");
@@ -1389,6 +1599,12 @@ mod tests {
     }
 
     #[test]
+    fn rpc_errors_are_classified_as_transport_failures() {
+        let record = serde_json::Map::new();
+        assert_eq!(classify_outcome(&record, "rpc_error"), "transport_error");
+    }
+
+    #[test]
     fn usage_record_contains_payload_and_result_metrics() {
         let arguments = json!({
             "cmd": "cargo test --token hidden-value",
@@ -1449,10 +1665,17 @@ mod tests {
             outcome: "success",
             response: Some(&response),
             worker_error: None,
+            host_session_key: None,
             redact_telemetry: true,
         });
 
         assert_eq!(record["schema_version"], 7);
+        assert_eq!(record["diagnostic_schema_version"], 1);
+        assert_eq!(record["event_type"], "tool_call");
+        assert_eq!(record["host_kind"], "rust_desktop");
+        assert_eq!(record["host_version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(record["severity"], "info");
+        assert_eq!(record["failure_domain"], "none");
         assert!(record["runtime_boot_id"].as_str().is_some());
         assert_eq!(record["rpc_fast_path"], false);
         assert_eq!(record["tool_family"], "process");
@@ -1492,6 +1715,109 @@ mod tests {
             .contains("--token [REDACTED]"));
         assert!(!record.to_string().contains("hidden-value"));
         assert!(!record.to_string().contains("do-not-log"));
+    }
+
+    #[test]
+    fn rpc_error_tool_usage_is_a_transport_event() {
+        let request_timing = ToolRequestTiming {
+            previous_response_completed_ts_ms: None,
+            orchestration_gap_ms: None,
+            activity_burst_id: 9,
+            activity_burst_sequence: 1,
+            concurrent_request: false,
+        };
+        let arguments = json!({});
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "error": { "code": -32603, "message": "internal error" }
+        });
+        let record = build_tool_usage_record(&ToolUsageInput {
+            profile_id: "workspace",
+            transport_mode: "streamable-http",
+            protocol_version: "2026-07-28",
+            request_id: &json!(9),
+            method: "tools/call",
+            tool_name: "server_info",
+            arguments: &arguments,
+            request_json_bytes: 10,
+            rpc_fast_path: false,
+            request_timing: &request_timing,
+            started_ts_ms: 3_000,
+            duration_ms: 2,
+            outcome: "rpc_error",
+            response: Some(&response),
+            worker_error: None,
+            host_session_key: None,
+            redact_telemetry: true,
+        });
+        assert_eq!(record["event"], "tool_call");
+        assert_eq!(record["event_type"], "transport_event");
+        assert_eq!(record["failure_domain"], "transport");
+        assert_eq!(record["severity"], "error");
+        assert_eq!(record["timestamp_ms"], 3_000);
+        assert_eq!(record["conversation_operation_id"], Value::Null);
+    }
+
+    #[test]
+    fn tool_usage_correlates_system_harness_operation_without_user_operation_id() {
+        let request_timing = ToolRequestTiming::default();
+        let arguments = json!({ "operation_id": "user-supplied-id" });
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": 10,
+            "result": {
+                "structuredContent": {
+                    "ok": true,
+                    "harness_operation_id": "harness-op-1",
+                    "resolved_workspace_id": "folder-a"
+                }
+            }
+        });
+        let record = build_tool_usage_record(&ToolUsageInput {
+            profile_id: "workspace",
+            transport_mode: "streamable-http",
+            protocol_version: "2026-07-28",
+            request_id: &json!(10),
+            method: "tools/call",
+            tool_name: "server_info",
+            arguments: &arguments,
+            request_json_bytes: 10,
+            rpc_fast_path: false,
+            request_timing: &request_timing,
+            started_ts_ms: 4_000,
+            duration_ms: 2,
+            outcome: "success",
+            response: Some(&response),
+            worker_error: None,
+            host_session_key: None,
+            redact_telemetry: true,
+        });
+        assert_eq!(record["timestamp_ms"], 4_000);
+        assert_eq!(record["conversation_operation_id"], "harness-op-1");
+        assert_eq!(record["selected_workspace_id"], "folder-a");
+        assert_ne!(record["conversation_operation_id"], "user-supplied-id");
+    }
+
+    #[test]
+    fn recovery_event_payload_links_without_copying_tool_payloads() {
+        let record = json!({
+            "recovery_attempt": true,
+            "retry_of_call_sequence": 7,
+            "recovery_action_id": "candidate-1",
+            "arguments": { "path": "do-not-copy.txt" },
+            "stdout": "do-not-copy-output"
+        });
+        let fields = recovery_event_fields(&record, "event-1", "edit_file", "success")
+            .expect("recovery fields");
+        assert_eq!(fields["linked_diagnostic_event_id"], "event-1");
+        assert_eq!(fields["tool"], "edit_file");
+        assert_eq!(fields["retry_of_call_sequence"], 7);
+        assert_eq!(fields["recovery_action_id"], "candidate-1");
+        assert_eq!(fields["recovery_succeeded"], true);
+        assert!(fields.get("arguments").is_none());
+        assert!(fields.get("stdout").is_none());
+        assert!(!fields.to_string().contains("do-not-copy"));
     }
 
     #[test]
@@ -1549,6 +1875,7 @@ mod tests {
             outcome: "success",
             response: Some(&response),
             worker_error: None,
+            host_session_key: None,
             redact_telemetry: true,
         });
         assert_eq!(record["schema_version"], 7);
@@ -1612,6 +1939,7 @@ mod tests {
             outcome: "success",
             response: Some(&response),
             worker_error: None,
+            host_session_key: None,
             redact_telemetry: true,
         });
         assert_eq!(check["schema_version"], 7);
@@ -1643,6 +1971,7 @@ mod tests {
             outcome: "success",
             response: None,
             worker_error: None,
+            host_session_key: None,
             redact_telemetry: true,
         });
         assert_eq!(apply["mutating_tool"], true);

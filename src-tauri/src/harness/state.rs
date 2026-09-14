@@ -11,6 +11,8 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
+use crate::tools::dispatch::{fast_containing_git_root, fast_workspace_git_identity};
+
 use super::model::{
     BaselineEntry, CapabilityStatus, ChangeSet, FileChangeRecord, HarnessEvent, HarnessStatus,
     OperationRecord, ProjectBaseline, ProjectFileState, ProjectState, ReasonRecord, TaskSession,
@@ -88,7 +90,7 @@ impl Harness {
             updated_at: now,
         };
         self.store.save_task(&task)?;
-        self.save_workspace_state(Some(&task.id), &task.updated_at)?;
+        self.save_workspace_state(Some(&task.id), &task)?;
         self.record_event(
             &task.id,
             "task_started",
@@ -110,20 +112,51 @@ impl Harness {
     }
 
     pub fn current_task_for_scope(&self, scope_id: &str) -> HarnessResult<Option<TaskSession>> {
-        Ok(self
+        let mut state = match self.store.load_workspace_state(&self.workspace_id)? {
+            Some(state) if state.active_task_ids.is_some() => state,
+            state => self.repair_workspace_state(state)?,
+        };
+        if let Some(task_id) = state
+            .active_task_ids
+            .as_ref()
+            .and_then(|active| active.get(scope_id))
+            .cloned()
+        {
+            if let Ok(task) = self.store.load_task(&self.workspace_id, &task_id) {
+                if task.status.is_writable() && self.task_scope_id(&task) == scope_id {
+                    return Ok(Some(task));
+                }
+            }
+            state = self.repair_workspace_state(Some(state))?;
+        } else if self
             .store
-            .list_tasks(&self.workspace_id)?
-            .into_iter()
-            .find(|task| task.status.is_writable() && self.task_scope_id(task) == scope_id))
+            .workspace_state_covers_task_entries(&self.workspace_id)
+        {
+            return Ok(None);
+        } else {
+            state = self.repair_workspace_state(Some(state))?;
+        }
+        let Some(task_id) = state
+            .active_task_ids
+            .as_ref()
+            .and_then(|active| active.get(scope_id))
+        else {
+            return Ok(None);
+        };
+        let task = self.store.load_task(&self.workspace_id, task_id)?;
+        Ok((task.status.is_writable() && self.task_scope_id(&task) == scope_id).then_some(task))
     }
 
     pub fn scope_root_for(&self, cwd: &Path) -> PathBuf {
         let cwd = cwd
             .canonicalize()
             .unwrap_or_else(|_| self.workspace_root.clone());
-        let candidate = git_value(&cwd, &["rev-parse", "--show-toplevel"])
-            .map(PathBuf::from)
-            .and_then(|path| path.canonicalize().ok())
+        let candidate = fast_containing_git_root(&self.workspace_root, &cwd)
+            .or_else(|| {
+                git_value(&cwd, &["rev-parse", "--show-toplevel"])
+                    .map(PathBuf::from)
+                    .and_then(|path| path.canonicalize().ok())
+            })
             .unwrap_or_else(|| self.workspace_root.clone());
         self.normalize_scope_root(&candidate)
     }
@@ -253,10 +286,7 @@ impl Harness {
         self.store.save_task(&task)?;
         self.store
             .append_event_for_workspace(&self.workspace_id, &finished_event)?;
-        self.save_workspace_state(
-            task.status.is_writable().then_some(task.id.as_str()),
-            &task.updated_at,
-        )?;
+        self.save_workspace_state(task.status.is_writable().then_some(task.id.as_str()), &task)?;
         Ok((task, change))
     }
 
@@ -272,7 +302,7 @@ impl Harness {
         task.updated_at = timestamp();
         self.store.save_task(&task)?;
         if !task.status.is_writable() {
-            self.save_workspace_state(None, &task.updated_at)?;
+            self.save_workspace_state(None, &task)?;
         }
         self.record_event(
             task_id,
@@ -328,6 +358,18 @@ impl Harness {
             ));
         }
         Ok(())
+    }
+
+    pub fn original_baseline_matches(
+        &self,
+        task_id: &str,
+    ) -> HarnessResult<(bool, ProjectBaseline)> {
+        let task = self.task(task_id)?;
+        let current = capture_baseline(&self.task_root(&task));
+        let matches = current.branch == task.baseline.branch
+            && current.head == task.baseline.head
+            && current.worktree_fingerprint == task.baseline.worktree_fingerprint;
+        Ok((matches, current))
     }
 
     pub fn refresh_expected_state(&self, task_id: &str) -> HarnessResult<TaskSession> {
@@ -506,14 +548,20 @@ impl Harness {
         let scope_id = self.scope_id_for_root(&scope_root);
         let task = self.current_task_for_scope(&scope_id)?;
         let current = task.as_ref().map(|_| capture_baseline(&scope_root));
+        let needs_identity = current
+            .as_ref()
+            .is_none_or(|baseline| baseline.branch.is_none() || baseline.head.is_none());
+        let fallback_identity = needs_identity
+            .then(|| git_identity(&scope_root))
+            .unwrap_or((None, None));
         let branch = current
             .as_ref()
             .and_then(|baseline| baseline.branch.clone())
-            .or_else(|| git_value(&scope_root, &["rev-parse", "--abbrev-ref", "HEAD"]));
+            .or(fallback_identity.0);
         let head = current
             .as_ref()
             .and_then(|baseline| baseline.head.clone())
-            .or_else(|| git_value(&scope_root, &["rev-parse", "HEAD"]));
+            .or(fallback_identity.1);
         let current_head = head.clone();
         let task_baseline_head = task.as_ref().and_then(|task| task.baseline.head.clone());
         let (task_id, task_state, task_updated_at, writable, baseline_matches, reason) =
@@ -651,56 +699,114 @@ impl Harness {
         })
     }
 
+    fn build_workspace_state(
+        &self,
+        existing: Option<WorkspaceHarnessState>,
+    ) -> HarnessResult<WorkspaceHarnessState> {
+        let tasks = self.store.list_tasks(&self.workspace_id)?;
+        let mut active_task_ids = HashMap::new();
+        for task in &tasks {
+            if task.status.is_writable() {
+                active_task_ids
+                    .entry(self.task_scope_id(task).to_string())
+                    .or_insert_with(|| task.id.clone());
+            }
+        }
+        let previous_active = existing
+            .as_ref()
+            .and_then(|state| state.active_task_id.clone());
+        let active_task_id = previous_active
+            .filter(|id| active_task_ids.values().any(|active| active == id))
+            .or_else(|| active_task_ids.get(&self.workspace_id).cloned())
+            .or_else(|| active_task_ids.values().next().cloned());
+        Ok(WorkspaceHarnessState {
+            schema_version: SCHEMA_VERSION,
+            active_task_id,
+            active_task_ids: Some(active_task_ids),
+            recent_task_ids: tasks.into_iter().take(20).map(|task| task.id).collect(),
+            updated_at: existing
+                .map(|state| state.updated_at)
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(timestamp),
+        })
+    }
+
+    fn repair_workspace_state(
+        &self,
+        existing: Option<WorkspaceHarnessState>,
+    ) -> HarnessResult<WorkspaceHarnessState> {
+        let state = self.build_workspace_state(existing)?;
+        self.store
+            .save_workspace_state(&self.workspace_id, &state)?;
+        Ok(state)
+    }
+
     fn save_workspace_state(
         &self,
         active_task_id: Option<&str>,
-        updated_at: &str,
+        task: &TaskSession,
     ) -> HarnessResult<()> {
-        self.store.save_workspace_state(
-            &self.workspace_id,
-            &WorkspaceHarnessState {
-                schema_version: SCHEMA_VERSION,
-                active_task_id: active_task_id.map(str::to_string),
-                recent_task_ids: self
-                    .store
-                    .list_tasks(&self.workspace_id)?
-                    .into_iter()
-                    .take(20)
-                    .map(|t| t.id)
-                    .collect(),
-                updated_at: updated_at.to_string(),
-            },
-        )
+        let existing = self.store.load_workspace_state(&self.workspace_id)?;
+        let mut state = match existing {
+            Some(state) if state.active_task_ids.is_some() => state,
+            state => self.build_workspace_state(state)?,
+        };
+        let active = state.active_task_ids.get_or_insert_with(HashMap::new);
+        let scope_id = self.task_scope_id(task).to_string();
+        if task.status.is_writable() {
+            active.insert(scope_id, task.id.clone());
+        } else if active.get(&scope_id).is_some_and(|id| id == &task.id) {
+            active.remove(&scope_id);
+        }
+        state.schema_version = SCHEMA_VERSION;
+        state.active_task_id = active_task_id.map(str::to_string);
+        state.recent_task_ids.retain(|id| id != &task.id);
+        state.recent_task_ids.insert(0, task.id.clone());
+        state.recent_task_ids.truncate(20);
+        state.updated_at = task.updated_at.clone();
+        self.store.save_workspace_state(&self.workspace_id, &state)
     }
 }
 
+fn git_identity(root: &Path) -> (Option<String>, Option<String>) {
+    if let Some((branch, head)) = fast_workspace_git_identity(root) {
+        return (Some(branch), Some(head));
+    }
+    std::thread::scope(|scope| {
+        let branch = scope.spawn(|| git_value(root, &["rev-parse", "--abbrev-ref", "HEAD"]));
+        let head = scope.spawn(|| git_value(root, &["rev-parse", "HEAD"]));
+        (branch.join().unwrap_or(None), head.join().unwrap_or(None))
+    })
+}
+
 pub fn capture_baseline(root: &Path) -> ProjectBaseline {
-    let mut entries = git_baseline_paths(root)
-        .map(|paths| {
-            paths
-                .into_iter()
-                .filter_map(|relative| baseline_entry(root, &relative))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_else(|| {
-            WalkDir::new(root)
-                .follow_links(false)
-                .into_iter()
-                .filter_map(Result::ok)
-                .filter_map(|item| {
-                    let path = item.path();
-                    if path == root || should_skip(path, root) || !item.file_type().is_file() {
-                        return None;
-                    }
-                    let relative = path
-                        .strip_prefix(root)
+    let paths = git_baseline_paths(root).unwrap_or_else(|| {
+        WalkDir::new(root)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter_map(|item| {
+                let path = item.path();
+                if path == root || should_skip(path, root) || !item.file_type().is_file() {
+                    return None;
+                }
+                Some(
+                    path.strip_prefix(root)
                         .unwrap_or(path)
                         .to_string_lossy()
-                        .replace('\\', "/");
-                    baseline_entry(root, &relative)
-                })
-                .collect::<Vec<_>>()
-        });
+                        .replace('\\', "/"),
+                )
+            })
+            .collect::<Vec<_>>()
+    });
+    let (mut entries, (branch, head)) = std::thread::scope(|scope| {
+        let entries = scope.spawn(|| baseline_entries_for_paths(root, paths));
+        let identity = scope.spawn(|| git_identity(root));
+        (
+            entries.join().unwrap_or_default(),
+            identity.join().unwrap_or((None, None)),
+        )
+    });
     entries.sort_by(|a, b| a.path.cmp(&b.path));
     let mut fingerprint = Sha256::new();
     for entry in &entries {
@@ -709,8 +815,8 @@ pub fn capture_baseline(root: &Path) -> ProjectBaseline {
         fingerprint.update(entry.bytes.to_le_bytes());
     }
     ProjectBaseline {
-        branch: git_value(root, &["rev-parse", "--abbrev-ref", "HEAD"]),
-        head: git_value(root, &["rev-parse", "HEAD"]),
+        branch,
+        head,
         worktree_fingerprint: format!("{:x}", fingerprint.finalize()),
         entries,
         captured_at: timestamp(),
@@ -737,6 +843,35 @@ fn git_baseline_paths(root: &Path) -> Option<Vec<String>> {
     paths.sort();
     paths.dedup();
     Some(paths)
+}
+
+fn baseline_entries_for_paths(root: &Path, paths: Vec<String>) -> Vec<BaselineEntry> {
+    if paths.is_empty() {
+        return Vec::new();
+    }
+    let workers = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(4)
+        .clamp(1, 16)
+        .min(paths.len());
+    let chunk_size = (paths.len() + workers - 1) / workers;
+    std::thread::scope(|scope| {
+        let handles = paths
+            .chunks(chunk_size)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .filter_map(|relative| baseline_entry(root, relative))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().unwrap_or_default())
+            .collect()
+    })
 }
 
 fn baseline_entry(root: &Path, relative: &str) -> Option<BaselineEntry> {
@@ -921,6 +1056,23 @@ mod tests {
     }
 
     #[test]
+    fn status_reports_git_identity_without_active_task() {
+        let workspace = tempdir().expect("workspace");
+        let harness_root = tempdir().expect("harness");
+        init_git_workspace(workspace.path());
+        let harness = Harness::new(
+            workspace.path().to_path_buf(),
+            harness_root.path().to_path_buf(),
+        )
+        .expect("harness");
+
+        let status = harness.status().expect("status");
+        assert!(status.branch.is_some());
+        assert!(status.head.is_some());
+        assert_eq!(status.capabilities["git"].status, "available");
+    }
+
+    #[test]
     fn starting_task_does_not_create_workspace_copies() {
         let workspace = tempdir().expect("workspace");
         let harness_root = tempdir().expect("harness");
@@ -938,6 +1090,92 @@ mod tests {
             .join(harness.workspace_id())
             .join("snapshots")
             .exists());
+    }
+
+    #[test]
+    fn terminal_task_is_removed_from_active_task_index() {
+        let workspace = tempdir().expect("workspace");
+        let harness_root = tempdir().expect("harness");
+        let harness = Harness::new(
+            workspace.path().to_path_buf(),
+            harness_root.path().to_path_buf(),
+        )
+        .expect("harness");
+        let task = harness.start_task("terminal index removal").expect("task");
+        harness
+            .transition(&task.id, TaskStatus::CompletedUnverified)
+            .expect("complete task");
+        assert!(harness.current_task().expect("current task").is_none());
+        let state = harness
+            .store
+            .load_workspace_state(harness.workspace_id())
+            .expect("state")
+            .expect("workspace state");
+        assert!(state
+            .active_task_ids
+            .expect("active task index")
+            .get(harness.workspace_id())
+            .is_none());
+
+        let reopened = Harness::new(
+            workspace.path().to_path_buf(),
+            harness_root.path().to_path_buf(),
+        )
+        .expect("reopened harness");
+        assert!(reopened.current_task().expect("reopened current").is_none());
+    }
+
+    #[test]
+    fn legacy_workspace_state_repairs_active_task_index_on_read() {
+        let workspace = tempdir().expect("workspace");
+        let harness_root = tempdir().expect("harness");
+        let harness = Harness::new(
+            workspace.path().to_path_buf(),
+            harness_root.path().to_path_buf(),
+        )
+        .expect("harness");
+        let task = harness.start_task("legacy index migration").expect("task");
+        let state_path = harness
+            .store_root()
+            .join("workspaces")
+            .join(harness.workspace_id())
+            .join("state.json");
+        let mut legacy: serde_json::Value =
+            serde_json::from_slice(&fs::read(&state_path).expect("state bytes"))
+                .expect("state json");
+        legacy
+            .as_object_mut()
+            .expect("state object")
+            .remove("active_task_ids");
+        fs::write(
+            &state_path,
+            serde_json::to_vec_pretty(&legacy).expect("legacy state json"),
+        )
+        .expect("legacy state write");
+
+        let reopened = Harness::new(
+            workspace.path().to_path_buf(),
+            harness_root.path().to_path_buf(),
+        )
+        .expect("reopened harness");
+        assert_eq!(
+            reopened
+                .current_task()
+                .expect("current task")
+                .expect("active task")
+                .id,
+            task.id
+        );
+        let repaired: WorkspaceHarnessState =
+            serde_json::from_slice(&fs::read(&state_path).expect("repaired state bytes"))
+                .expect("repaired state json");
+        assert_eq!(
+            repaired
+                .active_task_ids
+                .expect("repaired active task index")
+                .get(reopened.workspace_id()),
+            Some(&task.id)
+        );
     }
 
     #[test]
@@ -972,6 +1210,20 @@ mod tests {
         let linked_task = harness
             .start_task_for("linked task", &linked_scope)
             .expect("linked task");
+        let indexed_state = harness
+            .store
+            .load_workspace_state(harness.workspace_id())
+            .expect("indexed state")
+            .expect("workspace state");
+        let active = indexed_state.active_task_ids.expect("active task index");
+        assert_eq!(
+            active.get(&root_task.scope_id.clone().unwrap()),
+            Some(&root_task.id)
+        );
+        assert_eq!(
+            active.get(&linked_task.scope_id.clone().unwrap()),
+            Some(&linked_task.id)
+        );
 
         assert_eq!(root_task.workspace_id, linked_task.workspace_id);
         assert_ne!(root_task.scope_id, linked_task.scope_id);

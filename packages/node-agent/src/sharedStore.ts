@@ -142,11 +142,18 @@ function valuesFromDocument(document: Record<string, unknown>): Record<string, u
 }
 
 function agentSecretsFromValues(values: Record<string, unknown>): AgentSecrets {
+  const named = Object.fromEntries(Object.entries(values)
+    .filter(([key, value]) => !Object.values(COMMON_SECRET_KEYS).includes(key as SharedSecretValueKey)
+      && /^[A-Za-z0-9._-]{1,128}$/.test(key)
+      && typeof value === 'string'
+      && value.length > 0)
+    .map(([key, value]) => [key, String(value)]));
   return {
     oauthPassword: optionalSecret(values.oauth_password),
     oauthClientSecret: optionalSecret(values.oauth_client_secret),
     oauthTokenSecret: optionalSecret(values.oauth_token_secret),
-    tunnelEnrollmentUrl: optionalSecret(values.builtin_tunnel_enrollment_url)
+    tunnelEnrollmentUrl: optionalSecret(values.builtin_tunnel_enrollment_url),
+    ...(Object.keys(named).length > 0 ? { named } : {})
   };
 }
 
@@ -196,6 +203,9 @@ export async function writeSharedAgentSecrets(id: string, secrets: AgentSecrets)
   const filePath = sharedSecretsFile(id);
   const existing = record(await readWrappedFile(filePath));
   const values = valuesFromDocument(existing);
+  for (const [key, value] of Object.entries(secrets.named ?? {})) {
+    if (/^[A-Za-z0-9._-]{1,128}$/.test(key) && value) values[key] = value;
+  }
   for (const [property, key] of Object.entries(COMMON_SECRET_KEYS) as Array<[keyof AgentSecrets, SharedSecretValueKey]>) {
     const value = secrets[property];
     if (typeof value === 'string' && value.length > 0) values[key] = value;

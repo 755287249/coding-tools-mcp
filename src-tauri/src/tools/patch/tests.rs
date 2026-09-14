@@ -46,7 +46,7 @@ fn preserves_crlf_when_inserting_multiple_lines() {
         ],
     };
     assert_eq!(
-        apply_hunks(input, &[hunk]).expect("patch"),
+        apply_hunks(input, &[hunk], None).expect("patch"),
         "one\r\ninsert-a\r\ninsert-b\r\ntwo\r\n"
     );
 }
@@ -548,8 +548,28 @@ fn patch_without_line_numbers_rejects_ambiguous_context() {
             HunkLine::Add("inserted".into()),
         ],
     };
-    let error = apply_hunks("same\nother\nsame\n", &[hunk]).expect_err("ambiguous");
-    assert_eq!(error.to_error_value()["code"], "PATCH_CONTEXT_AMBIGUOUS");
+    let error =
+        apply_hunks("same\nother\nsame\n", &[hunk], Some("ambiguous.txt")).expect_err("ambiguous");
+    let value = error.to_error_value();
+    assert_eq!(value["code"], "PATCH_CONTEXT_AMBIGUOUS");
+    let actions = value["details"]["recovery_actions"]
+        .as_array()
+        .expect("candidate recovery actions");
+    assert_eq!(actions.len(), 2);
+    assert_eq!(actions[0]["candidate_line"], 1);
+    assert_eq!(actions[1]["candidate_line"], 3);
+    assert_eq!(actions[0]["required_arguments"], json!([]));
+    assert_eq!(actions[0]["arguments"]["files"][0]["path"], "ambiguous.txt");
+    assert_eq!(
+        actions[0]["arguments"]["files"][0]["edits"][0],
+        json!({
+            "type": "replace_lines",
+            "start_line": 1,
+            "end_line": 1,
+            "expected_text": "same",
+            "new_text": "same\ninserted"
+        })
+    );
 }
 
 #[test]
@@ -564,7 +584,7 @@ fn patch_preflight_reports_multiple_hunk_issues_together() {
             lines: vec![HunkLine::Context("missing-two".into())],
         },
     ];
-    let error = apply_hunks("actual\ncontent\n", &hunks).expect_err("preflight issues");
+    let error = apply_hunks("actual\ncontent\n", &hunks, None).expect_err("preflight issues");
     let value = error.to_error_value();
     assert_eq!(value["code"], "PATCH_PREFLIGHT_FAILED");
     assert_eq!(value["details"]["issue_count"], 2);

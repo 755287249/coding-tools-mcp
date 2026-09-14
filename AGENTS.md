@@ -73,3 +73,7 @@ This project is indexed by GitNexus as **coding-tools-mcp** (2497 symbols, 5234 
 - If a Rust shared behavior cannot be synchronized immediately, add or update its item in `docs/todo/node-agent-parity/manifest.json` and the matching TODO file; do not leave an undocumented parity gap.
 - When the Desktop Client version changes, run `pnpm run version:sync`. It must also update `packages/node-agent/package.json` under `codingTools.clientVersion` and `packages/node-agent/src/clientVersion.generated.ts`.
 - Before committing Client or shared-contract changes, run `pnpm run version:check`, `pnpm run node-agent:parity:check`, and `pnpm run node-agent:verify-repo`.
+
+## 啟動偏好
+
+- 啟動 Desktop / Node Agent 或任何 server 類行程時，一律用可見的 cmd 視窗（`Start-Process cmd /k` 或直接開 console 視窗），不要在背景 shell 裡跑，方便使用者看到即時輸出與 Ctrl+C。

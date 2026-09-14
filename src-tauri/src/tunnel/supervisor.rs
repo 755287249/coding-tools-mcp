@@ -1056,6 +1056,7 @@ pub fn append_profile_log(profile_id: &str, file_name: &str, line: &str) {
     append_log_line(&log_dir.join(file_name), line, None, 0);
 }
 
+#[allow(dead_code)]
 pub fn append_profile_log_rotating(
     profile_id: &str,
     file_name: &str,
@@ -1074,6 +1075,80 @@ pub fn append_profile_log_rotating(
     }
     let path = log_dir.join(file_name);
     append_log_line(&path, line, Some(max_bytes), retained_files);
+}
+
+pub fn append_profile_log_rotating_checked(
+    profile_id: &str,
+    file_name: &str,
+    line: &str,
+    max_bytes: u64,
+    retained_files: usize,
+) -> std::io::Result<()> {
+    let _guard = PROFILE_LOG_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let log_dir = log_dir_for_profile(profile_id);
+    std::fs::create_dir_all(&log_dir)?;
+    append_log_line_checked(
+        &log_dir.join(file_name),
+        line,
+        Some(max_bytes),
+        retained_files,
+    )
+}
+
+fn append_log_line_checked(
+    path: &Path,
+    line: &str,
+    max_bytes: Option<u64>,
+    retained_files: usize,
+) -> std::io::Result<()> {
+    use std::io::Write;
+
+    if let Some(max_bytes) = max_bytes.filter(|max_bytes| *max_bytes > 0) {
+        let current_bytes = std::fs::metadata(path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let incoming_bytes = line.len() as u64 + 2;
+        if current_bytes > 0 && current_bytes.saturating_add(incoming_bytes) > max_bytes {
+            rotate_log_files_checked(path, retained_files)?;
+        }
+    }
+
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    let mut record = Vec::with_capacity(line.len() + 1);
+    record.extend_from_slice(line.as_bytes());
+    record.push(b'\n');
+    file.write_all(&record)
+}
+
+fn rotate_log_files_checked(path: &Path, retained_files: usize) -> std::io::Result<()> {
+    if retained_files == 0 {
+        if path.exists() {
+            std::fs::remove_file(path)?;
+        }
+        return Ok(());
+    }
+    for index in (1..=retained_files).rev() {
+        let destination = rotated_log_path(path, index);
+        let source = if index == 1 {
+            path.to_path_buf()
+        } else {
+            rotated_log_path(path, index - 1)
+        };
+        if !source.exists() {
+            continue;
+        }
+        if destination.exists() {
+            std::fs::remove_file(&destination)?;
+        }
+        std::fs::rename(source, destination)?;
+    }
+    Ok(())
 }
 
 fn append_log_line(path: &Path, line: &str, max_bytes: Option<u64>, retained_files: usize) {
@@ -1133,6 +1208,24 @@ fn rotated_log_path(path: &Path, index: usize) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checked_profile_log_writer_rotates_and_reports_io_errors() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("usage.jsonl");
+        append_log_line_checked(&path, "first", Some(12), 1).expect("first write");
+        append_log_line_checked(&path, "second-long", Some(12), 1).expect("rotating write");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second-long\n");
+        assert_eq!(
+            std::fs::read_to_string(rotated_log_path(&path, 1)).unwrap(),
+            "first\n"
+        );
+
+        let not_directory = dir.path().join("not-directory");
+        std::fs::write(&not_directory, "file").unwrap();
+        let invalid_path = not_directory.join("usage.jsonl");
+        assert!(append_log_line_checked(&invalid_path, "fail", Some(12), 1).is_err());
+    }
 
     fn frp_profile(name: &str, subdomain: &str) -> WorkspaceProfile {
         let mut profile = WorkspaceProfile::new(format!("C:/workspace/{name}"), Some(name.into()));

@@ -27,7 +27,8 @@ use tokio::sync::{Mutex, Semaphore};
 use crate::device_auth::{AllowedServices, DeviceAuthError, DeviceRegistry, DeviceSummary};
 use crate::observability::{LogFilter, Observability};
 use crate::worker_policy::{WorkerPolicyError, WorkerPolicyStore};
-use coding_tools_tunnel_protocol::{TunnelService, WorkerPolicy};
+use crate::Registry;
+use coding_tools_tunnel_protocol::{valid_client_id, NodeUpdateOffer, TunnelService, WorkerPolicy};
 
 const ADMIN_HTML: &str = include_str!("admin.html");
 const ADMIN_LOGIN_HTML: &str = include_str!("admin_login.html");
@@ -57,6 +58,7 @@ struct AdminState {
     devices: DeviceRegistry,
     policies: WorkerPolicyStore,
     observability: Observability,
+    registry: Registry,
     public_origin: String,
     username: String,
     username_digest: [u8; 32],
@@ -135,6 +137,22 @@ struct WorkerPoliciesOutput {
 }
 
 #[derive(Debug, Deserialize)]
+struct DispatchNodeUpdateInput {
+    version: String,
+    url: String,
+    sha256: String,
+    signature: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DispatchNodeUpdateOutput {
+    client_id: String,
+    update_id: String,
+    version: String,
+    target_workers: usize,
+}
+
+#[derive(Debug, Deserialize)]
 struct LogsQuery {
     q: Option<String>,
     level: Option<String>,
@@ -206,6 +224,7 @@ pub fn build_admin_app(
     devices: DeviceRegistry,
     policies: WorkerPolicyStore,
     observability: Observability,
+    registry: Registry,
     public_origin: String,
     config: AdminConfig,
 ) -> Result<Router, String> {
@@ -219,6 +238,7 @@ pub fn build_admin_app(
         devices,
         policies,
         observability,
+        registry,
         public_origin: public_origin.trim_end_matches('/').to_string(),
         username: config.username,
         username_digest,
@@ -239,6 +259,10 @@ pub fn build_admin_app(
         .route("/api/devices", get(list_devices))
         .route("/api/dashboard", get(dashboard))
         .route("/api/workers", get(list_workers))
+        .route(
+            "/api/clients/{client_id}/update",
+            post(dispatch_node_update),
+        )
         .route("/api/activity", get(list_activity))
         .route("/api/logs", get(list_logs))
         .route("/api/worker-policies", get(list_worker_policies))
@@ -360,6 +384,88 @@ async fn list_workers(State(state): State<AdminState>, headers: HeaderMap) -> Re
         return unauthorized_response();
     }
     secure_json_response(Json(json!({ "workers": state.observability.workers() })).into_response())
+}
+
+async fn dispatch_node_update(
+    State(state): State<AdminState>,
+    Path(client_id): Path<String>,
+    headers: HeaderMap,
+    Json(input): Json<DispatchNodeUpdateInput>,
+) -> Response<Body> {
+    let Some(session) = state.sessions.get(&headers).await else {
+        return unauthorized_response();
+    };
+    if !csrf_authorized(&session, &headers) {
+        return json_error(StatusCode::FORBIDDEN, "CSRF validation failed");
+    }
+    let client_id = client_id.trim().to_string();
+    if !valid_client_id(&client_id) {
+        return json_error(StatusCode::BAD_REQUEST, "invalid client id");
+    }
+    let version = input.version.trim().to_string();
+    if version.is_empty()
+        || version.len() > 64
+        || !version
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+'))
+    {
+        return json_error(StatusCode::BAD_REQUEST, "invalid update version");
+    }
+    let url = input.url.trim().to_string();
+    if url.len() > 2048 || !url.starts_with("https://") {
+        return json_error(StatusCode::BAD_REQUEST, "update URL must use https");
+    }
+    let sha256 = input.sha256.trim().to_ascii_lowercase();
+    if sha256.len() != 64 || !sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "sha256 must be 64 hexadecimal characters",
+        );
+    }
+    let signature = input.signature.trim().to_string();
+    let Ok(signature_bytes) = URL_SAFE_NO_PAD.decode(&signature) else {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "signature must be base64url without padding",
+        );
+    };
+    if signature_bytes.len() != 64 {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "signature must contain a 64-byte Ed25519 signature",
+        );
+    }
+
+    let update_id = uuid::Uuid::new_v4().to_string();
+    let offer = NodeUpdateOffer {
+        update_id: update_id.clone(),
+        version: version.clone(),
+        url,
+        sha256,
+        signature,
+    };
+    let target_workers = state.registry.dispatch_node_update(&client_id, offer).await;
+    if target_workers == 0 {
+        return json_error(StatusCode::CONFLICT, "client has no connected MCP workers");
+    }
+    state.observability.log(
+        "info",
+        "update",
+        format!("dispatched Node Agent update {version} to {target_workers} worker(s)"),
+        Some(&client_id),
+        Some("mcp"),
+        None,
+        None,
+    );
+    secure_json_response(
+        Json(DispatchNodeUpdateOutput {
+            client_id,
+            update_id,
+            version,
+            target_workers,
+        })
+        .into_response(),
+    )
 }
 
 async fn list_activity(
@@ -759,6 +865,7 @@ mod tests {
             devices,
             policies,
             Observability::new(),
+            Registry::default(),
             "https://tunnel.example.com/".into(),
             AdminConfig {
                 username: TEST_USERNAME.into(),
@@ -780,6 +887,7 @@ mod tests {
             devices.clone(),
             policies,
             Observability::new(),
+            Registry::default(),
             "https://tunnel.example.com/".into(),
             AdminConfig {
                 username: TEST_USERNAME.into(),
@@ -958,6 +1066,11 @@ mod tests {
             "primary-tabs",
             "clients-panel",
             "client-log-search",
+            "client-update-panel",
+            "client-update-form",
+            "client-agent-version",
+            "client-update-state",
+            "/api/clients/${encodeURIComponent(client.clientId)}/update",
             "system-log-search",
             "purge-revoked",
             "/api/devices/revoked/purge",
@@ -1185,6 +1298,88 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(no_csrf.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn node_update_dispatch_validates_csrf_https_hash_and_signature() {
+        let (_directory, app) = test_app();
+        let (cookie, csrf) = authenticated(&app).await;
+        let signature = URL_SAFE_NO_PAD.encode([0_u8; 64]);
+        let valid = json!({
+            "version": "0.29.34",
+            "url": "https://updates.example.test/ctnode.zip",
+            "sha256": "a".repeat(64),
+            "signature": signature,
+        })
+        .to_string();
+
+        let no_csrf = app
+            .clone()
+            .oneshot(
+                Request::post("/api/clients/pc-a/update")
+                    .header(COOKIE, &cookie)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(valid.clone()))
+                    .expect("missing csrf update request"),
+            )
+            .await
+            .expect("missing csrf update response");
+        assert_eq!(no_csrf.status(), StatusCode::FORBIDDEN);
+
+        let insecure = json!({
+            "version": "0.29.34",
+            "url": "http://updates.example.test/ctnode.zip",
+            "sha256": "a".repeat(64),
+            "signature": URL_SAFE_NO_PAD.encode([0_u8; 64]),
+        })
+        .to_string();
+        let insecure = app
+            .clone()
+            .oneshot(
+                Request::post("/api/clients/pc-a/update")
+                    .header(COOKIE, &cookie)
+                    .header(&CSRF_HEADER, &csrf)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(insecure))
+                    .expect("insecure update request"),
+            )
+            .await
+            .expect("insecure update response");
+        assert_eq!(insecure.status(), StatusCode::BAD_REQUEST);
+
+        let malformed_signature = json!({
+            "version": "0.29.34",
+            "url": "https://updates.example.test/ctnode.zip",
+            "sha256": "a".repeat(64),
+            "signature": "short",
+        })
+        .to_string();
+        let malformed_signature = app
+            .clone()
+            .oneshot(
+                Request::post("/api/clients/pc-a/update")
+                    .header(COOKIE, &cookie)
+                    .header(&CSRF_HEADER, &csrf)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(malformed_signature))
+                    .expect("bad signature request"),
+            )
+            .await
+            .expect("bad signature response");
+        assert_eq!(malformed_signature.status(), StatusCode::BAD_REQUEST);
+
+        let accepted_metadata = app
+            .oneshot(
+                Request::post("/api/clients/pc-a/update")
+                    .header(COOKIE, &cookie)
+                    .header(&CSRF_HEADER, &csrf)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(valid))
+                    .expect("valid update request"),
+            )
+            .await
+            .expect("valid update response");
+        assert_eq!(accepted_metadata.status(), StatusCode::CONFLICT);
     }
 
     #[tokio::test]

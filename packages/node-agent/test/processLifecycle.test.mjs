@@ -7,9 +7,9 @@ import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
-  AUTO_DEDUPE_COMPLETED_GRACE_MS,
   attachHarnessOperation,
   cargoTargetLock,
+  nodeGeneratedLock,
   DETACHED_SESSION_GRACE_MS,
   disposeProcessSessions,
   FINALIZED_SESSION_RETENTION_MS,
@@ -18,7 +18,8 @@ import {
   pruneProcessSessions,
   resolvedCommandTimeoutMs,
   startAndYield,
-  waitForSession
+  waitForSession,
+  killProcessTree
 } from '../dist/processes.js';
 import { runtimeForFolderId } from '../dist/folderRuntime.js';
 import { createAgentRuntime, createToolContext } from '../dist/server.js';
@@ -31,6 +32,7 @@ import {
 test('process execution identity is owned by a dedicated module behind the processes facade', async () => {
   const identity = await import('../dist/processes/identity.js');
   assert.equal(identity.cargoTargetLock, cargoTargetLock);
+  assert.equal(identity.nodeGeneratedLock, nodeGeneratedLock);
   assert.equal(typeof identity.commandFingerprint, 'function');
   assert.equal(typeof identity.safeAutomaticDedup, 'function');
 });
@@ -116,6 +118,33 @@ test('Cargo resource locks follow resolved target directories across worktrees',
   assert.equal(cargoTargetLock(main, { program: nodeProgram, argv: [], display: nodeProgram, shell: false }, {}), undefined);
 });
 
+test('Node Agent build and tests infer the same generated-output lock', () => {
+  const root = path.resolve('C:/repo/main');
+  const build = nodeGeneratedLock(root, {
+    program: 'pnpm',
+    argv: ['--filter', '@coding-tools/node-agent', 'run', 'build:server'],
+    display: 'pnpm --filter @coding-tools/node-agent run build:server',
+    shell: false
+  });
+  const tests = nodeGeneratedLock(root, {
+    program: nodeProgram,
+    argv: ['--import', './packages/node-agent/test/setup.mjs', '--test', 'packages/node-agent/test/workspaceConversation.test.mjs'],
+    display: `${nodeProgram} --import ./packages/node-agent/test/setup.mjs --test packages/node-agent/test/workspaceConversation.test.mjs`,
+    shell: false
+  });
+  assert.equal(build?.target, path.resolve(root, 'packages/node-agent/dist'));
+  assert.equal(tests?.target, build?.target);
+  assert.equal(tests?.group, build?.group);
+
+  const unrelated = nodeGeneratedLock(root, {
+    program: nodeProgram,
+    argv: ['scripts/check.mjs'],
+    display: `${nodeProgram} scripts/check.mjs`,
+    shell: false
+  });
+  assert.equal(unrelated, undefined);
+});
+
 function config(root, dataDir, maxOutputBytes = 1024 * 1024) {
   return {
     host: '127.0.0.1', port: 0, dataDir, permissionMode: 'trusted',
@@ -176,7 +205,374 @@ process.stdin.on('end', () => process.exit(0));
 setInterval(() => {}, 1000);
 `;
 
-test('Docker Linux sandbox rejects a Windows host executable before any host process session is created', async t => {
+test('managed job survives Agent restart and reattaches by session and operation id', async t => {
+  const root = await mkdtemp(path.join(tmpdir(), 'ctmcp-durable-root-'));
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'ctmcp-durable-data-'));
+  const operationId = `durable-restart-${Date.now()}-${Math.random()}`;
+  const script = `console.log('before-restart'); setTimeout(() => { console.log('after-restart'); }, 1500);`;
+  const command = {
+    program: nodeProgram,
+    args: ['-e', script],
+    operation_id: operationId,
+    job_timeout_ms: 15_000,
+    lock_group: 'durable-restart-lock',
+    yield_time_ms: 100
+  };
+  const meta1 = { 'openai/session': `durable-a-${Date.now()}-${Math.random()}` };
+  const ctx1 = await createToolContext(config(root, dataDir));
+  let cleanupCtx = ctx1;
+  let sessionId;
+  t.after(async () => {
+    if (sessionId) {
+      try {
+        const status = await callTool(cleanupCtx, 'wait_command', {
+          session_id: sessionId,
+          timeout_ms: 0,
+          until: 'exit',
+          output_mode: 'none'
+        }, { 'openai/session': `durable-cleanup-${Date.now()}` });
+        if (status.process_still_running) {
+          await callTool(cleanupCtx, 'kill_session', { session_id: sessionId, signal: 'KILL' }, { 'openai/session': `durable-kill-${Date.now()}` });
+        }
+      } catch { /* best effort */ }
+    }
+    await disposeProcessSessions(cleanupCtx);
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  });
+
+  assert.equal((await callTool(ctx1, 'switch_workspace_folder', { folder_id: 'repo' }, meta1)).ok, true);
+  const started = await callTool(ctx1, 'exec_command', command, meta1);
+  sessionId = started.session_id;
+  assert.equal(started.execution_mode, 'job');
+  assert.equal(started.restart_recoverable, true);
+  assert.equal(started.process_still_running, true);
+  assert.ok(sessionId);
+
+  await disposeProcessSessions(ctx1);
+
+  const ctx2 = await createToolContext(config(root, dataDir));
+  cleanupCtx = ctx2;
+  const meta2 = { 'openai/session': `durable-b-${Date.now()}-${Math.random()}` };
+  assert.equal((await callTool(ctx2, 'switch_workspace_folder', { folder_id: 'repo' }, meta2)).ok, true);
+
+  const bySession = await callTool(ctx2, 'wait_command', {
+    session_id: sessionId,
+    timeout_ms: 0,
+    until: 'exit',
+    output_mode: 'tail'
+  }, meta2);
+  assert.equal(bySession.session_id, sessionId);
+  assert.equal(bySession.restart_recoverable, true);
+  assert.notEqual(bySession.termination_reason, 'server_restart');
+
+  const byOperation = await callTool(ctx2, 'exec_command', command, meta2);
+  assert.equal(byOperation.session_id, sessionId);
+  assert.equal(byOperation.operation_id, operationId);
+  assert.equal(byOperation.deduplicated, true);
+
+  const contenderPromise = callTool(ctx2, 'exec_command', {
+    program: nodeProgram,
+    args: ['-e', `console.log('contender');`],
+    lock_group: 'durable-restart-lock',
+    timeout_ms: 5_000,
+    yield_time_ms: 0
+  }, meta2);
+  const final = await waitFinal({ ctx: ctx2, meta: meta2 }, sessionId, 0, 'tail');
+  const contender = await contenderPromise;
+  const contenderFinal = contender.process_still_running
+    ? await waitFinal({ ctx: ctx2, meta: meta2 }, contender.session_id, 0, 'tail')
+    : contender;
+  assert.equal(contenderFinal.process_exit_code, 0);
+  assert.ok(contenderFinal.resource_lock_wait_ms >= 500, JSON.stringify(contenderFinal));
+  assert.equal(final.process_completed, true);
+  assert.equal(final.process_exit_code, 0);
+  assert.equal(final.termination_reason, 'exited');
+  assert.match(final.stdout, /before-restart/);
+  assert.match(final.stdout, /after-restart/);
+  assert.equal(final.restart_recoverable, true);
+});
+
+test('durable managed job keeps its fixed timeout across Agent restart', async t => {
+  const root = await mkdtemp(path.join(tmpdir(), 'ctmcp-durable-timeout-root-'));
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'ctmcp-durable-timeout-data-'));
+  const ctx1 = await createToolContext(config(root, dataDir));
+  const meta1 = { 'openai/session': `durable-timeout-a-${Date.now()}` };
+  let ctx2 = ctx1;
+  let sessionId;
+  t.after(async () => {
+    if (sessionId) {
+      try {
+        const status = await callTool(ctx2, 'wait_command', { session_id: sessionId, timeout_ms: 0, output_mode: 'none' }, { 'openai/session': `durable-timeout-clean-${Date.now()}` });
+        if (status.process_still_running) await callTool(ctx2, 'kill_session', { session_id: sessionId, signal: 'KILL' }, { 'openai/session': `durable-timeout-kill-${Date.now()}` });
+      } catch { /* best effort */ }
+    }
+    await disposeProcessSessions(ctx2);
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  });
+  assert.equal((await callTool(ctx1, 'switch_workspace_folder', { folder_id: 'repo' }, meta1)).ok, true);
+  const started = await callTool(ctx1, 'exec_command', {
+    program: nodeProgram,
+    args: ['-e', `console.log('timeout-start'); setTimeout(() => console.log('too-late'), 5000);`],
+    operation_id: `durable-timeout-${Date.now()}`,
+    job_timeout_ms: 800,
+    yield_time_ms: 50
+  }, meta1);
+  sessionId = started.session_id;
+  assert.equal(started.restart_recoverable, true);
+  await disposeProcessSessions(ctx1);
+
+  ctx2 = await createToolContext(config(root, dataDir));
+  const meta2 = { 'openai/session': `durable-timeout-b-${Date.now()}` };
+  assert.equal((await callTool(ctx2, 'switch_workspace_folder', { folder_id: 'repo' }, meta2)).ok, true);
+  const final = await waitFinal({ ctx: ctx2, meta: meta2 }, sessionId, 0, 'tail');
+  assert.equal(final.process_completed, true);
+  assert.equal(final.process_timed_out, true);
+  assert.equal(final.termination_reason, 'process_timeout');
+  assert.equal(final.restart_recoverable, true);
+  assert.match(final.stdout, /timeout-start/);
+  assert.doesNotMatch(final.stdout, /too-late/);
+});
+
+test('kill_session terminates a durable managed job after Agent restart', async t => {
+  const root = await mkdtemp(path.join(tmpdir(), 'ctmcp-durable-kill-root-'));
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'ctmcp-durable-kill-data-'));
+  const ctx1 = await createToolContext(config(root, dataDir));
+  const meta1 = { 'openai/session': `durable-kill-a-${Date.now()}` };
+  let ctx2 = ctx1;
+  let sessionId;
+  t.after(async () => {
+    if (sessionId) {
+      try {
+        const status = await callTool(ctx2, 'wait_command', { session_id: sessionId, timeout_ms: 0, output_mode: 'none' }, { 'openai/session': `durable-kill-clean-${Date.now()}` });
+        if (status.process_still_running) await callTool(ctx2, 'kill_session', { session_id: sessionId, signal: 'KILL' }, { 'openai/session': `durable-kill-force-${Date.now()}` });
+      } catch { /* best effort */ }
+    }
+    await disposeProcessSessions(ctx2);
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  });
+  assert.equal((await callTool(ctx1, 'switch_workspace_folder', { folder_id: 'repo' }, meta1)).ok, true);
+  const started = await callTool(ctx1, 'exec_command', {
+    program: nodeProgram,
+    args: ['-e', `console.log('kill-start'); setTimeout(() => console.log('too-late'), 60000);`],
+    operation_id: `durable-kill-${Date.now()}`,
+    job_timeout_ms: 60_000,
+    yield_time_ms: 50
+  }, meta1);
+  sessionId = started.session_id;
+  await disposeProcessSessions(ctx1);
+
+  ctx2 = await createToolContext(config(root, dataDir));
+  const meta2 = { 'openai/session': `durable-kill-b-${Date.now()}` };
+  assert.equal((await callTool(ctx2, 'switch_workspace_folder', { folder_id: 'repo' }, meta2)).ok, true);
+  const killed = await callTool(ctx2, 'kill_session', { session_id: sessionId, signal: 'KILL', wait_ms: 15_000 }, meta2);
+  assert.equal(killed.ok, true);
+  assert.equal(killed.termination_reason, 'killed');
+  assert.equal(killed.killed, true);
+  assert.equal(killed.restart_recoverable, true);
+  assert.equal(killed.evicted, true);
+  assert.match(killed.stdout, /kill-start/);
+  assert.doesNotMatch(killed.stdout, /too-late/);
+});
+
+test('exec_many server restart preserves an already-started durable child session', async t => {
+  const root = await mkdtemp(path.join(tmpdir(), 'ctmcp-durable-graph-root-'));
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'ctmcp-durable-graph-data-'));
+  const ctx1 = await createToolContext(config(root, dataDir));
+  const meta1 = { 'openai/session': `durable-graph-a-${Date.now()}` };
+  const childOperationId = `durable-graph-child-${Date.now()}-${Math.random()}`;
+  const graphOperationId = `durable-graph-${Date.now()}-${Math.random()}`;
+  let ctx2 = ctx1;
+  let sessionId;
+  t.after(async () => {
+    if (sessionId) {
+      try {
+        const status = await callTool(ctx2, 'wait_command', { session_id: sessionId, timeout_ms: 0, output_mode: 'none' }, { 'openai/session': `durable-graph-clean-${Date.now()}` });
+        if (status.process_still_running) await callTool(ctx2, 'kill_session', { session_id: sessionId, signal: 'KILL' }, { 'openai/session': `durable-graph-kill-${Date.now()}` });
+      } catch { /* best effort */ }
+    }
+    await disposeProcessSessions(ctx2);
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  });
+
+  assert.equal((await callTool(ctx1, 'switch_workspace_folder', { folder_id: 'repo' }, meta1)).ok, true);
+  let graph = await callTool(ctx1, 'exec_many', {
+    operation_id: graphOperationId,
+    mode: 'parallel',
+    max_parallel: 1,
+    yield_time_ms: 100,
+    result_mode: 'full',
+    commands: [{
+      id: 'durable-child',
+      program: nodeProgram,
+      args: ['-e', `console.log('graph-before-restart'); setTimeout(() => console.log('graph-after-restart'), 1600);`],
+      operation_id: childOperationId,
+      job_timeout_ms: 15_000,
+      yield_time_ms: 0
+    }]
+  }, meta1);
+  let child = graph.results.find(result => result.id === 'durable-child');
+  for (let attempt = 0; !child?.session_id && attempt < 20; attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 50));
+    graph = await callTool(ctx1, 'exec_many', {
+      operation_id: graphOperationId,
+      action: 'status',
+      result_mode: 'full'
+    }, meta1);
+    child = graph.results.find(result => result.id === 'durable-child');
+  }
+  sessionId = child?.session_id;
+  assert.ok(sessionId, JSON.stringify(graph));
+  assert.equal(child.restart_recoverable, true);
+  assert.equal(child.process_still_running, true);
+
+  await disposeProcessSessions(ctx1);
+
+  ctx2 = await createToolContext(config(root, dataDir));
+  const meta2 = { 'openai/session': `durable-graph-b-${Date.now()}` };
+  assert.equal((await callTool(ctx2, 'switch_workspace_folder', { folder_id: 'repo' }, meta2)).ok, true);
+  const restored = await callTool(ctx2, 'wait_command', {
+    session_id: sessionId,
+    timeout_ms: 0,
+    until: 'exit',
+    output_mode: 'tail'
+  }, meta2);
+  assert.equal(restored.restart_recoverable, true);
+  assert.notEqual(restored.termination_reason, 'graph_cancelled');
+  assert.notEqual(restored.termination_reason, 'server_restart');
+
+  const byOperation = await callTool(ctx2, 'exec_command', {
+    program: nodeProgram,
+    args: ['-e', `console.log('graph-before-restart'); setTimeout(() => console.log('graph-after-restart'), 1600);`],
+    operation_id: childOperationId,
+    job_timeout_ms: 15_000,
+    yield_time_ms: 0
+  }, meta2);
+  assert.equal(byOperation.session_id, sessionId);
+  assert.equal(byOperation.deduplicated, true);
+
+  let final;
+  const finalDeadline = Date.now() + 30_000;
+  while (Date.now() < finalDeadline) {
+    final = await callTool(ctx2, 'wait_command', {
+      session_id: sessionId,
+      cursor: Number(final?.latest_cursor ?? 0),
+      timeout_ms: 2_000,
+      until: 'finalized',
+      output_mode: 'tail',
+      max_output_bytes: 1024 * 1024
+    }, meta2);
+    if (final.process_completed) break;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  assert.equal(final?.process_completed, true, JSON.stringify(final));
+  assert.equal(final.process_exit_code, 0);
+  assert.equal(final.termination_reason, 'exited');
+  assert.match(final.stdout, /graph-before-restart/);
+  assert.match(final.stdout, /graph-after-restart/);
+});
+
+test('exec_many explicit cancel still terminates an owned durable child', async t => {
+  const root = await mkdtemp(path.join(tmpdir(), 'ctmcp-durable-graph-cancel-root-'));
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'ctmcp-durable-graph-cancel-data-'));
+  const ctx = await createToolContext(config(root, dataDir));
+  const meta = { 'openai/session': `durable-graph-cancel-${Date.now()}` };
+  const graphOperationId = `durable-graph-cancel-${Date.now()}-${Math.random()}`;
+  let sessionId;
+  t.after(async () => {
+    if (sessionId) {
+      try {
+        const status = await callTool(ctx, 'wait_command', {
+          session_id: sessionId,
+          timeout_ms: 0,
+          until: 'exit',
+          output_mode: 'none'
+        }, { 'openai/session': `durable-graph-cancel-clean-${Date.now()}` });
+        if (status.process_still_running) {
+          await callTool(ctx, 'kill_session', {
+            session_id: sessionId,
+            signal: 'KILL',
+            wait_ms: 15_000
+          }, { 'openai/session': `durable-graph-cancel-force-${Date.now()}` });
+        }
+      } catch { /* best effort */ }
+    }
+    await disposeProcessSessions(ctx);
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  });
+
+  assert.equal((await callTool(ctx, 'switch_workspace_folder', { folder_id: 'repo' }, meta)).ok, true);
+  let graph = await callTool(ctx, 'exec_many', {
+    operation_id: graphOperationId,
+    mode: 'parallel',
+    max_parallel: 1,
+    yield_time_ms: 100,
+    result_mode: 'full',
+    commands: [{
+      id: 'durable-child',
+      program: nodeProgram,
+      args: ['-e', `console.log('cancel-start'); setTimeout(() => console.log('too-late'), 60000);`],
+      operation_id: `durable-graph-cancel-child-${Date.now()}-${Math.random()}`,
+      job_timeout_ms: 60_000,
+      yield_time_ms: 0
+    }]
+  }, meta);
+  let child = graph.results.find(result => result.id === 'durable-child');
+  for (let attempt = 0; !child?.session_id && attempt < 20; attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 50));
+    graph = await callTool(ctx, 'exec_many', {
+      operation_id: graphOperationId,
+      action: 'status',
+      result_mode: 'full'
+    }, meta);
+    child = graph.results.find(result => result.id === 'durable-child');
+  }
+  sessionId = child?.session_id;
+  assert.ok(sessionId, JSON.stringify(graph));
+  assert.equal(child.restart_recoverable, true);
+  assert.equal(child.process_still_running, true);
+
+  const cancelled = await callTool(ctx, 'exec_many', {
+    operation_id: graphOperationId,
+    action: 'cancel',
+    reason: 'test explicit cancel',
+    yield_time_ms: 15_000,
+    result_mode: 'full'
+  }, meta);
+  assert.equal(cancelled.cancel_accepted, true, JSON.stringify(cancelled));
+  assert.ok(cancelled.cancelled_session_count >= 1, JSON.stringify(cancelled));
+
+  const final = await waitFinal({ ctx, meta }, sessionId, 0, 'tail');
+  assert.equal(final.process_completed, true);
+  assert.equal(final.termination_reason, 'graph_cancelled');
+  assert.match(final.stdout, /cancel-start/);
+  assert.doesNotMatch(final.stdout, /too-late/);
+});
+
+test('restart-persistent managed jobs reject interactive and protected credential sources before spawn', async t => {
+  const state = await fixture(t);
+  for (const command of [
+    { program: nodeProgram, args: ['-e', 'setInterval(() => {}, 1000)'], operation_id: 'durable-tty', job_timeout_ms: 5_000, tty: true },
+    { program: nodeProgram, args: ['-e', 'console.log(1)'], operation_id: 'durable-secret', job_timeout_ms: 5_000, secret_env: { API_TOKEN: 'fixture-secret' } },
+    { program: nodeProgram, args: ['-e', 'console.log(1)'], operation_id: 'durable-env', job_timeout_ms: 5_000, env: { API_TOKEN: 'plain-but-sensitive' } },
+    { program: nodeProgram, args: ['-e', 'console.log(1)', '--token', 'plain-command-secret'], operation_id: 'durable-argv', job_timeout_ms: 5_000 }
+  ]) {
+    const result = await callTool(state.ctx, 'exec_command', command, state.meta);
+    assert.equal(result.ok, false);
+    assert.equal(result.error.code, 'DURABLE_JOB_UNSUPPORTED');
+    assert.equal(result.error.details.process_started, false);
+  }
+  const runtime = runtimeForFolderId(state.ctx, 'repo');
+  assert.equal([...runtime.sessions.values()].filter(session => session.timeoutContract?.executionMode === 'job').length, 0);
+});
+
+test('Docker Linux sandbox rejects a Windows host executable before any host process session is created', {
+  skip: process.platform !== 'win32'
+}, async t => {
   const state = await fixture(t);
   state.ctx.config.sandbox = {
     enabled: true,
@@ -185,7 +581,7 @@ test('Docker Linux sandbox rejects a Windows host executable before any host pro
     options: {}
   };
   const result = await callTool(state.ctx, 'exec_command', {
-    program: nodeProgram,
+    program: 'node.exe',
     args: ['-e', 'process.stdout.write("must-not-run")'],
     timeout_ms: 5_000
   }, state.meta);
@@ -472,7 +868,31 @@ test('interactive sessions expose stdin state, byte counts, timing and closed-in
   assert.equal(rejected.error.retryable, false);
 });
 
-test('wait_command ignores the legacy heartbeat interval and uses the full server wait window', async t => {
+test('wait_command caps a long requested wait to the transport-safe chunk', async t => {
+  const state = await fixture(t);
+  const started = await callTool(state.ctx, 'exec_command', {
+    program: nodeProgram,
+    args: ['-e', 'setTimeout(() => process.exit(0), 200)'],
+    yield_time_ms: 0,
+    timeout_ms: 10_000,
+    output_mode: 'none'
+  }, state.meta);
+  assert.equal(started.next_actions[0].arguments.timeout_ms, 20_000);
+
+  const waitedAt = Date.now();
+  const waited = await callTool(state.ctx, 'wait_command', {
+    session_id: started.session_id,
+    cursor: started.latest_cursor,
+    timeout_ms: 60 * 60_000,
+    until: 'exit',
+    output_mode: 'none'
+  }, state.meta);
+  assert.ok(Date.now() - waitedAt < 5_000, JSON.stringify(waited));
+  assert.equal(waited.wait_timeout_ms, 60 * 60_000);
+  assert.equal(waited.effective_wait_ms, 20_000);
+  assert.equal(waited.process_still_running, false);
+});
+test('wait_command ignores the legacy heartbeat interval and uses the bounded server wait window', async t => {
   const state = await fixture(t);
   const started = await callTool(state.ctx, 'exec_command', {
     program: nodeProgram,
@@ -481,7 +901,7 @@ test('wait_command ignores the legacy heartbeat interval and uses the full serve
     timeout_ms: 10_000
   }, state.meta);
   assert.equal(started.operation_id, null);
-  assert.equal(started.next_actions[0].arguments.timeout_ms, 60 * 60_000);
+  assert.equal(started.next_actions[0].arguments.timeout_ms, 20_000);
   assert.equal(started.next_actions[0].arguments.until, 'output_or_exit');
 
   const waited = await callTool(state.ctx, 'wait_command', {
@@ -561,6 +981,29 @@ test('kill_session retains an exited session until post-check finalization compl
   assert.equal(repoRuntime(state.ctx).sessions.has(started.session_id), false);
 });
 
+test('Windows tree termination falls back to direct SIGKILL when taskkill fails', { skip: process.platform !== 'win32' }, async () => {
+  let fallbackSignal;
+  const child = {
+    pid: 2_147_483_647,
+    exitCode: null,
+    signalCode: null,
+    kill(signal) {
+      fallbackSignal = signal;
+      return true;
+    }
+  };
+  const session = {
+    endedAt: undefined,
+    child,
+    terminationReason: undefined,
+    killed: false,
+    events: new EventEmitter()
+  };
+
+  await killProcessTree(session, 'KILL', 'killed');
+  assert.equal(fallbackSignal, 'SIGKILL');
+});
+
 test('Windows TERM kill_session forcefully terminates the managed tree like Rust', { skip: process.platform !== 'win32' }, async t => {
   const state = await fixture(t);
   const started = await callTool(state.ctx, 'exec_command', {
@@ -583,7 +1026,7 @@ test('Windows TERM kill_session forcefully terminates the managed tree like Rust
   assert.equal(killed.evicted, true, JSON.stringify(killed));
 });
 
-test('operation reattachment, conflict and automatic dedupe grace match Rust', async t => {
+test('operation reattachment is stable while automatic dedupe only coalesces active sessions', async t => {
   const state = await fixture(t);
   const explicitArgs = {
     program: nodeProgram,
@@ -637,18 +1080,39 @@ test('operation reattachment, conflict and automatic dedupe grace match Rust', a
     timeout_ms: 10_000,
     yield_time_ms: 10_000
   };
-  const automaticFirst = await callTool(state.ctx, 'exec_command', automaticArgs, state.meta);
-  assert.match(automaticFirst.operation_id, /^auto:[0-9a-f]{32}$/);
+  const automaticStarted = await callTool(state.ctx, 'exec_command', automaticArgs, state.meta);
+  assert.match(automaticStarted.operation_id, /^auto:[0-9a-f]{32}$/);
+  const automaticFirst = automaticStarted.process_still_running
+    ? await waitFinal(state, automaticStarted.session_id, automaticStarted.latest_cursor, 'tail')
+    : automaticStarted;
+  assert.equal(automaticFirst.process_still_running, false, JSON.stringify(automaticFirst));
+  assert.ok(Number(automaticFirst.finalized_ts_ms) > 0, JSON.stringify(automaticFirst));
   const automaticSecond = await callTool(state.ctx, 'exec_command', automaticArgs, state.meta);
-  assert.equal(automaticSecond.session_id, automaticFirst.session_id);
-  assert.equal(automaticSecond.deduplicated, true);
+  assert.notEqual(automaticSecond.session_id, automaticFirst.session_id);
+  assert.equal(automaticSecond.deduplicated, false);
 
-  const retained = repoRuntime(state.ctx).sessions.get(automaticFirst.session_id);
-  assert.ok(retained?.finalizedAt);
-  retained.finalizedAt = Date.now() - AUTO_DEDUPE_COMPLETED_GRACE_MS - 1;
-  const automaticThird = await callTool(state.ctx, 'exec_command', automaticArgs, state.meta);
-  assert.notEqual(automaticThird.session_id, automaticFirst.session_id);
-  assert.equal(automaticThird.deduplicated, false);
+  const activeArgs = {
+    program: nodeProgram,
+    args: ['-e', 'setTimeout(() => process.exit(0), 30_000)'],
+    deduplicate: true,
+    timeout_ms: 60_000,
+    yield_time_ms: 0,
+    output_mode: 'none'
+  };
+  const activeFirst = await callTool(state.ctx, 'exec_command', activeArgs, state.meta);
+  assert.equal(activeFirst.process_still_running, true, JSON.stringify(activeFirst));
+  const activeSecond = await callTool(state.ctx, 'exec_command', activeArgs, state.meta);
+  assert.equal(activeSecond.session_id, activeFirst.session_id);
+  assert.equal(activeSecond.deduplicated, true);
+  assert.equal(activeSecond.attached_to_session_id, activeFirst.session_id);
+  const activeCleanup = await callTool(state.ctx, 'kill_session', {
+    session_id: activeFirst.session_id,
+    signal: 'KILL',
+    wait_ms: 5_000
+  }, state.meta);
+  assert.equal(activeCleanup.ok, true, JSON.stringify(activeCleanup));
+  assert.equal(activeCleanup.killed, true, JSON.stringify(activeCleanup));
+  assert.equal(activeCleanup.process_still_running, false, JSON.stringify(activeCleanup));
 });
 
 test('Windows startup admission retains sessions even when it consumes the command timeout', {
@@ -697,16 +1161,19 @@ test('timeout and detached grace expose Rust recovery contracts and reattachment
   const lifecycle = new ProcessRequestLifecycle(state.ctx, 80);
   const detachedStart = await startAndYield(state.ctx, state.meta['openai/session'], {
     program: nodeProgram,
-    args: ['-e', 'setTimeout(() => {}, 10000)'],
+    args: ['-e', 'setTimeout(() => {}, 600000)'],
     tty: true,
     yield_time_ms: 0,
-    timeout_ms: 10_000,
+    timeout_ms: 600_000,
     operation_id: 'detached-operation'
   }, lifecycle);
   lifecycle.abort();
   const detachedSession = repoRuntime(state.ctx).sessions.get(detachedStart.session_id);
   assert.ok(detachedSession);
-  await waitForSession(detachedSession, detachedSession.sequence, 5_000, 'finalized');
+  const detachedDeadline = Date.now() + 180_000;
+  while (!detachedSession.finalizedAt && Date.now() < detachedDeadline) {
+    await waitForSession(detachedSession, detachedSession.sequence, 20_000, 'finalized');
+  }
   assert.ok(detachedSession.finalizedAt, 'detached timeout must finalize through the normal lifecycle');
   const detachedFinal = await callTool(state.ctx, 'resolve_operation', {
     operation_id: 'detached-operation',
@@ -719,10 +1186,10 @@ test('timeout and detached grace expose Rust recovery contracts and reattachment
   const cancelLifecycle = new ProcessRequestLifecycle(state.ctx, 250);
   const cancelStart = await startAndYield(state.ctx, state.meta['openai/session'], {
     program: nodeProgram,
-    args: ['-e', 'setTimeout(() => {}, 10000)'],
+    args: ['-e', 'setTimeout(() => {}, 120000)'],
     tty: true,
     yield_time_ms: 0,
-    timeout_ms: 10_000,
+    timeout_ms: 120_000,
     operation_id: 'cancel-detached-operation'
   }, cancelLifecycle);
   cancelLifecycle.abort();
@@ -807,8 +1274,10 @@ test('retained output pagination reports expiry, UTF-8 alignment and delta conti
     output_mode: 'delta',
     max_output_bytes: 1024
   }, state.meta);
+  assert.equal(firstOutput.event_detail, 'compact');
   assert.equal(firstOutput.events.length, 1);
-  assert.equal(Buffer.byteLength(firstOutput.events[0].data), 700);
+  assert.equal(firstOutput.events[0].data, undefined);
+  assert.equal(Buffer.byteLength(firstOutput.stdout), 700);
   await callTool(state.ctx, 'send_input', {
     session_id: streamed.session_id,
     chars: 'continue',
@@ -821,8 +1290,10 @@ test('retained output pagination reports expiry, UTF-8 alignment and delta conti
     timeout_ms: 10_000,
     until: 'finalized',
     output_mode: 'delta',
+    event_detail: 'full',
     max_output_bytes: 1024
   }, state.meta);
+  assert.equal(firstPage.event_detail, 'full');
   assert.equal(firstPage.command_ok, true);
   assert.equal(firstPage.has_more_output, true);
   assert.ok(firstPage.next_cursor < firstPage.latest_cursor);
@@ -835,8 +1306,10 @@ test('retained output pagination reports expiry, UTF-8 alignment and delta conti
     timeout_ms: 0,
     until: 'finalized',
     output_mode: 'delta',
+    event_detail: 'full',
     max_output_bytes: 1024
   }, state.meta);
+  assert.equal(secondPage.event_detail, 'full');
   assert.equal(secondPage.events.length, 1);
   assert.equal(Buffer.byteLength(secondPage.events[0].data), 700);
   assert.equal(secondPage.has_more_output, false);
@@ -862,10 +1335,10 @@ test('closing the Agent finalizes running sessions with server_restart recovery 
 
   const started = await callTool(runtime.context, 'exec_command', {
     program: nodeProgram,
-    args: ['-e', 'setTimeout(() => {}, 10000)'],
+    args: ['-e', 'setTimeout(() => {}, 60000)'],
     tty: true,
     yield_time_ms: 0,
-    timeout_ms: 10_000,
+    timeout_ms: 60_000,
     operation_id: 'server-close-operation'
   }, meta);
   const session = repoRuntime(runtime.context).sessions.get(started.session_id);

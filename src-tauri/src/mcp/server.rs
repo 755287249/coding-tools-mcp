@@ -9,8 +9,9 @@ use super::tasks::{
     detailed_task, mark_cancelled, require_task, task_error, update_from_snapshot, TASKS_EXTENSION,
 };
 use crate::tools::{
-    call_tool, call_tool_async, list_tools_for_profile, wrap_mcp_tool_result, ExecutionLimits,
-    SharedRuntimeToolConfig, SharedToolContext, ToolContext, Workspace,
+    call_tool, call_tool_async, call_tool_async_with_canary_sample_key, list_tools_for_profile,
+    wrap_mcp_tool_result, ExecutionLimits, SharedRuntimeToolConfig, SharedToolContext, ToolContext,
+    Workspace,
 };
 use crate::workspace::{AuthConfig, SandboxConfig, WorkspaceFolder};
 
@@ -66,19 +67,19 @@ pub fn handle_request(state: &SharedState, body: &Value) -> Value {
             .and_then(Value::as_str)
             .ok_or_else(|| json!({ "code": -32602, "message": "Missing prompt name" }))
             .and_then(|name| {
-                crate::workspace_features::get_skill_prompt(&state.profile_id, name)
-                    .map_err(|message| crate::workspace_features::skill_rpc_error(method, message))
+                crate::workspace_features::get_skill_prompt_for_session(
+                    &state.profile_id,
+                    name,
+                    host_session_key(&params),
+                )
+                .map_err(|message| crate::workspace_features::skill_rpc_error(method, message))
             }),
-        "resources/list" => crate::workspace_features::list_skill_resources(&state.profile_id)
-            .map_err(|message| crate::workspace_features::skill_rpc_error(method, message)),
+        "resources/list" => list_resources(state),
         "resources/read" => params
             .get("uri")
             .and_then(Value::as_str)
             .ok_or_else(|| json!({ "code": -32602, "message": "Missing resource URI" }))
-            .and_then(|uri| {
-                crate::workspace_features::read_skill_resource(&state.profile_id, uri)
-                    .map_err(|message| crate::workspace_features::skill_rpc_error(method, message))
-            }),
+            .and_then(|uri| read_resource(state, uri, host_session_key(&params))),
         "tools/call" => handle_tools_call(state, &params),
         _ => Err(serde_json::json!({
             "code": -32601,
@@ -111,6 +112,30 @@ pub async fn handle_request_async(state: SharedState, body: Value) -> Value {
     match result {
         Ok(result) => serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result }),
         Err(error) => serde_json::json!({ "jsonrpc": "2.0", "id": id, "error": error }),
+    }
+}
+
+fn list_resources(state: &SharedState) -> Result<Value, Value> {
+    let skills = crate::workspace_features::list_skill_resources(&state.profile_id)
+        .map_err(|message| crate::workspace_features::skill_rpc_error("resources/list", message))?;
+    let evolution = crate::knowledge::list_tool_evolution_resources(state)?;
+    Ok(crate::knowledge::merge_resource_lists(skills, evolution))
+}
+
+fn read_resource(
+    state: &SharedState,
+    uri: &str,
+    session_key: Option<&str>,
+) -> Result<Value, Value> {
+    if crate::knowledge::is_tool_evolution_resource_uri(uri) {
+        crate::knowledge::read_tool_evolution_resource(state, uri)
+    } else {
+        crate::workspace_features::read_skill_resource_for_session(
+            &state.profile_id,
+            uri,
+            session_key,
+        )
+        .map_err(|message| crate::workspace_features::skill_rpc_error("resources/read", message))
     }
 }
 
@@ -249,6 +274,18 @@ fn conversation_bootstrap(
             "project_skills".into(),
             crate::workspace_features::skill_bootstrap_summary(&state.profile_id, folder_id)
                 .unwrap_or_else(|_| serde_json::json!({ "count": 0, "skills": [] })),
+        );
+        history.insert(
+            "learning".into(),
+            crate::knowledge::learning_bootstrap_summary(selected_context.as_ref()).unwrap_or_else(
+                |_| {
+                    serde_json::json!({
+                        "state": "metadata_unavailable",
+                        "runtime_policy": "validated_canary_rust_parity",
+                        "knowledge_loading_policy": "Persistent knowledge is not injected into inference context."
+                    })
+                },
+            ),
         );
         history.insert(
             "legacy_startup_fallback".into(),
@@ -594,6 +631,15 @@ fn handle_tools_call(state: &SharedState, params: &Value) -> Result<Value, Value
             } else {
                 call_tool(routed.context.as_ref(), canonical_name, &args)
             };
+            let structured = enrich_alternate_workspace_recovery(
+                state,
+                host_session_key,
+                canonical_name,
+                &args,
+                requested_folder_id.as_deref(),
+                &routed,
+                structured,
+            );
             attach_workspace_routing(structured, requested_folder_id.as_deref(), &routed)
         }
     };
@@ -758,8 +804,23 @@ async fn handle_tools_call_async(state: SharedState, params: Value) -> Result<Va
                     &json!({ "resume_id": retry.resume_id, "approve": retry.approved, "confirm": retry.approved, "scope": "once" }),
                 )
             } else {
-                call_tool_async(routed.context.clone(), canonical_name.clone(), args.clone()).await
+                call_tool_async_with_canary_sample_key(
+                    routed.context.clone(),
+                    canonical_name.clone(),
+                    args.clone(),
+                    host_session_key.map(str::to_owned),
+                )
+                .await
             };
+            structured = enrich_alternate_workspace_recovery(
+                &state,
+                host_session_key,
+                &canonical_name,
+                &args,
+                requested_folder_id.as_deref(),
+                &routed,
+                structured,
+            );
             let post = crate::workspace_features::run_post_tool_hooks(
                 &state.profile_id,
                 Some(&routed.folder_id),
@@ -1037,6 +1098,134 @@ fn take_workspace_folder_id(name: &str, args: &mut Value) -> Result<Option<Strin
         );
     }
     Ok(Some(folder_id.to_string()))
+}
+
+fn alternate_workspace_path_recovery_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "read_file" | "view_image" | "list_files" | "search_text" | "project_map" | "git_status"
+    )
+}
+
+fn enrich_alternate_workspace_recovery(
+    state: &SharedState,
+    host_session_key: Option<&str>,
+    tool_name: &str,
+    args: &Value,
+    requested_folder_id: Option<&str>,
+    routed: &crate::tools::hub::McpRoutedContext,
+    mut structured: Value,
+) -> Value {
+    if requested_folder_id.is_some()
+        || routed.route_source != "conversation"
+        || structured.get("ok").and_then(Value::as_bool) != Some(false)
+        || !alternate_workspace_path_recovery_tool(tool_name)
+    {
+        return structured;
+    }
+    let Some(error_code) = structured
+        .get("error")
+        .and_then(|error| error.get("code"))
+        .and_then(Value::as_str)
+    else {
+        return structured;
+    };
+    if error_code != "NOT_FOUND" {
+        return structured;
+    }
+    let Some(raw_path) = args
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|path| !path.is_empty() && *path != ".")
+    else {
+        return structured;
+    };
+
+    let listing = crate::tools::hub::list_workspace_folders(state, host_session_key);
+    let Some(folders) = listing.get("folders").and_then(Value::as_array) else {
+        return structured;
+    };
+    let mut matches = Vec::<Value>::new();
+    let mut recovery_actions = Vec::<Value>::new();
+    for folder in folders {
+        let Some(folder_id) = folder.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        if folder_id == routed.folder_id {
+            continue;
+        }
+        let Ok(alternate) = crate::tools::hub::resolve_tool_context(
+            state.clone(),
+            host_session_key,
+            Some(folder_id),
+            tool_name,
+            args,
+        ) else {
+            continue;
+        };
+        if alternate
+            .context
+            .workspace
+            .resolve_read_path(raw_path)
+            .is_err()
+        {
+            continue;
+        }
+        let folder_name = folder
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or(folder_id);
+        matches.push(json!({
+            "folder_id": folder_id,
+            "folder_name": folder_name
+        }));
+        if recovery_actions.len() < 8 {
+            let mut retry_args = args.as_object().cloned().unwrap_or_default();
+            retry_args.insert(
+                "workspace_folder_id".into(),
+                Value::String(folder_id.to_string()),
+            );
+            recovery_actions.push(json!({
+                "action": "retry_in_workspace",
+                "action_id": format!("workspace-retry-{folder_id}"),
+                "tool": tool_name,
+                "required_arguments": [],
+                "arguments": Value::Object(retry_args),
+                "reason": "alternate_workspace_match"
+            }));
+        }
+    }
+    if matches.is_empty() {
+        return structured;
+    }
+
+    let match_count = matches.len();
+    let Some(error) = structured.get_mut("error").and_then(Value::as_object_mut) else {
+        return structured;
+    };
+    error.insert("retryable".into(), Value::Bool(true));
+    let details = error.entry("details").or_insert_with(|| json!({}));
+    if !details.is_object() {
+        *details = json!({});
+    }
+    let details = details
+        .as_object_mut()
+        .expect("details normalized to object");
+    details.insert("alternate_workspace_match_count".into(), json!(match_count));
+    details.insert("alternate_workspace_matches".into(), Value::Array(matches));
+    details.insert("recovery_actions".into(), Value::Array(recovery_actions));
+    details.insert(
+        "suggestion".into(),
+        Value::String(if match_count == 1 {
+            "Retry this call with the provided workspace_folder_id; the conversation selection will not change."
+                .into()
+        } else {
+            "Choose one matching workspace recovery action; the conversation selection will not change."
+                .into()
+        }),
+    );
+    structured
 }
 
 fn attach_workspace_routing(
@@ -1396,6 +1585,251 @@ mod tests {
                 "resources/read"
             ])
         );
+        let learning = &structured["learning"];
+        assert_eq!(learning["runtime_policy"], "validated_canary_rust_parity");
+        assert_eq!(learning["ingestion"]["enabled"], true);
+        assert_eq!(
+            learning["knowledge_revision"]
+                .as_str()
+                .expect("knowledge revision")
+                .len(),
+            64
+        );
+        assert!(learning.get("records").is_none());
+        assert!(learning.get("hypothesis").is_none());
+        assert!(learning.get("recommended_action").is_none());
+
+        crate::tools::hub::remove_live_hub(&profile_id);
+        crate::workspace_features::unregister_runtime(&profile_id);
+    }
+
+    #[test]
+    fn validated_evolved_skill_is_only_consumed_by_session_canary_surfaces() {
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        let skill_name = format!("evolved-canary-{}", uuid::Uuid::new_v4());
+        let skill_dir = workspace.path().join(".agents/skills").join(&skill_name);
+        fs::create_dir_all(&skill_dir).expect("create skill dir");
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            format!(
+                "---\nname: {skill_name}\ndescription: Evolved Skill canary parity\n---\nBase workflow only.\n"
+            ),
+        )
+        .expect("write skill");
+        let profile_id = format!("evolved-canary-{}", uuid::Uuid::new_v4());
+        let state = new_state(
+            vec![crate::workspace::WorkspaceFolder {
+                id: "folder-a".into(),
+                name: "Folder A".into(),
+                path: workspace.path().display().to_string(),
+                execution: Default::default(),
+            }],
+            "folder-a".into(),
+            profile_id.clone(),
+            crate::workspace::AuthConfig::default(),
+            crate::tools::policy::PolicySettings::default(),
+            "full".into(),
+            "trusted".into(),
+            crate::workspace::SandboxConfig::default(),
+            crate::tools::ExecutionLimits::default(),
+        )
+        .expect("mcp state");
+
+        let bootstrap_before =
+            crate::workspace_features::skill_bootstrap_summary(&profile_id, "folder-a")
+                .expect("skill bootstrap");
+        let base = bootstrap_before["skills"]
+            .as_array()
+            .expect("skill summaries")
+            .iter()
+            .find(|skill| skill["name"] == skill_name)
+            .expect("base skill");
+        let base_source = base["source"].as_str().expect("base source").to_string();
+        let base_sha = base["content_sha256"]
+            .as_str()
+            .expect("base sha")
+            .to_string();
+        let prompt_name = format!("project-skill/folder-a/{skill_name}");
+        let resource_uri = format!("skill://coding-tools/folder-a/{skill_name}");
+        let prompts_before = handle_request(
+            &state,
+            &json!({"jsonrpc":"2.0","id":1,"method":"prompts/list","params":{}}),
+        );
+        let resources_before = handle_request(
+            &state,
+            &json!({"jsonrpc":"2.0","id":2,"method":"resources/list","params":{}}),
+        );
+
+        let store = crate::knowledge::knowledge_store_for_context(state.as_ref());
+        let record = crate::knowledge::KnowledgeRecord {
+            id: String::new(),
+            schema_version: 1,
+            scope: crate::knowledge::KnowledgeScope::Workspace,
+            target: crate::knowledge::KnowledgeArtifactTarget::EvolvedSkill,
+            status: crate::knowledge::KnowledgeStatus::Validated,
+            trigger: json!({"tool":"edit","pattern":"stale_guarded_edit_recovery"})
+                .as_object()
+                .unwrap()
+                .clone(),
+            hypothesis: "Serve validated local Skill guidance to a deterministic session canary."
+                .into(),
+            recommended_action: json!({
+                "append_guidance": ["Re-read the current file before rebuilding a stale guarded edit."]
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+            evidence: crate::knowledge::KnowledgeEvidence {
+                observations: 15,
+                successes: 0,
+                failures: 15,
+                verified_successes: None,
+                verification_failures: None,
+                recovery_successes: None,
+                recovery_failures: None,
+                total_duration_ms: 1_000,
+                total_request_bytes: 0,
+                total_response_bytes: 0,
+                first_seen_at_ms: 1,
+                last_seen_at_ms: 15,
+                task_context_ids: None,
+                conversation_context_ids: Some(vec!["a".repeat(64), "b".repeat(64)]),
+                runtime_boot_context_ids: None,
+            },
+            confidence: 0.9,
+            compatibility: None,
+            source_event_ids: (0..15).map(|index| format!("seed-{index}")).collect(),
+            counterexample_event_ids: vec![],
+            supersedes: None,
+            superseded_by: None,
+            created_at_ms: 1,
+            updated_at_ms: 15,
+            metadata: Some(
+                json!({
+                    "name": skill_name,
+                    "base": {
+                        "source": base_source,
+                        "name": skill_name,
+                        "contentSha256": base_sha
+                    },
+                    "generation": 1
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        };
+        let stored = store.upsert(record).expect("store evolved Skill");
+        let canary_store = crate::knowledge::CanaryImpactStore::new(store.root());
+        let engine = crate::knowledge::EvolvedSkillCanaryEngine::new(store, canary_store);
+        let mut intervention_session = None;
+        let mut control_session = None;
+        for index in 0..100 {
+            let session = format!("evolved-session-{index}");
+            let decision = engine
+                .decide(&base_source, &skill_name, &base_sha, None, &session)
+                .expect("canary decision")
+                .expect("eligible evolved Skill");
+            if decision.applied && intervention_session.is_none() {
+                intervention_session = Some(session.clone());
+            }
+            if !decision.applied && control_session.is_none() {
+                control_session = Some(session);
+            }
+            if intervention_session.is_some() && control_session.is_some() {
+                break;
+            }
+        }
+        let intervention_session = intervention_session.expect("intervention session");
+        let control_session = control_session.expect("control session");
+
+        let intervention_prompt = handle_request(
+            &state,
+            &json!({
+                "jsonrpc":"2.0","id":3,"method":"prompts/get",
+                "params":{"name":prompt_name,"_meta":{"openai/session":intervention_session}}
+            }),
+        );
+        let control_prompt = handle_request(
+            &state,
+            &json!({
+                "jsonrpc":"2.0","id":4,"method":"prompts/get",
+                "params":{"name":prompt_name,"_meta":{"openai/session":control_session}}
+            }),
+        );
+        let intervention_text = intervention_prompt["result"]["messages"][0]["content"]["text"]
+            .as_str()
+            .expect("intervention prompt text");
+        let control_text = control_prompt["result"]["messages"][0]["content"]["text"]
+            .as_str()
+            .expect("control prompt text");
+        assert!(intervention_text.contains("## Learned guidance"));
+        assert!(intervention_text.contains("Re-read the current file"));
+        assert!(!control_text.contains("## Learned guidance"));
+
+        let intervention_resource = handle_request(
+            &state,
+            &json!({
+                "jsonrpc":"2.0","id":5,"method":"resources/read",
+                "params":{"uri":resource_uri,"_meta":{"openai/session":intervention_session}}
+            }),
+        );
+        assert!(intervention_resource["result"]["contents"][0]["text"]
+            .as_str()
+            .expect("resource text")
+            .contains("## Learned guidance"));
+
+        let intervention_attribution =
+            crate::workspace_features::selected_skill_learning_attribution(
+                &profile_id,
+                Some(&intervention_session),
+                "folder-a",
+            )
+            .expect("intervention attribution");
+        let control_attribution = crate::workspace_features::selected_skill_learning_attribution(
+            &profile_id,
+            Some(&control_session),
+            "folder-a",
+        )
+        .expect("control attribution");
+        assert_eq!(
+            intervention_attribution
+                .canary
+                .as_ref()
+                .expect("intervention canary")
+                .knowledge_id,
+            stored.id
+        );
+        assert!(intervention_attribution.canary.unwrap().applied);
+        assert!(!control_attribution.canary.unwrap().applied);
+
+        assert_eq!(
+            crate::workspace_features::skill_bootstrap_summary(&profile_id, "folder-a")
+                .expect("bootstrap after validated canary"),
+            bootstrap_before,
+            "validated canary guidance must not change bootstrap snapshots"
+        );
+        assert_eq!(
+            handle_request(
+                &state,
+                &json!({"jsonrpc":"2.0","id":1,"method":"prompts/list","params":{}}),
+            ),
+            prompts_before,
+            "validated canary guidance must not change prompts/list"
+        );
+        let resources_after = handle_request(
+            &state,
+            &json!({"jsonrpc":"2.0","id":2,"method":"resources/list","params":{}}),
+        );
+        assert_eq!(
+            resources_after["result"]["resources"], resources_before["result"]["resources"],
+            "validated canary guidance must not change the listed Skill resources"
+        );
+        assert_eq!(
+            resources_after["result"]["_meta"]["coding-tools/skillset-revision"],
+            resources_before["result"]["_meta"]["coding-tools/skillset-revision"],
+            "validated canary guidance must not change the Skill resource revision"
+        );
 
         crate::tools::hub::remove_live_hub(&profile_id);
         crate::workspace_features::unregister_runtime(&profile_id);
@@ -1573,6 +2007,131 @@ mod tests {
             }),
         );
         assert_eq!(selected["result"]["structuredContent"]["ok"], true);
+
+        crate::tools::hub::remove_live_hub(&profile_id);
+    }
+
+    #[test]
+    fn not_found_returns_one_call_retry_for_unique_alternate_workspace_match() {
+        let first = tempfile::tempdir().expect("first workspace");
+        let second = tempfile::tempdir().expect("second workspace");
+        fs::write(
+            second.path().join("alternate-only.txt"),
+            "alternate workspace only",
+        )
+        .expect("write alternate file");
+        let profile_id = format!("alternate-routing-{}", uuid::Uuid::new_v4());
+        let state = new_state(
+            vec![
+                crate::workspace::WorkspaceFolder {
+                    id: "folder-a".into(),
+                    name: "Folder A".into(),
+                    path: first.path().display().to_string(),
+                    execution: Default::default(),
+                },
+                crate::workspace::WorkspaceFolder {
+                    id: "folder-b".into(),
+                    name: "Folder B".into(),
+                    path: second.path().display().to_string(),
+                    execution: Default::default(),
+                },
+            ],
+            "folder-a".into(),
+            profile_id.clone(),
+            crate::workspace::AuthConfig::default(),
+            crate::tools::policy::PolicySettings::default(),
+            "full".into(),
+            "trusted".into(),
+            crate::workspace::SandboxConfig::default(),
+            crate::tools::ExecutionLimits::default(),
+        )
+        .expect("mcp state");
+
+        let switched = handle_request(
+            &state,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "switch_workspace_folder",
+                    "arguments": {"folder_id": "folder-a"},
+                    "_meta": {"openai/session": "session-a"}
+                }
+            }),
+        );
+        assert_eq!(switched["result"]["structuredContent"]["ok"], true);
+
+        let missing = handle_request(
+            &state,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "read_file",
+                    "arguments": {"path": "alternate-only.txt"},
+                    "_meta": {"openai/session": "session-a"}
+                }
+            }),
+        );
+        let structured = &missing["result"]["structuredContent"];
+        assert_eq!(structured["ok"], false);
+        assert_eq!(structured["error"]["code"], "NOT_FOUND");
+        assert_eq!(structured["error"]["retryable"], true);
+        assert_eq!(
+            structured["error"]["details"]["alternate_workspace_match_count"],
+            1
+        );
+        assert_eq!(
+            structured["error"]["details"]["alternate_workspace_matches"],
+            json!([{"folder_id": "folder-b", "folder_name": "Folder B"}])
+        );
+        let action = &structured["error"]["details"]["recovery_actions"][0];
+        assert_eq!(action["action"], "retry_in_workspace");
+        assert_eq!(action["action_id"], "workspace-retry-folder-b");
+        assert_eq!(action["tool"], "read_file");
+        assert_eq!(action["required_arguments"], json!([]));
+        assert_eq!(
+            action["arguments"],
+            json!({"path": "alternate-only.txt", "workspace_folder_id": "folder-b"})
+        );
+
+        let recovered = handle_request(
+            &state,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": "read_file",
+                    "arguments": action["arguments"].clone(),
+                    "_meta": {"openai/session": "session-a"}
+                }
+            }),
+        );
+        let recovered = &recovered["result"]["structuredContent"];
+        assert_eq!(recovered["ok"], true);
+        assert_eq!(recovered["content"], "alternate workspace only");
+        assert_eq!(recovered["workspace_route_source"], "explicit");
+
+        let listing = handle_request(
+            &state,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {
+                    "name": "list_workspace_folders",
+                    "arguments": {},
+                    "_meta": {"openai/session": "session-a"}
+                }
+            }),
+        );
+        assert_eq!(
+            listing["result"]["structuredContent"]["selected_folder_id"],
+            "folder-a"
+        );
 
         crate::tools::hub::remove_live_hub(&profile_id);
     }
@@ -1886,7 +2445,7 @@ mod tests {
             .expect("task id")
             .to_string();
         assert!(task_id.starts_with("exec:"));
-        assert_eq!(created["result"]["ttlMs"], 900_000);
+        assert_eq!(created["result"]["ttlMs"], 60 * 60_000);
         assert_eq!(created["result"]["pollIntervalMs"], 1_000);
 
         let unadvertised = handle_request_async(

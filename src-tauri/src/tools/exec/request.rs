@@ -4,7 +4,11 @@ use coding_tools_command_policy::resolved_command_timeout_ms as resolve_command_
 use serde_json::{json, Value};
 
 use crate::mcp::command_kind;
+use crate::secret::SecretStore;
 use crate::tools::context::{RuntimeToolConfig, ToolContext};
+use crate::tools::execution_timeout::{
+    configured_job_timeout_max_ms, resolve_process_timeout, ProcessTimeoutContract,
+};
 use crate::tools::redaction::arguments_reference_sensitive_source;
 use crate::tools::session::{OutputMode, OutputOptions};
 use crate::tools::workspace::WorkspaceError;
@@ -23,6 +27,8 @@ pub(super) struct ResolvedExecRequest {
     pub(super) post_checks: Vec<PostCheckSpec>,
     pub(super) output_options: OutputOptions,
     pub(super) legacy_native: bool,
+    pub(super) stdin_text: String,
+    pub(super) timeout_contract: ProcessTimeoutContract,
 }
 
 pub(super) struct ExecRuntimeOptions<'a> {
@@ -70,13 +76,20 @@ pub(super) fn resolve_exec_request(
         .to_string();
     validate_child_process_scope(args, &runtime.policy.security_policy)?;
     let resolution_target = resolution_target_for_sandbox(&runtime.sandbox);
-    let spec = resolve_exec_spec_for_target(
+    let mut spec = resolve_exec_spec_for_target(
         args,
         &workdir.path,
         ctx.workspace.root(),
         &runtime.policy,
         resolution_target,
     )?;
+    let timeout_contract = resolve_process_timeout(
+        args,
+        resolved_command_timeout_ms(args, &spec),
+        ABSOLUTE_COMMAND_TIMEOUT_MAX_MS,
+        configured_job_timeout_max_ms(),
+    )?;
+    let stdin_text = resolve_secret_inputs(ctx, args, &mut spec)?;
     let post_checks = resolve_post_checks_for_target(
         args,
         &workdir.path,
@@ -99,26 +112,77 @@ pub(super) fn resolve_exec_request(
         post_checks,
         output_options,
         legacy_native,
+        stdin_text,
+        timeout_contract,
     })
 }
 
 pub(super) fn resolve_runtime_options<'a>(
     args: &'a Value,
-    spec: &ExecSpec,
+    timeout_contract: &ProcessTimeoutContract,
     security_policy: &SecurityPolicy,
+    stdin_text: &'a str,
 ) -> ExecRuntimeOptions<'a> {
     ExecRuntimeOptions {
-        timeout_ms: resolved_command_timeout_ms(args, spec),
+        timeout_ms: timeout_contract.effective_timeout_ms,
         yield_ms: args
             .get("yield_time_ms")
             .and_then(Value::as_u64)
             .unwrap_or(1000)
             .min(30_000),
         tty: args.get("tty").and_then(Value::as_bool).unwrap_or(false),
-        stdin_text: args.get("stdin").and_then(Value::as_str).unwrap_or(""),
+        stdin_text,
         sensitive_output: security_policy.withhold_sensitive_source_output
             && arguments_reference_sensitive_source(args),
     }
+}
+
+fn resolve_secret_inputs(
+    ctx: &ToolContext,
+    args: &Value,
+    spec: &mut ExecSpec,
+) -> Result<String, WorkspaceError> {
+    if let Some(secret_env) = args.get("secret_env").and_then(Value::as_object) {
+        for (name, reference) in secret_env {
+            let reference = reference.as_str().ok_or_else(|| {
+                WorkspaceError::invalid_argument(
+                    "secret_env values must be secret reference strings",
+                )
+            })?;
+            let value = resolve_workspace_secret(ctx, reference)?;
+            spec.env.push((name.clone(), value));
+        }
+    }
+    let direct_stdin = args.get("stdin").and_then(Value::as_str).unwrap_or("");
+    let Some(reference) = args.get("stdin_secret").and_then(Value::as_str) else {
+        return Ok(direct_stdin.to_string());
+    };
+    if !direct_stdin.is_empty() {
+        return Err(WorkspaceError::invalid_argument(
+            "stdin and stdin_secret cannot both be provided",
+        ));
+    }
+    resolve_workspace_secret(ctx, reference)
+}
+
+fn resolve_workspace_secret(ctx: &ToolContext, reference: &str) -> Result<String, WorkspaceError> {
+    let value =
+        SecretStore::get(&ctx.profile_id, reference).map_err(|error| WorkspaceError::Tool {
+            code: "SECRET_STORE_ERROR",
+            message: format!("Unable to read workspace secret {reference}: {error}"),
+            category: "runtime",
+            retryable: false,
+        })?;
+    value.filter(|value| !value.is_empty()).ok_or_else(|| WorkspaceError::ToolDetails {
+        code: "SECRET_NOT_FOUND",
+        message: format!("Workspace secret is not configured: {reference}"),
+        category: "validation",
+        retryable: false,
+        details: json!({
+            "reference": reference,
+            "suggestion": "Store the secret locally in the selected workspace, then retry using the same secret reference."
+        }),
+    })
 }
 
 fn resolved_command_timeout_ms(args: &Value, spec: &ExecSpec) -> u64 {

@@ -15,6 +15,7 @@ pub(super) fn input_schema(name: &str) -> Option<Value> {
             "type": "object",
             "properties": {
                 "paths": { "type": "array", "items": { "type": "string" }, "default": [] },
+                "repo_path": { "type": "string", "default": ".", "description": "Workspace-relative Git repository or linked worktree root" },
                 "staged": { "type": "boolean", "default": false },
                 "unstaged": { "type": "boolean", "default": true },
                 "context_lines": { "type": "integer", "minimum": 0, "maximum": 1000, "default": 3, "description": "Values above 20 are normalized to 20" },
@@ -35,6 +36,7 @@ pub(super) fn input_schema(name: &str) -> Option<Value> {
         "git_show" => json!({
             "type": "object",
             "properties": {
+                "repo_path": { "type": "string", "default": ".", "description": "Workspace-relative Git repository or linked worktree root" },
                 "rev": { "type": "string", "default": "HEAD" },
                 "path": { "type": "string" },
                 "paths": { "type": "array", "items": { "type": "string" } },

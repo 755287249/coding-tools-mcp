@@ -9,8 +9,14 @@ use crate::tools::context::ToolContext;
 use crate::tools::parallel_stats::{parallelism_report, ParallelHistory};
 use crate::tools::workspace::{tool_ok, WorkspaceError};
 
+const DIAGNOSTICS_LOG_FILE: &str = "diagnostics.jsonl";
 const TOOL_USAGE_LOG_FILE: &str = "mcp-tool-usage.jsonl";
+const DIAGNOSTICS_SCHEMA_VERSION: u64 = 1;
+const DIAGNOSTICS_HOST_KIND: &str = "rust_desktop";
+const STRUCTURED_LOG_MAX_BYTES: u64 = 20 * 1024 * 1024;
+const STRUCTURED_LOG_QUEUE_CAPACITY: usize = 1_024;
 const MAX_ROTATED_FILES: usize = 5;
+const RECORD_CURSOR_MAX: usize = 10_000;
 const DEFAULT_BURST_IDLE_MS: u64 = 120_000;
 const PHASE_METRICS: [(&str, &str); 10] = [
     ("preflight", "phase_preflight_ms"),
@@ -35,6 +41,8 @@ struct PhaseStats {
 struct ToolStats {
     calls: u64,
     errors: u64,
+    tool_errors: u64,
+    transport_errors: u64,
     warnings: u64,
     duration_ms: u128,
     queue_wait_ms: u128,
@@ -170,6 +178,12 @@ pub fn query_tool_usage_for_profile(
         .and_then(Value::as_u64)
         .unwrap_or(100)
         .clamp(1, 1_000) as usize;
+    let cursor = args
+        .get("cursor")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        .min(RECORD_CURSOR_MAX as u64) as usize;
+    let record_window_limit = cursor.saturating_add(limit);
     let top = args
         .get("top")
         .and_then(Value::as_u64)
@@ -237,16 +251,34 @@ pub fn query_tool_usage_for_profile(
     let outcomes = string_filter(args.get("outcomes"));
 
     let log_dir = crate::tunnel::log_dir_for_profile(profile_id);
-    let paths = log_paths(&log_dir);
+    let paths = log_paths(&log_dir, TOOL_USAGE_LOG_FILE)
+        .into_iter()
+        .map(|path| ("legacy", path))
+        .chain(
+            log_paths(&log_dir, DIAGNOSTICS_LOG_FILE)
+                .into_iter()
+                .map(|path| ("canonical", path)),
+        )
+        .collect::<Vec<_>>();
     let mut invalid_lines = 0u64;
     let mut scanned_lines = 0u64;
+    let mut log_bytes_read = 0u64;
+    let mut legacy_scanned_lines = 0u64;
+    let mut canonical_scanned_lines = 0u64;
     let mut matched_lines = 0u64;
     let mut matched_async_session_events = 0u64;
-    let mut recent = VecDeque::with_capacity(limit);
+    let mut recent = VecDeque::with_capacity(record_window_limit);
     let mut stats = BTreeMap::<String, ToolStats>::new();
     let mut outcome_counts = BTreeMap::<String, u64>::new();
     let mut error_counts = BTreeMap::<String, u64>::new();
+    let mut tool_error_counts = BTreeMap::<String, u64>::new();
+    let mut transport_error_counts = BTreeMap::<String, u64>::new();
+    let mut events_by_type = BTreeMap::<String, u64>::new();
+    let mut standalone_transport_errors = 0u64;
     let mut repeated_identical_error_count = 0u64;
+    let mut persisted_dropped_records = 0u64;
+    let mut duplicate_records_ignored = 0u64;
+    let mut seen_diagnostic_event_ids = BTreeSet::<String>::new();
     let mut previous_error_signature: Option<(String, String, String)> = None;
     let mut totals = ToolStats::default();
     let mut current_version_totals = ToolStats::default();
@@ -260,12 +292,36 @@ pub fn query_tool_usage_for_profile(
     let mut recovery_chains = BTreeMap::<String, RecoveryChainStats>::new();
     let mut call_completed_ts = BTreeMap::<u64, u64>::new();
 
-    for path in paths {
-        let (scanned, invalid) = visit_complete_jsonl_records(&path, |record| {
+    for (source, path) in paths {
+        let (scanned, invalid, bytes_read) = visit_complete_jsonl_records(&path, |record| {
+            if diagnostic_event_is_duplicate(&record, &mut seen_diagnostic_event_ids) {
+                duplicate_records_ignored = duplicate_records_ignored.saturating_add(1);
+                return;
+            }
             let event = record
                 .get("event")
                 .and_then(Value::as_str)
                 .unwrap_or("tool_call");
+            if matches_scope_and_time(&record, scope, since_ts_ms) {
+                let event_type = diagnostic_event_type(&record, event);
+                *events_by_type.entry(event_type.clone()).or_default() += 1;
+                if event_type == "transport_event"
+                    && event != "tool_call"
+                    && (record.get("failure_domain").and_then(Value::as_str) == Some("transport")
+                        || record.get("severity").and_then(Value::as_str) == Some("error"))
+                {
+                    standalone_transport_errors = standalone_transport_errors.saturating_add(1);
+                    if let Some(error_code) = record
+                        .get("error_code")
+                        .or_else(|| record.get("rpc_error_code"))
+                        .and_then(Value::as_str)
+                    {
+                        *transport_error_counts
+                            .entry(error_code.to_string())
+                            .or_default() += 1;
+                    }
+                }
+            }
             if event == "async_session_finalized" {
                 let exec_requested = tools.is_empty()
                     || tools
@@ -331,6 +387,12 @@ pub fn query_tool_usage_for_profile(
                 return;
             }
             matched_lines += 1;
+            persisted_dropped_records = persisted_dropped_records.saturating_add(
+                record
+                    .get("telemetry_dropped_before")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+            );
             parallel_history.accumulate_record(&record);
             let current_error_signature = error_signature(&record);
             if current_error_signature.is_some()
@@ -357,6 +419,8 @@ pub fn query_tool_usage_for_profile(
                     &mut stats,
                     &mut outcome_counts,
                     &mut error_counts,
+                    &mut tool_error_counts,
+                    &mut transport_error_counts,
                 );
             }
             if include_slowest {
@@ -366,7 +430,7 @@ pub fn query_tool_usage_for_profile(
                 push_top_record(&mut largest, &record, "response_json_bytes", top);
             }
             if include_records {
-                if recent.len() == limit {
+                if recent.len() == record_window_limit {
                     recent.pop_front();
                 }
                 recent.push_back(if include_payloads {
@@ -378,7 +442,16 @@ pub fn query_tool_usage_for_profile(
         })?;
         scanned_lines += scanned;
         invalid_lines += invalid;
+        log_bytes_read = log_bytes_read.saturating_add(bytes_read);
+        if source == "legacy" {
+            legacy_scanned_lines += scanned;
+        } else {
+            canonical_scanned_lines += scanned;
+        }
     }
+
+    let (record_page, next_record_cursor, cursor_limit_reached) =
+        paginate_record_window(&recent, matched_lines, cursor, limit);
 
     let mut tool_stats = stats
         .into_iter()
@@ -387,6 +460,8 @@ pub fn query_tool_usage_for_profile(
                 "tool": tool,
                 "calls": stats.calls,
                 "errors": stats.errors,
+                "tool_errors": stats.tool_errors,
+                "transport_errors": stats.transport_errors,
                 "warnings": stats.warnings,
                 "duration_ms": stats.duration_ms,
                 "queue_wait_ms": stats.queue_wait_ms,
@@ -441,10 +516,24 @@ pub fn query_tool_usage_for_profile(
         "largest": include_largest,
         "activity_bursts": include_bursts
     });
+    let diagnostics_summary = diagnostics_summary_value(
+        scope,
+        &totals,
+        invalid_lines,
+        persisted_dropped_records,
+        &tool_error_counts,
+        &transport_error_counts,
+        repeated_identical_error_count,
+        &events_by_type,
+        standalone_transport_errors,
+        crate::mcp::tool_usage_log_health(),
+    );
     let aggregate_value = if aggregate {
         json!({
             "calls": totals.calls,
             "errors": totals.errors,
+            "tool_errors": totals.tool_errors,
+            "transport_errors": totals.transport_errors,
             "warnings": totals.warnings,
             "duration_ms": totals.duration_ms,
             "queue_wait_ms": totals.queue_wait_ms,
@@ -469,6 +558,8 @@ pub fn query_tool_usage_for_profile(
             "response_bytes": totals.response_bytes,
             "outcomes": outcome_counts,
             "errors_by_code": error_counts,
+            "tool_errors_by_code": tool_error_counts,
+            "transport_errors_by_code": transport_error_counts,
             "tools": tool_stats
         })
     } else {
@@ -530,14 +621,56 @@ pub fn query_tool_usage_for_profile(
         "scope": scope,
         "runtime_boot_id": crate::mcp::runtime_boot_id(),
         "server_version": env!("CARGO_PKG_VERSION"),
+        "diagnostics_contract": {
+            "schema_version": DIAGNOSTICS_SCHEMA_VERSION,
+            "host_kind": DIAGNOSTICS_HOST_KIND,
+            "host_version": env!("CARGO_PKG_VERSION"),
+            "structured_log_file": DIAGNOSTICS_LOG_FILE,
+            "structured_log": {
+                "file": DIAGNOSTICS_LOG_FILE,
+                "max_bytes": STRUCTURED_LOG_MAX_BYTES,
+                "retained_files": MAX_ROTATED_FILES,
+                "queue_capacity": STRUCTURED_LOG_QUEUE_CAPACITY
+            },
+            "compatibility": {
+                "legacy_file": TOOL_USAGE_LOG_FILE,
+                "dual_write": crate::mcp::legacy_compat_write_enabled(),
+                "dual_write_default": true,
+                "legacy_write_env": crate::mcp::legacy_compat_write_env(),
+                "legacy_read_preserved": true,
+                "retirement_requires_compatibility_window": true,
+                "query_deduplicates_by": "diagnostic_event_id"
+            },
+            "migration": {
+                "duplicate_records_ignored": duplicate_records_ignored,
+                "legacy_scanned_lines": legacy_scanned_lines,
+                "canonical_scanned_lines": canonical_scanned_lines
+            },
+            "legacy_errors_include_transport": true
+        },
+        "diagnostics_summary": if aggregate { diagnostics_summary } else { Value::Null },
         "log_dir": log_dir.display().to_string(),
         "scanned_lines": scanned_lines,
         "matched_lines": matched_lines,
         "matched_async_session_events": matched_async_session_events,
         "invalid_complete_lines": invalid_lines,
+        "log_bytes_read": log_bytes_read,
         "response_profile": response_profile,
         "detail_sections": detail_sections,
-        "records": recent,
+        "records_pagination": if include_records {
+            json!({
+                "cursor": cursor,
+                "next_cursor": next_record_cursor,
+                "total": matched_lines,
+                "limit": limit,
+                "cursor_origin": "latest",
+                "page_order": "oldest_to_newest",
+                "cursor_limit_reached": cursor_limit_reached
+            })
+        } else {
+            Value::Null
+        },
+        "records": record_page,
         "slowest": if include_slowest { Value::Array(slowest) } else { Value::Null },
         "largest": if include_largest { Value::Array(largest) } else { Value::Null },
         "aggregate": aggregate_value,
@@ -551,10 +684,70 @@ pub fn query_tool_usage_for_profile(
     })))
 }
 
+fn top_error_counts(counts: &BTreeMap<String, u64>) -> Vec<Value> {
+    let mut rows = counts
+        .iter()
+        .map(|(code, count)| json!({ "code": code, "count": count }))
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        right["count"]
+            .as_u64()
+            .cmp(&left["count"].as_u64())
+            .then_with(|| left["code"].as_str().cmp(&right["code"].as_str()))
+    });
+    rows.truncate(5);
+    rows
+}
+
+fn diagnostics_summary_value(
+    scope: &str,
+    stats: &ToolStats,
+    invalid_complete_lines: u64,
+    persisted_dropped_records: u64,
+    tool_error_counts: &BTreeMap<String, u64>,
+    transport_error_counts: &BTreeMap<String, u64>,
+    repeated_identical_error_count: u64,
+    events_by_type: &BTreeMap<String, u64>,
+    standalone_transport_errors: u64,
+    log_health: Value,
+) -> Value {
+    json!({
+        "schema_version": DIAGNOSTICS_SCHEMA_VERSION,
+        "host_kind": DIAGNOSTICS_HOST_KIND,
+        "host_version": env!("CARGO_PKG_VERSION"),
+        "scope": scope,
+        "calls": stats.calls,
+        "tool_errors": stats.tool_errors,
+        "transport_errors": stats.transport_errors.saturating_add(standalone_transport_errors),
+        "warnings": stats.warnings,
+        "invalid_complete_lines": invalid_complete_lines,
+        "persisted_dropped_records": persisted_dropped_records,
+        "top_tool_errors": top_error_counts(tool_error_counts),
+        "top_transport_errors": top_error_counts(transport_error_counts),
+        "latency": {
+            "p50_ms": percentile(&stats.durations, 50),
+            "p95_ms": percentile(&stats.durations, 95),
+            "max_ms": stats.durations.iter().copied().max().unwrap_or(0)
+        },
+        "wait": {
+            "actual_wait_ms": stats.actual_wait_ms,
+            "empty_wait_timeouts": stats.empty_wait_timeouts
+        },
+        "recovery": {
+            "repeated_identical_error_count": repeated_identical_error_count
+        },
+        "events_by_type": events_by_type,
+        "log_health": log_health,
+        "sanitized": true
+    })
+}
+
 fn version_scope_stats(stats: &ToolStats) -> Value {
     json!({
         "calls": stats.calls,
         "errors": stats.errors,
+        "tool_errors": stats.tool_errors,
+        "transport_errors": stats.transport_errors,
         "warnings": stats.warnings,
         "duration_ms": stats.duration_ms,
         "avg_ms": average(stats.duration_ms, stats.calls),
@@ -566,22 +759,47 @@ fn version_scope_stats(stats: &ToolStats) -> Value {
     })
 }
 
-fn log_paths(log_dir: &Path) -> Vec<PathBuf> {
+fn diagnostic_event_type(record: &Value, legacy_event: &str) -> String {
+    if let Some(event_type) = record.get("event_type").and_then(Value::as_str) {
+        if !event_type.is_empty() {
+            return event_type.to_string();
+        }
+    }
+    if legacy_event == "async_session_finalized" {
+        return "process_session".to_string();
+    }
+    if legacy_event == "tool_call" && is_transport_error_record(record) {
+        return "transport_event".to_string();
+    }
+    legacy_event.to_string()
+}
+
+fn diagnostic_event_is_duplicate(record: &Value, seen: &mut BTreeSet<String>) -> bool {
+    record
+        .get("diagnostic_event_id")
+        .and_then(Value::as_str)
+        .is_some_and(|event_id| !seen.insert(event_id.to_string()))
+}
+
+fn log_paths(log_dir: &Path, file_name: &str) -> Vec<PathBuf> {
     let mut paths = (1..=MAX_ROTATED_FILES)
         .rev()
-        .map(|index| log_dir.join(format!("{TOOL_USAGE_LOG_FILE}.{index}")))
+        .map(|index| log_dir.join(format!("{file_name}.{index}")))
         .collect::<Vec<_>>();
-    paths.push(log_dir.join(TOOL_USAGE_LOG_FILE));
+    paths.push(log_dir.join(file_name));
     paths
 }
 
-fn visit_complete_jsonl_records<F>(path: &Path, mut visit: F) -> Result<(u64, u64), WorkspaceError>
+fn visit_complete_jsonl_records<F>(
+    path: &Path,
+    mut visit: F,
+) -> Result<(u64, u64, u64), WorkspaceError>
 where
     F: FnMut(Value),
 {
     let file = match fs::File::open(path) {
         Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((0, 0)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((0, 0, 0)),
         Err(error) => {
             return Err(WorkspaceError::Tool {
                 code: "LOG_READ_FAILED",
@@ -595,6 +813,7 @@ where
     let mut buffer = Vec::with_capacity(8 * 1024);
     let mut scanned = 0u64;
     let mut invalid = 0u64;
+    let mut bytes_read = 0u64;
     loop {
         buffer.clear();
         let read = reader
@@ -608,6 +827,7 @@ where
         if read == 0 {
             break;
         }
+        bytes_read = bytes_read.saturating_add(read as u64);
         if !buffer.ends_with(b"\n") {
             break;
         }
@@ -626,7 +846,7 @@ where
             Err(_) => invalid += 1,
         }
     }
-    Ok((scanned, invalid))
+    Ok((scanned, invalid, bytes_read))
 }
 
 fn string_filter(value: Option<&Value>) -> Vec<String> {
@@ -709,6 +929,8 @@ fn accumulate(
     by_tool: &mut BTreeMap<String, ToolStats>,
     outcomes: &mut BTreeMap<String, u64>,
     errors: &mut BTreeMap<String, u64>,
+    tool_errors: &mut BTreeMap<String, u64>,
+    transport_errors: &mut BTreeMap<String, u64>,
 ) {
     let tool = record
         .get("tool")
@@ -723,6 +945,16 @@ fn accumulate(
         .and_then(Value::as_str);
     if let Some(error_code) = error_code {
         *errors.entry(error_code.to_string()).or_default() += 1;
+        let domain_errors = if is_transport_error_record(record) {
+            Some(transport_errors)
+        } else if is_tool_error_record(record) {
+            Some(tool_errors)
+        } else {
+            None
+        };
+        if let Some(domain_errors) = domain_errors {
+            *domain_errors.entry(error_code.to_string()).or_default() += 1;
+        }
     }
     add_stats(record, totals);
     add_stats(record, by_tool.entry(tool).or_default());
@@ -735,6 +967,8 @@ fn add_stats(record: &Value, stats: &mut ToolStats) {
         .unwrap_or(0);
     stats.calls += 1;
     stats.errors += u64::from(is_error_record(record));
+    stats.tool_errors += u64::from(is_tool_error_record(record));
+    stats.transport_errors += u64::from(is_transport_error_record(record));
     stats.warnings += record
         .get("warning_count")
         .and_then(Value::as_u64)
@@ -972,15 +1206,49 @@ fn accumulate_repeated_failure(record: &Value, stats: &mut RepeatedFailureStats)
     group.max_attempt_count = group.max_attempt_count.max(attempt_count);
 }
 
+fn deterministic_failure_weight(error_code: &str) -> u128 {
+    let upper = error_code.to_ascii_uppercase();
+    if [
+        "INVALID",
+        "MISMATCH",
+        "NOT_FOUND",
+        "PATH_",
+        "POLICY",
+        "CONTRACT",
+        "EXPECTED_",
+        "PROTECTED",
+        "PATCH_",
+    ]
+    .iter()
+    .any(|marker| upper.contains(marker))
+    {
+        2
+    } else {
+        1
+    }
+}
+
+fn repeated_failure_friction_score(group: &RepeatedFailureGroup) -> u128 {
+    u128::from(group.retry_count)
+        .saturating_mul(group.wasted_duration_ms.max(1))
+        .saturating_mul(deterministic_failure_weight(&group.error_code))
+}
+
 fn repeated_failure_report(
     stats: &RepeatedFailureStats,
     legacy_adjacent_retry_count: u64,
     top: usize,
 ) -> Value {
+    let friction_score = stats
+        .groups
+        .values()
+        .map(repeated_failure_friction_score)
+        .fold(0u128, u128::saturating_add);
     let mut groups = stats
         .groups
         .iter()
         .map(|(signature, group)| {
+            let group_friction_score = repeated_failure_friction_score(group);
             json!({
                 "signature": signature,
                 "tool": group.tool,
@@ -988,13 +1256,16 @@ fn repeated_failure_report(
                 "retry_count": group.retry_count,
                 "chain_count": group.chain_count,
                 "wasted_duration_ms": group.wasted_duration_ms,
-                "max_attempt_count": group.max_attempt_count
+                "max_attempt_count": group.max_attempt_count,
+                "deterministic_error_weight": deterministic_failure_weight(&group.error_code),
+                "friction_score": group_friction_score
             })
         })
         .collect::<Vec<_>>();
     groups.sort_by(|left, right| {
-        metric_u64(right, "retry_count")
-            .cmp(&metric_u64(left, "retry_count"))
+        metric_u64(right, "friction_score")
+            .cmp(&metric_u64(left, "friction_score"))
+            .then_with(|| metric_u64(right, "retry_count").cmp(&metric_u64(left, "retry_count")))
             .then_with(|| {
                 metric_u64(right, "wasted_duration_ms").cmp(&metric_u64(left, "wasted_duration_ms"))
             })
@@ -1006,6 +1277,7 @@ fn repeated_failure_report(
         "chain_count": stats.chain_count,
         "wasted_duration_ms": stats.wasted_duration_ms,
         "max_attempt_count": stats.max_attempt_count,
+        "friction_score": friction_score,
         "legacy_adjacent_retry_count": legacy_adjacent_retry_count,
         "top": groups,
         "recovery_hint": if stats.retry_count > 0 {
@@ -1442,6 +1714,15 @@ fn is_error_record(record: &Value) -> bool {
     )
 }
 
+fn is_transport_error_record(record: &Value) -> bool {
+    record.get("failure_domain").and_then(Value::as_str) == Some("transport")
+        || normalized_outcome(record) == "rpc_error"
+}
+
+fn is_tool_error_record(record: &Value) -> bool {
+    is_error_record(record) && !is_transport_error_record(record)
+}
+
 fn metric_u64(record: &Value, field: &str) -> u64 {
     match field {
         "p95_ms" => record.get("p95_ms").and_then(Value::as_u64).unwrap_or(0),
@@ -1510,6 +1791,31 @@ fn percentile(values: &[u64], percentile: usize) -> u64 {
     sorted[index.min(sorted.len() - 1)]
 }
 
+fn paginate_record_window(
+    records: &VecDeque<Value>,
+    total: u64,
+    cursor: usize,
+    limit: usize,
+) -> (Vec<Value>, Option<usize>, bool) {
+    let page_end = records.len().saturating_sub(cursor.min(records.len()));
+    let page_start = page_end.saturating_sub(limit);
+    let page = records
+        .iter()
+        .skip(page_start)
+        .take(page_end.saturating_sub(page_start))
+        .cloned()
+        .collect::<Vec<_>>();
+    let next_candidate = cursor.saturating_add(page.len());
+    let has_older_records = total > next_candidate as u64;
+    let cursor_limit_reached = has_older_records && next_candidate > RECORD_CURSOR_MAX;
+    let next_cursor = if has_older_records && !cursor_limit_reached {
+        Some(next_candidate)
+    } else {
+        None
+    };
+    (page, next_cursor, cursor_limit_reached)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1522,6 +1828,65 @@ mod tests {
     }
 
     #[test]
+    fn canonical_diagnostics_dual_read_deduplicates_event_ids_but_keeps_legacy_records() {
+        let mut seen = BTreeSet::new();
+        let canonical = json!({ "diagnostic_event_id": "event-1", "event": "tool_call" });
+        let legacy_copy = canonical.clone();
+        let legacy_without_id = json!({ "event": "tool_call", "tool": "server_info" });
+
+        assert!(!diagnostic_event_is_duplicate(&canonical, &mut seen));
+        assert!(diagnostic_event_is_duplicate(&legacy_copy, &mut seen));
+        assert!(!diagnostic_event_is_duplicate(
+            &legacy_without_id,
+            &mut seen
+        ));
+        assert!(!diagnostic_event_is_duplicate(
+            &legacy_without_id,
+            &mut seen
+        ));
+    }
+
+    #[test]
+    fn record_pages_walk_backward_from_latest_without_reversing_page_order() {
+        let records = (1..=5)
+            .map(|index| json!({ "started_ts_ms": index * 1_000 }))
+            .collect::<VecDeque<_>>();
+
+        let (first, first_next, first_limited) = paginate_record_window(&records, 5, 0, 2);
+        assert_eq!(
+            first
+                .iter()
+                .map(|record| record["started_ts_ms"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![4_000, 5_000]
+        );
+        assert_eq!(first_next, Some(2));
+        assert!(!first_limited);
+
+        let (second, second_next, second_limited) = paginate_record_window(&records, 5, 2, 2);
+        assert_eq!(
+            second
+                .iter()
+                .map(|record| record["started_ts_ms"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![2_000, 3_000]
+        );
+        assert_eq!(second_next, Some(4));
+        assert!(!second_limited);
+
+        let (third, third_next, third_limited) = paginate_record_window(&records, 5, 4, 2);
+        assert_eq!(
+            third
+                .iter()
+                .map(|record| record["started_ts_ms"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![1_000]
+        );
+        assert_eq!(third_next, None);
+        assert!(!third_limited);
+    }
+
+    #[test]
     fn incomplete_jsonl_tail_is_ignored() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("usage.jsonl");
@@ -1531,10 +1896,14 @@ mod tests {
         )
         .expect("write log");
         let mut records = Vec::new();
-        let (scanned, invalid) =
+        let (scanned, invalid, bytes_read) =
             visit_complete_jsonl_records(&path, |record| records.push(record)).expect("read log");
         assert_eq!(scanned, 1);
         assert_eq!(invalid, 0);
+        assert_eq!(
+            bytes_read,
+            std::fs::metadata(&path).expect("metadata").len()
+        );
         assert_eq!(records.len(), 1);
         assert_eq!(records[0]["tool"], "server_info");
     }
@@ -1560,6 +1929,194 @@ mod tests {
             error_signature(&json!({"tool": "read_file", "outcome": "success"})),
             None
         );
+    }
+
+    #[test]
+    fn transport_failures_are_split_from_tool_failures() {
+        let contract: Value = serde_json::from_str(include_str!(
+            "../../../docs/specs/diagnostics/contract-v1.json"
+        ))
+        .expect("diagnostics contract should be valid JSON");
+        assert_eq!(contract["schema_version"], DIAGNOSTICS_SCHEMA_VERSION);
+        assert_eq!(contract["host_kinds"]["rust"], DIAGNOSTICS_HOST_KIND);
+        assert_eq!(contract["structured_log"]["file"], DIAGNOSTICS_LOG_FILE);
+        assert_eq!(
+            contract["compatibility"]["legacy_file"],
+            TOOL_USAGE_LOG_FILE
+        );
+        assert_eq!(contract["compatibility"]["dual_write"], true);
+        assert_eq!(contract["records_pagination"]["cursor_origin"], "latest");
+        assert_eq!(
+            contract["records_pagination"]["page_order"],
+            "oldest_to_newest"
+        );
+        assert_eq!(contract["records_pagination"]["max_cursor"], 10_000);
+        assert_eq!(contract["compatibility"]["dual_write_default"], true);
+        assert_eq!(
+            contract["compatibility"]["legacy_write_env"],
+            "CODING_TOOLS_DIAGNOSTICS_LEGACY_WRITE"
+        );
+        assert_eq!(contract["compatibility"]["legacy_read_preserved"], true);
+        assert_eq!(
+            contract["compatibility"]["retirement_requires_compatibility_window"],
+            true
+        );
+        assert_eq!(
+            contract["compatibility"]["query_deduplicates_by"],
+            "diagnostic_event_id"
+        );
+        assert_eq!(contract["diagnostics_summary"]["sanitized"], true);
+        let log_health_fields = contract["diagnostics_summary"]["log_health_fields"]
+            .as_array()
+            .expect("log health fields");
+        assert!(log_health_fields
+            .iter()
+            .any(|field| field == "write_failures"));
+        assert!(log_health_fields
+            .iter()
+            .any(|field| field == "legacy_compat_write_failures"));
+        let query = query_tool_usage_for_profile(
+            &format!("diagnostics-contract-parity-{}", std::process::id()),
+            &json!({ "scope": "all", "exclude_tools": [] }),
+        )
+        .expect("diagnostics query should succeed");
+        let mut actual_query_keys = query
+            .as_object()
+            .expect("diagnostics query should be an object")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut expected_query_keys = contract["query_response"]["fields"]
+            .as_array()
+            .expect("diagnostics query fields")
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        actual_query_keys.sort();
+        expected_query_keys.sort();
+        assert_eq!(actual_query_keys, expected_query_keys);
+        assert!(query["log_bytes_read"].as_u64().is_some());
+        let actual_log_health = crate::mcp::tool_usage_log_health();
+        let mut actual_log_health_keys = actual_log_health
+            .as_object()
+            .expect("log health should be an object")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut expected_log_health_keys = log_health_fields
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        actual_log_health_keys.sort();
+        expected_log_health_keys.sort();
+        assert_eq!(actual_log_health_keys, expected_log_health_keys);
+        assert_eq!(
+            contract["structured_log"]["max_bytes"],
+            STRUCTURED_LOG_MAX_BYTES
+        );
+        assert_eq!(
+            contract["structured_log"]["retained_files"],
+            MAX_ROTATED_FILES
+        );
+        assert_eq!(
+            contract["structured_log"]["queue_capacity"],
+            STRUCTURED_LOG_QUEUE_CAPACITY
+        );
+        let mut stats = ToolStats::default();
+        add_stats(
+            &json!({
+                "tool": "edit_file",
+                "outcome": "tool_error",
+                "is_error": true,
+                "error_code": "E_FAIL",
+                "duration_ms": 5
+            }),
+            &mut stats,
+        );
+        add_stats(
+            &json!({
+                "tool": "server_info",
+                "outcome": "rpc_error",
+                "rpc_error_code": "-32603",
+                "duration_ms": 0
+            }),
+            &mut stats,
+        );
+
+        assert_eq!(
+            stats.errors, 2,
+            "legacy combined error count remains compatible"
+        );
+        assert_eq!(stats.tool_errors, 1);
+        assert_eq!(stats.transport_errors, 1);
+
+        let version = version_scope_stats(&stats);
+        assert_eq!(version["errors"], 2);
+        assert_eq!(version["tool_errors"], 1);
+        assert_eq!(version["transport_errors"], 1);
+
+        let summary = diagnostics_summary_value(
+            "all",
+            &stats,
+            2,
+            3,
+            &BTreeMap::from([("E_FAIL".to_string(), 1)]),
+            &BTreeMap::from([("-32603".to_string(), 1)]),
+            4,
+            &BTreeMap::from([
+                ("tool_call".to_string(), 1),
+                ("transport_event".to_string(), 2),
+            ]),
+            1,
+            json!({
+                "queue_capacity": STRUCTURED_LOG_QUEUE_CAPACITY,
+                "pending_records": Value::Null,
+                "pending_dropped_records": 5,
+                "write_failures": 1,
+                "legacy_compat_write_failures": 0,
+                "write_error_present": true,
+                "last_successful_write_ts_ms": 100,
+                "last_write_failure_ts_ms": 200,
+                "writer_state": "ready"
+            }),
+        );
+        assert_eq!(summary["schema_version"], DIAGNOSTICS_SCHEMA_VERSION);
+        assert_eq!(summary["host_kind"], DIAGNOSTICS_HOST_KIND);
+        assert_eq!(summary["scope"], "all");
+        assert_eq!(summary["calls"], 2);
+        assert_eq!(summary["tool_errors"], 1);
+        assert_eq!(summary["transport_errors"], 2);
+        assert_eq!(summary["invalid_complete_lines"], 2);
+        assert_eq!(summary["persisted_dropped_records"], 3);
+        assert_eq!(summary["recovery"]["repeated_identical_error_count"], 4);
+        assert_eq!(summary["top_tool_errors"][0]["code"], "E_FAIL");
+        assert_eq!(summary["top_transport_errors"][0]["code"], "-32603");
+        assert_eq!(summary["events_by_type"]["tool_call"], 1);
+        assert_eq!(summary["events_by_type"]["transport_event"], 2);
+        assert_eq!(summary["log_health"]["write_failures"], 1);
+        assert_eq!(summary["sanitized"], true);
+        let mut actual_summary_keys = summary
+            .as_object()
+            .expect("diagnostics summary should be an object")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut expected_summary_keys = contract["diagnostics_summary"]["fields"]
+            .as_array()
+            .expect("diagnostics summary fields")
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        actual_summary_keys.sort();
+        expected_summary_keys.sort();
+        assert_eq!(actual_summary_keys, expected_summary_keys);
+        let serialized = serde_json::to_string(&summary).expect("summary JSON");
+        assert!(!serialized.contains("arguments"));
+        assert!(!serialized.contains("stdout"));
+        assert!(!serialized.contains("stderr"));
     }
 
     #[test]
@@ -1723,9 +2280,12 @@ mod tests {
         assert_eq!(report["chain_count"], 1);
         assert_eq!(report["wasted_duration_ms"], 18);
         assert_eq!(report["max_attempt_count"], 3);
+        assert_eq!(report["friction_score"], 72);
         assert_eq!(report["legacy_adjacent_retry_count"], 4);
         assert_eq!(report["top"][0]["signature"], signature);
         assert_eq!(report["top"][0]["retry_count"], 2);
+        assert_eq!(report["top"][0]["deterministic_error_weight"], 2);
+        assert_eq!(report["top"][0]["friction_score"], 72);
         assert!(report["recovery_hint"]
             .as_str()
             .unwrap()

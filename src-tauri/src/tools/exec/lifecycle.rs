@@ -7,7 +7,9 @@ use tokio::sync::OwnedMutexGuard;
 
 use crate::mcp::classify_command_text;
 use crate::tools::context::ToolContext;
-use crate::tools::session::{ExecSession, OutputMode, OutputOptions, DETACHED_SESSION_GRACE};
+use crate::tools::session::{
+    EventDetail, ExecSession, OutputMode, OutputOptions, DETACHED_SESSION_GRACE,
+};
 use crate::tools::workspace::WorkspaceError;
 
 use super::backend::{start_exec_process, CommandExecutionBackend};
@@ -95,6 +97,17 @@ pub(super) async fn run_command(
             .with_sensitive_output(sensitive_output)
             .with_telemetry(&ctx.profile_id, classify_command_text(&spec.display))
             .with_sandbox_phase_durations(sandbox_prepare_ms, sandbox_startup_ms)
+            .with_process_timeout(
+                identity.process_timeout.clone().unwrap_or_else(|| {
+                    crate::tools::execution_timeout::ProcessTimeoutContract {
+                        execution_mode: "command",
+                        requested_timeout_ms: None,
+                        effective_timeout_ms: limit.as_millis() as u64,
+                        limit_ms: crate::tools::ABSOLUTE_COMMAND_TIMEOUT_MAX_MS,
+                    }
+                }),
+                start,
+            )
             .with_execution_identity(
                 identity.operation_id.clone(),
                 identity.command_fingerprint.clone(),
@@ -235,6 +248,7 @@ fn spawn_lifecycle_monitor(
 
         let main = session.snapshot_with_options(OutputOptions {
             mode: OutputMode::None,
+            event_detail: EventDetail::Full,
             cursor: session.latest_cursor(),
             max_output_bytes: 1,
             tail_lines: 1,

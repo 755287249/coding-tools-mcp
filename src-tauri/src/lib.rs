@@ -10,6 +10,7 @@ mod data;
 mod error;
 pub mod harness;
 mod health;
+pub mod knowledge;
 mod mcp;
 mod platform;
 mod runtime;
@@ -74,7 +75,9 @@ pub fn export_behavioral_parity_fixtures() -> serde_json::Value {
             "global_process_admission": limits.global_process_admission,
             "active_sessions": limits.active_sessions,
             "command_timeout_default_ms": tools::DEFAULT_COMMAND_TIMEOUT_MAX_MS,
-            "command_timeout_absolute_max_ms": tools::ABSOLUTE_COMMAND_TIMEOUT_MAX_MS
+            "command_timeout_absolute_max_ms": tools::ABSOLUTE_COMMAND_TIMEOUT_MAX_MS,
+            "job_timeout_default_max_ms": tools::execution_timeout::DEFAULT_JOB_TIMEOUT_MAX_MS,
+            "job_timeout_absolute_max_ms": tools::execution_timeout::ABSOLUTE_JOB_TIMEOUT_MAX_MS
         },
         "workspace": tools::hub::behavioral_parity_fixture(),
         "process_start": tools::process_start_behavioral_parity_fixture(),

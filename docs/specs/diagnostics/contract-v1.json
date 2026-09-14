@@ -1,0 +1,124 @@
+{
+  "schema_version": 1,
+  "event_types": [
+    "tool_call",
+    "process_session",
+    "service_event",
+    "transport_event",
+    "lifecycle_event",
+    "recovery_event"
+  ],
+  "host_kinds": {
+    "node": "node_agent",
+    "rust": "rust_desktop"
+  },
+  "failure_domains": [
+    "none",
+    "tool",
+    "transport",
+    "process"
+  ],
+  "common_fields": [
+    "schema_version",
+    "diagnostic_schema_version",
+    "timestamp_ms",
+    "event_type",
+    "host_kind",
+    "host_version",
+    "runtime_boot_id",
+    "workspace_id",
+    "conversation_operation_id",
+    "severity",
+    "failure_domain",
+    "diagnostic_event_id"
+  ],
+  "structured_log": {
+    "file": "diagnostics.jsonl",
+    "max_bytes": 20971520,
+    "retained_files": 5,
+    "queue_capacity": 1024
+  },
+  "query_response": {
+    "fields": [
+      "ok",
+      "workspace_id",
+      "scope",
+      "runtime_boot_id",
+      "server_version",
+      "diagnostics_contract",
+      "diagnostics_summary",
+      "log_dir",
+      "scanned_lines",
+      "matched_lines",
+      "matched_async_session_events",
+      "invalid_complete_lines",
+      "log_bytes_read",
+      "response_profile",
+      "detail_sections",
+      "records_pagination",
+      "records",
+      "slowest",
+      "largest",
+      "aggregate",
+      "scope_breakdown",
+      "optimization",
+      "formatting",
+      "search",
+      "parallelism",
+      "performance",
+      "warnings"
+    ]
+  },
+  "diagnostics_summary": {
+    "sanitized": true,
+    "requires_aggregate": true,
+    "fields": [
+      "schema_version",
+      "host_kind",
+      "host_version",
+      "scope",
+      "calls",
+      "tool_errors",
+      "transport_errors",
+      "warnings",
+      "invalid_complete_lines",
+      "persisted_dropped_records",
+      "top_tool_errors",
+      "top_transport_errors",
+      "latency",
+      "wait",
+      "recovery",
+      "events_by_type",
+      "log_health",
+      "sanitized"
+    ],
+    "log_health_fields": [
+      "queue_capacity",
+      "pending_records",
+      "pending_dropped_records",
+      "write_failures",
+      "legacy_compat_write_failures",
+      "write_error_present",
+      "last_successful_write_ts_ms",
+      "last_write_failure_ts_ms",
+      "writer_state"
+    ]
+  },
+  "records_pagination": {
+    "cursor_origin": "latest",
+    "page_order": "oldest_to_newest",
+    "max_cursor": 10000
+  },
+  "compatibility": {
+    "legacy_file": "mcp-tool-usage.jsonl",
+    "dual_write": true,
+    "dual_write_default": true,
+    "legacy_write_env": "CODING_TOOLS_DIAGNOSTICS_LEGACY_WRITE",
+    "legacy_read_preserved": true,
+    "retirement_requires_compatibility_window": true,
+    "query_deduplicates_by": "diagnostic_event_id",
+    "legacy_errors_include_transport": true,
+    "legacy_event_field_preserved": true,
+    "legacy_server_version_field_preserved": true
+  }
+}

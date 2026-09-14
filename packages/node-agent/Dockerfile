@@ -7,8 +7,7 @@ ENV PATH=${PNPM_HOME}:${PATH}
 
 WORKDIR /src
 
-RUN corepack enable \
-    && corepack prepare pnpm@10.19.0 --activate
+RUN npm install --global @pnpm/exe@12.0.0
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY packages/node-agent/package.json packages/node-agent/package.json
@@ -23,16 +22,17 @@ COPY packages/node-agent ./packages/node-agent
 
 ARG BUILD_GIT_SHA=unknown
 ARG BUILD_SOURCE_CLEAN=false
+ARG TOOL_EVOLUTION_PROPOSAL_IDS=
 ENV CTMCP_BUILD_GIT_SHA=${BUILD_GIT_SHA}
 ENV CTMCP_BUILD_SOURCE_CLEAN=${BUILD_SOURCE_CLEAN}
+ENV CTMCP_TOOL_EVOLUTION_PROPOSAL_IDS=${TOOL_EVOLUTION_PROPOSAL_IDS}
 
 RUN pnpm --filter @coding-tools/node-agent run build \
     && pnpm --filter @coding-tools/node-agent --prod deploy /opt/node-agent
 
 FROM node:22-bookworm-slim AS runtime
 
-RUN corepack enable \
-    && corepack prepare pnpm@10.19.0 --activate \
+RUN npm install --global @pnpm/exe@12.0.0 \
     && apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl git gosu openssh-client passwd \
     && install -m 0755 -d /etc/apt/keyrings \

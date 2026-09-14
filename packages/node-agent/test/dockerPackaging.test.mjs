@@ -17,5 +17,6 @@ test('Docker Compose exposes the management UI only through host loopback while 
   assert.match(compose, /CTMCP_UI_TRUST_PRIVATE_PROXY:\s*(?:true|"true"|'true'|1|"1"|'1')/);
   assert.doesNotMatch(dockerfile, /CTMCP_UI_TRUST_PRIVATE_PROXY/);
   assert.match(compose, /restart:\s*unless-stopped/);
+  assert.match(entrypoint, /export CTMCP_RESTART_SUPERVISOR=active-v1/);
   assert.match(entrypoint, /node dist\/cli\.js --restart-supervised "\$@"/);
 });

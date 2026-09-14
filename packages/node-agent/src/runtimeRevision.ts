@@ -2,7 +2,7 @@ import { readFile, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { BUILD_GIT_SHA, BUILD_SOURCE_CLEAN } from './version.js';
 
-type GitMetadata = { gitDir: string; commonDir: string };
+type GitMetadata = { root: string; gitDir: string; commonDir: string };
 
 async function readText(value: string): Promise<string | null> {
   try {
@@ -25,14 +25,12 @@ async function canonical(value: string): Promise<string | null> {
   }
 }
 
-async function gitMetadataForWorkspace(root: string): Promise<GitMetadata | null> {
-  const workspace = await canonical(root);
-  if (!workspace) return null;
+async function gitMetadataForCanonicalWorkspace(workspace: string): Promise<GitMetadata | null> {
   const marker = path.join(workspace, '.git');
   try {
     if ((await stat(marker)).isDirectory()) {
       const gitDir = await canonical(marker);
-      return gitDir && pathWithin(gitDir, workspace) ? { gitDir, commonDir: gitDir } : null;
+      return gitDir && pathWithin(gitDir, workspace) ? { root: workspace, gitDir, commonDir: gitDir } : null;
     }
   } catch {
     // Linked worktrees use a .git pointer file instead of a directory.
@@ -52,7 +50,12 @@ async function gitMetadataForWorkspace(root: string): Promise<GitMetadata | null
   const repositoryRoot = path.dirname(commonDir);
   if (!pathWithin(workspace, repositoryRoot)) return null;
   if (!pathWithin(gitDir, path.join(commonDir, 'worktrees'))) return null;
-  return { gitDir, commonDir };
+  return { root: workspace, gitDir, commonDir };
+}
+
+async function gitMetadataForWorkspace(root: string): Promise<GitMetadata | null> {
+  const workspace = await canonical(root);
+  return workspace ? gitMetadataForCanonicalWorkspace(workspace) : null;
 }
 
 function validGitHash(value: string): boolean {
@@ -64,18 +67,43 @@ function validGitRef(value: string): boolean {
   return value.split('/').every(part => part.length > 0 && part !== '.' && part !== '..');
 }
 
-export async function fastWorkspaceGitHead(root: string): Promise<string | null> {
+function validGitHeadMarker(head: string): boolean {
+  const reference = head.match(/^ref:\s*(.+)$/i)?.[1]?.trim();
+  return reference ? validGitRef(reference) : validGitHash(head);
+}
+
+export async function fastContainingGitRoot(workspaceRoot: string, cwd: string): Promise<string | null> {
+  const [workspace, start] = await Promise.all([canonical(workspaceRoot), canonical(cwd)]);
+  if (!workspace || !start || !pathWithin(start, workspace)) return null;
+  let current = start;
+  for (;;) {
+    const metadata = await gitMetadataForCanonicalWorkspace(current);
+    if (metadata) {
+      const head = (await readText(path.join(metadata.gitDir, 'HEAD')))?.trim();
+      if (head && validGitHeadMarker(head)) return metadata.root;
+    }
+    if (path.relative(workspace, current) === '') return null;
+    const parent = path.dirname(current);
+    if (parent === current || !pathWithin(parent, workspace)) return null;
+    current = parent;
+  }
+}
+
+export type WorkspaceGitIdentity = { branch: string; head: string };
+
+export async function fastWorkspaceGitIdentity(root: string): Promise<WorkspaceGitIdentity | null> {
   const metadata = await gitMetadataForWorkspace(root);
   if (!metadata) return null;
   const head = (await readText(path.join(metadata.gitDir, 'HEAD')))?.trim();
   if (!head) return null;
   const reference = head.match(/^ref:\s*(.+)$/i)?.[1]?.trim();
-  if (!reference) return validGitHash(head) ? head.toLowerCase() : null;
+  if (!reference) return validGitHash(head) ? { branch: 'HEAD', head: head.toLowerCase() } : null;
   if (!validGitRef(reference)) return null;
+  const branch = reference.startsWith('refs/heads/') ? reference.slice('refs/heads/'.length) : reference;
 
   for (const base of [metadata.gitDir, metadata.commonDir]) {
     const value = (await readText(path.join(base, reference)))?.trim();
-    if (value && validGitHash(value)) return value.toLowerCase();
+    if (value && validGitHash(value)) return { branch, head: value.toLowerCase() };
   }
   for (const base of [metadata.gitDir, metadata.commonDir]) {
     const packed = await readText(path.join(base, 'packed-refs'));
@@ -84,10 +112,14 @@ export async function fastWorkspaceGitHead(root: string): Promise<string | null>
       const trimmed = line.trim();
       if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('^')) continue;
       const [value, name] = trimmed.split(/\s+/, 2);
-      if (name === reference && value && validGitHash(value)) return value.toLowerCase();
+      if (name === reference && value && validGitHash(value)) return { branch, head: value.toLowerCase() };
     }
   }
   return null;
+}
+
+export async function fastWorkspaceGitHead(root: string): Promise<string | null> {
+  return (await fastWorkspaceGitIdentity(root))?.head ?? null;
 }
 
 async function isRuntimeSourceWorkspace(root: string): Promise<boolean> {

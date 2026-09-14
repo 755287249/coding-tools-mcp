@@ -14,6 +14,8 @@ export interface DeviceIdentity {
   privateKeyDer: string;
   publicKeyRaw: string;
   enrolled: boolean;
+  serverId?: string;
+  serverPublicKeyRaw?: string;
 }
 
 interface EncryptedIdentity {
@@ -70,6 +72,23 @@ export function identityPrivateKey(identity: DeviceIdentity): KeyObject {
   return createPrivateKey({ key: Buffer.from(identity.privateKeyDer, 'base64'), format: 'der', type: 'pkcs8' });
 }
 
+function expectedServerId(publicKeyRaw: string): string | undefined {
+  if (!/^[A-Za-z0-9_-]{43}$/.test(publicKeyRaw)) return undefined;
+  try {
+    const raw = Buffer.from(publicKeyRaw, 'base64url');
+    if (raw.length !== 32) return undefined;
+    return createHash('sha256').update(raw).digest('base64url');
+  } catch {
+    return undefined;
+  }
+}
+
+export function hasPinnedServerIdentity(identity: DeviceIdentity): boolean {
+  if (!identity.serverId || !/^[A-Za-z0-9_-]{43}$/.test(identity.serverId)) return false;
+  if (!identity.serverPublicKeyRaw) return false;
+  return expectedServerId(identity.serverPublicKeyRaw) === identity.serverId;
+}
+
 function validateEnrollmentUrl(publicUrl: string, value: string): URL {
   const publicEndpoint = new URL(publicUrl);
   const enrollment = new URL(value.trim());
@@ -93,13 +112,16 @@ export async function loadOrEnroll(
   if (!config.tunnel) throw new Error('built-in tunnel is not configured');
   const enrollmentUrl = config.tunnel.enrollmentUrl?.trim();
   const stored = await readIdentity(config.tunnel.stateFile, config.oauth.tokenSecret);
-  if (stored?.enrolled && !enrollmentUrl) {
+  if (stored?.enrolled && hasPinnedServerIdentity(stored)) {
     return { identity: stored, enrollmentCompleted: false };
   }
 
-  let identity = stored && !stored.enrolled ? stored : newIdentity(endpoint.clientId);
+  let identity = stored ?? newIdentity(endpoint.clientId);
   if (!enrollmentUrl) {
     await saveIdentity(config.tunnel.stateFile, identity, config.oauth.tokenSecret);
+    if (identity.enrolled && !hasPinnedServerIdentity(identity)) {
+      throw new Error('built-in tunnel v4 requires re-enrollment to pin the server identity');
+    }
     throw new Error('built-in tunnel enrollment URL is required for the first connection');
   }
   const enrollment = validateEnrollmentUrl(endpoint.publicUrl, enrollmentUrl);
@@ -108,11 +130,21 @@ export async function loadOrEnroll(
     body: JSON.stringify({ device_id: identity.deviceId, client_id: identity.clientId, device_name: hostname() || 'Coding Tools MCP Node', public_key: identity.publicKeyRaw })
   });
   if (!response.ok) throw new Error(`built-in tunnel enrollment failed (${response.status}): ${(await response.text()).trim()}`);
-  const enrolled = await response.json() as { device_id?: string; client_id?: string };
+  const enrolled = await response.json() as {
+    device_id?: string;
+    client_id?: string;
+    server_id?: string;
+    server_public_key?: string;
+  };
   if (enrolled.device_id !== identity.deviceId) throw new Error('built-in tunnel enrollment returned a different device ID');
   const clientId = String(enrolled.client_id || identity.clientId).trim();
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(clientId)) throw new Error('built-in tunnel enrollment returned an invalid client ID');
-  identity = { ...identity, clientId, enrolled: true };
+  const serverId = String(enrolled.server_id || '').trim();
+  const serverPublicKeyRaw = String(enrolled.server_public_key || '').trim();
+  if (!/^[A-Za-z0-9_-]{43}$/.test(serverId) || expectedServerId(serverPublicKeyRaw) !== serverId) {
+    throw new Error('built-in tunnel enrollment returned an invalid server identity');
+  }
+  identity = { ...identity, clientId, enrolled: true, serverId, serverPublicKeyRaw };
   await saveIdentity(config.tunnel.stateFile, identity, config.oauth.tokenSecret);
   return { identity, enrollmentCompleted: true };
 }

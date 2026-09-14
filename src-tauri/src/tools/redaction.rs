@@ -79,10 +79,29 @@ pub fn redact_tool_output_with_policy(
     OutputRedactionContext::new_with_policy(tool_name, arguments, policy).redact(value)
 }
 
+fn references_secret_input(value: &Value) -> bool {
+    match value {
+        Value::Array(values) => values.iter().any(references_secret_input),
+        Value::Object(values) => {
+            values
+                .get("stdin_secret")
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty())
+                || values
+                    .get("secret_env")
+                    .and_then(Value::as_object)
+                    .is_some_and(|value| !value.is_empty())
+                || values.values().any(references_secret_input)
+        }
+        _ => false,
+    }
+}
+
 pub fn arguments_reference_sensitive_source(arguments: &Value) -> bool {
-    serde_json::to_string(arguments)
-        .ok()
-        .is_some_and(|serialized| contains_sensitive_path(&serialized))
+    references_secret_input(arguments)
+        || serde_json::to_string(arguments)
+            .ok()
+            .is_some_and(|serialized| contains_sensitive_path(&serialized))
 }
 
 pub fn contains_sensitive_path(value: &str) -> bool {

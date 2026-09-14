@@ -427,21 +427,39 @@ impl Workspace {
     }
 }
 
+#[cfg(windows)]
+fn comparable_windows_display_path(path: &Path) -> String {
+    let display = path.to_string_lossy().replace('\\', "/");
+    if let Some(unc) = display
+        .strip_prefix("//?/UNC/")
+        .or_else(|| display.strip_prefix("//?/unc/"))
+    {
+        return format!("//{unc}");
+    }
+    display.strip_prefix("//?/").unwrap_or(&display).to_string()
+}
+
 pub fn relative_display(root: &Path, path: &Path) -> String {
-    let display = path
-        .strip_prefix(root)
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/"));
+    if let Ok(relative) = path.strip_prefix(root) {
+        return relative.to_string_lossy().replace('\\', "/");
+    }
     #[cfg(windows)]
     {
-        if let Some(unc) = display.strip_prefix("//?/UNC/") {
-            return format!("//{unc}");
+        let root_display = comparable_windows_display_path(root);
+        let path_display = comparable_windows_display_path(path);
+        if path_display.eq_ignore_ascii_case(&root_display) {
+            return String::new();
         }
-        if let Some(normal) = display.strip_prefix("//?/") {
-            return normal.to_string();
+        let prefix = format!("{}/", root_display.trim_end_matches('/'));
+        if path_display.len() >= prefix.len()
+            && path_display[..prefix.len()].eq_ignore_ascii_case(&prefix)
+        {
+            return path_display[prefix.len()..].to_string();
         }
+        return path_display;
     }
-    display
+    #[cfg(not(windows))]
+    path.to_string_lossy().replace('\\', "/")
 }
 
 pub fn tool_ok(mut value: Value) -> Value {
@@ -552,8 +570,21 @@ fn mcp_result_summary(tool_name: &str, structured: &Value, is_error: bool) -> St
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use std::path::Path;
 
-    use super::wrap_mcp_tool_result;
+    use super::{relative_display, wrap_mcp_tool_result};
+
+    #[cfg(windows)]
+    #[test]
+    fn relative_display_matches_verbatim_and_normal_windows_paths() {
+        let root = Path::new(r"\\?\C:\Users\Tester\workspace");
+        let normal = Path::new(r"C:\Users\Tester\workspace\nested-repo\tracked.txt");
+        assert_eq!(relative_display(root, normal), "nested-repo/tracked.txt");
+
+        let unc_root = Path::new(r"\\?\UNC\server\share\workspace");
+        let unc_path = Path::new(r"\\server\share\workspace\nested\file.txt");
+        assert_eq!(relative_display(unc_root, unc_path), "nested/file.txt");
+    }
 
     #[test]
     fn mcp_text_content_is_a_summary_not_a_second_structured_payload() {

@@ -12,10 +12,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/setup@v2
         with:
-          version: 10.19.0
-          run_install: false
+          version: 12.0.0
+          install: false
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -28,35 +28,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build Linux Node Agent image
-        run: docker build -f packages/node-agent/Dockerfile -t coding-tools-node-agent:ci .
-      - name: Smoke test Linux Node Agent container
+      - name: Run Node Agent Docker regression
         shell: bash
-        run: |
-          set -euo pipefail
-          docker run -d --name coding-tools-node-agent-ci \
-            -p 127.0.0.1:37891:3789 \
-            -e CTMCP_OAUTH_PASSWORD=ci-smoke-password \
-            coding-tools-node-agent:ci
-          trap 'docker logs coding-tools-node-agent-ci || true; docker rm -f coding-tools-node-agent-ci || true' EXIT
-          for attempt in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:37891/health >/dev/null; then
-              echo 'node-agent-docker-smoke=ok'
-              exit 0
-            fi
-            sleep 1
-          done
-          echo 'Node Agent health endpoint did not become ready.' >&2
-          exit 1
+        run: ./scripts/test-node-agent-docker-regression.sh
 
   headless-core:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/setup@v2
         with:
-          version: 10.19.0
-          run_install: false
+          version: 12.0.0
+          install: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -95,10 +78,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/setup@v2
         with:
-          version: 10.19.0
-          run_install: false
+          version: 12.0.0
+          install: false
       - uses: actions/setup-node@v4
         with:
           node-version: "22"

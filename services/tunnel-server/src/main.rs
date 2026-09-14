@@ -2,6 +2,7 @@ mod admin;
 mod database;
 mod device_auth;
 mod observability;
+mod server_identity;
 mod worker_policy;
 
 use std::collections::{HashMap, VecDeque};
@@ -23,13 +24,17 @@ use axum::Router;
 use bytes::Bytes;
 use coding_tools_tunnel_protocol::{
     expected_routes, is_hop_by_hop_header, is_retry_safe_mcp_request, is_retry_safe_tool_name,
-    route_matches, valid_client_id, ClientHello, ControlMessage, EnrollmentRequest, HeaderPair,
-    TunnelService, WorkerDemand, WorkerPolicy, CLIENT_ID_HEADER, ENROLL_PATH_PREFIX,
-    MAX_REQUEST_BODY_BYTES, PROTOCOL_VERSION, SERVICE_HEADER, WS_PATH, WS_SUBPROTOCOL,
+    route_matches, server_ack_signing_payload, server_challenge_signing_payload, valid_client_id,
+    ClientHello, ControlMessage, EnrollmentRequest, HeaderPair, NodeUpdateOffer, NodeUpdateState,
+    TunnelService, WorkerDemand, WorkerPolicy, CLIENT_ID_HEADER, DEVICE_ID_HEADER,
+    ENROLL_PATH_PREFIX, MAX_REQUEST_BODY_BYTES, PROTOCOL_VERSION, SERVICE_HEADER, WORKER_ID_HEADER,
+    WS_PATH, WS_SUBPROTOCOL,
 };
 use database::DatabaseWriter;
 use device_auth::{unix_ms, AllowedServices, DeviceAuthError, DeviceRegistry};
 use observability::Observability;
+use server_identity::ServerIdentity;
+use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::{interval, sleep, timeout, timeout_at, Instant, MissedTickBehavior};
@@ -40,6 +45,8 @@ use uuid::Uuid;
 use worker_policy::WorkerPolicyStore;
 
 const REQUEST_QUEUE_CAPACITY: usize = 128;
+const CONTROL_REQUEST_QUEUE_CAPACITY: usize = 32;
+const CONTROL_PENDING_REQUEST_CAPACITY: usize = 32;
 const AVAILABLE_WORKER_CAPACITY: usize = 128;
 const RESPONSE_BODY_CAPACITY: usize = 16;
 const RESPONSE_HEAD_TIMEOUT: Duration = Duration::from_secs(30);
@@ -56,6 +63,7 @@ struct AppState {
     devices: DeviceRegistry,
     policies: WorkerPolicyStore,
     observability: Observability,
+    server_identity: ServerIdentity,
     max_request_body_bytes: usize,
     response_head_timeout: Duration,
     reconnect_grace_timeout: Duration,
@@ -70,10 +78,13 @@ struct ClientKey {
 
 #[derive(Clone)]
 struct ClientPool {
-    request_tx: mpsc::Sender<ProxyJob>,
+    control_request_tx: mpsc::Sender<ProxyJob>,
+    execution_request_tx: mpsc::Sender<ProxyJob>,
     available_tx: mpsc::Sender<AvailableWorker>,
+    update_tx: watch::Sender<Option<NodeUpdateOffer>>,
     active_workers: Arc<AtomicUsize>,
-    pending_requests: Arc<AtomicUsize>,
+    control_pending_requests: Arc<AtomicUsize>,
+    execution_pending_requests: Arc<AtomicUsize>,
 }
 
 #[derive(Clone)]
@@ -100,12 +111,30 @@ struct Registry {
     inner: Arc<Mutex<RegistryInner>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestLane {
+    Control,
+    Execution,
+}
+
+impl RequestLane {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Control => "control",
+            Self::Execution => "execution",
+        }
+    }
+}
+
+const CONTROL_WORKER_RESERVE: usize = 1;
+
 struct ProxyJob {
     request_id: String,
     method: String,
     path_and_query: String,
     headers: Vec<HeaderPair>,
     body: Bytes,
+    lane: RequestLane,
     attempt: u8,
     enqueued_at: Instant,
     policy: WorkerPolicy,
@@ -218,15 +247,25 @@ impl Registry {
             return pool.clone();
         }
 
-        let (request_tx, request_rx) = mpsc::channel(REQUEST_QUEUE_CAPACITY);
+        let (control_request_tx, control_request_rx) =
+            mpsc::channel(CONTROL_REQUEST_QUEUE_CAPACITY);
+        let (execution_request_tx, execution_request_rx) = mpsc::channel(REQUEST_QUEUE_CAPACITY);
         let (available_tx, available_rx) = mpsc::channel(AVAILABLE_WORKER_CAPACITY);
+        let (update_tx, _) = watch::channel(None);
         let pool = ClientPool {
-            request_tx,
+            control_request_tx,
+            execution_request_tx,
             available_tx,
+            update_tx,
             active_workers: Arc::new(AtomicUsize::new(0)),
-            pending_requests: Arc::new(AtomicUsize::new(0)),
+            control_pending_requests: Arc::new(AtomicUsize::new(0)),
+            execution_pending_requests: Arc::new(AtomicUsize::new(0)),
         };
-        tokio::spawn(dispatch_requests(request_rx, available_rx));
+        tokio::spawn(dispatch_requests(
+            control_request_rx,
+            execution_request_rx,
+            available_rx,
+        ));
 
         for prefix in expected_routes(&key.client_id, key.service) {
             inner.routes.push(RouteEntry {
@@ -240,6 +279,40 @@ impl Registry {
             .sort_by_key(|route| std::cmp::Reverse(route.prefix.len()));
         inner.pools.insert(key, pool.clone());
         pool
+    }
+
+    async fn dispatch_node_update(&self, client_id: &str, offer: NodeUpdateOffer) -> usize {
+        let inner = self.inner.lock().await;
+        let key = ClientKey {
+            client_id: client_id.to_string(),
+            service: TunnelService::Mcp,
+        };
+        let Some(pool) = inner.pools.get(&key) else {
+            return 0;
+        };
+        let targets = pool.active_workers.load(Ordering::Acquire);
+        pool.update_tx.send_replace(Some(offer));
+        targets
+    }
+
+    async fn clear_node_update(&self, client_id: &str, update_id: &str) -> bool {
+        let inner = self.inner.lock().await;
+        let key = ClientKey {
+            client_id: client_id.to_string(),
+            service: TunnelService::Mcp,
+        };
+        let Some(pool) = inner.pools.get(&key) else {
+            return false;
+        };
+        let matches_current = pool
+            .update_tx
+            .borrow()
+            .as_ref()
+            .is_some_and(|offer| offer.update_id == update_id);
+        if matches_current {
+            pool.update_tx.send_replace(None);
+        }
+        matches_current
     }
 
     async fn lookup(&self, path: &str) -> Option<RouteMatch> {
@@ -256,20 +329,35 @@ impl Registry {
 }
 
 async fn dispatch_requests(
-    mut request_rx: mpsc::Receiver<ProxyJob>,
+    mut control_request_rx: mpsc::Receiver<ProxyJob>,
+    mut execution_request_rx: mpsc::Receiver<ProxyJob>,
     mut available_rx: mpsc::Receiver<AvailableWorker>,
 ) {
-    let mut jobs: VecDeque<ProxyJob> = VecDeque::new();
+    let mut control_jobs: VecDeque<ProxyJob> = VecDeque::new();
+    let mut execution_jobs: VecDeque<ProxyJob> = VecDeque::new();
     let mut workers: VecDeque<AvailableWorker> = VecDeque::new();
     let mut cleanup_tick = interval(Duration::from_millis(100));
     cleanup_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     loop {
-        jobs.retain(|job| !job.abandoned());
+        control_jobs.retain(|job| !job.abandoned());
+        execution_jobs.retain(|job| !job.abandoned());
         discard_closed_workers(&mut workers);
-        while !workers.is_empty() && !jobs.is_empty() {
+        while !workers.is_empty() && (!control_jobs.is_empty() || !execution_jobs.is_empty()) {
+            let execution_can_run = execution_jobs.front().is_some_and(|job| {
+                let connected = job.active_workers.load(Ordering::Acquire);
+                let reserve =
+                    usize::from(connected > CONTROL_WORKER_RESERVE) * CONTROL_WORKER_RESERVE;
+                workers.len() > reserve
+            });
+            let mut job = if let Some(job) = control_jobs.pop_front() {
+                job
+            } else if execution_can_run {
+                execution_jobs.pop_front().expect("execution queue checked")
+            } else {
+                break;
+            };
             let worker = workers.pop_front().expect("worker queue checked");
-            let mut job = jobs.pop_front().expect("job queue checked");
             if job.abandoned() {
                 workers.push_front(worker);
                 continue;
@@ -312,16 +400,24 @@ async fn dispatch_requests(
                 Err(mut job) => {
                     job.assigned = assigned;
                     job.pending_slot = pending_slot;
-                    jobs.push_front(job);
+                    match job.lane {
+                        RequestLane::Control => control_jobs.push_front(job),
+                        RequestLane::Execution => execution_jobs.push_front(job),
+                    }
                     discard_closed_workers(&mut workers);
                 }
             }
         }
 
         tokio::select! {
-            job = request_rx.recv() => match job {
-                Some(job) => jobs.push_back(job),
-                None => break,
+            biased;
+            job = control_request_rx.recv(), if !control_request_rx.is_closed() => match job {
+                Some(job) => control_jobs.push_back(job),
+                None => {}
+            },
+            job = execution_request_rx.recv(), if !execution_request_rx.is_closed() => match job {
+                Some(job) => execution_jobs.push_back(job),
+                None => {}
             },
             worker = available_rx.recv() => match worker {
                 Some(worker) => workers.push_back(worker),
@@ -329,9 +425,16 @@ async fn dispatch_requests(
             },
             _ = cleanup_tick.tick() => {}
         }
+        if control_request_rx.is_closed()
+            && execution_request_rx.is_closed()
+            && control_jobs.is_empty()
+            && execution_jobs.is_empty()
+        {
+            break;
+        }
     }
 
-    for job in jobs {
+    for job in control_jobs.into_iter().chain(execution_jobs) {
         let _ = job
             .response_head
             .send(Err("內建隧道 dispatcher 已停止。".into()));
@@ -354,6 +457,17 @@ async fn main() {
         });
     let _trace_guard = init_tracing(&log_directory).expect("failed to initialize file logging");
     let database = DatabaseWriter::open(&database_path).expect("failed to open tunnel database");
+    let server_identity_path = std::env::var_os("CODING_TOOLS_TUNNEL_SERVER_IDENTITY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            database_path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| FsPath::new("."))
+                .join("server-identity.json")
+        });
+    let server_identity = ServerIdentity::load_or_create(&server_identity_path)
+        .expect("failed to load tunnel server identity");
     let devices = DeviceRegistry::from_writer(database.clone())
         .expect("failed to open tunnel device registry");
     let policies = WorkerPolicyStore::from_writer(database.clone())
@@ -407,6 +521,7 @@ async fn main() {
         devices: devices.clone(),
         policies: policies.clone(),
         observability: observability.clone(),
+        server_identity,
         max_request_body_bytes: std::env::var("CODING_TOOLS_TUNNEL_MAX_BODY_BYTES")
             .ok()
             .and_then(|value| value.parse().ok())
@@ -424,6 +539,7 @@ async fn main() {
         worker_liveness_timeout: WORKER_LIVENESS_TIMEOUT,
     };
 
+    let admin_registry = state.registry.clone();
     let app = build_app(state);
     let listener = tokio::net::TcpListener::bind(bind)
         .await
@@ -444,6 +560,7 @@ async fn main() {
             devices,
             policies,
             observability,
+            admin_registry,
             public_origin,
             admin_config,
         )
@@ -598,7 +715,11 @@ async fn enroll_device(
     Json(request): Json<EnrollmentRequest>,
 ) -> Response<Body> {
     match state.devices.enroll(code, request).await {
-        Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
+        Ok(mut response) => {
+            response.server_id = state.server_identity.server_id().to_string();
+            response.server_public_key = state.server_identity.public_key().to_string();
+            (StatusCode::CREATED, Json(response)).into_response()
+        }
         Err(error) => {
             if matches!(&error, DeviceAuthError::Storage(_)) {
                 warn!(%error, "device enrollment storage failed");
@@ -616,6 +737,14 @@ async fn enroll_device(
     }
 }
 
+#[derive(Clone)]
+struct WorkerSocketAuth {
+    server_identity: ServerIdentity,
+    key: ClientKey,
+    device_id: String,
+    worker_id: String,
+}
+
 async fn websocket_upgrade(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -630,6 +759,18 @@ async fn websocket_upgrade(
     let Some(service) = header_text(&headers, SERVICE_HEADER).and_then(TunnelService::parse) else {
         return status_response(StatusCode::BAD_REQUEST, "invalid service header");
     };
+    let Some(device_id) = header_text(&headers, DEVICE_ID_HEADER)
+        .filter(|value| !value.is_empty() && value.len() <= 128)
+        .map(str::to_string)
+    else {
+        return status_response(StatusCode::BAD_REQUEST, "invalid device id header");
+    };
+    let Some(worker_id) = header_text(&headers, WORKER_ID_HEADER)
+        .filter(|value| !value.is_empty() && value.len() <= 128)
+        .map(str::to_string)
+    else {
+        return status_response(StatusCode::BAD_REQUEST, "invalid worker id header");
+    };
     let key = ClientKey {
         client_id: client_id.to_string(),
         service,
@@ -642,7 +783,12 @@ async fn websocket_upgrade(
                 state.devices,
                 state.policies,
                 state.observability,
-                key,
+                WorkerSocketAuth {
+                    server_identity: state.server_identity,
+                    key,
+                    device_id,
+                    worker_id,
+                },
                 state.worker_liveness_timeout,
             )
         })
@@ -655,16 +801,33 @@ async fn run_worker_socket(
     devices: DeviceRegistry,
     policies: WorkerPolicyStore,
     observability: Observability,
-    key: ClientKey,
+    auth: WorkerSocketAuth,
     worker_liveness_timeout: Duration,
 ) {
+    let WorkerSocketAuth {
+        server_identity,
+        key,
+        device_id: expected_device_id,
+        worker_id: expected_worker_id,
+    } = auth;
     let nonce = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     let expires_at_unix_ms = unix_ms().saturating_add(AUTH_CHALLENGE_TIMEOUT.as_millis() as u64);
+    let server_signature = server_identity.sign(&server_challenge_signing_payload(
+        &nonce,
+        expires_at_unix_ms,
+        server_identity.server_id(),
+        &expected_device_id,
+        &key.client_id,
+        key.service,
+        &expected_worker_id,
+    ));
     if send_control(
         &mut socket,
         &ControlMessage::Challenge {
             nonce: nonce.clone(),
             expires_at_unix_ms,
+            server_id: server_identity.server_id().to_string(),
+            server_signature,
         },
     )
     .await
@@ -692,8 +855,17 @@ async fn run_worker_socket(
         let _ = send_error(&mut socket, None, &message).await;
         return;
     }
+    if proof.device_id != expected_device_id || proof.hello.worker_id != expected_worker_id {
+        let _ = send_error(
+            &mut socket,
+            None,
+            "authentication proof does not match connection identity",
+        )
+        .await;
+        return;
+    }
     if let Err(error) = devices
-        .verify(nonce, expires_at_unix_ms, proof.clone())
+        .verify(nonce.clone(), expires_at_unix_ms, proof.clone())
         .await
     {
         warn!(client_id = %key.client_id, service = key.service.as_str(), device_id = %proof.device_id, %error, "device authentication rejected");
@@ -701,10 +873,16 @@ async fn run_worker_socket(
         return;
     }
 
-    let hello = proof.hello;
+    let hello = proof.hello.clone();
     let pool = registry.register(key.clone()).await;
     let mut policy_updates = policies.subscribe(key.service);
     let worker_policy = policy_updates.borrow().clone();
+    let server_signature = server_identity.sign(&server_ack_signing_payload(
+        &nonce,
+        server_identity.server_id(),
+        &proof,
+        &worker_policy,
+    ));
     let Some(_active_worker) = ActiveWorkerGuard::try_new(
         pool.active_workers.clone(),
         usize::from(worker_policy.max_workers),
@@ -717,6 +895,8 @@ async fn run_worker_socket(
         &ControlMessage::HelloAck {
             protocol_version: PROTOCOL_VERSION,
             worker_policy,
+            server_id: server_identity.server_id().to_string(),
+            server_signature,
         },
     )
     .await
@@ -732,11 +912,43 @@ async fn run_worker_socket(
         &key.client_id,
         key.service.as_str(),
     );
+    let mut update_offers = pool.update_tx.subscribe();
 
     loop {
         match timeout(worker_liveness_timeout, receive_control(&mut socket)).await {
             Ok(Ok(ControlMessage::Ready)) => {
                 observability.worker_state(&worker_id, "idle");
+            }
+            Ok(Ok(ControlMessage::ClientStatus {
+                agent_version,
+                client_compat_version,
+                build_git_sha,
+            })) => {
+                observability.worker_client_status(
+                    &worker_id,
+                    &agent_version,
+                    &client_compat_version,
+                    &build_git_sha,
+                );
+                continue;
+            }
+            Ok(Ok(ControlMessage::UpdateStatus {
+                update_id,
+                version,
+                state,
+                message,
+            })) => {
+                observability.worker_update_status(
+                    &worker_id,
+                    &update_id,
+                    &version,
+                    node_update_state_name(&state),
+                    message.as_deref(),
+                );
+                if node_update_state_terminal(&state) {
+                    registry.clear_node_update(&key.client_id, &update_id).await;
+                }
+                continue;
             }
             Ok(Ok(ControlMessage::Error { message, .. })) => {
                 warn!(client_id = %key.client_id, service = key.service.as_str(), %message, "worker reported an error while idle");
@@ -782,7 +994,36 @@ async fn run_worker_socket(
                                 return;
                             }
                         }
+                        Ok(Some(Ok(Message::Text(text)))) => {
+                            let Ok(control) = serde_json::from_str::<ControlMessage>(text.as_str()) else {
+                                return;
+                            };
+                            match control {
+                                ControlMessage::ClientStatus { agent_version, client_compat_version, build_git_sha } => {
+                                    observability.worker_client_status(&worker_id, &agent_version, &client_compat_version, &build_git_sha);
+                                }
+                                ControlMessage::UpdateStatus { update_id, version, state, message } => {
+                                    observability.worker_update_status(&worker_id, &update_id, &version, node_update_state_name(&state), message.as_deref());
+                                    if node_update_state_terminal(&state) {
+                                        registry.clear_node_update(&key.client_id, &update_id).await;
+                                    }
+                                }
+                                ControlMessage::Error { message, .. } => observability.worker_error(&worker_id, &message),
+                                _ => return,
+                            }
+                        }
                         _ => return,
+                    }
+                }
+                changed = update_offers.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    let offer = { update_offers.borrow_and_update().clone() };
+                    if let Some(offer) = offer {
+                        if send_control(&mut socket, &ControlMessage::UpdateOffer(offer)).await.is_err() {
+                            return;
+                        }
                     }
                 }
                 changed = policy_updates.changed() => {
@@ -1002,6 +1243,113 @@ async fn wait_for_cancellation(cancelled: &mut watch::Receiver<bool>) {
     }
 }
 
+fn classify_request_lane(service: TunnelService, body: &[u8]) -> RequestLane {
+    if service != TunnelService::Mcp {
+        return RequestLane::Execution;
+    }
+    let Ok(message) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return RequestLane::Execution;
+    };
+    let Some(method) = message.get("method").and_then(serde_json::Value::as_str) else {
+        return RequestLane::Execution;
+    };
+    if matches!(method, "initialize" | "ping" | "tools/list") {
+        return RequestLane::Control;
+    }
+    if method != "tools/call" {
+        return RequestLane::Execution;
+    }
+    let Some(params) = message.get("params") else {
+        return RequestLane::Execution;
+    };
+    let Some(name) = params.get("name").and_then(serde_json::Value::as_str) else {
+        return RequestLane::Execution;
+    };
+    if matches!(
+        name,
+        "exec_health_check"
+            | "wait_command"
+            | "resolve_operation"
+            | "list_sessions"
+            | "send_input"
+            | "kill_session"
+            | "read_output"
+            | "request_permissions"
+    ) {
+        return RequestLane::Control;
+    }
+    if name == "exec_many" {
+        let arguments = params
+            .get("arguments")
+            .and_then(serde_json::Value::as_object);
+        let action = arguments
+            .and_then(|value| value.get("action"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("run");
+        let has_commands = arguments
+            .and_then(|value| value.get("commands"))
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|commands| !commands.is_empty());
+        let has_operation_id = arguments
+            .and_then(|value| value.get("operation_id"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty());
+        if matches!(action, "status" | "cancel" | "forget")
+            || (action == "run" && has_operation_id && !has_commands)
+        {
+            return RequestLane::Control;
+        }
+    }
+    RequestLane::Execution
+}
+
+fn request_operation_hash(service: TunnelService, body: &[u8]) -> Option<String> {
+    if service != TunnelService::Mcp {
+        return None;
+    }
+    let message = serde_json::from_slice::<serde_json::Value>(body).ok()?;
+    let operation_id = message
+        .get("params")?
+        .get("arguments")?
+        .get("operation_id")?
+        .as_str()?
+        .trim();
+    if operation_id.is_empty() {
+        return None;
+    }
+    let digest = Sha256::digest(operation_id.as_bytes());
+    Some(
+        digest
+            .iter()
+            .take(8)
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+    )
+}
+
+fn with_tunnel_request_context(
+    mut response: Response<Body>,
+    request_id: &str,
+    lane: RequestLane,
+    operation_hash: Option<&str>,
+) -> Response<Body> {
+    if let Ok(value) = HeaderValue::from_str(request_id) {
+        response.headers_mut().insert("x-tunnel-request-id", value);
+    }
+    response.headers_mut().insert(
+        "x-tunnel-request-lane",
+        HeaderValue::from_static(lane.as_str()),
+    );
+    if let Some(operation_hash) = operation_hash {
+        if let Ok(value) = HeaderValue::from_str(operation_hash) {
+            response
+                .headers_mut()
+                .insert("x-tunnel-operation-hash", value);
+        }
+    }
+    response
+}
+
 async fn proxy_request(State(state): State<AppState>, request: Request<Body>) -> Response<Body> {
     let path = request.uri().path().to_string();
     let Some(route) = state.registry.lookup(&path).await else {
@@ -1076,6 +1424,8 @@ async fn proxy_request(State(state): State<AppState>, request: Request<Body>) ->
     let request_headers = encode_headers(&parts.headers);
     let retry_class =
         automatic_retry_class(&request_method, service_kind, &request_path, body.as_ref());
+    let request_lane = classify_request_lane(service_kind, body.as_ref());
+    let operation_hash = request_operation_hash(service_kind, body.as_ref());
     let max_attempts = if retry_class.is_some() {
         MAX_SAFE_REQUEST_ATTEMPTS
     } else {
@@ -1088,13 +1438,37 @@ async fn proxy_request(State(state): State<AppState>, request: Request<Body>) ->
         &client_id,
         &service,
     );
+    if let Some(operation_hash) = operation_hash.as_deref() {
+        state.observability.log(
+            "debug",
+            "request",
+            format!(
+                "request_context lane={} operation_hash={operation_hash}",
+                request_lane.as_str()
+            ),
+            Some(&client_id),
+            Some(&service),
+            None,
+            Some(&request_id),
+        );
+    }
     let mut attempt = 1_u8;
 
     let (head, body_rx, queue_wait_ms) = loop {
         let policy = state.policies.current(service_kind);
+        let (pending_requests, pending_limit) = match request_lane {
+            RequestLane::Control => (
+                pool.control_pending_requests.clone(),
+                CONTROL_PENDING_REQUEST_CAPACITY,
+            ),
+            RequestLane::Execution => (
+                pool.execution_pending_requests.clone(),
+                usize::from(policy.max_pending_requests),
+            ),
+        };
         let Some(pending_slot) = PendingRequestSlot::try_new(
-            pool.pending_requests.clone(),
-            usize::from(policy.max_pending_requests),
+            pending_requests.clone(),
+            pending_limit,
             state.observability.clone(),
         ) else {
             state.observability.record_capacity_rejection();
@@ -1102,10 +1476,12 @@ async fn proxy_request(State(state): State<AppState>, request: Request<Body>) ->
                 "warn",
                 "capacity",
                 format!(
-                    "worker_capacity_exhausted pending={} limit={} active_workers={}",
-                    pool.pending_requests.load(Ordering::Acquire),
-                    policy.max_pending_requests,
-                    pool.active_workers.load(Ordering::Acquire)
+                    "worker_capacity_exhausted lane={} pending={} limit={} active_workers={} control_reserve={}",
+                    request_lane.as_str(),
+                    pending_requests.load(Ordering::Acquire),
+                    pending_limit,
+                    pool.active_workers.load(Ordering::Acquire),
+                    CONTROL_WORKER_RESERVE
                 ),
                 Some(&client_id),
                 Some(&service),
@@ -1113,9 +1489,14 @@ async fn proxy_request(State(state): State<AppState>, request: Request<Body>) ->
                 Some(&request_id),
             );
             request_guard.finish(StatusCode::SERVICE_UNAVAILABLE.as_u16());
-            return capacity_response(
-                "worker_capacity_exhausted",
-                "tunnel worker capacity is exhausted",
+            return with_tunnel_request_context(
+                capacity_response(
+                    "worker_capacity_exhausted",
+                    "tunnel worker capacity is exhausted",
+                ),
+                &request_id,
+                request_lane,
+                operation_hash.as_deref(),
             );
         };
 
@@ -1131,6 +1512,7 @@ async fn proxy_request(State(state): State<AppState>, request: Request<Body>) ->
             path_and_query: request_path.clone(),
             headers: request_headers.clone(),
             body: body.clone(),
+            lane: request_lane,
             attempt,
             enqueued_at: Instant::now(),
             policy: policy.clone(),
@@ -1143,7 +1525,11 @@ async fn proxy_request(State(state): State<AppState>, request: Request<Body>) ->
             cancelled: cancel_rx,
         };
 
-        match timeout_at(acquire_deadline, pool.request_tx.send(job)).await {
+        let request_tx = match request_lane {
+            RequestLane::Control => &pool.control_request_tx,
+            RequestLane::Execution => &pool.execution_request_tx,
+        };
+        match timeout_at(acquire_deadline, request_tx.send(job)).await {
             Ok(Ok(())) => {}
             Ok(Err(_)) => {
                 state.observability.log(
@@ -1174,7 +1560,7 @@ async fn proxy_request(State(state): State<AppState>, request: Request<Body>) ->
                         "worker_acquire_timeout while entering dispatcher after {} ms; timeout_ms={}; pending={}; active_workers={}",
                         request_started.elapsed().as_millis(),
                         policy.worker_acquire_timeout_ms,
-                        pool.pending_requests.load(Ordering::Acquire),
+                        pending_requests.load(Ordering::Acquire),
                         pool.active_workers.load(Ordering::Acquire)
                     ),
                     Some(&client_id),
@@ -1183,9 +1569,14 @@ async fn proxy_request(State(state): State<AppState>, request: Request<Body>) ->
                     Some(&request_id),
                 );
                 request_guard.finish(StatusCode::SERVICE_UNAVAILABLE.as_u16());
-                return capacity_response(
-                    "worker_acquire_timeout",
-                    "the tunnel dispatcher did not accept the request before the queue deadline",
+                return with_tunnel_request_context(
+                    capacity_response(
+                        "worker_acquire_timeout",
+                        "the tunnel dispatcher did not accept the request before the queue deadline",
+                    ),
+                    &request_id,
+                    request_lane,
+                    operation_hash.as_deref(),
                 );
             }
         }
@@ -1216,11 +1607,13 @@ async fn proxy_request(State(state): State<AppState>, request: Request<Body>) ->
                     "warn",
                     "capacity",
                     format!(
-                        "worker_acquire_timeout after {} ms; timeout_ms={}; pending={}; active_workers={}",
+                        "worker_acquire_timeout lane={} after {} ms; timeout_ms={}; pending={}; active_workers={}; control_reserve={}",
+                        request_lane.as_str(),
                         request_started.elapsed().as_millis(),
                         policy.worker_acquire_timeout_ms,
-                        pool.pending_requests.load(Ordering::Acquire),
-                        pool.active_workers.load(Ordering::Acquire)
+                        pending_requests.load(Ordering::Acquire),
+                        pool.active_workers.load(Ordering::Acquire),
+                        CONTROL_WORKER_RESERVE
                     ),
                     Some(&client_id),
                     Some(&service),
@@ -1228,9 +1621,14 @@ async fn proxy_request(State(state): State<AppState>, request: Request<Body>) ->
                     Some(&request_id),
                 );
                 request_guard.finish(StatusCode::SERVICE_UNAVAILABLE.as_u16());
-                return capacity_response(
-                    "worker_acquire_timeout",
-                    "no tunnel worker became available before the queue deadline",
+                return with_tunnel_request_context(
+                    capacity_response(
+                        "worker_acquire_timeout",
+                        "no tunnel worker became available before the queue deadline",
+                    ),
+                    &request_id,
+                    request_lane,
+                    operation_hash.as_deref(),
                 );
             }
         };
@@ -1273,7 +1671,12 @@ async fn proxy_request(State(state): State<AppState>, request: Request<Body>) ->
                     continue;
                 }
                 request_guard.finish(StatusCode::BAD_GATEWAY.as_u16());
-                return status_response(StatusCode::BAD_GATEWAY, &message);
+                return with_tunnel_request_context(
+                    status_response(StatusCode::BAD_GATEWAY, &message),
+                    &request_id,
+                    request_lane,
+                    operation_hash.as_deref(),
+                );
             }
             Ok(Err(_)) => {
                 let _ = cancel_tx.send(true);
@@ -1308,7 +1711,12 @@ async fn proxy_request(State(state): State<AppState>, request: Request<Body>) ->
                     continue;
                 }
                 request_guard.finish(StatusCode::BAD_GATEWAY.as_u16());
-                return status_response(StatusCode::BAD_GATEWAY, "tunnel worker disconnected");
+                return with_tunnel_request_context(
+                    status_response(StatusCode::BAD_GATEWAY, "tunnel worker disconnected"),
+                    &request_id,
+                    request_lane,
+                    operation_hash.as_deref(),
+                );
             }
             Err(_) => {
                 let _ = cancel_tx.send(true);
@@ -1327,9 +1735,14 @@ async fn proxy_request(State(state): State<AppState>, request: Request<Body>) ->
                     Some(&request_id),
                 );
                 request_guard.finish(StatusCode::GATEWAY_TIMEOUT.as_u16());
-                return status_response(
-                    StatusCode::GATEWAY_TIMEOUT,
-                    "assigned tunnel worker did not provide response headers before the deadline",
+                return with_tunnel_request_context(
+                    status_response(
+                        StatusCode::GATEWAY_TIMEOUT,
+                        "assigned tunnel worker did not provide response headers before the deadline",
+                    ),
+                    &request_id,
+                    request_lane,
+                    operation_hash.as_deref(),
                 );
             }
         }
@@ -1357,7 +1770,12 @@ async fn proxy_request(State(state): State<AppState>, request: Request<Body>) ->
     request_guard.finish(status.as_u16());
     let mut builder = Response::builder()
         .status(status)
-        .header("x-tunnel-queue-wait-ms", queue_wait_ms.to_string());
+        .header("x-tunnel-queue-wait-ms", queue_wait_ms.to_string())
+        .header("x-tunnel-request-id", &request_id)
+        .header("x-tunnel-request-lane", request_lane.as_str());
+    if let Some(operation_hash) = operation_hash.as_deref() {
+        builder = builder.header("x-tunnel-operation-hash", operation_hash);
+    }
     for header in head.headers {
         if is_hop_by_hop_header(&header.name) {
             continue;
@@ -1434,6 +1852,20 @@ fn encode_headers(headers: &HeaderMap) -> Vec<HeaderPair> {
             })
         })
         .collect()
+}
+
+fn node_update_state_name(state: &NodeUpdateState) -> &'static str {
+    match state {
+        NodeUpdateState::Downloading => "downloading",
+        NodeUpdateState::Verified => "verified",
+        NodeUpdateState::Draining => "draining",
+        NodeUpdateState::Scheduled => "scheduled",
+        NodeUpdateState::Failed => "failed",
+    }
+}
+
+fn node_update_state_terminal(state: &NodeUpdateState) -> bool {
+    matches!(state, NodeUpdateState::Scheduled | NodeUpdateState::Failed)
 }
 
 async fn receive_control(socket: &mut WebSocket) -> Result<ControlMessage, String> {
@@ -1542,6 +1974,47 @@ mod tests {
     use tokio_tungstenite::tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL;
     use tokio_tungstenite::tungstenite::Message as WsMessage;
 
+    fn test_server_identity() -> ServerIdentity {
+        let directory = tempfile::tempdir().expect("server identity tempdir");
+        ServerIdentity::load_or_create(&directory.path().join("server-identity.json"))
+            .expect("test server identity")
+    }
+
+    #[tokio::test]
+    async fn terminal_update_status_clears_only_the_matching_offer() {
+        let registry = Registry::default();
+        let key = ClientKey {
+            client_id: "pc-a".into(),
+            service: TunnelService::Mcp,
+        };
+        let pool = registry.register(key).await;
+        let offer = NodeUpdateOffer {
+            update_id: "update-1".into(),
+            version: "0.29.34".into(),
+            url: "https://updates.example.test/ctnode.zip".into(),
+            sha256: "a".repeat(64),
+            signature: "b".repeat(86),
+        };
+        registry.dispatch_node_update("pc-a", offer.clone()).await;
+        assert_eq!(pool.update_tx.borrow().as_ref(), Some(&offer));
+
+        assert!(!registry.clear_node_update("pc-a", "older-update").await);
+        assert_eq!(pool.update_tx.borrow().as_ref(), Some(&offer));
+
+        assert!(registry.clear_node_update("pc-a", "update-1").await);
+        assert!(pool.update_tx.borrow().is_none());
+        assert!(!registry.clear_node_update("pc-a", "update-1").await);
+    }
+
+    #[test]
+    fn terminal_update_state_is_scheduled_or_failed_only() {
+        assert!(!node_update_state_terminal(&NodeUpdateState::Downloading));
+        assert!(!node_update_state_terminal(&NodeUpdateState::Verified));
+        assert!(!node_update_state_terminal(&NodeUpdateState::Draining));
+        assert!(node_update_state_terminal(&NodeUpdateState::Scheduled));
+        assert!(node_update_state_terminal(&NodeUpdateState::Failed));
+    }
+
     #[test]
     fn dispatcher_discards_closed_worker_slots_before_assignment() {
         let (closed_assign, closed_receiver) = oneshot::channel::<ProxyJob>();
@@ -1572,6 +2045,7 @@ mod tests {
             devices,
             policies,
             observability: Observability::new(),
+            server_identity: test_server_identity(),
             max_request_body_bytes: MAX_REQUEST_BODY_BYTES,
             response_head_timeout: RESPONSE_HEAD_TIMEOUT,
             reconnect_grace_timeout: RECONNECT_GRACE_TIMEOUT,
@@ -1599,6 +2073,7 @@ mod tests {
             devices,
             policies,
             observability: Observability::new(),
+            server_identity: test_server_identity(),
             max_request_body_bytes: MAX_REQUEST_BODY_BYTES,
             response_head_timeout: RESPONSE_HEAD_TIMEOUT,
             reconnect_grace_timeout: RECONNECT_GRACE_TIMEOUT,
@@ -1630,6 +2105,7 @@ mod tests {
             devices,
             policies,
             observability: Observability::new(),
+            server_identity: test_server_identity(),
             max_request_body_bytes: MAX_REQUEST_BODY_BYTES,
             response_head_timeout,
             reconnect_grace_timeout,
@@ -1693,6 +2169,7 @@ mod tests {
         let ControlMessage::HelloAck {
             protocol_version,
             worker_policy,
+            ..
         } = serde_json::from_str::<ControlMessage>(hello_ack.as_ref()).expect("hello ack json")
         else {
             panic!("expected hello ack control");
@@ -1724,6 +2201,12 @@ mod tests {
         request
             .headers_mut()
             .insert(SERVICE_HEADER, "mcp".parse().expect("service"));
+        request
+            .headers_mut()
+            .insert(DEVICE_ID_HEADER, device_id.parse().expect("device id"));
+        request
+            .headers_mut()
+            .insert(WORKER_ID_HEADER, "worker-1".parse().expect("worker id"));
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
             WS_SUBPROTOCOL.parse().expect("subprotocol"),
@@ -1748,6 +2231,7 @@ mod tests {
         let ControlMessage::Challenge {
             nonce,
             expires_at_unix_ms,
+            ..
         } = serde_json::from_str::<ControlMessage>(challenge.as_ref()).expect("challenge json")
         else {
             panic!("expected challenge");
@@ -1840,13 +2324,11 @@ mod tests {
         let WsMessage::Text(hello_ack) = hello_ack else {
             panic!("expected hello ack text");
         };
-        assert_eq!(
+        assert!(matches!(
             serde_json::from_str::<ControlMessage>(hello_ack.as_ref()).expect("hello ack json"),
-            ControlMessage::HelloAck {
-                protocol_version: PROTOCOL_VERSION,
-                worker_policy: WorkerPolicy::default_for(TunnelService::Mcp)
-            }
-        );
+            ControlMessage::HelloAck { protocol_version: PROTOCOL_VERSION, worker_policy, .. }
+                if worker_policy == WorkerPolicy::default_for(TunnelService::Mcp)
+        ));
         worker
             .send(WsMessage::Text(
                 serde_json::to_string(&ControlMessage::Ready)
@@ -2269,6 +2751,71 @@ mod tests {
         );
     }
 
+    #[test]
+    fn mcp_control_lane_classification_keeps_reattach_and_session_control_off_execution_lane() {
+        let call = |name: &str, arguments: serde_json::Value| {
+            serde_json::to_vec(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": { "name": name, "arguments": arguments }
+            }))
+            .expect("request json")
+        };
+        for name in [
+            "exec_health_check",
+            "wait_command",
+            "resolve_operation",
+            "list_sessions",
+            "send_input",
+            "kill_session",
+            "read_output",
+            "request_permissions",
+        ] {
+            assert_eq!(
+                classify_request_lane(TunnelService::Mcp, &call(name, serde_json::json!({}))),
+                RequestLane::Control
+            );
+        }
+        assert_eq!(
+            classify_request_lane(
+                TunnelService::Mcp,
+                &call(
+                    "exec_many",
+                    serde_json::json!({ "operation_id": "graph-1" })
+                )
+            ),
+            RequestLane::Control
+        );
+        assert_eq!(
+            classify_request_lane(
+                TunnelService::Mcp,
+                &call(
+                    "exec_many",
+                    serde_json::json!({ "operation_id": "graph-1", "action": "cancel" })
+                )
+            ),
+            RequestLane::Control
+        );
+        assert_eq!(
+            classify_request_lane(
+                TunnelService::Mcp,
+                &call(
+                    "exec_many",
+                    serde_json::json!({ "operation_id": "graph-1", "commands": [{ "id": "a", "program": "echo" }] })
+                )
+            ),
+            RequestLane::Execution
+        );
+        assert_eq!(
+            classify_request_lane(
+                TunnelService::Mcp,
+                &call("exec_command", serde_json::json!({}))
+            ),
+            RequestLane::Execution
+        );
+    }
+
     #[tokio::test]
     async fn saturated_route_uses_bounded_queue_and_returns_explicit_503_errors() {
         let directory = tempfile::tempdir().expect("tempdir");
@@ -2595,13 +3142,11 @@ mod tests {
         let WsMessage::Text(hello_ack) = hello_ack else {
             panic!("expected hello ack text");
         };
-        assert_eq!(
+        assert!(matches!(
             serde_json::from_str::<ControlMessage>(hello_ack.as_ref()).expect("hello ack json"),
-            ControlMessage::HelloAck {
-                protocol_version: PROTOCOL_VERSION,
-                worker_policy: policy.clone(),
-            }
-        );
+            ControlMessage::HelloAck { protocol_version: PROTOCOL_VERSION, worker_policy, .. }
+                if worker_policy == policy
+        ));
         worker
             .send(WsMessage::Text(
                 serde_json::to_string(&ControlMessage::Ready)

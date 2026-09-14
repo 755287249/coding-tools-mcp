@@ -96,12 +96,13 @@ test('observability views retain complete filters, pagination, and host-scoped A
 });
 
 test('operation-log integration omits raw payloads and keeps Rust and Node debugging summaries synchronized', async () => {
-  const [managementTest, harnessTest, taskTools, operationSummary, processes, rustDispatch, rustDispatchTracking, rustSession, rustSessionAttachment, rustSessionLifecycle] = await Promise.all([
+  const [managementTest, harnessTest, taskTools, operationSummary, processes, processHarnessTracking, rustDispatch, rustDispatchTracking, rustSession, rustSessionAttachment, rustSessionLifecycle] = await Promise.all([
     read('packages/node-agent/test/management.test.mjs'),
     read('packages/node-agent/test/harnessBaseline.test.mjs'),
     read('packages/node-agent/src/taskTools.ts'),
     read('packages/node-agent/src/operationSummary.ts'),
     read('packages/node-agent/src/processes.ts'),
+    read('packages/node-agent/src/processes/harnessTracking.ts'),
     read('src-tauri/src/tools/dispatch.rs'),
     read('src-tauri/src/tools/dispatch/tracking.rs'),
     read('src-tauri/src/tools/session.rs'),
@@ -136,8 +137,9 @@ test('operation-log integration omits raw payloads and keeps Rust and Node debug
     assert.match(taskTools, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
   for (const marker of ['recordHarnessOperationFinalization', 'harnessOperations', 'harnessOperationRecordedIds']) {
-    assert.match(processes, new RegExp(marker));
+    assert.match(processHarnessTracking, new RegExp(marker));
   }
+  assert.match(processes, /await recordHarnessOperationFinalization\(ctx, session\)/);
   assert.match(harnessTest, /yield_time_ms: 0/);
   assert.match(harnessTest, /\['failed', 'started'\]/);
   assert.match(managementTest, /status: 'running'/);

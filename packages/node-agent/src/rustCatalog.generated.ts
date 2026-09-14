@@ -305,6 +305,12 @@ export const rustCatalog: readonly ToolDefinition[] = [
           "minimum": 1000,
           "type": "integer"
         },
+        "cursor": {
+          "default": 0,
+          "maximum": 10000,
+          "minimum": 0,
+          "type": "integer"
+        },
         "errors_only": {
           "default": false,
           "type": "boolean"
@@ -884,6 +890,132 @@ export const rustCatalog: readonly ToolDefinition[] = [
       "idempotentHint": false,
       "openWorldHint": false,
       "readOnlyHint": false,
+      "title": "Fail task"
+    },
+    "description": "Mark an active or verifying task as recoverably failed without emitting a terminal learning outcome.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "recovery_action_id": {
+          "description": "Optional stable recovery action identifier selected from a previous error response. Removed before tool execution.",
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "recovery_of_operation_id": {
+          "description": "Optional recovery-chain correlation to a prior operation_id. The runtime hashes this identifier in telemetry and removes it before tool execution.",
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "retry_of_call_sequence": {
+          "description": "Optional telemetry correlation to the failed tool call_sequence being retried. Removed before tool execution and does not change tool semantics or dedupe identity.",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "task_id": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id"
+      ],
+      "type": "object"
+    },
+    "name": "fail_task",
+    "title": "Fail task"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false,
+      "title": "Close failed task"
+    },
+    "description": "Finalize a failed task as terminal failure and emit the task failure learning outcome.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "recovery_action_id": {
+          "description": "Optional stable recovery action identifier selected from a previous error response. Removed before tool execution.",
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "recovery_of_operation_id": {
+          "description": "Optional recovery-chain correlation to a prior operation_id. The runtime hashes this identifier in telemetry and removes it before tool execution.",
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "retry_of_call_sequence": {
+          "description": "Optional telemetry correlation to the failed tool call_sequence being retried. Removed before tool execution and does not change tool semantics or dedupe identity.",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "task_id": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id"
+      ],
+      "type": "object"
+    },
+    "name": "close_failed_task",
+    "title": "Close failed task"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false,
+      "title": "Rollback task"
+    },
+    "description": "Finalize a failed task as rolled back only after the workspace matches its original baseline.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "recovery_action_id": {
+          "description": "Optional stable recovery action identifier selected from a previous error response. Removed before tool execution.",
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "recovery_of_operation_id": {
+          "description": "Optional recovery-chain correlation to a prior operation_id. The runtime hashes this identifier in telemetry and removes it before tool execution.",
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "retry_of_call_sequence": {
+          "description": "Optional telemetry correlation to the failed tool call_sequence being retried. Removed before tool execution and does not change tool semantics or dedupe identity.",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "task_id": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id"
+      ],
+      "type": "object"
+    },
+    "name": "rollback_task",
+    "title": "Rollback task"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false,
       "title": "Finish task"
     },
     "description": "Finish a task with verification status and change summary.",
@@ -1226,6 +1358,15 @@ export const rustCatalog: readonly ToolDefinition[] = [
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
+        "content_mode": {
+          "description": "Choose one content representation to avoid duplicate payloads. Defaults to numbered when line_numbers=true, otherwise plain. Use both only when both representations are required.",
+          "enum": [
+            "plain",
+            "numbered",
+            "both"
+          ],
+          "type": "string"
+        },
         "context_lines": {
           "default": 20,
           "maximum": 500,
@@ -1265,6 +1406,7 @@ export const rustCatalog: readonly ToolDefinition[] = [
         },
         "line_numbers": {
           "default": false,
+          "description": "Compatibility shortcut: when true and content_mode is omitted, return numbered-only content.",
           "type": "boolean"
         },
         "matches": {
@@ -2400,7 +2542,7 @@ export const rustCatalog: readonly ToolDefinition[] = [
       "readOnlyHint": false,
       "title": "Execute command"
     },
-    "description": "Run a bounded command in the workspace under runtime policy. When a session is retained, continue with wait_command using the returned next_actions arguments.",
+    "description": "Run a bounded command in the workspace under runtime policy. Use job_timeout_ms plus a stable operation_id for an authorized long-running process; wait_command controls response waiting only and never extends the fixed process deadline. When a session is retained, continue with wait_command using next_actions.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -2427,7 +2569,7 @@ export const rustCatalog: readonly ToolDefinition[] = [
           "type": "integer"
         },
         "deduplicate": {
-          "description": "Coalesce identical retries. Defaults to true for safe Cargo check, test, build, and format commands.",
+          "description": "Coalesce identical in-flight retries. Completed automatic results are never reused; use operation_id to reattach a retained completed command. Defaults to true for safe Cargo check, test, build, and format commands.",
           "type": "boolean"
         },
         "env": {
@@ -2444,6 +2586,12 @@ export const rustCatalog: readonly ToolDefinition[] = [
             "workspace"
           ],
           "type": "string"
+        },
+        "job_timeout_ms": {
+          "description": "Opt-in fixed long-running child-process budget. Requires operation_id and is bounded by host CTMCP_JOB_TIMEOUT_MAX_MS (default 6h, absolute 24h). Polling and reattachment never extend the deadline.",
+          "maximum": 86400000,
+          "minimum": 1,
+          "type": "integer"
         },
         "lock_group": {
           "description": "Shared resource lock. Cargo commands automatically derive a lock from their target directory.",
@@ -2591,6 +2739,17 @@ export const rustCatalog: readonly ToolDefinition[] = [
           "minLength": 1,
           "type": "string"
         },
+        "secret_env": {
+          "additionalProperties": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9._-]+$",
+            "type": "string"
+          },
+          "description": "Map child environment names to workspace-local secret references. Secret values never cross the MCP request.",
+          "maxProperties": 64,
+          "type": "object"
+        },
         "shell": {
           "default": "none",
           "enum": [
@@ -2605,6 +2764,13 @@ export const rustCatalog: readonly ToolDefinition[] = [
           "default": "",
           "type": "string"
         },
+        "stdin_secret": {
+          "description": "Workspace-local secret reference whose value is written to child stdin. Mutually exclusive with stdin.",
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "type": "string"
+        },
         "tail_lines": {
           "default": 100,
           "maximum": 10000,
@@ -2613,6 +2779,7 @@ export const rustCatalog: readonly ToolDefinition[] = [
         },
         "timeout_ms": {
           "default": 30000,
+          "description": "Fixed ordinary child-process lifetime. Mutually exclusive with job_timeout_ms. wait_command.timeout_ms only controls polling and never extends this deadline.",
           "maximum": 3600000,
           "minimum": 1,
           "type": "integer"
@@ -2687,12 +2854,12 @@ export const rustCatalog: readonly ToolDefinition[] = [
                 "type": "boolean"
               },
               "deduplicate": {
-                "description": "Coalesce identical retries. Defaults to true for safe Cargo check, test, build, and format commands.",
+                "description": "Coalesce identical in-flight retries. Completed automatic results are never reused; use operation_id to reattach a retained completed command. Defaults to true for safe Cargo check, test, build, and format commands.",
                 "type": "boolean"
               },
               "depends_on": {
                 "default": [],
-                "description": "Command IDs that must succeed before this command can run in dag mode",
+                "description": "Command IDs that must reach a terminal graph result before this command is evaluated in dag mode",
                 "items": {
                   "maxLength": 128,
                   "minLength": 1,
@@ -2722,6 +2889,12 @@ export const rustCatalog: readonly ToolDefinition[] = [
                 "minLength": 1,
                 "type": "string"
               },
+              "job_timeout_ms": {
+                "description": "Opt-in fixed long-running child-process budget. Requires the command operation_id and never renews through graph polling.",
+                "maximum": 86400000,
+                "minimum": 1,
+                "type": "integer"
+              },
               "lock_group": {
                 "description": "Shared named resource lock such as cargo-target, node-generated, or git-index",
                 "maxLength": 128,
@@ -2742,8 +2915,11 @@ export const rustCatalog: readonly ToolDefinition[] = [
               },
               "output_mode": {
                 "default": "tail",
+                "description": "Per-command process output projection. Matches exec_command output_mode values.",
                 "enum": [
+                  "delta",
                   "tail",
+                  "all",
                   "none",
                   "summary"
                 ],
@@ -2764,10 +2940,38 @@ export const rustCatalog: readonly ToolDefinition[] = [
                 "maxItems": 64,
                 "type": "array"
               },
+              "resource_class": {
+                "description": "Opt-in host-wide heavy I/O admission. io_heavy commands are serialized across exec_many graphs to preserve control-plane responsiveness under disk saturation.",
+                "enum": [
+                  "io_heavy"
+                ],
+                "type": "string"
+              },
+              "run_if": {
+                "default": "success",
+                "description": "Generic dependency outcome condition for dag mode. success requires every dependency to succeed; failure runs when at least one dependency did not succeed; always runs after all dependencies become terminal regardless of outcome.",
+                "enum": [
+                  "success",
+                  "failure",
+                  "always"
+                ],
+                "type": "string"
+              },
               "script": {
                 "description": "Structured shell script body; requires shell other than none",
                 "minLength": 1,
                 "type": "string"
+              },
+              "secret_env": {
+                "additionalProperties": {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "pattern": "^[A-Za-z0-9._-]+$",
+                  "type": "string"
+                },
+                "description": "Map child environment names to workspace-local secret references. Secret values never cross the MCP request.",
+                "maxProperties": 64,
+                "type": "object"
               },
               "shell": {
                 "default": "none",
@@ -2783,8 +2987,16 @@ export const rustCatalog: readonly ToolDefinition[] = [
                 "default": "",
                 "type": "string"
               },
+              "stdin_secret": {
+                "description": "Workspace-local secret reference whose value is written to child stdin. Mutually exclusive with stdin.",
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9._-]+$",
+                "type": "string"
+              },
               "timeout_ms": {
                 "default": 30000,
+                "description": "Fixed ordinary child-process lifetime; mutually exclusive with job_timeout_ms.",
                 "maximum": 3600000,
                 "minimum": 1,
                 "type": "integer"
@@ -2851,7 +3063,7 @@ export const rustCatalog: readonly ToolDefinition[] = [
           "type": "string"
         },
         "result_mode": {
-          "description": "Controls per-command result detail. When omitted, run/reattach preserves full results while status/cancel use compact summaries to avoid repeating large stdout/stderr payloads.",
+          "description": "Controls per-command result detail. When omitted, small completed results stay full while aggregate child stdout/stderr above 16 KiB is automatically compacted to summary; retained running/status/cancel responses are compact where supported. Use full to opt into complete retained child output.",
           "enum": [
             "full",
             "summary",
@@ -2875,9 +3087,9 @@ export const rustCatalog: readonly ToolDefinition[] = [
           "x-mcp-header": "Workspace"
         },
         "yield_time_ms": {
-          "default": 30000,
-          "description": "How long this exec_many call waits for graph completion before returning retained progress. The graph continues running after this window.",
-          "maximum": 30000,
+          "default": 20000,
+          "description": "Requested wait for retained graph completion. Requests up to 300000 ms remain accepted for compatibility, but each exec_many MCP response is transport-safely capped at 20000 ms; the graph keeps running and can be reattached with operation_id.",
+          "maximum": 300000,
           "minimum": 0,
           "type": "integer"
         }
@@ -2895,7 +3107,7 @@ export const rustCatalog: readonly ToolDefinition[] = [
       "readOnlyHint": true,
       "title": "Wait for command"
     },
-    "description": "Wait for an exec_command session to produce new sequenced output, exit, or finish verification without client-side polling.",
+    "description": "Wait for an exec_command session to produce new sequenced output, exit, or finish verification. This wait window is separate from the fixed child-process deadline and never renews timeout_ms or job_timeout_ms.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -2904,9 +3116,18 @@ export const rustCatalog: readonly ToolDefinition[] = [
           "minimum": 0,
           "type": "integer"
         },
+        "event_detail": {
+          "default": "compact",
+          "description": "For delta output, compact returns sequence/stream/stream_offset metadata while stdout/stderr carry the data once. full additionally includes per-event decoded offsets, encoding, and data for callers that need exact stdout/stderr interleaving.",
+          "enum": [
+            "compact",
+            "full"
+          ],
+          "type": "string"
+        },
         "heartbeat_ms": {
           "default": 0,
-          "description": "Deprecated compatibility field. Accepted but ignored for application wait timing; MCP transport heartbeats keep long requests alive automatically.",
+          "description": "Deprecated compatibility field. Accepted but ignored for application wait timing; long waits are transport-safely chunked instead of relying on proxy heartbeat forwarding.",
           "maximum": 30000,
           "minimum": 0,
           "type": "integer"
@@ -2956,8 +3177,8 @@ export const rustCatalog: readonly ToolDefinition[] = [
           "type": "integer"
         },
         "timeout_ms": {
-          "default": 30000,
-          "description": "Server-side event wait, separate from the child-process timeout. The MCP transport sends a heartbeat every 10 seconds to keep long requests alive. Use output_or_exit for live incremental status; the wait window may be up to 60 minutes.",
+          "default": 20000,
+          "description": "Requested server-side event wait, separate from the child-process timeout. Values up to 60 minutes are accepted for compatibility, but each MCP response waits at most 20 seconds and returns retained next_actions so proxy heartbeat behavior cannot cause a lost response.",
           "maximum": 3600000,
           "minimum": 0,
           "type": "integer"
@@ -3409,6 +3630,11 @@ export const rustCatalog: readonly ToolDefinition[] = [
           "minLength": 1,
           "type": "string"
         },
+        "repo_path": {
+          "default": ".",
+          "description": "Workspace-relative Git repository or linked worktree root",
+          "type": "string"
+        },
         "retry_of_call_sequence": {
           "description": "Optional telemetry correlation to the failed tool call_sequence being retried. Removed before tool execution and does not change tool semantics or dedupe identity.",
           "minimum": 1,
@@ -3543,6 +3769,11 @@ export const rustCatalog: readonly ToolDefinition[] = [
           "description": "Optional recovery-chain correlation to a prior operation_id. The runtime hashes this identifier in telemetry and removes it before tool execution.",
           "maxLength": 128,
           "minLength": 1,
+          "type": "string"
+        },
+        "repo_path": {
+          "default": ".",
+          "description": "Workspace-relative Git repository or linked worktree root",
           "type": "string"
         },
         "retry_of_call_sequence": {
@@ -4733,6 +4964,9 @@ export const rustToolNamesByProfile: Readonly<Record<ToolProfile, readonly strin
     "update_task",
     "pause_task",
     "resume_task",
+    "fail_task",
+    "close_failed_task",
+    "rollback_task",
     "finish_task",
     "task_context",
     "list_task_events",
@@ -4814,6 +5048,9 @@ export const rustToolNamesByProfile: Readonly<Record<ToolProfile, readonly strin
     "update_task",
     "pause_task",
     "resume_task",
+    "fail_task",
+    "close_failed_task",
+    "rollback_task",
     "finish_task",
     "task_context",
     "list_task_events",
@@ -5006,6 +5243,27 @@ export const rustToolAnnotationOverridesByProfile: Readonly<Record<ToolProfile, 
       "readOnlyHint": true,
       "title": "Resume task"
     },
+    "fail_task": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": "Fail task"
+    },
+    "close_failed_task": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": "Close failed task"
+    },
+    "rollback_task": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": "Rollback task"
+    },
     "finish_task": {
       "destructiveHint": false,
       "idempotentHint": true,
@@ -5179,11 +5437,11 @@ export const rustToolAnnotationOverridesByProfile: Readonly<Record<ToolProfile, 
   "trusted-core": {}
 };
 export const rustToolsetRevisionByProfile: Readonly<Record<ToolProfile, string>> = {
-  "advanced": "7471ed64dcf9dff0",
-  "read-only": "97953fdd57a2fd2d",
-  "compat-readonly-all": "ddb51706768c0ca9",
-  "guarded-core": "ee2b091d11ad61e6",
-  "trusted-core": "7a653fa35b86129e"
+  "advanced": "a63a3dcecad4c58e",
+  "read-only": "0a428588c2f8c57f",
+  "compat-readonly-all": "546245bb66231e38",
+  "guarded-core": "7f436310989a1db0",
+  "trusted-core": "1f8403a4182bf946"
 };
 export const rustBehavioralParityFixtures: Readonly<Record<string, unknown>> = {
   "execution_limits": {
@@ -5193,6 +5451,8 @@ export const rustBehavioralParityFixtures: Readonly<Record<string, unknown>> = {
     "command_timeout_default_ms": 1800000,
     "global_blocking_admission": 1024,
     "global_process_admission": 512,
+    "job_timeout_absolute_max_ms": 86400000,
+    "job_timeout_default_max_ms": 21600000,
     "process_admission": 64
   },
   "mcp_transport": {

@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
-import { chmod, copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { ensureAgentSecrets } from './secrets.js';
 import { defaultPolicy, mergeAllowedCommands, normalizeScriptExtensions } from './policy.js';
@@ -80,14 +80,78 @@ interface MigrationResult {
   fromSchema: number;
 }
 
+function defaultWorkspaceFolders(): WorkspaceFolder[] {
+  return [{ id: 'default', name: path.basename(process.cwd()), path: process.cwd() }];
+}
+
 function parseFolders(value: string | undefined): WorkspaceFolder[] {
   const raw = value?.trim();
-  if (!raw) return [{ id: 'default', name: path.basename(process.cwd()), path: process.cwd() }];
-  return raw.split(path.delimiter).filter(Boolean).map((folderPath, index) => ({
+  if (!raw) return defaultWorkspaceFolders();
+  const folderPaths = raw.split(path.delimiter).map(folderPath => folderPath.trim()).filter(Boolean);
+  if (!folderPaths.length) return defaultWorkspaceFolders();
+  return folderPaths.map((folderPath, index) => ({
     id: `folder-${index + 1}`,
     name: workspaceBasename(folderPath),
     path: normalizeWorkspacePath(folderPath)
   }));
+}
+
+function missingWorkspacePath(error: unknown): boolean {
+  return Boolean(
+    error
+    && typeof error === 'object'
+    && 'code' in error
+    && ['ENOENT', 'ENOTDIR'].includes(String((error as NodeJS.ErrnoException).code))
+  );
+}
+
+export async function recoverWorkspaceFolders(
+  config: AgentConfig,
+  document: AgentConfigDocument
+): Promise<{
+  config: AgentConfig;
+  document: AgentConfigDocument;
+  removed: WorkspaceFolder[];
+  fallbackCreated: boolean;
+}> {
+  const available: WorkspaceFolder[] = [];
+  const removed: WorkspaceFolder[] = [];
+  for (const folder of config.folders) {
+    try {
+      const metadata = await stat(folder.path);
+      if (!metadata.isDirectory()) {
+        removed.push(folder);
+        continue;
+      }
+      available.push(folder);
+    } catch (error) {
+      if (!missingWorkspacePath(error)) throw error;
+      removed.push(folder);
+    }
+  }
+
+  let fallbackCreated = false;
+  if (!available.length && removed.length) {
+    const fallbackPath = path.join(config.dataDir, 'workspace');
+    await mkdir(fallbackPath, { recursive: true, mode: 0o700 });
+    available.push({ id: 'default', name: 'workspace', path: fallbackPath });
+    fallbackCreated = true;
+  }
+
+  const folders = await canonicalizeWorkspaceFolders(available.length ? available : config.folders);
+  if (!removed.length) {
+    return { config: { ...config, folders }, document, removed, fallbackCreated };
+  }
+
+  return {
+    config: { ...config, folders },
+    document: {
+      ...document,
+      folders: folders.map(folder => ({ id: folder.id, name: folder.name, path: folder.path }))
+    },
+    removed,
+    fallbackCreated
+  };
 }
 
 function positiveInt(value: unknown, fallback: number, max = Number.MAX_SAFE_INTEGER): number {
@@ -255,7 +319,12 @@ export function normalizeConfig(
       clientId: environment.CTMCP_OAUTH_CLIENT_ID ?? input.oauth?.clientId ?? createOAuthClientId(),
       clientSecret: environment.CTMCP_OAUTH_CLIENT_SECRET ?? secrets.oauthClientSecret,
       password: environment.CTMCP_OAUTH_PASSWORD ?? secrets.oauthPassword ?? 'change-me',
-      tokenSecret
+      tokenSecret,
+      tokenTtlSeconds: positiveInt(
+        environment.CTMCP_OAUTH_TOKEN_TTL_SECONDS ?? input.oauth?.tokenTtlSeconds,
+        7 * 24 * 60 * 60,
+        30 * 24 * 60 * 60
+      )
     },
     folders: environmentFolders !== undefined
       ? parseFolders(environmentFolders)
@@ -307,14 +376,19 @@ function migrateConfigDocument(value: unknown, identity?: WorkspaceIdentity): Mi
 
   if (looksLikeCanonicalWorkspace(source)) {
     const extracted = extractPlaintextSecrets(source);
-    const parsed = parseCanonicalWorkspace(source);
+    const missingFolders = !Array.isArray(source.folders) || source.folders.length === 0;
+    const fallbackFolders = missingFolders ? defaultWorkspaceFolders() : undefined;
+    const canonicalSource = fallbackFolders
+      ? { ...source, folders: fallbackFolders, activeFolderId: fallbackFolders[0].id }
+      : source;
+    const parsed = parseCanonicalWorkspace(canonicalSource);
     const canonical = resolveWorkspaceIdentity(parsed, identity);
     const identityChanged = canonical.id !== parsed.id || canonical.name !== parsed.name;
     return {
       document: canonicalToAgentConfigDocument(canonical),
       canonical,
       secrets: extracted.secrets,
-      changed: extracted.found || identityChanged,
+      changed: extracted.found || identityChanged || missingFolders,
       fromSchema: CANONICAL_SCHEMA_VERSION
     };
   }
@@ -457,6 +531,10 @@ export async function loadConfigBundle(
     migration.document.oauth = { ...migration.document.oauth, clientId: createOAuthClientId() };
     migration.changed = true;
   }
+  if (!migration.document.folders?.length) {
+    migration.document.folders = parseFolders(process.env.CTMCP_WORKSPACES);
+    migration.changed = true;
+  }
   if (migration.document.folders?.length) {
     const normalizedFolders = normalizeWorkspaceFolderDocuments(migration.document.folders);
     if (JSON.stringify(normalizedFolders) !== JSON.stringify(migration.document.folders)) {
@@ -483,7 +561,22 @@ export async function loadConfigBundle(
   );
   let config = normalizeConfig(migration.document, secretState.secrets);
   validateConfig(config);
-  config = { ...config, folders: await canonicalizeWorkspaceFolders(config.folders) };
+  const folderRecovery = await recoverWorkspaceFolders(config, migration.document);
+  config = folderRecovery.config;
+  if (folderRecovery.removed.length) {
+    migration.document = folderRecovery.document;
+    migration.changed = true;
+    canonical = overlayAgentDocumentOnCanonical(migration.document, {
+      id: canonical.id,
+      name: canonical.name
+    }, canonical);
+    console.warn(
+      `Removed unavailable workspace folder(s) from ${configPath}: ${folderRecovery.removed.map(folder => folder.path).join(', ')}`
+    );
+    if (folderRecovery.fallbackCreated) {
+      console.warn(`No configured workspace folders remained; created fallback workspace: ${config.folders[0]?.path ?? ''}`);
+    }
+  }
 
   if (!input.exists || migration.changed) {
     if (input.exists) await copyFile(configPath, `${configPath}.bak`);

@@ -119,6 +119,72 @@ test('OAuthRuntime rate limits repeated password failures and recovers after the
   assert.equal(runtime.authorizeSubmit(authorizationForm('unblocked'), base).status, 303);
 });
 
+test('OAuthRuntime consumes authorization passwords once, persists rotation, and rejects concurrent reuse', async () => {
+  const base = 'https://public.example/builtin/clients/oauth-test';
+  const persisted = [];
+  const runtime = new OAuthRuntime(oauthConfig(), Date.now, async password => {
+    await new Promise(resolve => setTimeout(resolve, 5));
+    persisted.push(password);
+  });
+
+  const oldPassword = runtime.password;
+  const firstForm = authorizationForm('one-time-first');
+  const reusedForm = authorizationForm('one-time-reused');
+  const [first, reused] = await Promise.all([
+    runtime.authorizeSubmitOneTime(firstForm, base),
+    runtime.authorizeSubmitOneTime(reusedForm, base)
+  ]);
+
+  assert.equal(first.status, 303);
+  assert.equal(reused.status, 401);
+  assert.equal(persisted.length, 1);
+  assert.notEqual(runtime.password, oldPassword);
+  assert.equal(persisted[0], runtime.password);
+
+  const firstCode = new URL(first.location).searchParams.get('code');
+  assert.ok(firstCode);
+  const exchanged = runtime.exchangeToken(tokenForm(firstCode), {}, base);
+  assert.equal(exchanged.status, 200);
+  assert.equal(exchanged.body.expires_in, 7 * 24 * 60 * 60);
+
+  const nextPassword = runtime.password;
+  const nextForm = authorizationForm('one-time-next');
+  nextForm.set('password', nextPassword);
+  const next = await runtime.authorizeSubmitOneTime(nextForm, base);
+  assert.equal(next.status, 303);
+  assert.equal(persisted.length, 2);
+  assert.notEqual(runtime.password, nextPassword);
+});
+
+test('OAuthRuntime applies configurable access-token TTL with a 30-day cap', async () => {
+  const base = 'https://public.example/builtin/clients/oauth-test';
+  const runtime = new OAuthRuntime(oauthConfig({ tokenTtlSeconds: 60 * 60 }));
+  const authorized = await runtime.authorizeSubmitOneTime(authorizationForm('custom-ttl'), base);
+  assert.equal(authorized.status, 303);
+  const code = new URL(authorized.location).searchParams.get('code');
+  assert.ok(code);
+  const exchanged = runtime.exchangeToken(tokenForm(code), {}, base);
+  assert.equal(exchanged.status, 200);
+  assert.equal(exchanged.body.expires_in, 60 * 60);
+  const [, payloadPart] = exchanged.body.access_token.split('.');
+  const payload = JSON.parse(Buffer.from(payloadPart, 'base64url').toString('utf8'));
+  assert.equal(payload.exp - payload.iat, 60 * 60);
+
+  const capped = new OAuthRuntime(oauthConfig({ tokenTtlSeconds: 365 * 24 * 60 * 60 }));
+  assert.equal(capped.tokenTtlSeconds, 30 * 24 * 60 * 60);
+});
+
+test('OAuthRuntime does not consume a valid password when persistence fails', async () => {
+  const base = 'https://public.example/builtin/clients/oauth-test';
+  const runtime = new OAuthRuntime(oauthConfig(), Date.now, async () => {
+    throw new Error('simulated persistence failure');
+  });
+  const originalPassword = runtime.password;
+  const failed = await runtime.authorizeSubmitOneTime(authorizationForm('persist-failure'), base);
+  assert.equal(failed.status, 503);
+  assert.equal(runtime.password, originalPassword);
+});
+
 test('OAuthRuntime updates credentials and clears pending authorization codes', () => {
   const base = 'https://public.example/builtin/clients/oauth-test';
   const runtime = new OAuthRuntime(oauthConfig({ clientSecret: 'old-client-secret' }));

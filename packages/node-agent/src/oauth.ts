@@ -1,6 +1,7 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { IncomingHttpHeaders, ServerResponse } from 'node:http';
 import type { AgentConfig } from './types.js';
+import { generateAuthorizationPassword } from './secrets.js';
 
 interface PendingCode {
   challenge: string;
@@ -24,7 +25,8 @@ interface TokenResponse {
 
 const allowedOrigins = new Set(['https://chatgpt.com', 'https://chat.openai.com']);
 const codeTtlMs = 5 * 60_000;
-const tokenTtlSeconds = 7 * 24 * 60 * 60;
+export const DEFAULT_OAUTH_TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60;
+export const MAX_OAUTH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
 const loginFailureWindowMs = 60_000;
 const loginBlockMs = 60_000;
 const maxLoginFailures = 5;
@@ -192,27 +194,40 @@ export class OAuthRuntime {
   clientSecret?: string;
   password: string;
   tokenSecret: string;
+  tokenTtlSeconds: number;
   readonly #pending = new Map<string, PendingCode>();
   readonly #now: () => number;
+  readonly #persistPassword?: (password: string) => Promise<void>;
+  #authorizationQueue: Promise<void> = Promise.resolve();
   #loginFailures = 0;
   #loginWindowStartedAt = 0;
   #loginBlockedUntil = 0;
 
-  constructor(config: AgentConfig['oauth'], now: () => number = Date.now) {
+  constructor(
+    config: AgentConfig['oauth'],
+    now: () => number = Date.now,
+    persistPassword?: (password: string) => Promise<void>
+  ) {
     this.clientId = config.clientId.trim();
     if (!this.clientId) throw new Error('OAuth client ID is not configured');
     this.clientSecret = config.clientSecret && config.clientSecret.trim() ? config.clientSecret : undefined;
     this.password = requireConfiguredSecret(config.password, 'OAuth password');
     this.tokenSecret = requireConfiguredSecret(config.tokenSecret, 'OAuth token secret');
+    const requestedTokenTtl = Number(config.tokenTtlSeconds ?? DEFAULT_OAUTH_TOKEN_TTL_SECONDS);
+    this.tokenTtlSeconds = Number.isInteger(requestedTokenTtl) && requestedTokenTtl > 0
+      ? Math.min(requestedTokenTtl, MAX_OAUTH_TOKEN_TTL_SECONDS)
+      : DEFAULT_OAUTH_TOKEN_TTL_SECONDS;
     this.#now = now;
+    this.#persistPassword = persistPassword;
   }
 
   update(config: AgentConfig['oauth']): void {
-    const replacement = new OAuthRuntime(config, this.#now);
+    const replacement = new OAuthRuntime(config, this.#now, this.#persistPassword);
     this.clientId = replacement.clientId;
     this.clientSecret = replacement.clientSecret;
     this.password = replacement.password;
     this.tokenSecret = replacement.tokenSecret;
+    this.tokenTtlSeconds = replacement.tokenTtlSeconds;
     this.#pending.clear();
     this.#resetLoginFailures();
   }
@@ -278,6 +293,67 @@ export class OAuthRuntime {
     return { status: 303, location: target.toString(), body: '' };
   }
 
+  async authorizeSubmitOneTime(form: URLSearchParams, base: string): Promise<HtmlResponse> {
+    let release!: () => void;
+    const previous = this.#authorizationQueue;
+    this.#authorizationQueue = new Promise<void>(resolve => { release = resolve; });
+    await previous;
+    try {
+      const clientId = form.get('client_id') ?? '';
+      const redirectUri = form.get('redirect_uri') ?? '';
+      const challenge = form.get('code_challenge') ?? '';
+      const challengeMethod = form.get('code_challenge_method') ?? '';
+      const state = form.get('state') ?? '';
+      const submittedPassword = form.get('password') ?? '';
+      const values = { clientId, redirectUri, challenge, challengeMethod, state };
+      if (!redirectUriAllowed(redirectUri)) return htmlError('redirect_uri is not allowed');
+      if (!this.clientIdAllowed(clientId)) return { status: 200, body: loginPage({ ...values, error: 'Invalid client' }) };
+      if (challengeMethod !== 'S256' || !challenge) return { status: 200, body: loginPage({ ...values, error: 'Invalid PKCE parameters' }) };
+      if (this.#loginRateLimited()) {
+        return { status: 429, body: loginPage({ ...values, error: 'Too many authorization attempts; try again later' }) };
+      }
+      if (!constantTimeEqual(submittedPassword, this.password)) {
+        const blocked = this.#recordLoginFailure();
+        return {
+          status: blocked ? 429 : 401,
+          body: loginPage({
+            ...values,
+            error: blocked ? 'Too many authorization attempts; try again later' : 'Invalid password'
+          })
+        };
+      }
+
+      const nextPassword = generateAuthorizationPassword();
+      try {
+        await this.#persistPassword?.(nextPassword);
+      } catch {
+        return {
+          status: 503,
+          body: loginPage({ ...values, error: 'Authorization password rotation failed; try again later' })
+        };
+      }
+      this.password = nextPassword;
+      this.#resetLoginFailures();
+
+      this.#cleanupPending();
+      const code = randomBytes(16).toString('hex');
+      this.#pending.set(code, {
+        challenge,
+        clientId,
+        redirectUri,
+        state,
+        expiresAt: this.#now() + codeTtlMs,
+        issuer: base.replace(/\/$/, '')
+      });
+      const target = new URL(redirectUri);
+      target.searchParams.append('code', code);
+      if (state) target.searchParams.append('state', state);
+      return { status: 303, location: target.toString(), body: '' };
+    } finally {
+      release();
+    }
+  }
+
   exchangeToken(form: URLSearchParams, headers: IncomingHttpHeaders, base: string): TokenResponse {
     if (form.get('grant_type') !== 'authorization_code') {
       return tokenError('unsupported_grant_type', 'Only authorization_code is supported');
@@ -316,9 +392,9 @@ export class OAuthRuntime {
     return {
       status: 200,
       body: {
-        access_token: signJwt({ iss: issuer, aud: `${issuer}/mcp`, iat: issuedAt, exp: issuedAt + tokenTtlSeconds, scope: 'mcp' }, this.tokenSecret),
+        access_token: signJwt({ iss: issuer, aud: `${issuer}/mcp`, iat: issuedAt, exp: issuedAt + this.tokenTtlSeconds, scope: 'mcp' }, this.tokenSecret),
         token_type: 'Bearer',
-        expires_in: tokenTtlSeconds
+        expires_in: this.tokenTtlSeconds
       }
     };
   }

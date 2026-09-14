@@ -1,8 +1,9 @@
 import type { FolderRuntime, ProcessSession, ToolContext } from '../types.js';
 import { ProcessToolError } from './errors.js';
+import { removeDurableSessionArtifacts } from './durableSession.js';
 
 export const MAX_RETAINED_FINALIZED_SESSIONS = 128;
-export const FINALIZED_SESSION_RETENTION_MS = 900_000;
+export const FINALIZED_SESSION_RETENTION_MS = 60 * 60_000;
 
 function processRuntime(value: ToolContext | FolderRuntime): FolderRuntime {
   if ('folderId' in value) return value;
@@ -17,11 +18,13 @@ export function removeProcessSession(value: ToolContext | FolderRuntime, session
   if (!session) return false;
   if (session.timeoutTimer) clearTimeout(session.timeoutTimer);
   if (session.detachedTimer) clearTimeout(session.detachedTimer);
+  if (session.durableMonitor) clearInterval(session.durableMonitor);
   session.lockRelease?.();
   runtime.sessions.delete(sessionId);
   for (const [fingerprintValue, indexedSessionId] of runtime.operationsByFingerprint) {
     if (indexedSessionId === sessionId) runtime.operationsByFingerprint.delete(fingerprintValue);
   }
+  void removeDurableSessionArtifacts(session).catch(() => { /* best-effort retained artifact cleanup */ });
   return true;
 }
 

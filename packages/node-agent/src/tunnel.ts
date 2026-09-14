@@ -1,4 +1,4 @@
-import { randomUUID, sign } from 'node:crypto';
+import { createPublicKey, randomUUID, sign, verify } from 'node:crypto';
 import {
   request as httpRequest, type ClientRequest, type IncomingMessage,
   type OutgoingHttpHeaders, type RequestOptions
@@ -8,6 +8,7 @@ import type { AgentConfig, JsonObject, ToolContext } from './types.js';
 import { AsyncQueue } from './runtime.js';
 import {
   authSigningPayload, builtinEndpointForClient, parseBuiltinPublicUrl,
+  serverAckSigningPayload, serverChallengeSigningPayload,
   TUNNEL_PROTOCOL_VERSION, TUNNEL_SUBPROTOCOL, TUNNEL_WS_PATH,
   type TunnelEndpoint
 } from './tunnel/endpoint.js';
@@ -19,6 +20,7 @@ import {
 
 export {
   authSigningPayload, builtinEndpointForClient, parseBuiltinPublicUrl,
+  serverAckSigningPayload, serverChallengeSigningPayload,
   TUNNEL_ENROLL_PATH, TUNNEL_PROTOCOL_VERSION, TUNNEL_SUBPROTOCOL, TUNNEL_WS_PATH
 } from './tunnel/endpoint.js';
 export type { TunnelEndpoint } from './tunnel/endpoint.js';
@@ -84,6 +86,8 @@ export interface BuiltinTunnelManagerOptions {
   localConnectTimeoutMs?: number;
   localRequestTimeoutMs?: number;
   localLookup?: RequestOptions['lookup'];
+  onUpdateOffer?: (offer: JsonObject, sendStatus: (status: JsonObject) => Promise<void>) => Promise<void>;
+  clientStatus?: JsonObject;
   now?: () => number;
   onEndpointResolved?: (endpoint: ResolvedBuiltinTunnelEndpoint) => Promise<void> | void;
 }
@@ -118,11 +122,18 @@ async function nextControl(queue: AsyncQueue<TunnelMessage>, timeoutMs = 30_000)
 async function openWebSocket(
   websocketUrl: string,
   endpoint: TunnelEndpoint,
+  identity: DeviceIdentity,
+  workerId: string,
   touch: () => void
 ): Promise<{ socket: WebSocket; queue: AsyncQueue<TunnelMessage> }> {
   const socket = new WebSocket(websocketUrl, TUNNEL_SUBPROTOCOL, {
     handshakeTimeout: 15_000,
-    headers: { 'x-coding-tools-client-id': endpoint.clientId, 'x-coding-tools-service': 'mcp' }
+    headers: {
+      'x-coding-tools-client-id': endpoint.clientId,
+      'x-coding-tools-service': 'mcp',
+      'x-coding-tools-device-id': identity.deviceId,
+      'x-coding-tools-worker-id': workerId
+    }
   });
   const queue = messageQueue(socket, touch);
   await new Promise<void>((resolve, reject) => {
@@ -433,6 +444,28 @@ async function authenticate(ws: WebSocket, queue: AsyncQueue<TunnelMessage>, ide
   if (challenge.kind === 'error') throw new Error(String(challenge.message ?? 'tunnel server error'));
   if (challenge.kind !== 'challenge') throw new Error('server did not issue a tunnel authentication challenge');
   if (Date.now() > Number(challenge.expires_at_unix_ms)) throw new Error('tunnel authentication challenge expired');
+  if (!identity.serverId || !identity.serverPublicKeyRaw || String(challenge.server_id) !== identity.serverId) {
+    throw new Error('tunnel server identity does not match the enrolled server');
+  }
+  const serverSpki = Buffer.concat([
+    Buffer.from('302a300506032b6570032100', 'hex'),
+    Buffer.from(identity.serverPublicKeyRaw, 'base64url')
+  ]);
+  const serverPublicKey = createPublicKey({ key: serverSpki, format: 'der', type: 'spki' });
+  const challengeValid = verify(
+    null,
+    serverChallengeSigningPayload(
+      String(challenge.nonce),
+      Number(challenge.expires_at_unix_ms),
+      identity.serverId,
+      identity.deviceId,
+      identity.clientId,
+      workerId
+    ),
+    serverPublicKey,
+    Buffer.from(String(challenge.server_signature || ''), 'base64url')
+  );
+  if (!challengeValid) throw new Error('tunnel server challenge signature is invalid');
   const hello = { protocol_version: TUNNEL_PROTOCOL_VERSION, client_id: identity.clientId, service: 'mcp', worker_id: workerId };
   const signature = sign(null, authSigningPayload(String(challenge.nonce), identity.deviceId, identity.clientId, workerId), identityPrivateKey(identity)).toString('base64url');
   await sendControl(ws, { kind: 'authenticate', hello, device_id: identity.deviceId, signature });
@@ -441,6 +474,23 @@ async function authenticate(ws: WebSocket, queue: AsyncQueue<TunnelMessage>, ide
   if (acknowledgment.kind !== 'hello_ack' || Number(acknowledgment.protocol_version) !== TUNNEL_PROTOCOL_VERSION) {
     throw new Error('server did not acknowledge tunnel authentication');
   }
+  if (String(acknowledgment.server_id) !== identity.serverId) {
+    throw new Error('tunnel server acknowledgement identity changed during authentication');
+  }
+  const ackValid = verify(
+    null,
+    serverAckSigningPayload(
+      String(challenge.nonce),
+      identity.serverId,
+      identity.deviceId,
+      identity.clientId,
+      workerId,
+      acknowledgment.worker_policy
+    ),
+    serverPublicKey,
+    Buffer.from(String(acknowledgment.server_signature || ''), 'base64url')
+  );
+  if (!ackValid) throw new Error('tunnel server acknowledgement signature is invalid');
   return normalizeWorkerPolicy(acknowledgment.worker_policy);
 }
 
@@ -766,7 +816,7 @@ export class BuiltinTunnelManager {
         const workerId = `${process.pid}-${worker.index}-${randomUUID().slice(0, 8)}`;
         const websocketUrl = this.options.websocketUrlOverride ?? this.#endpoint.websocketUrl;
         const touch = () => { lastActivity = this.#now(); };
-        const opened = await openWebSocket(websocketUrl, this.#endpoint, touch);
+        const opened = await openWebSocket(websocketUrl, this.#endpoint, this.#identity, workerId, touch);
         const { socket, queue } = opened;
         worker.socket = socket;
         const policy = await authenticate(socket, queue, this.#identity, workerId);
@@ -777,6 +827,7 @@ export class BuiltinTunnelManager {
         attempt = 0;
         if (this.context.tunnelStatus) this.context.tunnelStatus.lastError = undefined;
         this.#setWorkerState(worker, 'idle');
+        if (this.options.clientStatus) await sendControl(socket, { kind: 'client_status', ...this.options.clientStatus });
         await sendControl(socket, { kind: 'ready' });
         heartbeat = setInterval(() => {
           if (socket.readyState !== WebSocket.OPEN) return;
@@ -796,6 +847,19 @@ export class BuiltinTunnelManager {
           if (message.binary) throw new Error('unexpected binary frame while worker is idle');
           const control = JSON.parse(message.data.toString('utf8')) as JsonObject;
           if (control.kind === 'policy_update') { this.#applyPolicy(control.worker_policy); continue; }
+          if (control.kind === 'update_offer') {
+            if (this.options.onUpdateOffer) {
+              void this.options.onUpdateOffer(control, status => sendControl(socket, { kind: 'update_status', ...status }))
+                .catch(error => sendControl(socket, {
+                  kind: 'update_status',
+                  update_id: String(control.update_id ?? ''),
+                  version: String(control.version ?? ''),
+                  state: 'failed',
+                  message: error instanceof Error ? error.message : String(error)
+                }).catch(() => undefined));
+            }
+            continue;
+          }
           if (control.kind === 'error') throw new Error(String(control.message ?? 'tunnel server error'));
           if (control.kind !== 'request_head') throw new Error(`unexpected tunnel control message: ${control.kind}`);
           const head = control as unknown as RequestHead;

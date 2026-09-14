@@ -1,5 +1,6 @@
 use serde_json::{json, Value};
 
+use crate::tools::execution_timeout::ABSOLUTE_JOB_TIMEOUT_MAX_MS;
 use crate::tools::ABSOLUTE_COMMAND_TIMEOUT_MAX_MS;
 
 pub(super) fn input_schema(name: &str) -> Option<Value> {
@@ -16,7 +17,8 @@ pub(super) fn input_schema(name: &str) -> Option<Value> {
                     "env": { "type": "object", "maxProperties": 64, "additionalProperties": { "type": "string", "maxLength": 4096 } },
                     "remove_env": { "type": "array", "maxItems": 64, "items": { "type": "string" } },
                     "workdir": { "type": "string", "default": "." },
-                    "timeout_ms": { "type": "integer", "minimum": 1, "maximum": ABSOLUTE_COMMAND_TIMEOUT_MAX_MS, "default": 30000 },
+                    "timeout_ms": { "type": "integer", "minimum": 1, "maximum": ABSOLUTE_COMMAND_TIMEOUT_MAX_MS, "default": 30000, "description": "Fixed ordinary child-process lifetime. Mutually exclusive with job_timeout_ms. wait_command.timeout_ms only controls polling and never extends this deadline." },
+                    "job_timeout_ms": { "type": "integer", "minimum": 1, "maximum": ABSOLUTE_JOB_TIMEOUT_MAX_MS, "description": "Opt-in fixed long-running child-process budget. Requires operation_id and is bounded by host CTMCP_JOB_TIMEOUT_MAX_MS (default 6h, absolute 24h). Polling and reattachment never extend the deadline." },
                     "max_output_bytes": { "type": "integer", "minimum": 1024, "maximum": 1048576, "default": 65536 },
                     "yield_time_ms": { "type": "integer", "minimum": 0, "maximum": 30000, "default": 1000 },
                     "output_mode": { "type": "string", "enum": ["delta", "tail", "all", "none", "summary"], "default": "tail" },
@@ -57,6 +59,25 @@ pub(super) fn input_schema(name: &str) -> Option<Value> {
                 .and_then(Value::as_object_mut)
                 .expect("exec_command schema properties");
             properties.insert(
+                "secret_env".into(),
+                json!({
+                    "type": "object",
+                    "maxProperties": 64,
+                    "additionalProperties": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._-]+$" },
+                    "description": "Map child environment names to workspace-local secret references. Secret values never cross the MCP request."
+                }),
+            );
+            properties.insert(
+                "stdin_secret".into(),
+                json!({
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9._-]+$",
+                    "description": "Workspace-local secret reference whose value is written to child stdin. Mutually exclusive with stdin."
+                }),
+            );
+            properties.insert(
                 "operation_id".into(),
                 json!({
                     "type": "string",
@@ -69,7 +90,7 @@ pub(super) fn input_schema(name: &str) -> Option<Value> {
                 "deduplicate".into(),
                 json!({
                     "type": "boolean",
-                    "description": "Coalesce identical retries. Defaults to true for safe Cargo check, test, build, and format commands."
+                    "description": "Coalesce identical in-flight retries. Completed automatic results are never reused; use operation_id to reattach a retained completed command. Defaults to true for safe Cargo check, test, build, and format commands."
                 }),
             );
             properties.insert(

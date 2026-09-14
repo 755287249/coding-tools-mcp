@@ -12,10 +12,10 @@ import {
 } from './management.js';
 import { defaultPolicy } from './policy.js';
 import { legacySecurityPolicy } from './securityPolicy.js';
-import { disposeProcessSessions } from './processes.js';
+import { disposeProcessSessions, restoreProcessSessions } from './processes.js';
 import { preflightSandboxConfiguration } from './sandbox.js';
 import { ToolUsageStore } from './toolUsage.js';
-import { createFolderRuntime } from './folderRuntime.js';
+import { allFolderRuntimes, createFolderRuntime, syncToolEvolutionRuntimes } from './folderRuntime.js';
 import { ExtensionRegistry } from './extensions/registry.js';
 import { canonicalizeWorkspaceFolders } from './workspace.js';
 import { ConversationStore, deriveWorkspaceProfileId } from './conversation.js';
@@ -46,6 +46,7 @@ export async function createToolContext(config: AgentConfig): Promise<ToolContex
   const usageStore = new ToolUsageStore(config.dataDir, { redactTelemetry: config.securityPolicy.redactTelemetry });
   const folderRuntimes = new Map(config.folders.map(folder => [folder.id, createFolderRuntime(config, folder)]));
   if (!folderRuntimes.size) throw new Error('at least one workspace folder is required');
+  await syncToolEvolutionRuntimes([...folderRuntimes.values()], usageStore, 'tool_evolution_startup');
   const extensions = new ExtensionRegistry({
     folders: config.folders,
     hooksActive: config.extensions.hooks.active,
@@ -66,7 +67,7 @@ export async function createToolContext(config: AgentConfig): Promise<ToolContex
     persistencePath: path.join(config.dataDir, `conversation-state-${workspaceProfileId}.json`),
     allowedFolderIds: config.folders.map(folder => folder.id)
   });
-  return {
+  const context: ToolContext = {
     config,
     conversations,
     workspaceProfileId,
@@ -82,6 +83,8 @@ export async function createToolContext(config: AgentConfig): Promise<ToolContex
       ? { enabled: true, state: 'stopped', publicUrl: config.tunnel.publicUrl, workers: 1, connectedWorkers: 0, completedRequests: 0 }
       : { enabled: false, state: 'disabled', workers: 0, connectedWorkers: 0, completedRequests: 0 }
   };
+  await restoreProcessSessions(context);
+  return context;
 }
 
 export interface AgentRuntime {
@@ -97,13 +100,21 @@ export interface AgentRuntimeOptions {
   requestRestart?: () => void;
   workspaceStore?: WorkspaceManagementStore;
   runtimeRegistry?: Map<string, WorkspaceRuntimeRecord>;
+  secretResolver?: (name: string) => string | undefined;
+  persistOAuthPassword?: (password: string) => Promise<void>;
 }
 
 export async function createAgentRuntime(config: AgentConfig, options: AgentRuntimeOptions = {}): Promise<AgentRuntime> {
   const context = await createToolContext(config);
-  const oauth = new OAuthRuntime(config.oauth);
+  context.resolveSecret = options.secretResolver;
+  const oauth = new OAuthRuntime(config.oauth, Date.now, options.persistOAuthPassword);
   const startedAt = Date.now();
   const workspaceId = config.workspaceId ?? context.workspaceProfileId;
+  context.usageStore.recordDiagnosticEvent({
+    eventType: 'lifecycle_event',
+    event: 'runtime_created',
+    fields: { runtime_kind: 'node_agent' }
+  });
   options.runtimeRegistry?.set(workspaceId, {
     context,
     oauth,
@@ -173,7 +184,11 @@ export async function createAgentRuntime(config: AgentConfig, options: AgentRunt
       }
       const results = await Promise.allSettled([
         context.conversations.flush(),
-        context.usageStore.flush()
+        context.usageStore.flush(),
+        ...allFolderRuntimes(context).flatMap(runtime => [
+          runtime.knowledgeIngestor.flush(),
+          runtime.toolEvolutionBenchmarkCollector.flush()
+        ])
       ]);
       errors.push(...results
         .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
@@ -190,9 +205,26 @@ export async function createAgentRuntime(config: AgentConfig, options: AgentRunt
   });
   server.once('listening', () => {
     hasListened = true;
+    context.usageStore.recordDiagnosticEvent({
+      eventType: 'service_event',
+      event: 'mcp_listener_started',
+      fields: { service: 'mcp_listener', transport_mode: 'streamable-http' }
+    });
   });
   server.once('close', () => {
     closed = true;
+    if (hasListened) {
+      context.usageStore.recordDiagnosticEvent({
+        eventType: 'service_event',
+        event: 'mcp_listener_stopped',
+        fields: { service: 'mcp_listener', transport_mode: 'streamable-http' }
+      });
+    }
+    context.usageStore.recordDiagnosticEvent({
+      eventType: 'lifecycle_event',
+      event: 'runtime_closed',
+      fields: { runtime_kind: 'node_agent' }
+    });
     resolveServerClosed?.();
     void cleanup().catch(() => undefined);
   });

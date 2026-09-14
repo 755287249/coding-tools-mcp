@@ -4,6 +4,7 @@ import type { AgentConfig, JsonObject, ToolContext } from './types.js';
 import { relativeInside, resolveFromWorkspace, resolveInside, rootAndCwd } from './workspace.js';
 import { parseWslUncPath, validateWslExecPaths, WslRoutingError, wslUncPath } from './wsl.js';
 import { DEFAULT_COMMAND_TIMEOUT_MAX_MS } from './executionLimits.js';
+import { resolveProcessTimeout } from './processes/timeoutPolicy.js';
 
 const BASIC_READ_ONLY_COMMANDS = ['pwd', 'ls', 'dir', 'cat', 'head', 'tail', 'grep', 'find', 'which', 'echo'];
 const DEFAULT_ALLOWED_COMMANDS = [
@@ -151,6 +152,13 @@ function environmentKey(value: string): void {
   if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(value)) throw new PolicyError(`Invalid environment key: ${value}`, 'INVALID_ARGUMENT');
 }
 
+function secretReferenceKey(value: unknown): string {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(value.trim())) {
+    throw new PolicyError('Secret references must use 1-128 letters, numbers, dot, underscore, or hyphen', 'INVALID_ARGUMENT');
+  }
+  return value.trim();
+}
+
 function validateEnvironment(argumentsValue: JsonObject, protectEnvironment: boolean, enforceResourceLimits: boolean): void {
   if (argumentsValue.env !== undefined) {
     if (!argumentsValue.env || typeof argumentsValue.env !== 'object' || Array.isArray(argumentsValue.env)) {
@@ -165,6 +173,31 @@ function validateEnvironment(argumentsValue: JsonObject, protectEnvironment: boo
       }
       if (typeof raw !== 'string') throw new PolicyError('env values must be strings', 'INVALID_ARGUMENT');
       if ((enforceResourceLimits && raw.length > 4096) || raw.includes('\0')) throw new PolicyError(`Invalid environment value for ${key}`, 'INVALID_ARGUMENT');
+    }
+  }
+  if (argumentsValue.secret_env !== undefined) {
+    if (!argumentsValue.secret_env || typeof argumentsValue.secret_env !== 'object' || Array.isArray(argumentsValue.secret_env)) {
+      throw new PolicyError('secret_env must be an object mapping environment names to secret references', 'INVALID_ARGUMENT');
+    }
+    const entries = Object.entries(argumentsValue.secret_env as JsonObject);
+    if (enforceResourceLimits && entries.length > 64) throw new PolicyError('secret_env contains too many entries', 'INVALID_ARGUMENT');
+    const direct = new Set(Object.keys((argumentsValue.env as JsonObject | undefined) ?? {}).map(key => key.toLowerCase()));
+    const removed = new Set((Array.isArray(argumentsValue.remove_env) ? argumentsValue.remove_env : []).filter(value => typeof value === 'string').map(value => value.toLowerCase()));
+    for (const [key, raw] of entries) {
+      environmentKey(key);
+      if (protectEnvironment && [...BLOCKED_ENVIRONMENT_KEYS].some(blocked => blocked.toLowerCase() === key.toLowerCase())) {
+        throw new PolicyError(`Environment variable is protected: ${key}`, 'ENVIRONMENT_VARIABLE_PROTECTED');
+      }
+      secretReferenceKey(raw);
+      if (direct.has(key.toLowerCase()) || removed.has(key.toLowerCase())) {
+        throw new PolicyError(`Environment variable ${key} cannot be configured by both env/remove_env and secret_env`, 'INVALID_ARGUMENT');
+      }
+    }
+  }
+  if (argumentsValue.stdin_secret !== undefined) {
+    secretReferenceKey(argumentsValue.stdin_secret);
+    if (typeof argumentsValue.stdin === 'string' && argumentsValue.stdin.length > 0) {
+      throw new PolicyError('stdin and stdin_secret cannot both be provided', 'INVALID_ARGUMENT');
     }
   }
   if (argumentsValue.remove_env !== undefined) {
@@ -348,9 +381,7 @@ async function validateCommand(ctx: ToolContext, key: string, argumentsValue: Js
   if (!allowed) throw new PolicyError(`Command is not allowlisted: ${stem}`, 'COMMAND_REJECTED');
   validateEnvironment(argumentsValue, security.protectEnvironmentVariables, security.enforceResourceLimits);
   const commandTimeoutMaxMs = ctx.config.limits.commandTimeoutMaxMs ?? DEFAULT_COMMAND_TIMEOUT_MAX_MS;
-  if (security.enforceResourceLimits && Number(argumentsValue.timeout_ms ?? 0) > commandTimeoutMaxMs) {
-    throw new PolicyError(`Command timeout exceeds configured limit (${commandTimeoutMaxMs} ms)`, 'INVALID_ARGUMENT');
-  }
+  resolveProcessTimeout(argumentsValue, command, commandTimeoutMaxMs);
   if (argumentsValue.post_checks !== undefined) {
     if (!Array.isArray(argumentsValue.post_checks)) throw new PolicyError('post_checks must be an array', 'INVALID_ARGUMENT');
     if (security.enforceResourceLimits && argumentsValue.post_checks.length > 16) throw new PolicyError('post_checks supports at most 16 checks', 'INVALID_ARGUMENT');
@@ -358,6 +389,7 @@ async function validateCommand(ctx: ToolContext, key: string, argumentsValue: Js
       const value = argumentsValue.post_checks[index];
       if (!value || typeof value !== 'object' || Array.isArray(value)) throw new PolicyError(`post_checks[${index}] must be an object`, 'INVALID_ARGUMENT');
       if ('post_checks' in value) throw new PolicyError('nested post_checks are not allowed', 'INVALID_ARGUMENT');
+      if ('job_timeout_ms' in value) throw new PolicyError('post_checks cannot use job_timeout_ms; use a separate managed command.', 'INVALID_ARGUMENT');
       try { await validateCommand(ctx, key, value as JsonObject); }
       catch (error) { throw new PolicyError(`post_checks[${index}] rejected: ${error instanceof Error ? error.message : String(error)}`, error instanceof PolicyError || error instanceof WslRoutingError ? error.code : 'POLICY_REJECTED'); }
     }
@@ -434,6 +466,9 @@ export function validateCommandGraphStructure(commands: CommandGraphCommand[], v
   const dependencies = new Map<string, string[]>();
   for (let index = 0; index < commands.length; index += 1) {
     const command = commands[index];
+    if (command.run_if !== undefined && (typeof command.run_if !== 'string' || !['success', 'failure', 'always'].includes(command.run_if))) {
+      throw new Error(`commands[${index}].run_if must be success, failure, or always`);
+    }
     if (command.depends_on !== undefined && !Array.isArray(command.depends_on)) {
       throw new Error(`commands[${index}].depends_on must be an array`);
     }
@@ -445,6 +480,9 @@ export function validateCommandGraphStructure(commands: CommandGraphCommand[], v
       }
       return value;
     });
+    if ((command.run_if === 'failure' || command.run_if === 'always') && parsed.length === 0) {
+      throw new Error(`commands[${index}].run_if=${command.run_if} requires depends_on`);
+    }
     for (const dependency of parsed) {
       if (dependency === command.id) throw new Error(`command ${command.id} cannot depend on itself`);
       if (!ids.has(dependency)) throw new Error(`command ${command.id} depends on unknown command ${dependency}`);
@@ -512,11 +550,20 @@ export async function validateToolPolicy(ctx: ToolContext, key: string, toolName
         commands = normalizeCommandGraphCommands(argumentsValue.commands);
         const hasDependencies = commands.some(command => Array.isArray(command.depends_on) && command.depends_on.length > 0);
         validateCommandGraphStructure(commands, hasDependencies);
+        const requestedMode = String(argumentsValue.mode ?? 'auto');
+        const effectiveMode = requestedMode === 'auto' ? (hasDependencies ? 'dag' : 'sequential') : requestedMode;
+        if (effectiveMode !== 'dag' && commands.some(command => command.run_if === 'failure' || command.run_if === 'always')) {
+          throw new Error('run_if=failure or run_if=always requires dag mode (or auto with dependencies)');
+        }
       } catch (error) {
         throw new PolicyError(error instanceof Error ? error.message : String(error), 'INVALID_ARGUMENT');
       }
       for (let index = 0; index < commands.length; index += 1) {
-        try { await validateCommand(ctx, key, commands[index]); }
+        const child: JsonObject = { ...commands[index] };
+        delete child.id;
+        delete child.depends_on;
+        delete child.run_if;
+        try { await validateCommand(ctx, key, child); }
         catch (error) { throw new PolicyError(`commands[${index}] rejected: ${error instanceof Error ? error.message : String(error)}`, error instanceof PolicyError || error instanceof WslRoutingError ? error.code : 'POLICY_REJECTED'); }
       }
       return;

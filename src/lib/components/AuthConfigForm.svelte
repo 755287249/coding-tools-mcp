@@ -26,6 +26,9 @@
 
   let { workspaceId, auth, onSaveProfile }: Props = $props();
   const capabilities = getBackend().capabilities;
+  const SECONDS_PER_DAY = 24 * 60 * 60;
+  const DEFAULT_OAUTH_TOKEN_TTL_DAYS = 7;
+  const MAX_OAUTH_TOKEN_TTL_DAYS = 30;
   const AUTH_OPTIONS = $derived(
     capabilities.staticBearerAuth
       ? [
@@ -37,6 +40,7 @@
   );
 
   let draft = $state<AuthConfig>({ type: "oauth", oauth_client_id: "", use_shared_secrets: false });
+  let draftOauthTokenTtlDays = $state(DEFAULT_OAUTH_TOKEN_TTL_DAYS);
   let saving = $state(false);
   let secrets = $state<Partial<Record<WorkspaceSecretKey, string>>>({});
   let loadedSecrets = $state<Partial<Record<WorkspaceSecretKey, string>>>({});
@@ -57,6 +61,9 @@
         ? draft.oauth_client_id !== loadedSharedOauthClientId
         : draft.oauth_client_id !== auth.oauth_client_id) ||
       draft.use_shared_secrets !== !!auth.use_shared_secrets ||
+      (draft.type === "oauth" &&
+        draftOauthTokenTtlDays * SECONDS_PER_DAY !==
+          (auth.oauth_token_ttl_seconds ?? DEFAULT_OAUTH_TOKEN_TTL_DAYS * SECONDS_PER_DAY)) ||
       secretsDirty,
   );
 
@@ -70,6 +77,16 @@
       oauth_client_id: auth.oauth_client_id,
       use_shared_secrets: capabilities.sharedSecretStore && !!auth.use_shared_secrets,
     };
+    draftOauthTokenTtlDays = Math.min(
+      MAX_OAUTH_TOKEN_TTL_DAYS,
+      Math.max(
+        1,
+        Math.round(
+          (auth.oauth_token_ttl_seconds ?? DEFAULT_OAUTH_TOKEN_TTL_DAYS * SECONDS_PER_DAY) /
+            SECONDS_PER_DAY,
+        ),
+      ),
+    );
   });
 
   $effect(() => {
@@ -128,9 +145,26 @@
         if (!clientId) throw new Error(translate("OAuth Client ID cannot be empty"));
         sharedSecretChanged = clientId !== loadedSharedOauthClientId;
       }
+      if (
+        draft.type === "oauth" &&
+        (!Number.isInteger(draftOauthTokenTtlDays) ||
+          draftOauthTokenTtlDays < 1 ||
+          draftOauthTokenTtlDays > MAX_OAUTH_TOKEN_TTL_DAYS)
+      ) {
+        throw new Error(translate("OAuth token lifetime must be between 1 and 30 days"));
+      }
       // Persist the shared-secret flag first. If the secret value changes, the backend
       // owns the single runtime restart; the page must not race it with a second restart.
-      await onSaveProfile({ ...draft }, { skipRuntimeRestart: sharedSecretChanged });
+      await onSaveProfile(
+        {
+          ...draft,
+          oauth_token_ttl_seconds:
+            draft.type === "oauth"
+              ? draftOauthTokenTtlDays * SECONDS_PER_DAY
+              : draft.oauth_token_ttl_seconds,
+        },
+        { skipRuntimeRestart: sharedSecretChanged },
+      );
       if (sharedSecretChanged) {
         await setSharedSecret("oauth_client_id", clientId);
         loadedSharedOauthClientId = clientId;
@@ -207,6 +241,21 @@
         bind:value={draft.oauth_client_id}
         readonly={draft.use_shared_secrets}
       />
+    </label>
+
+    <label class="grid gap-1">
+      <span class="text-xs text-[var(--color-text-muted)]">{$t("OAuth access token lifetime (days)")}</span>
+      <input
+        type="number"
+        min="1"
+        max={MAX_OAUTH_TOKEN_TTL_DAYS}
+        step="1"
+        class="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 text-sm"
+        bind:value={draftOauthTokenTtlDays}
+      />
+      <span class="text-xs text-[var(--color-text-muted)]">
+        {$t("Applies to newly issued access tokens. Existing tokens keep their original expiry.")}
+      </span>
     </label>
 
     {#if capabilities.staticBearerAuth}

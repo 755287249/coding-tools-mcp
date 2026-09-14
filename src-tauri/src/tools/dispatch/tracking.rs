@@ -20,6 +20,8 @@ const OPERATION_RESULT_BOOLEAN_FIELDS: &[&str] = &[
     "post_checks_pending",
     "detached",
     "deduplicated",
+    "timeout_clamped",
+    "polling_extends_process_deadline",
 ];
 
 const OPERATION_RESULT_TOKEN_FIELDS: &[&str] = &[
@@ -27,6 +29,8 @@ const OPERATION_RESULT_TOKEN_FIELDS: &[&str] = &[
     "termination_reason",
     "execution_lane",
     "outcome_class",
+    "execution_mode",
+    "timeout_scope",
 ];
 
 const OPERATION_RESULT_INTEGER_FIELDS: &[&str] = &[
@@ -46,6 +50,11 @@ const OPERATION_RESULT_INTEGER_FIELDS: &[&str] = &[
     "resource_lock_wait_ms",
     "history_lock_wait_ms",
     "session_registry_wait_ms",
+    "requested_process_timeout_ms",
+    "effective_process_timeout_ms",
+    "process_timeout_limit_ms",
+    "process_deadline_ts_ms",
+    "process_timeout_remaining_ms",
 ];
 
 fn operation_summary_token(value: Option<&Value>) -> Option<&str> {

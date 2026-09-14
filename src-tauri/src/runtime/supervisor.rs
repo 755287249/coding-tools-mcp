@@ -345,6 +345,7 @@ impl RuntimeSupervisor {
                     oauth_client_secret,
                     oauth_password,
                     oauth_token_secret,
+                    use_shared,
                     policy,
                     profile.runtime.sandbox.clone(),
                     crate::tools::ExecutionLimits::new_with_global(

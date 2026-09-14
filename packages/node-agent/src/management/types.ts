@@ -23,6 +23,7 @@ export interface WorkspaceManagementStore {
     runtime?: RuntimeHotApplyTarget
   ): Promise<JsonObject>;
   regenerateSecret(id: string, key: 'oauthPassword', runtime?: RuntimeHotApplyTarget): Promise<JsonObject>;
+  replaceNamedSecret(id: string, reference: string, value: string): Promise<JsonObject>;
 }
 
 export interface WorkspaceRuntimeRecord extends RuntimeHotApplyTarget {

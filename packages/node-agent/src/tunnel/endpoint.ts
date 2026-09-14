@@ -1,7 +1,7 @@
-export const TUNNEL_PROTOCOL_VERSION = 3;
+export const TUNNEL_PROTOCOL_VERSION = 4;
 export const TUNNEL_WS_PATH = '/_tunnel/v1';
 export const TUNNEL_ENROLL_PATH = '/_tunnel/enroll';
-export const TUNNEL_SUBPROTOCOL = 'coding-tools-tunnel-v3';
+export const TUNNEL_SUBPROTOCOL = 'coding-tools-tunnel-v4';
 
 export interface TunnelEndpoint {
   publicUrl: string;
@@ -47,5 +47,45 @@ export function authSigningPayload(nonce: string, deviceId: string, clientId: st
     client_id: clientId,
     service: 'mcp',
     worker_id: workerId
+  }));
+}
+
+export function serverChallengeSigningPayload(
+  nonce: string,
+  expiresAtUnixMs: number,
+  serverId: string,
+  deviceId: string,
+  clientId: string,
+  workerId: string
+): Buffer {
+  return Buffer.from(JSON.stringify({
+    protocol_version: TUNNEL_PROTOCOL_VERSION,
+    nonce,
+    expires_at_unix_ms: expiresAtUnixMs,
+    server_id: serverId,
+    device_id: deviceId,
+    client_id: clientId,
+    service: 'mcp',
+    worker_id: workerId
+  }));
+}
+
+export function serverAckSigningPayload(
+  nonce: string,
+  serverId: string,
+  deviceId: string,
+  clientId: string,
+  workerId: string,
+  workerPolicy: unknown
+): Buffer {
+  return Buffer.from(JSON.stringify({
+    protocol_version: TUNNEL_PROTOCOL_VERSION,
+    nonce,
+    server_id: serverId,
+    device_id: deviceId,
+    client_id: clientId,
+    service: 'mcp',
+    worker_id: workerId,
+    worker_policy: workerPolicy
   }));
 }

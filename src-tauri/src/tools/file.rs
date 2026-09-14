@@ -79,6 +79,17 @@ pub fn read_many(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> 
         .get("line_numbers")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let content_mode = args
+        .get("content_mode")
+        .and_then(Value::as_str)
+        .unwrap_or(if line_numbers { "numbered" } else { "plain" });
+    if !matches!(content_mode, "plain" | "numbered" | "both") {
+        return Err(WorkspaceError::invalid_argument(
+            "content_mode must be one of: plain, numbered, both",
+        ));
+    }
+    let include_plain_content = content_mode != "numbered";
+    let include_numbered_content = content_mode != "plain";
 
     let mut remaining = max_total_bytes;
     let mut results = Vec::with_capacity(requests.len());
@@ -123,7 +134,7 @@ pub fn read_many(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> 
                     .get("truncated")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
-                let numbered_content = if line_numbers {
+                let numbered_content = if include_numbered_content {
                     let start =
                         value.get("start_line").and_then(Value::as_u64).unwrap_or(1) as usize;
                     let content = value.get("content").and_then(Value::as_str).unwrap_or("");
@@ -134,6 +145,11 @@ pub fn read_many(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> 
                 if let Some(object) = value.as_object_mut() {
                     object.insert("index".into(), json!(request.index));
                     object.insert("source_indexes".into(), json!(request.source_indexes));
+                    object.insert("content_mode".into(), json!(content_mode));
+                    if !include_plain_content {
+                        object.remove("content");
+                        object.insert("content_omitted".into(), json!(true));
+                    }
                     if let Some(numbered_content) = numbered_content {
                         object.insert("numbered_content".into(), Value::String(numbered_content));
                     }
@@ -159,6 +175,7 @@ pub fn read_many(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> 
         "result_count": requests.len(),
         "merged_count": requests.iter().map(|r| r.source_indexes.len().saturating_sub(1)).sum::<usize>(),
         "failed_count": failed,
+        "content_mode": content_mode,
         "bytes_read": max_total_bytes.saturating_sub(remaining),
         "max_total_bytes": max_total_bytes,
         "truncated": truncated,
@@ -420,7 +437,20 @@ pub fn list_files(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError>
     })))
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SearchTextExecutionOptions {
+    pub exact_total_fast_tail: bool,
+}
+
 pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
+    search_text_with_options(ws, args, SearchTextExecutionOptions::default())
+}
+
+pub fn search_text_with_options(
+    ws: &Workspace,
+    args: &Value,
+    options: SearchTextExecutionOptions,
+) -> Result<Value, WorkspaceError> {
     let queries = parse_search_queries(args)?;
     let filename_query = args.get("filename_query").and_then(Value::as_str);
     if queries.is_empty() && filename_query.is_none() {
@@ -505,6 +535,10 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
     );
     let mut matches = Vec::new();
     let mut files = Vec::new();
+    let response_bytes_limit = 128 * 1024usize;
+    let context_line_bytes_limit = max_preview.min(2_048);
+    let mut response_bytes_estimate = 0usize;
+    let mut response_limit_reached = false;
     let mut query_counts = vec![0usize; queries.len()];
     let mut files_considered = 0usize;
     let mut scanned_files = 0usize;
@@ -513,6 +547,7 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
     let mut skipped = 0usize;
     let mut truncated = false;
     let mut stopped_early = false;
+    let mut exact_total_fast_tail_skipped_match_details = 0usize;
 
     'files: for p in file_paths {
         if !ws.is_safe_read_path(&p)
@@ -617,9 +652,18 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
                     if count_only {
                         continue;
                     }
+                    if response_limit_reached {
+                        if options.exact_total_fast_tail && calculate_total {
+                            exact_total_fast_tail_skipped_match_details += 1;
+                        }
+                        continue;
+                    }
                     if matches.len() >= max_results {
                         truncated = true;
                         if calculate_total {
+                            if options.exact_total_fast_tail {
+                                exact_total_fast_tail_skipped_match_details += 1;
+                            }
                             continue;
                         }
                         stopped_early = true;
@@ -627,6 +671,10 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
                     }
                     let column = line[..found.start()].chars().count() + 1;
                     let end_column = line[..found.end()].chars().count() + 1;
+                    let (bounded_match, match_truncated) =
+                        truncate_utf8_prefix(&line[found.start()..found.end()], max_preview);
+                    let (bounded_query, query_truncated) =
+                        truncate_utf8_prefix(&query.query, 1_024);
                     let mut item = json!({
                         "match_id": stable_match_id(&rel, idx + 1, query_index, &query.query),
                         "path": rel,
@@ -634,16 +682,76 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
                         "column": column,
                         "end_column": end_column,
                         "query_index": query_index,
-                        "query": query.query,
-                        "match": &line[found.start()..found.end()],
+                        "query": bounded_query,
+                        "match": bounded_match,
                         "preview": preview_around_match(line, found.start(), found.end(), max_preview)
                     });
+                    if query_truncated {
+                        item["query_truncated"] = json!(true);
+                    }
+                    if match_truncated {
+                        item["match_truncated"] = json!(true);
+                    }
                     if context_lines > 0 {
                         let start = idx.saturating_sub(context_lines);
                         let end = (idx + 1 + context_lines).min(lines.len());
-                        item["before"] = json!(lines[start..idx]);
-                        item["after"] = json!(lines[idx + 1..end]);
+                        let mut context_truncated = false;
+                        let before = lines[start..idx]
+                            .iter()
+                            .map(|line| {
+                                let (value, truncated) =
+                                    truncate_utf8_prefix(line, context_line_bytes_limit);
+                                context_truncated |= truncated;
+                                value
+                            })
+                            .collect::<Vec<_>>();
+                        let after = lines[idx + 1..end]
+                            .iter()
+                            .map(|line| {
+                                let (value, truncated) =
+                                    truncate_utf8_prefix(line, context_line_bytes_limit);
+                                context_truncated |= truncated;
+                                value
+                            })
+                            .collect::<Vec<_>>();
+                        item["before"] = json!(before);
+                        item["after"] = json!(after);
+                        if context_truncated {
+                            item["context_truncated"] = json!(true);
+                        }
                     }
+                    let mut item_bytes = serde_json::to_vec(&item)
+                        .map(|value| value.len())
+                        .unwrap_or(0);
+                    if matches.is_empty()
+                        && item_bytes > response_bytes_limit
+                        && (item.get("before").is_some() || item.get("after").is_some())
+                    {
+                        if let Some(object) = item.as_object_mut() {
+                            object.remove("before");
+                            object.remove("after");
+                            object.insert(
+                                "context_omitted_due_to_response_limit".to_string(),
+                                json!(true),
+                            );
+                        }
+                        item_bytes = serde_json::to_vec(&item)
+                            .map(|value| value.len())
+                            .unwrap_or(0);
+                    }
+                    if response_bytes_estimate.saturating_add(item_bytes) > response_bytes_limit {
+                        truncated = true;
+                        response_limit_reached = true;
+                        if calculate_total {
+                            if options.exact_total_fast_tail {
+                                exact_total_fast_tail_skipped_match_details += 1;
+                            }
+                            continue;
+                        }
+                        stopped_early = true;
+                        break 'files;
+                    }
+                    response_bytes_estimate = response_bytes_estimate.saturating_add(item_bytes);
                     matches.push(item);
                 }
             }
@@ -660,16 +768,48 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
     } else {
         None
     };
-    let early_stop_reason = stopped_early.then_some("result_limit");
-    let search_recommendation = if stopped_early
-        && path == "."
-        && include_globs.is_empty()
-        && filename_query.is_none()
-    {
+    let exact_total_forced_full_scan =
+        calculate_total && !count_only && truncated && !stopped_early;
+    let truncation_reason = if response_limit_reached {
+        Some("response_limit")
+    } else if truncated {
+        Some("result_limit")
+    } else {
+        None
+    };
+    let early_stop_reason = if stopped_early {
+        truncation_reason
+    } else {
+        None
+    };
+    let search_recommendation = if exact_total_forced_full_scan {
+        Some(if response_limit_reached {
+            "calculate_total=true forced a full scan after the response payload limit was reached. Omit calculate_total for discovery, narrow path/include_globs/filename_query, or use count_only=true when only the exact count is needed."
+        } else {
+            "calculate_total=true forced a full scan after the result limit was reached. Omit calculate_total for discovery, narrow path/include_globs/filename_query, or use count_only=true when only the exact count is needed."
+        })
+    } else if response_limit_reached {
+        Some("Search stopped at the response payload limit. Continue with next_cursor, reduce context_lines/max_preview_bytes, or narrow path/include_globs.")
+    } else if stopped_early && path == "." && include_globs.is_empty() && filename_query.is_none() {
         Some("Search stopped at max_results. Narrow path/include_globs/filename_query, or set calculate_total=true only when an exact total is required.")
     } else {
         None
     };
+    let mut warnings = Vec::new();
+    if truncated {
+        warnings.push(if response_limit_reached {
+            "response payload limit reached"
+        } else {
+            "result limit reached"
+        });
+    }
+    if exact_total_forced_full_scan {
+        warnings.push(if response_limit_reached {
+            "calculate_total forced a full scan after the response payload limit was reached"
+        } else {
+            "calculate_total forced a full scan after the result limit was reached"
+        });
+    }
     Ok(tool_ok(json!({
         "query": args.get("query"),
         "queries": queries.iter().enumerate().map(|(index, query)| json!({
@@ -695,6 +835,13 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
         "scan_completed": !stopped_early,
         "early_stop_reason": early_stop_reason,
         "search_recommendation": search_recommendation,
+        "exact_total_forced_full_scan": exact_total_forced_full_scan,
+        "exact_total_fast_tail": options.exact_total_fast_tail && calculate_total && !count_only,
+        "exact_total_fast_tail_skipped_match_details": exact_total_fast_tail_skipped_match_details,
+        "response_bytes_limit": response_bytes_limit,
+        "response_bytes_estimate": response_bytes_estimate,
+        "context_line_bytes_limit": context_line_bytes_limit,
+        "response_limit_reached": response_limit_reached,
         "arguments_normalized": arguments_normalized,
         "normalized_arguments": if arguments_normalized {
             json!({
@@ -706,7 +853,7 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
             Value::Null
         },
         "truncated": truncated,
-        "warnings": if truncated { vec!["result limit reached"] } else { vec![] }
+        "warnings": warnings
     })))
 }
 
@@ -833,6 +980,17 @@ fn search_file_paths(
         .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
         .map(|entry| entry.into_path())
         .collect()
+}
+
+fn truncate_utf8_prefix(value: &str, max_bytes: usize) -> (String, bool) {
+    if value.len() <= max_bytes {
+        return (value.to_string(), false);
+    }
+    let mut end = max_bytes.min(value.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    (value[..end].to_string(), true)
 }
 
 fn preview_around_match(line: &str, start: usize, end: usize, max_bytes: usize) -> String {
@@ -1103,6 +1261,112 @@ mod tests {
     }
 
     #[test]
+    fn search_exact_total_fast_tail_preserves_results_and_counts_skipped_details() {
+        let workspace = tempdir().expect("workspace");
+        let content = (0..40)
+            .map(|index| format!("needle {index:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(workspace.path().join("tail.txt"), format!("{content}\n")).expect("fixture");
+        let ws = Workspace::new(workspace.path().to_path_buf()).expect("workspace");
+        let args = json!({
+            "query": "needle",
+            "path": "tail.txt",
+            "max_results": 3,
+            "calculate_total": true
+        });
+
+        let baseline = search_text(&ws, &args).expect("baseline");
+        let fast_tail = search_text_with_options(
+            &ws,
+            &args,
+            SearchTextExecutionOptions {
+                exact_total_fast_tail: true,
+            },
+        )
+        .expect("fast tail");
+
+        assert_eq!(fast_tail["total_matches"], baseline["total_matches"]);
+        assert_eq!(fast_tail["total_matches_exact"], true);
+        assert_eq!(fast_tail["matches"], baseline["matches"]);
+        assert_eq!(fast_tail["returned_count"], baseline["returned_count"]);
+        assert_eq!(fast_tail["exact_total_fast_tail"], true);
+        assert!(
+            fast_tail["exact_total_fast_tail_skipped_match_details"]
+                .as_u64()
+                .unwrap_or_default()
+                > 0
+        );
+    }
+
+    #[test]
+    fn search_bounds_match_payload_and_preserves_exact_totals() {
+        let workspace = tempdir().expect("workspace");
+        let content = (0..300)
+            .map(|index| format!("needle {index:03} {}", "x".repeat(2_000)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(workspace.path().join("large.txt"), format!("{content}\n")).expect("fixture");
+        let ws = Workspace::new(workspace.path().to_path_buf()).expect("workspace");
+
+        let bounded = search_text(
+            &ws,
+            &json!({
+                "query": "needle",
+                "path": "large.txt",
+                "max_results": 1000,
+                "max_preview_bytes": 4096
+            }),
+        )
+        .expect("bounded");
+        assert_eq!(bounded["response_limit_reached"], true);
+        assert_eq!(bounded["truncated"], true);
+        assert_eq!(bounded["early_stop_reason"], "response_limit");
+        assert_eq!(bounded["scan_completed"], false);
+        assert_eq!(bounded["total_matches_exact"], false);
+        let returned = bounded["returned_count"].as_u64().unwrap();
+        assert!(returned > 0 && returned < 300);
+        assert!(
+            bounded["response_bytes_estimate"].as_u64().unwrap()
+                <= bounded["response_bytes_limit"].as_u64().unwrap()
+        );
+        assert_eq!(bounded["next_cursor"].as_u64().unwrap(), returned);
+
+        let next = search_text(
+            &ws,
+            &json!({
+                "query": "needle",
+                "path": "large.txt",
+                "max_results": 1000,
+                "max_preview_bytes": 4096,
+                "cursor": returned
+            }),
+        )
+        .expect("next page");
+        assert_eq!(next["matches"][0]["line"].as_u64().unwrap(), returned + 1);
+
+        let exact = search_text(
+            &ws,
+            &json!({
+                "query": "needle",
+                "path": "large.txt",
+                "max_results": 1000,
+                "max_preview_bytes": 4096,
+                "calculate_total": true
+            }),
+        )
+        .expect("exact");
+        assert_eq!(exact["response_limit_reached"], true);
+        assert_eq!(exact["truncated"], true);
+        assert_eq!(exact["scan_completed"], true);
+        assert_eq!(exact["total_matches_exact"], true);
+        assert_eq!(exact["total_matches"], 300);
+        assert!(exact["early_stop_reason"].is_null());
+        assert_eq!(exact["exact_total_forced_full_scan"], true);
+        assert!(exact["returned_count"].as_u64().unwrap() < 300);
+    }
+
+    #[test]
     fn list_files_can_return_directories_without_a_separate_tool() {
         let workspace = tempdir().expect("workspace");
         fs::create_dir_all(workspace.path().join("src/nested")).expect("directories");
@@ -1183,6 +1447,45 @@ mod tests {
         assert!(matched_paths.contains(&"visible.txt"));
         assert!(matched_paths.contains(&"node_modules/pkg/index.txt"));
         assert!(!matched_paths.iter().any(|path| path.starts_with(".git/")));
+    }
+
+    #[test]
+    fn read_many_avoids_duplicate_numbered_content_by_default() {
+        let workspace = tempdir().expect("workspace");
+        fs::write(workspace.path().join("a.txt"), "one\ntwo\n").expect("a");
+        let ws = Workspace::new(workspace.path().to_path_buf()).expect("workspace");
+
+        let numbered = read_many(
+            &ws,
+            &json!({
+                "items": [{ "path": "a.txt", "start_line": 1, "end_line": 2 }],
+                "line_numbers": true
+            }),
+        )
+        .expect("numbered");
+        assert_eq!(numbered["content_mode"], "numbered");
+        let numbered_result = numbered["results"][0].as_object().expect("numbered result");
+        assert!(numbered_result.get("content").is_none());
+        assert_eq!(numbered_result.get("content_omitted"), Some(&json!(true)));
+        assert!(numbered_result["numbered_content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("1 | one"));
+
+        let both = read_many(
+            &ws,
+            &json!({
+                "items": [{ "path": "a.txt", "start_line": 1, "end_line": 2 }],
+                "content_mode": "both"
+            }),
+        )
+        .expect("both");
+        assert_eq!(both["content_mode"], "both");
+        assert_eq!(both["results"][0]["content"], "one\ntwo\n");
+        assert!(both["results"][0]["numbered_content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("1 | one"));
     }
 
     #[test]

@@ -396,6 +396,8 @@ impl DeviceRegistry {
                             return Ok(EnrollmentResponse {
                                 device_id: request.device_id.clone(),
                                 client_id: enrollment.0.clone(),
+                                server_id: String::new(),
+                                server_public_key: String::new(),
                             });
                         }
                     }
@@ -493,6 +495,8 @@ impl DeviceRegistry {
                 Ok(EnrollmentResponse {
                     device_id,
                     client_id,
+                    server_id: String::new(),
+                    server_public_key: String::new(),
                 })
             })
             .map_err(|error| DeviceAuthError::Storage(error.to_string()))?

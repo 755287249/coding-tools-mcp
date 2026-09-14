@@ -20,7 +20,10 @@ test('runtime registry covers every advanced catalog tool exactly once', () => {
 
 test('runtime registry preserves execution lanes, locks, harness, and permissions', () => {
   assert.equal(toolRuntimeFor('exec_command').lane, 'process');
+  assert.equal(toolRuntimeFor('exec_command').admission, 'request');
+  assert.equal(toolRuntimeFor('exec_many').admission, 'children');
   assert.equal(toolRuntimeFor('wait_command').lane, 'control');
+  assert.equal(toolRuntimeFor('wait_command').admission, 'none');
   assert.equal(toolRuntimeFor('read_file').lane, 'blocking');
   assert.deepEqual(toolRuntimeFor('apply_patch').lockGroups, ['workspace_content']);
   assert.deepEqual(toolRuntimeFor('git_restore').lockGroups, ['git', 'workspace_content']);
@@ -85,6 +88,7 @@ test('unknown requests retain neutral runtime defaults for catalog errors', () =
     domain: 'runtime',
     usageFamily: 'other',
     lane: 'blocking',
+    admission: 'request',
     lockGroups: [],
     harnessTool: false,
     coalescing: 'never',

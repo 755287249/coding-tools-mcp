@@ -21,6 +21,7 @@ mod request;
 mod result;
 mod runner;
 mod spec;
+mod test_runner;
 
 use admission::{admit_operation, OperationAdmission};
 use backend::CommandExecutionBoundary;
@@ -45,6 +46,18 @@ use spec::{
     resolve_program, ExecSpec,
 };
 use spec::{resolution_target_for_sandbox, resolve_exec_spec_for_target, ExecResolutionTarget};
+use test_runner::{preflight_test_runner_capabilities, test_workflow as planned_test_workflow};
+
+fn attach_test_metadata(result: &mut Value, capability: &Option<Value>, workflow: &Option<Value>) {
+    if let Some(object) = result.as_object_mut() {
+        if let Some(capability) = capability.clone() {
+            object.insert("test_runner_capability".into(), capability);
+        }
+        if let Some(workflow) = workflow.clone() {
+            object.insert("test_workflow".into(), workflow);
+        }
+    }
+}
 
 #[cfg(windows)]
 pub(crate) fn selected_powershell_program() -> Option<PathBuf> {
@@ -79,7 +92,21 @@ pub async fn exec_command_async_with_runtime(
 ) -> Result<Value, WorkspaceError> {
     let request = resolve_exec_request(ctx, args, &runtime_config)?;
     let boundary = CommandExecutionBoundary::from_config(&runtime_config.sandbox, &ctx.workspace)?;
-    if request.legacy_native && boundary.allows_native_diagnostic() {
+    let test_runner_capability = if runtime_config.sandbox.enabled {
+        None
+    } else {
+        preflight_test_runner_capabilities(&request.spec, &request.workdir).await?
+    };
+    let test_workflow = planned_test_workflow(
+        &request.spec,
+        args.get("workdir")
+            .or_else(|| args.get("cwd"))
+            .and_then(Value::as_str),
+    );
+    if request.legacy_native
+        && request.timeout_contract.execution_mode != "job"
+        && boundary.allows_native_diagnostic()
+    {
         if let Some(result) = run_native_diagnostic(ctx, &request.spec.display, &request.workdir)? {
             let mut result = result;
             if let Some(object) = result.as_object_mut() {
@@ -93,14 +120,19 @@ pub async fn exec_command_async_with_runtime(
                 object.insert("args".into(), json!(request.spec.args));
                 object.insert("shell".into(), json!(request.spec.shell));
             }
+            attach_test_metadata(&mut result, &test_runner_capability, &test_workflow);
             boundary.attach_result_metadata(&mut result, false, false);
             attach_session_capacity(ctx, &mut result);
             return Ok(tool_ok(result));
         }
     }
-    let runtime_options =
-        resolve_runtime_options(args, &request.spec, &runtime_config.policy.security_policy);
-    let identity = execution_identity(
+    let runtime_options = resolve_runtime_options(
+        args,
+        &request.timeout_contract,
+        &runtime_config.policy.security_policy,
+        &request.stdin_text,
+    );
+    let mut identity = execution_identity(
         args,
         &request.spec,
         &request.workdir,
@@ -109,6 +141,7 @@ pub async fn exec_command_async_with_runtime(
         runtime_options.stdin_text,
         &request.post_checks,
     );
+    identity.process_timeout = Some(request.timeout_contract.clone());
     let (operation_guard, operation_lock_wait_ms) = match admit_operation(
         ctx,
         &identity,
@@ -124,7 +157,10 @@ pub async fn exec_command_async_with_runtime(
             operation_guard,
             operation_lock_wait_ms,
         } => (operation_guard, operation_lock_wait_ms),
-        OperationAdmission::Reattached(out) => return Ok(tool_ok(out)),
+        OperationAdmission::Reattached(mut out) => {
+            attach_test_metadata(&mut out, &test_runner_capability, &test_workflow);
+            return Ok(tool_ok(out));
+        }
     };
 
     let sandbox_prepare_started = runtime_config.sandbox.enabled.then(Instant::now);
@@ -159,12 +195,14 @@ pub async fn exec_command_async_with_runtime(
                     Value::String(request.filesystem_scope),
                 );
             }
+            attach_test_metadata(&mut out, &test_runner_capability, &test_workflow);
             boundary.attach_result_metadata(&mut out, true, true);
             attach_session_capacity(ctx, &mut out);
             Ok(tool_ok(out))
         }
         Err(error) => match execution_failure_result(&error, &request.spec, &request.workdir) {
             Some(mut result) => {
+                attach_test_metadata(&mut result, &test_runner_capability, &test_workflow);
                 boundary.attach_result_metadata(&mut result, false, false);
                 attach_session_capacity(ctx, &mut result);
                 Ok(tool_ok(result))
@@ -300,6 +338,10 @@ pub fn exec_health_check(ctx: &ToolContext) -> Result<Value, WorkspaceError> {
     response["duration_ms"] = json!(start.elapsed().as_millis());
     Ok(tool_ok(response))
 }
+
+#[cfg(test)]
+#[path = "exec/secret_tests.rs"]
+mod secret_tests;
 
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]

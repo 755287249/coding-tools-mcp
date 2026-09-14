@@ -560,6 +560,14 @@ fn nonzero_command_exit_keeps_transport_ok_but_sets_command_ok_false() {
     assert_eq!(payload["command_ok"], false);
     assert_eq!(payload["status"], "exited");
     assert_eq!(payload["exit_code"], 1);
+    assert_eq!(payload["failure_origin"], "child_process");
+    assert_eq!(payload["policy_blocked"], false);
+    assert_eq!(payload["execution_attempted"], true);
+    assert_eq!(payload["process_started"], true);
+    assert!(payload["diagnostic_summary"]
+        .as_str()
+        .unwrap_or("")
+        .contains("MCP policy did not block execution"));
 }
 
 #[test]

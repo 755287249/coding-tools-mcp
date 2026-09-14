@@ -8,7 +8,7 @@ use crate::tools::{wrap_mcp_tool_result, SharedToolContext};
 
 pub const TASKS_EXTENSION: &str = "io.modelcontextprotocol/tasks";
 pub const TASK_POLL_INTERVAL_MS: u64 = 1_000;
-pub const TASK_TTL_MS: u64 = 900_000;
+pub const TASK_TTL_MS: u64 = 60 * 60_000;
 
 #[derive(Clone)]
 pub struct ProcessTask {

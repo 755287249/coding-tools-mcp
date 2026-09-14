@@ -40,6 +40,7 @@ pub enum TaskStatus {
     Paused,
     Verifying,
     Failed,
+    FailedFinal,
     Completed,
     CompletedUnverified,
     RolledBack,
@@ -63,7 +64,10 @@ impl TaskStatus {
                     Self::Verifying,
                     Self::Completed | Self::CompletedUnverified | Self::Failed
                 )
-                | (Self::Failed, Self::Active | Self::RolledBack)
+                | (
+                    Self::Failed,
+                    Self::Active | Self::FailedFinal | Self::RolledBack
+                )
         )
     }
 }
@@ -210,6 +214,8 @@ pub struct ProjectState {
 pub struct WorkspaceHarnessState {
     pub schema_version: u32,
     pub active_task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_task_ids: Option<HashMap<String, String>>,
     #[serde(default)]
     pub recent_task_ids: Vec<String>,
     pub updated_at: String,

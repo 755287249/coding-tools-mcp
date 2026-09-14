@@ -1,12 +1,13 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::tools::context::{SharedToolContext, ToolContext};
+use crate::tools::execution_timeout::{configured_job_timeout_max_ms, resolve_process_timeout};
 use crate::tools::parallel_stats::{
     parallel_pair_history, parallel_safety_lower_bound, record_parallel_observations,
     ParallelPairStats,
@@ -14,15 +15,31 @@ use crate::tools::parallel_stats::{
 use crate::tools::redaction::OutputRedactionContext;
 use crate::tools::session;
 use crate::tools::workspace::{tool_err, tool_ok, WorkspaceError};
+use crate::tools::ABSOLUTE_COMMAND_TIMEOUT_MAX_MS;
 
 use super::{
     admission_error, attach_admission_metadata, call_exec_tool_async, call_tool_inner,
-    ADMISSION_TIMEOUT,
+    ToolCallExecutionContext, ADMISSION_TIMEOUT,
 };
+
+mod retained;
+use retained::RetainedExecManyGraph;
 
 const PARALLEL_MIN_CONFIDENT_SAMPLES: u64 = 5;
 const PARALLEL_SAFE_LOWER_BOUND: f64 = 0.70;
 const MAX_PARALLEL_OBSERVATIONS: usize = 128;
+const IO_HEAVY_ADMISSION_LIMIT: usize = 1;
+
+fn io_heavy_admission() -> Arc<tokio::sync::Semaphore> {
+    static ADMISSION: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    ADMISSION
+        .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(IO_HEAVY_ADMISSION_LIMIT)))
+        .clone()
+}
+
+fn is_io_heavy(arguments: &Value) -> bool {
+    arguments.get("resource_class").and_then(Value::as_str) == Some("io_heavy")
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ParallelPrior {
@@ -47,6 +64,7 @@ pub(super) struct ExecBatchCommand {
     index: usize,
     id: String,
     depends_on: Vec<String>,
+    run_if: String,
     pub(super) lock_group: Option<String>,
     pub(super) lock_group_inferred: bool,
     pub(super) parallel_signature: String,
@@ -55,6 +73,14 @@ pub(super) struct ExecBatchCommand {
 }
 
 pub(super) async fn call_exec_many_async(ctx: SharedToolContext, args: &Value) -> Value {
+    retained::call_exec_many_retained_async(ctx, args).await
+}
+
+async fn execute_exec_many_async(
+    ctx: SharedToolContext,
+    args: &Value,
+    retained: Option<Arc<RetainedExecManyGraph>>,
+) -> Value {
     let Some(commands) = args.get("commands").and_then(Value::as_array) else {
         return tool_err(WorkspaceError::invalid_argument("commands is required"));
     };
@@ -62,7 +88,14 @@ pub(super) async fn call_exec_many_async(ctx: SharedToolContext, args: &Value) -
         Ok(commands) => commands,
         Err(error) => return tool_err(error),
     };
+    if let Err(error) = validate_exec_batch_timeout_contracts(&commands) {
+        return tool_err(error);
+    }
     let requested_mode = match exec_many_mode(args) {
+        Ok(mode) => mode,
+        Err(error) => return tool_err(error),
+    };
+    let requested_result_mode = match exec_many_result_mode(args) {
         Ok(mode) => mode,
         Err(error) => return tool_err(error),
     };
@@ -75,6 +108,11 @@ pub(super) async fn call_exec_many_async(ctx: SharedToolContext, args: &Value) -
     let decision =
         resolve_exec_many_decision(&ctx.profile_id, requested_mode, &commands, default_parallel);
     let mode = decision.mode;
+    if mode != "dag" && commands.iter().any(|command| command.run_if != "success") {
+        return tool_err(WorkspaceError::invalid_argument(
+            "run_if=failure or run_if=always requires dag mode (or auto with dependencies)",
+        ));
+    }
     if mode == "dag" {
         if let Err(error) = validate_exec_batch_dag(&commands) {
             return tool_err(error);
@@ -114,7 +152,13 @@ pub(super) async fn call_exec_many_async(ctx: SharedToolContext, args: &Value) -
             let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
             let mut results = Vec::with_capacity(commands.len());
             for command in commands.iter().cloned() {
-                let result = run_exec_batch_command(ctx.clone(), command, semaphore.clone()).await;
+                let result = run_exec_batch_command(
+                    ctx.clone(),
+                    command,
+                    semaphore.clone(),
+                    retained.clone(),
+                )
+                .await;
                 let command_ok = result.get("command_ok").and_then(Value::as_bool) == Some(true);
                 results.push(result);
                 if stop_on_error && !command_ok {
@@ -129,10 +173,23 @@ pub(super) async fn call_exec_many_async(ctx: SharedToolContext, args: &Value) -
                     "parallel mode schedules independent commands immediately; stop_on_error cannot cancel commands that already started".into(),
                 );
             }
-            run_exec_batch_wave(ctx.clone(), commands.clone(), max_parallel).await
+            run_exec_batch_wave(
+                ctx.clone(),
+                commands.clone(),
+                max_parallel,
+                retained.clone(),
+            )
+            .await
         }
         "dag" => {
-            run_exec_batch_dag(ctx.clone(), commands.clone(), max_parallel, stop_on_error).await
+            run_exec_batch_dag(
+                ctx.clone(),
+                commands.clone(),
+                max_parallel,
+                stop_on_error,
+                retained.clone(),
+            )
+            .await
         }
         _ => unreachable!("validated exec_many mode"),
     };
@@ -148,6 +205,7 @@ pub(super) async fn call_exec_many_async(ctx: SharedToolContext, args: &Value) -
         stop_on_error,
         commands.len(),
         results,
+        requested_result_mode,
         started,
         warnings,
         "async_batch",
@@ -198,6 +256,10 @@ pub(super) fn call_exec_many_sync(ctx: &ToolContext, args: &Value) -> Value {
         Ok(mode) => mode,
         Err(error) => return tool_err(error),
     };
+    let requested_result_mode = match exec_many_result_mode(args) {
+        Ok(mode) => mode,
+        Err(error) => return tool_err(error),
+    };
     if !matches!(requested_mode, "auto" | "sequential") {
         return tool_err(WorkspaceError::invalid_argument(
             "parallel and dag exec_many modes require the async MCP/Actions execution path",
@@ -211,6 +273,9 @@ pub(super) fn call_exec_many_sync(ctx: &ToolContext, args: &Value) -> Value {
         Ok(commands) => commands,
         Err(error) => return tool_err(error),
     };
+    if let Err(error) = validate_exec_batch_timeout_contracts(&commands) {
+        return tool_err(error);
+    }
     let stop_on_error = args
         .get("stop_on_error")
         .and_then(Value::as_bool)
@@ -218,7 +283,13 @@ pub(super) fn call_exec_many_sync(ctx: &ToolContext, args: &Value) -> Value {
     let started = Instant::now();
     let mut results = Vec::with_capacity(commands.len());
     for command in commands.iter().cloned() {
-        let mut result = call_tool_inner(ctx, "exec_command", &command.args, false);
+        let mut result = call_tool_inner(
+            ctx,
+            "exec_command",
+            &command.args,
+            false,
+            &ToolCallExecutionContext::default(),
+        );
         while result.get("process_still_running").and_then(Value::as_bool) == Some(true) {
             let Some(session_id) = result
                 .get("session_id")
@@ -236,7 +307,7 @@ pub(super) fn call_exec_many_sync(ctx: &ToolContext, args: &Value) -> Value {
                 &json!({
                     "session_id": session_id,
                     "cursor": cursor,
-                    "timeout_ms": session::WAIT_COMMAND_TIMEOUT_MAX_MS,
+                    "timeout_ms": session::WAIT_COMMAND_TIMEOUT_DEFAULT_MS,
                     "until": "finalized",
                     "output_mode": "tail"
                 }),
@@ -260,6 +331,7 @@ pub(super) fn call_exec_many_sync(ctx: &ToolContext, args: &Value) -> Value {
         stop_on_error,
         commands.len(),
         results,
+        requested_result_mode,
         started,
         if requested_mode == "auto" {
             vec!["auto scheduler fell back to sequential on the blocking execution path".into()]
@@ -297,6 +369,19 @@ fn exec_many_mode(args: &Value) -> Result<&str, WorkspaceError> {
     } else {
         Err(WorkspaceError::invalid_argument(
             "mode must be auto, sequential, parallel, or dag",
+        ))
+    }
+}
+
+fn exec_many_result_mode(args: &Value) -> Result<Option<&str>, WorkspaceError> {
+    let Some(mode) = args.get("result_mode").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    if matches!(mode, "full" | "summary" | "none") {
+        Ok(Some(mode))
+    } else {
+        Err(WorkspaceError::invalid_argument(
+            "exec_many result_mode must be full, summary, or none",
         ))
     }
 }
@@ -912,6 +997,29 @@ pub(super) fn parse_exec_batch_commands(
                 )))
             }
         };
+        let run_if = match object.remove("run_if") {
+            None => "success".to_string(),
+            Some(Value::String(value))
+                if matches!(value.as_str(), "success" | "failure" | "always") =>
+            {
+                value
+            }
+            Some(Value::String(_)) => {
+                return Err(WorkspaceError::invalid_argument(format!(
+                    "commands[{index}].run_if must be success, failure, or always"
+                )))
+            }
+            Some(_) => {
+                return Err(WorkspaceError::invalid_argument(format!(
+                    "commands[{index}].run_if must be a string"
+                )))
+            }
+        };
+        if matches!(run_if.as_str(), "failure" | "always") && depends_on.is_empty() {
+            return Err(WorkspaceError::invalid_argument(format!(
+                "commands[{index}].run_if={run_if} requires depends_on"
+            )));
+        }
         let explicit_lock_group = match object.remove("lock_group") {
             None => None,
             Some(Value::String(value)) => {
@@ -952,6 +1060,7 @@ pub(super) fn parse_exec_batch_commands(
             index,
             id,
             depends_on,
+            run_if,
             lock_group,
             lock_group_inferred,
             parallel_signature,
@@ -980,6 +1089,27 @@ pub(super) fn parse_exec_batch_commands(
         }
     }
     Ok(parsed)
+}
+
+fn validate_exec_batch_timeout_contracts(
+    commands: &[ExecBatchCommand],
+) -> Result<(), WorkspaceError> {
+    let job_max_ms = configured_job_timeout_max_ms();
+    for command in commands {
+        resolve_process_timeout(
+            &command.args,
+            30_000,
+            ABSOLUTE_COMMAND_TIMEOUT_MAX_MS,
+            job_max_ms,
+        )
+        .map_err(|error| {
+            WorkspaceError::invalid_argument(format!(
+                "commands[{}] rejected before scheduling: {error}",
+                command.index
+            ))
+        })?;
+    }
+    Ok(())
 }
 
 fn validate_exec_batch_dag(commands: &[ExecBatchCommand]) -> Result<(), WorkspaceError> {
@@ -1027,29 +1157,42 @@ async fn run_exec_batch_dag(
     commands: Vec<ExecBatchCommand>,
     max_parallel: usize,
     stop_on_error: bool,
+    retained: Option<Arc<RetainedExecManyGraph>>,
 ) -> Vec<Value> {
     let mut pending = commands;
     let mut completed = HashMap::<String, bool>::new();
     let mut results = Vec::new();
+    let mut stop_on_error_triggered = false;
     while !pending.is_empty() {
         let mut ready = Vec::new();
         let mut remaining = Vec::new();
         for command in pending {
-            if command
+            let dependencies_resolved = command
                 .depends_on
                 .iter()
-                .any(|dependency| completed.get(dependency) == Some(&false))
-            {
-                completed.insert(command.id.clone(), false);
-                results.push(skipped_batch_result(command, "dependency_failed"));
-            } else if command
-                .depends_on
-                .iter()
-                .all(|dependency| completed.get(dependency) == Some(&true))
-            {
-                ready.push(command);
-            } else {
+                .all(|dependency| completed.contains_key(dependency));
+            if !dependencies_resolved {
                 remaining.push(command);
+                continue;
+            }
+            let dependency_failed = command
+                .depends_on
+                .iter()
+                .any(|dependency| completed.get(dependency) == Some(&false));
+            match command.run_if.as_str() {
+                "success" if dependency_failed => {
+                    completed.insert(command.id.clone(), false);
+                    results.push(skipped_batch_result(command, "dependency_failed"));
+                }
+                "failure" if !dependency_failed => {
+                    completed.insert(command.id.clone(), false);
+                    results.push(conditional_skipped_batch_result(command));
+                }
+                "success" if stop_on_error_triggered => {
+                    completed.insert(command.id.clone(), false);
+                    results.push(skipped_batch_result(command, "stopped_after_failure"));
+                }
+                _ => ready.push(command),
             }
         }
         if ready.is_empty() {
@@ -1062,7 +1205,8 @@ async fn run_exec_batch_dag(
             }
             break;
         }
-        let wave_results = run_exec_batch_wave(ctx.clone(), ready, max_parallel).await;
+        let wave_results =
+            run_exec_batch_wave(ctx.clone(), ready, max_parallel, retained.clone()).await;
         let wave_failed = wave_results
             .iter()
             .any(|result| result.get("command_ok").and_then(Value::as_bool) != Some(true));
@@ -1076,11 +1220,7 @@ async fn run_exec_batch_dag(
         }
         results.extend(wave_results);
         if stop_on_error && wave_failed {
-            for command in remaining {
-                completed.insert(command.id.clone(), false);
-                results.push(skipped_batch_result(command, "stopped_after_failure"));
-            }
-            break;
+            stop_on_error_triggered = true;
         }
         pending = remaining;
     }
@@ -1097,15 +1237,20 @@ async fn run_exec_batch_wave(
     ctx: SharedToolContext,
     commands: Vec<ExecBatchCommand>,
     max_parallel: usize,
+    retained: Option<Arc<RetainedExecManyGraph>>,
 ) -> Vec<Value> {
     let semaphore = Arc::new(tokio::sync::Semaphore::new(max_parallel.max(1)));
     let mut tasks = tokio::task::JoinSet::new();
     for command in commands {
         let ctx = ctx.clone();
         let semaphore = semaphore.clone();
+        let retained = retained.clone();
         tasks.spawn(async move {
             let index = command.index;
-            (index, run_exec_batch_command(ctx, command, semaphore).await)
+            (
+                index,
+                run_exec_batch_command(ctx, command, semaphore, retained).await,
+            )
         });
     }
     let mut results = Vec::new();
@@ -1140,6 +1285,7 @@ async fn run_exec_batch_command(
     ctx: SharedToolContext,
     command: ExecBatchCommand,
     semaphore: Arc<tokio::sync::Semaphore>,
+    retained: Option<Arc<RetainedExecManyGraph>>,
 ) -> Value {
     let resource_lock_wait_ms = 0u128;
     let batch_started = Instant::now();
@@ -1148,6 +1294,14 @@ async fn run_exec_batch_command(
         .await
         .expect("exec_many semaphore closed");
     let batch_queue_wait_ms = batch_started.elapsed().as_millis();
+    if retained
+        .as_ref()
+        .map(|graph| graph.cancel_requested())
+        .unwrap_or(false)
+    {
+        drop(batch_permit);
+        return skipped_batch_result(command, "graph_cancelled");
+    }
     let policy = ctx.runtime_config().policy.security_policy;
     let redaction = OutputRedactionContext::new_with_policy("exec_command", &command.args, &policy);
     let Some((
@@ -1259,7 +1413,60 @@ async fn run_exec_batch_command(
         };
     let global_admission_wait_ms = global_started.elapsed().as_millis();
     let admission_queue_wait_ms = admission_started.elapsed().as_millis();
-    let mut result = call_exec_tool_async(ctx.as_ref(), "exec_command", &command.args).await;
+    let io_heavy = is_io_heavy(&command.args);
+    let io_admission_started = Instant::now();
+    let io_heavy_permit = if io_heavy {
+        let remaining = ADMISSION_TIMEOUT.saturating_sub(admission_started.elapsed());
+        match tokio::time::timeout(remaining, io_heavy_admission().acquire_owned()).await {
+            Ok(Ok(permit)) => Some(permit),
+            Ok(Err(error)) => {
+                return batch_result(
+                    &command,
+                    tool_err(WorkspaceError::Tool {
+                        code: "IO_HEAVY_ADMISSION_UNAVAILABLE",
+                        message: format!("Host-wide heavy I/O admission lane closed: {error}"),
+                        category: "runtime",
+                        retryable: true,
+                    }),
+                    false,
+                    false,
+                    None,
+                    resource_lock_wait_ms,
+                    batch_queue_wait_ms,
+                );
+            }
+            Err(_) => {
+                return batch_result(
+                    &command,
+                    tool_err(WorkspaceError::Tool {
+                        code: "IO_HEAVY_ADMISSION_TIMEOUT",
+                        message: "Host-wide heavy I/O admission queue exceeded the combined 30 second admission budget".into(),
+                        category: "runtime",
+                        retryable: true,
+                    }),
+                    false,
+                    false,
+                    None,
+                    resource_lock_wait_ms,
+                    batch_queue_wait_ms,
+                );
+            }
+        }
+    } else {
+        None
+    };
+    let io_heavy_admission_wait_ms = if io_heavy {
+        io_admission_started.elapsed().as_millis()
+    } else {
+        0
+    };
+    let mut exec_args = command.args.clone();
+    if retained.is_some() {
+        if let Some(object) = exec_args.as_object_mut() {
+            object.insert("yield_time_ms".into(), json!(0));
+        }
+    }
+    let mut result = call_exec_tool_async(ctx.as_ref(), "exec_command", &exec_args).await;
     if let Some(object) = result.as_object_mut() {
         object.insert("execution_lane".into(), json!("async_process"));
         object.insert("blocking_queue_wait_ms".into(), json!(0));
@@ -1272,8 +1479,41 @@ async fn run_exec_batch_command(
             global_admission_wait_ms,
             admission_queue_wait_ms,
         );
+        object.insert(
+            "resource_class".into(),
+            json!(if io_heavy { "io_heavy" } else { "default" }),
+        );
+        object.insert(
+            "io_heavy_admission_limit".into(),
+            json!(if io_heavy {
+                IO_HEAVY_ADMISSION_LIMIT
+            } else {
+                0
+            }),
+        );
+        object.insert(
+            "io_heavy_admission_wait_ms".into(),
+            json!(io_heavy_admission_wait_ms),
+        );
     }
     let mut result = redaction.redact(result);
+    let tracked_session_id = result
+        .get("session_id")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if let (Some(graph), Some(session_id)) = (retained.as_ref(), tracked_session_id.as_deref()) {
+        if graph.register_session(session_id) || graph.cancel_requested() {
+            result = match session::kill_session_async(
+                &ctx.sessions,
+                &json!({"session_id": session_id, "signal": "TERM", "wait_ms": 5_000}),
+            )
+            .await
+            {
+                Ok(value) => value,
+                Err(error) => tool_err(error),
+            };
+        }
+    }
     while result.get("process_still_running").and_then(Value::as_bool) == Some(true) {
         let Some(session_id) = result
             .get("session_id")
@@ -1291,7 +1531,7 @@ async fn run_exec_batch_command(
             &json!({
                 "session_id": session_id,
                 "cursor": cursor,
-                "timeout_ms": session::WAIT_COMMAND_TIMEOUT_MAX_MS,
+                "timeout_ms": session::WAIT_COMMAND_TIMEOUT_DEFAULT_MS,
                 "until": "finalized",
                 "output_mode": "tail"
             }),
@@ -1302,6 +1542,39 @@ async fn run_exec_batch_command(
             Err(error) => tool_err(error),
         };
     }
+    if let Some(object) = result.as_object_mut() {
+        object.insert("execution_lane".into(), json!("async_process"));
+        object.insert("blocking_queue_wait_ms".into(), json!(0));
+        attach_admission_metadata(
+            object,
+            admission_lane,
+            admission_limit,
+            global_admission_limit,
+            workspace_admission_wait_ms,
+            global_admission_wait_ms,
+            admission_queue_wait_ms,
+        );
+        object.insert(
+            "resource_class".into(),
+            json!(if io_heavy { "io_heavy" } else { "default" }),
+        );
+        object.insert(
+            "io_heavy_admission_limit".into(),
+            json!(if io_heavy {
+                IO_HEAVY_ADMISSION_LIMIT
+            } else {
+                0
+            }),
+        );
+        object.insert(
+            "io_heavy_admission_wait_ms".into(),
+            json!(io_heavy_admission_wait_ms),
+        );
+    }
+    if let (Some(graph), Some(session_id)) = (retained.as_ref(), tracked_session_id.as_deref()) {
+        graph.unregister_session(session_id);
+    }
+    drop(io_heavy_permit);
     drop(global_permit);
     drop(permit);
     drop(batch_permit);
@@ -1334,6 +1607,7 @@ fn batch_result(
         "index": command.index,
         "id": command.id,
         "depends_on": command.depends_on,
+        "run_if": command.run_if,
         "lock_group": command.lock_group,
         "command": command.args,
         "command_ok": command_ok,
@@ -1363,6 +1637,26 @@ fn skipped_batch_result(command: ExecBatchCommand, reason: &str) -> Value {
     )
 }
 
+fn conditional_skipped_batch_result(command: ExecBatchCommand) -> Value {
+    let mut result = batch_result(
+        &command,
+        json!({
+            "ok": true,
+            "command_ok": null,
+            "status": "skipped",
+            "outcome_class": "condition_not_met",
+            "reason": "run_condition_not_met"
+        }),
+        false,
+        true,
+        Some("run_condition_not_met"),
+        0,
+        0,
+    );
+    result["conditional_skip"] = json!(true);
+    result
+}
+
 #[allow(clippy::too_many_arguments)]
 fn batch_failure_summary(result: &Value) -> Value {
     let nested = result.get("result").unwrap_or(&Value::Null);
@@ -1387,6 +1681,112 @@ fn batch_failure_summary(result: &Value) -> Value {
     })
 }
 
+const EXEC_MANY_AUTO_COMPACT_OUTPUT_BYTES: u64 = 16 * 1024;
+const EXEC_MANY_FAILURE_SUMMARY_CHARS: usize = 2_048;
+
+struct ExecManyResultShape {
+    mode: &'static str,
+    reason: &'static str,
+    auto_compacted_output_bytes: u64,
+    results_omitted_count: usize,
+    results: Vec<Value>,
+}
+
+fn bounded_output_summary(value: Option<&Value>) -> Option<String> {
+    let text = value.and_then(Value::as_str)?;
+    if text.is_empty() {
+        return None;
+    }
+    let chars = text.chars().collect::<Vec<_>>();
+    let start = chars.len().saturating_sub(EXEC_MANY_FAILURE_SUMMARY_CHARS);
+    Some(chars[start..].iter().collect())
+}
+
+fn compact_exec_many_result(batch: &Value) -> Value {
+    let result = batch.get("result").unwrap_or(&Value::Null);
+    let command_ok = batch.get("command_ok").and_then(Value::as_bool);
+    let failed = command_ok == Some(false);
+    json!({
+        "index": batch.get("index").cloned().unwrap_or(Value::Null),
+        "id": batch.get("id").cloned().unwrap_or(Value::Null),
+        "command_ok": batch.get("command_ok").cloned().unwrap_or(Value::Null),
+        "skipped": batch.get("skipped").cloned().unwrap_or(json!(false)),
+        "skip_reason": batch.get("skip_reason").cloned().unwrap_or(Value::Null),
+        "conditional_skip": batch.get("conditional_skip").cloned().unwrap_or(json!(false)),
+        "run_if": batch.get("run_if").cloned().unwrap_or(json!("success")),
+        "resource_lock_wait_ms": batch.get("resource_lock_wait_ms").cloned().unwrap_or(json!(0)),
+        "batch_queue_wait_ms": batch.get("batch_queue_wait_ms").cloned().unwrap_or(json!(0)),
+        "status": result.get("status").cloned().unwrap_or(Value::Null),
+        "termination_reason": result.get("termination_reason").cloned().unwrap_or(Value::Null),
+        "exit_code": result.get("exit_code").cloned().unwrap_or_else(|| result.get("process_exit_code").cloned().unwrap_or(Value::Null)),
+        "process_exit_code": result.get("process_exit_code").cloned().unwrap_or(Value::Null),
+        "execution_mode": result.get("execution_mode").cloned().unwrap_or(Value::Null),
+        "requested_process_timeout_ms": result.get("requested_process_timeout_ms").cloned().unwrap_or(Value::Null),
+        "effective_process_timeout_ms": result.get("effective_process_timeout_ms").cloned().unwrap_or(Value::Null),
+        "process_timeout_limit_ms": result.get("process_timeout_limit_ms").cloned().unwrap_or(Value::Null),
+        "process_deadline_ts_ms": result.get("process_deadline_ts_ms").cloned().unwrap_or(Value::Null),
+        "process_timeout_remaining_ms": result.get("process_timeout_remaining_ms").cloned().unwrap_or(Value::Null),
+        "timeout_clamped": result.get("timeout_clamped").cloned().unwrap_or(Value::Null),
+        "polling_extends_process_deadline": result.get("polling_extends_process_deadline").cloned().unwrap_or(Value::Null),
+        "timeout_scope": result.get("timeout_scope").cloned().unwrap_or(Value::Null),
+        "elapsed_ms": result.get("elapsed_ms").cloned().unwrap_or(Value::Null),
+        "stdout_bytes": result.get("stdout_bytes").cloned().unwrap_or(json!(0)),
+        "stderr_bytes": result.get("stderr_bytes").cloned().unwrap_or(json!(0)),
+        "output_refs": result.get("output_refs").cloned().unwrap_or(Value::Null),
+        "error_code": result.get("error").and_then(|error| error.get("code")).cloned().unwrap_or(Value::Null),
+        "error_message": result.get("error").and_then(|error| error.get("message")).cloned().unwrap_or(Value::Null),
+        "stdout_summary": if failed { bounded_output_summary(result.get("stdout")) } else { None },
+        "stderr_summary": if failed { bounded_output_summary(result.get("stderr")) } else { None }
+    })
+}
+
+fn shape_exec_many_results(
+    results: &[Value],
+    requested_mode: Option<&str>,
+) -> Result<ExecManyResultShape, WorkspaceError> {
+    let total_output_bytes = results
+        .iter()
+        .map(|batch| {
+            let result = batch.get("result").unwrap_or(&Value::Null);
+            result
+                .get("stdout_bytes")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                + result
+                    .get("stderr_bytes")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+        })
+        .sum::<u64>();
+    let (mode, reason, auto_compacted_output_bytes) = match requested_mode {
+        Some("full") => ("full", "explicit", 0),
+        Some("summary") => ("summary", "explicit", 0),
+        Some("none") => ("none", "explicit", 0),
+        Some(_) => {
+            return Err(WorkspaceError::invalid_argument(
+                "exec_many result_mode must be full, summary, or none",
+            ))
+        }
+        None if total_output_bytes > EXEC_MANY_AUTO_COMPACT_OUTPUT_BYTES => {
+            ("summary", "large_output", total_output_bytes)
+        }
+        None => ("full", "default", 0),
+    };
+    let shaped = match mode {
+        "full" => results.to_vec(),
+        "summary" => results.iter().map(compact_exec_many_result).collect(),
+        "none" => Vec::new(),
+        _ => unreachable!(),
+    };
+    Ok(ExecManyResultShape {
+        mode,
+        reason,
+        auto_compacted_output_bytes,
+        results_omitted_count: if mode == "none" { results.len() } else { 0 },
+        results: shaped,
+    })
+}
+
 fn exec_many_output(
     ctx: &ToolContext,
     mode: &str,
@@ -1394,6 +1794,7 @@ fn exec_many_output(
     stop_on_error: bool,
     commands_requested: usize,
     mut results: Vec<Value>,
+    requested_result_mode: Option<&str>,
     started: Instant,
     warnings: Vec<String>,
     execution_lane: &str,
@@ -1425,6 +1826,18 @@ fn exec_many_output(
         .filter(|result| result.get("skipped").and_then(Value::as_bool) == Some(true))
         .filter_map(|result| result.get("id").and_then(Value::as_str).map(str::to_string))
         .collect::<Vec<_>>();
+    let conditional_skipped_command_ids = results
+        .iter()
+        .filter(|result| {
+            result.get("conditional_skip").and_then(Value::as_bool) == Some(true)
+                || result.get("skip_reason").and_then(Value::as_str)
+                    == Some("run_condition_not_met")
+        })
+        .filter_map(|result| result.get("id").and_then(Value::as_str).map(str::to_string))
+        .collect::<Vec<_>>();
+    let conditional_skipped_command_count = conditional_skipped_command_ids.len();
+    let blocking_skipped_command_count =
+        skipped_command_count.saturating_sub(conditional_skipped_command_count);
     let successful_command_count = results
         .iter()
         .filter(|result| result.get("command_ok").and_then(Value::as_bool) == Some(true))
@@ -1437,8 +1850,8 @@ fn exec_many_output(
         })
         .map(batch_failure_summary);
     let all_commands_ok = failed_command_count == 0
-        && skipped_command_count == 0
-        && successful_command_count == commands_requested;
+        && blocking_skipped_command_count == 0
+        && successful_command_count + conditional_skipped_command_count == commands_requested;
     let outcome_class = if all_commands_ok {
         "success"
     } else if successful_command_count > 0 {
@@ -1450,7 +1863,11 @@ fn exec_many_output(
         .admission_for("exec_command")
         .map(|(_, workspace, _, global, _)| (workspace, global))
         .unwrap_or((0, 0));
-    let batch_summary = if all_commands_ok {
+    let batch_summary = if all_commands_ok && conditional_skipped_command_count > 0 {
+        format!(
+            "{successful_command_count} succeeded, {conditional_skipped_command_count} conditionally skipped"
+        )
+    } else if all_commands_ok {
         format!("All {commands_requested} commands succeeded")
     } else {
         format!(
@@ -1475,6 +1892,10 @@ fn exec_many_output(
             }),
         ]
     };
+    let stopped_early = blocking_skipped_command_count > 0 || results.len() < commands_requested;
+    let result_shape = shape_exec_many_results(&results, requested_result_mode)
+        .expect("result_mode was validated before command execution");
+
     let mut output = tool_ok(json!({
         "mode": mode,
         "max_parallel": max_parallel,
@@ -1485,15 +1906,23 @@ fn exec_many_output(
         "failed_command_ids": failed_command_ids,
         "skipped_command_count": skipped_command_count,
         "skipped_command_ids": skipped_command_ids,
+        "conditional_skipped_command_count": conditional_skipped_command_count,
+        "conditional_skipped_command_ids": conditional_skipped_command_ids,
         "first_failed_command": first_failed_command,
         "batch_summary": batch_summary,
         "stop_on_error": stop_on_error,
-        "stopped_early": skipped_command_count > 0 || results.len() < commands_requested,
+        "stopped_early": stopped_early,
         "command_ok": all_commands_ok,
         "all_commands_ok": all_commands_ok,
         "outcome_class": outcome_class,
         "recovery_actions": recovery_actions,
-        "results": results,
+        "result_mode": result_shape.mode,
+        "result_mode_reason": result_shape.reason,
+        "auto_compacted_output_bytes": result_shape.auto_compacted_output_bytes,
+        "results_included": result_shape.mode != "none",
+        "result_output_included": result_shape.mode == "full",
+        "results_omitted_count": result_shape.results_omitted_count,
+        "results": result_shape.results,
         "duration_ms": started.elapsed().as_millis(),
         "warnings": warnings
     }));
@@ -1506,4 +1935,73 @@ fn exec_many_output(
         object.insert("admission_queue_wait_ms".into(), json!(0));
     }
     output
+}
+
+#[cfg(test)]
+mod result_mode_tests {
+    use super::*;
+
+    fn synthetic_result(stdout_bytes: u64) -> Value {
+        json!({
+            "index": 0,
+            "id": "large-output",
+            "command_ok": true,
+            "skipped": false,
+            "resource_lock_wait_ms": 0,
+            "batch_queue_wait_ms": 0,
+            "result": {
+                "status": "exited",
+                "command_ok": true,
+                "process_exit_code": 0,
+                "execution_mode": "job",
+                "requested_process_timeout_ms": 5_000,
+                "effective_process_timeout_ms": 5_000,
+                "process_timeout_limit_ms": 21_600_000,
+                "process_deadline_ts_ms": 123_456_789,
+                "process_timeout_remaining_ms": 4_000,
+                "timeout_clamped": false,
+                "polling_extends_process_deadline": false,
+                "timeout_scope": "process",
+                "elapsed_ms": 10,
+                "stdout": "x",
+                "stderr": "",
+                "stdout_bytes": stdout_bytes,
+                "stderr_bytes": 0,
+                "output_refs": {
+                    "stdout": "output://session/stdout",
+                    "stderr": "output://session/stderr"
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn result_mode_auto_compacts_large_output_and_honors_explicit_modes() {
+        let results = vec![synthetic_result(32_768)];
+        let auto = shape_exec_many_results(&results, None).expect("auto result mode");
+        assert_eq!(auto.mode, "summary");
+        assert_eq!(auto.reason, "large_output");
+        assert_eq!(auto.auto_compacted_output_bytes, 32_768);
+        assert_eq!(auto.results[0]["stdout_bytes"], 32_768);
+        assert_eq!(auto.results[0]["execution_mode"], "job");
+        assert_eq!(auto.results[0]["effective_process_timeout_ms"], 5_000);
+        assert_eq!(auto.results[0]["polling_extends_process_deadline"], false);
+        assert_eq!(auto.results[0]["timeout_scope"], "process");
+        assert_eq!(
+            auto.results[0]["output_refs"]["stdout"],
+            "output://session/stdout"
+        );
+        assert!(auto.results[0].get("stdout").is_none());
+
+        let full = shape_exec_many_results(&results, Some("full")).expect("full result mode");
+        assert_eq!(full.mode, "full");
+        assert_eq!(full.results[0]["result"]["stdout"], "x");
+
+        let none = shape_exec_many_results(&results, Some("none")).expect("none result mode");
+        assert_eq!(none.mode, "none");
+        assert!(none.results.is_empty());
+        assert_eq!(none.results_omitted_count, 1);
+
+        assert!(shape_exec_many_results(&results, Some("invalid")).is_err());
+    }
 }

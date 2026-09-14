@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -7,6 +8,7 @@ import { EDIT_PROPOSAL_TTL_MS } from '../dist/editRecovery.js';
 import { runtimeForFolderId } from '../dist/folderRuntime.js';
 import { createToolContext } from '../dist/server.js';
 import { callTool } from '../dist/tools.js';
+import { editBlastRadius, unchangedLineEndingChanges } from '../dist/fileTools.js';
 
 function proposals(ctx) {
   return runtimeForFolderId(ctx, 'repo').editProposals;
@@ -37,11 +39,13 @@ function config(root, dataDir) {
 async function fixture(t) {
   const root = await mkdtemp(path.join(tmpdir(), 'ctmcp-edit-recovery-root-'));
   const dataDir = await mkdtemp(path.join(tmpdir(), 'ctmcp-edit-recovery-data-'));
-  t.after(async () => {
-    await rm(root, { recursive: true, force: true });
-    await rm(dataDir, { recursive: true, force: true });
-  });
   const ctx = await createToolContext(config(root, dataDir));
+  t.after(async () => {
+    await ctx.conversations.flush();
+    await ctx.usageStore.flush();
+    await rm(root, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+  });
   const meta = { 'openai/session': `edit-recovery-${Date.now()}-${Math.random()}` };
   const selected = await callTool(ctx, 'switch_workspace_folder', { folder_id: 'repo' }, meta);
   assert.equal(selected.ok, true);
@@ -61,6 +65,59 @@ async function proposal(ctx, meta, file = 'main.txt', replacement = 'let value =
   assert.equal(result.status, 'proposal_required');
   return result;
 }
+
+test('newline churn detector identifies EOL changes on unchanged content', () => {
+  const changes = unchangedLineEndingChanges(
+    'one\ntwo\nTHREE\nfour\nfive\n',
+    'one\r\ntwo\r\nTHREE-EDITED\r\nfour\r\nfive\r\n'
+  );
+  assert.deepEqual(changes.map(change => change.before_line), [1, 2, 4, 5]);
+  assert.ok(changes.every(change => change.before_eol === '\n'));
+  assert.ok(changes.every(change => change.after_eol === '\r\n'));
+});
+
+test('newline churn detector allows removing the delimiter before a deleted unterminated final line', () => {
+  assert.deepEqual(unchangedLineEndingChanges('alpha\nbeta\r\ngamma', 'alpha\nbeta'), []);
+});
+
+test('newline churn detector does not misalign repeated content after a legitimate deletion', () => {
+  assert.deepEqual(unchangedLineEndingChanges('alpha\nx\r\nx\nbeta\n', 'alpha\nx\nbeta\n'), []);
+});
+
+test('edit blast-radius detector rejects whole-file churn from a narrow contract', () => {
+  const original = `${Array.from({ length: 200 }, (_, index) => `line-${index + 1}`).join('\n')}\n`;
+  const updated = `${Array.from({ length: 200 }, (_, index) => `rewritten-${index + 1}`).join('\n')}\n`;
+  const radius = editBlastRadius(original, updated, [
+    { type: 'replace', old_text: 'line-100', new_text: 'LINE-100' }
+  ]);
+  assert.equal(radius.excessive, true);
+  assert.ok(radius.changed_line_count > radius.allowed_changed_line_count);
+  assert.ok(radius.change_ratio >= 0.6);
+});
+
+test('edit blast-radius detector allows a precise local change', () => {
+  const original = `${Array.from({ length: 200 }, (_, index) => `line-${index + 1}`).join('\n')}\n`;
+  const updated = original.replace('line-100', 'LINE-100');
+  const radius = editBlastRadius(original, updated, [
+    { type: 'replace', old_text: 'line-100', new_text: 'LINE-100' }
+  ]);
+  assert.equal(radius.excessive, false);
+  assert.equal(radius.changed_line_count, 2);
+});
+
+test('edit blast-radius detector measures disjoint precise edits instead of the span between them', () => {
+  const original = `${Array.from({ length: 200 }, (_, index) => `line-${index + 1}`).join('\n')}\n`;
+  const updated = original
+    .replace('line-10', 'LINE-10')
+    .replace('line-190', 'LINE-190');
+  const radius = editBlastRadius(original, updated, [
+    { type: 'replace', old_text: 'line-10', new_text: 'LINE-10' },
+    { type: 'replace', old_text: 'line-190', new_text: 'LINE-190' }
+  ]);
+  assert.equal(radius.excessive, false);
+  assert.equal(radius.changed_line_count, 4);
+  assert.equal(radius.change_measure, 'bounded_line_diff');
+});
 
 test('ambiguous exact edit returns a bounded proposal without writing', async t => {
   const { root, ctx, meta } = await fixture(t);
@@ -154,6 +211,36 @@ test('edit_many reports the failed file index before writing any file', async t 
   assert.equal(await readFile(path.join(root, 'second.txt'), 'utf8'), 'second\n');
 });
 
+test('multi-edit keeps later guarded line scopes anchored to the original snapshot', async t => {
+  const { root, ctx, meta } = await fixture(t);
+  await writeFile(path.join(root, 'main.txt'), 'anchor\none\ntwo\ntarget\nend\n');
+
+  const result = await callTool(ctx, 'edit_file', {
+    path: 'main.txt',
+    edits: [
+      { type: 'insert_after', anchor: 'anchor\n', text: 'new1\nnew2\n' },
+      { type: 'replace', old_text: 'target', new_text: 'TARGET', start_line: 4, end_line: 4 }
+    ]
+  }, meta);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(await readFile(path.join(root, 'main.txt'), 'utf8'), 'anchor\nnew1\nnew2\none\ntwo\nTARGET\nend\n');
+});
+
+test('multi-edit preserves sequential fallback when a later edit depends on earlier output', async t => {
+  const { root, ctx, meta } = await fixture(t);
+  await writeFile(path.join(root, 'main.txt'), 'one\nseed\nthree\n');
+
+  const result = await callTool(ctx, 'edit_file', {
+    path: 'main.txt',
+    edits: [
+      { type: 'replace', old_text: 'seed', new_text: 'created' },
+      { type: 'replace', old_text: 'created', new_text: 'final', start_line: 2, end_line: 2 }
+    ]
+  }, meta);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(await readFile(path.join(root, 'main.txt'), 'utf8'), 'one\nfinal\nthree\n');
+});
+
 test('delete_lines applies the same expected_text guard as replace_lines', async t => {
   const { root, ctx, meta } = await fixture(t);
   await writeFile(path.join(root, 'main.txt'), 'alpha\nbeta\ngamma\n');
@@ -171,6 +258,155 @@ test('delete_lines applies the same expected_text guard as replace_lines', async
   assert.equal(result.error.code, 'EDIT_EXPECTED_TEXT_MISMATCH');
   assert.equal(result.error.details.actual_text, 'beta');
   assert.equal(await readFile(path.join(root, 'main.txt'), 'utf8'), 'alpha\nbeta\ngamma\n');
+});
+
+test('replace_lines preserves untouched mixed line endings and follows the local EOL', async t => {
+  const { root, ctx, meta } = await fixture(t);
+  const file = path.join(root, 'mixed-lines.txt');
+  const original = 'alpha\r\nbeta\r\ngamma\ndelta\n';
+  await writeFile(file, original);
+
+  const result = await callTool(ctx, 'edit_file', {
+    path: 'mixed-lines.txt',
+    edits: [{
+      type: 'replace_lines',
+      start_line: 3,
+      end_line: 3,
+      expected_text: 'gamma',
+      new_text: 'GAMMA\nSECOND'
+    }]
+  }, meta);
+
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(await readFile(file, 'utf8'), 'alpha\r\nbeta\r\nGAMMA\nSECOND\ndelta\n');
+  assert.equal(result.newline_before, 'mixed');
+  assert.equal(result.newline_after, 'mixed');
+  assert.equal(result.newline_guard, 'passed');
+  assert.equal(result.blast_radius_guard, 'passed');
+  assert.equal(result.blast_radius.excessive, false);
+});
+
+test('text replacement adapts inserted newlines to the target line instead of the whole mixed file', async t => {
+  const { root, ctx, meta } = await fixture(t);
+  const file = path.join(root, 'mixed-text.txt');
+  await writeFile(file, 'first\nsecond\r\nthird\r\n');
+
+  const result = await callTool(ctx, 'edit_file', {
+    path: 'mixed-text.txt',
+    edits: [{ type: 'replace', old_text: 'first', new_text: 'FIRST\nEXTRA' }]
+  }, meta);
+
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(await readFile(file, 'utf8'), 'FIRST\nEXTRA\nsecond\r\nthird\r\n');
+});
+
+test('delete_lines preserves untouched mixed EOLs when deleting the final unterminated line', async t => {
+  const { root, ctx, meta } = await fixture(t);
+  const file = path.join(root, 'mixed-delete.txt');
+  await writeFile(file, 'alpha\nbeta\r\ngamma');
+
+  const result = await callTool(ctx, 'edit_file', {
+    path: 'mixed-delete.txt',
+    edits: [{ type: 'delete_lines', start_line: 3, end_line: 3, expected_text: 'gamma' }]
+  }, meta);
+
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(await readFile(file, 'utf8'), 'alpha\nbeta');
+});
+
+test('replace_lines keeps CRLF-only files CRLF', async t => {
+  const { root, ctx, meta } = await fixture(t);
+  const file = path.join(root, 'crlf-lines.txt');
+  await writeFile(file, 'alpha\r\nbeta\r\ngamma\r\n');
+
+  const result = await callTool(ctx, 'edit_file', {
+    path: 'crlf-lines.txt',
+    edits: [{ type: 'replace_lines', start_line: 2, end_line: 2, new_text: 'BETA\nSECOND' }]
+  }, meta);
+
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(await readFile(file, 'utf8'), 'alpha\r\nBETA\r\nSECOND\r\ngamma\r\n');
+  assert.equal(result.newline_before, 'crlf');
+  assert.equal(result.newline_after, 'crlf');
+  assert.equal(result.newline_guard, 'passed');
+});
+
+test('replace_lines preserves an unterminated final line', async t => {
+  const { root, ctx, meta } = await fixture(t);
+  const file = path.join(root, 'replace-eof.txt');
+  await writeFile(file, 'alpha\nbeta');
+
+  const result = await callTool(ctx, 'edit_file', {
+    path: 'replace-eof.txt',
+    edits: [{ type: 'replace_lines', start_line: 2, end_line: 2, new_text: 'BETA' }]
+  }, meta);
+
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(await readFile(file, 'utf8'), 'alpha\nBETA');
+});
+
+test('delete_lines preserves normal middle-line semantics', async t => {
+  const { root, ctx, meta } = await fixture(t);
+  const file = path.join(root, 'delete-middle.txt');
+  await writeFile(file, 'alpha\nbeta\ngamma\n');
+
+  const result = await callTool(ctx, 'edit_file', {
+    path: 'delete-middle.txt',
+    edits: [{ type: 'delete_lines', start_line: 2, end_line: 2 }]
+  }, meta);
+
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(await readFile(file, 'utf8'), 'alpha\ngamma\n');
+});
+
+test('delete_lines does not trigger newline churn guard when repeated content shifts', async t => {
+  const { root, ctx, meta } = await fixture(t);
+  const file = path.join(root, 'delete-duplicate.txt');
+  await writeFile(file, 'alpha\nx\r\nx\nbeta\n');
+
+  const result = await callTool(ctx, 'edit_file', {
+    path: 'delete-duplicate.txt',
+    edits: [{ type: 'delete_lines', start_line: 2, end_line: 2 }]
+  }, meta);
+
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.newline_guard, 'passed');
+  assert.equal(await readFile(file, 'utf8'), 'alpha\nx\nbeta\n');
+});
+
+test('delete_lines keeps the preceding newline when the deleted final line was terminated', async t => {
+  const { root, ctx, meta } = await fixture(t);
+  const file = path.join(root, 'delete-final-newline.txt');
+  await writeFile(file, 'alpha\nbeta\n');
+
+  const result = await callTool(ctx, 'edit_file', {
+    path: 'delete-final-newline.txt',
+    edits: [{ type: 'delete_lines', start_line: 2, end_line: 2 }]
+  }, meta);
+
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(await readFile(file, 'utf8'), 'alpha\n');
+});
+
+test('trailing empty line is addressable without confusing the preceding delimiter', async t => {
+  const { root, ctx, meta } = await fixture(t);
+  const file = path.join(root, 'trailing-empty-line.txt');
+  await writeFile(file, 'alpha\nbeta\n');
+
+  const replaced = await callTool(ctx, 'edit_file', {
+    path: 'trailing-empty-line.txt',
+    edits: [{ type: 'replace_lines', start_line: 3, end_line: 3, new_text: 'gamma' }]
+  }, meta);
+  assert.equal(replaced.ok, true, JSON.stringify(replaced));
+  assert.equal(await readFile(file, 'utf8'), 'alpha\nbeta\ngamma');
+
+  await writeFile(file, 'alpha\nbeta\n');
+  const deleted = await callTool(ctx, 'edit_file', {
+    path: 'trailing-empty-line.txt',
+    edits: [{ type: 'delete_lines', start_line: 3, end_line: 3 }]
+  }, meta);
+  assert.equal(deleted.ok, true, JSON.stringify(deleted));
+  assert.equal(await readFile(file, 'utf8'), 'alpha\nbeta');
 });
 
 test('dry-run edit plans replay once and reject stale reuse', async t => {
@@ -201,6 +437,118 @@ test('dry-run edit plans replay once and reject stale reuse', async t => {
   const stale = await callTool(ctx, planned.edit_plan.tool, planned.edit_plan.arguments, meta);
   assert.equal(stale.ok, false, JSON.stringify(stale));
   assert.equal(stale.error.code, 'FILE_VERSION_MISMATCH');
+});
+
+test('stale single-file edits return a complete explicit retry only after revalidation on current content', async t => {
+  const { root, ctx, meta } = await fixture(t);
+  const file = path.join(root, 'stale-direct.txt');
+  const original = 'target\nkeep\n';
+  const current = 'target\nexternal change\n';
+  await writeFile(file, original);
+  const staleSha = createHash('sha256').update(original).digest('hex');
+  await writeFile(file, current);
+
+  const stale = await callTool(ctx, 'edit', {
+    files: [{
+      path: 'stale-direct.txt',
+      expected_sha256: staleSha,
+      edits: [{ type: 'replace', old_text: 'target', new_text: 'updated' }]
+    }]
+  }, meta);
+  assert.equal(stale.ok, false, JSON.stringify(stale));
+  assert.equal(stale.error.code, 'FILE_VERSION_MISMATCH');
+  assert.equal(stale.error.details.direct_recovery_action_count, 1);
+  assert.equal(await readFile(file, 'utf8'), current, 'stale request itself must not write');
+  const direct = stale.error.details.recovery_actions[0];
+  assert.equal(direct.action, 'retry_guarded_edit');
+  assert.equal(direct.tool, 'edit');
+  assert.deepEqual(direct.required_arguments, []);
+  assert.equal(direct.arguments.files[0].expected_sha256, stale.error.details.actual_sha256);
+
+  const retried = await callTool(ctx, direct.tool, direct.arguments, meta);
+  assert.equal(retried.ok, true, JSON.stringify(retried));
+  assert.equal(await readFile(file, 'utf8'), 'updated\nexternal change\n');
+
+  await writeFile(file, 'target removed\nexternal change\n');
+  const unsafe = await callTool(ctx, 'edit', {
+    files: [{
+      path: 'stale-direct.txt',
+      expected_sha256: stale.error.details.actual_sha256,
+      edits: [{ type: 'replace', old_text: 'updated', new_text: 'again' }]
+    }]
+  }, meta);
+  assert.equal(unsafe.ok, false, JSON.stringify(unsafe));
+  assert.equal(unsafe.error.code, 'FILE_VERSION_MISMATCH');
+  assert.equal(unsafe.error.details.direct_recovery_action_count ?? 0, 0);
+  assert.equal(unsafe.error.details.recovery_actions[0].action, 'read_current_file');
+});
+
+test('single-file edit returns a bounded contextual diff for large files', async t => {
+  const { root, ctx, meta } = await fixture(t);
+  const lines = Array.from({ length: 10_000 }, (_, index) => `line-${index + 1}`);
+  lines[4_999] = 'target-line';
+  await writeFile(path.join(root, 'large.txt'), `${lines.join('\n')}\n`);
+
+  const result = await callTool(ctx, 'edit', {
+    files: [{ path: 'large.txt', edits: [{ type: 'replace', old_text: 'target-line', new_text: 'updated-line' }] }]
+  }, meta);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.diff_truncated, false);
+  assert.equal(result.diff_bytes, Buffer.byteLength(result.diff));
+  assert.ok(result.diff_bytes < 1_024, `expected compact diff, got ${result.diff_bytes} bytes`);
+  assert.match(result.diff, /line-4997/);
+  assert.match(result.diff, /-target-line/);
+  assert.match(result.diff, /\+updated-line/);
+  assert.match(result.diff, /line-5003/);
+  assert.doesNotMatch(result.diff, /line-1\n/);
+
+  const huge = 'x'.repeat(40_000);
+  const truncated = await callTool(ctx, 'edit', {
+    files: [{ path: 'large.txt', edits: [{ type: 'replace', old_text: 'updated-line', new_text: huge }] }]
+  }, meta);
+  assert.equal(truncated.ok, true, JSON.stringify(truncated));
+  assert.equal(truncated.diff_truncated, true);
+  assert.ok(truncated.diff_bytes <= 32 * 1024);
+});
+
+test('single-file edit diff stays compact for CRLF files', async t => {
+  const { root, ctx, meta } = await fixture(t);
+  const lines = Array.from({ length: 200 }, (_, index) => `crlf-line-${index + 1}`);
+  lines[99] = 'crlf-target';
+  const file = path.join(root, 'crlf-diff.txt');
+  await writeFile(file, `${lines.join('\r\n')}\r\n`);
+
+  const result = await callTool(ctx, 'edit', {
+    files: [{ path: 'crlf-diff.txt', edits: [{ type: 'replace', old_text: 'crlf-target', new_text: 'crlf-updated' }] }]
+  }, meta);
+
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.newline_before, 'crlf');
+  assert.equal(result.newline_after, 'crlf');
+  assert.ok(result.diff_bytes < 1_024, `expected compact CRLF diff, got ${result.diff_bytes} bytes`);
+  assert.match(result.diff, /-crlf-target/);
+  assert.match(result.diff, /\+crlf-updated/);
+  assert.doesNotMatch(result.diff, /crlf-line-1\n/);
+});
+
+test('canonical edit applies multiple files atomically in one request', async t => {
+  const { root, ctx, meta } = await fixture(t);
+  await writeFile(path.join(root, 'first.txt'), 'first\n');
+  await writeFile(path.join(root, 'second.txt'), 'second\n');
+
+  const result = await callTool(ctx, 'edit', {
+    files: [
+      { path: 'first.txt', edits: [{ type: 'replace', old_text: 'first', new_text: 'FIRST' }] },
+      { path: 'second.txt', edits: [{ type: 'replace', old_text: 'second', new_text: 'SECOND' }] }
+    ]
+  }, meta);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.atomic, true);
+  assert.equal(result.results.length, 2);
+  assert.deepEqual(result.results.map(item => item.path), ['first.txt', 'second.txt']);
+  assert.ok(result.results.every(item => item.changed === true));
+  assert.equal(await readFile(path.join(root, 'first.txt'), 'utf8'), 'FIRST\n');
+  assert.equal(await readFile(path.join(root, 'second.txt'), 'utf8'), 'SECOND\n');
 });
 
 test('dry-run edit_many plans replay atomically with per-file guards', async t => {
@@ -245,6 +593,15 @@ test('edit returns candidate context, supports context disambiguation, and edits
   assert.deepEqual(ambiguous.error.details.candidate_lines, [2, 6]);
   assert.equal(ambiguous.error.details.candidate_contexts.length, 2);
   assert.equal(ambiguous.error.details.candidate_contexts_truncated, false);
+  assert.equal(ambiguous.error.details.direct_recovery_action_count, 2);
+  const directCandidates = ambiguous.error.details.recovery_actions.filter(action => action.action === 'retry_match_candidate');
+  assert.deepEqual(directCandidates.map(action => action.candidate_line), [2, 6]);
+  assert.ok(directCandidates.every(action => action.required_arguments.length === 0));
+  assert.ok(directCandidates.every(action => action.arguments.files[0].expected_sha256 === ambiguous.error.details.actual_sha256));
+  const directSecond = await callTool(ctx, directCandidates[1].tool, directCandidates[1].arguments, meta);
+  assert.equal(directSecond.ok, true, JSON.stringify(directSecond));
+  assert.match(await readFile(file, 'utf8'), /fn second\(\) \{\n  return result;\n\}/);
+  await writeFile(file, original);
   assert.equal(await readFile(file, 'utf8'), original);
 
   const selected = await callTool(ctx, 'edit', {
@@ -485,7 +842,23 @@ test('patch preflight reports ambiguous and multiple hunk failures with recovery
   assert.equal(ambiguous.ok, false);
   assert.equal(ambiguous.error.code, 'PATCH_CONTEXT_AMBIGUOUS');
   assert.deepEqual(ambiguous.error.details.candidate_lines, [1, 3]);
-  assert.equal(ambiguous.error.details.recovery_actions[0].tool, 'edit');
+  const candidateActions = ambiguous.error.details.recovery_actions;
+  assert.equal(candidateActions.length, 2);
+  assert.deepEqual(candidateActions.map(action => action.candidate_line), [1, 3]);
+  assert.equal(candidateActions[0].tool, 'edit');
+  assert.deepEqual(candidateActions[0].required_arguments, []);
+  assert.deepEqual(candidateActions[0].arguments, {
+    files: [{
+      path: 'ambiguous.txt',
+      edits: [{
+        type: 'replace_lines',
+        start_line: 1,
+        end_line: 1,
+        expected_text: 'same',
+        new_text: 'same\ninserted'
+      }]
+    }]
+  });
 
   await writeFile(path.join(root, 'multiple.txt'), 'actual\ncontent\n');
   const multiple = await callTool(ctx, 'patch_check', {

@@ -4,6 +4,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use serde_json::{json, Value};
 
+use crate::knowledge::sync_tool_evolution_lifecycle_for_workspace;
+
 use crate::tools::{
     ExecutionLimits, SharedRuntimeToolConfig, SharedToolContext, ToolContext, Workspace,
 };
@@ -83,6 +85,9 @@ pub fn register(
     initial_context: SharedToolContext,
     config: HubConfig,
 ) -> Result<(), String> {
+    for folder in &folders {
+        let _ = sync_tool_evolution_lifecycle_for_workspace(Path::new(&folder.path));
+    }
     let router = HubRouter::new(profile_id.clone(), folders, config)?;
     let bootstrap_folder_id = {
         let state = lock_state(&router);
@@ -145,6 +150,17 @@ pub fn resolve_context(
         }
     };
     router.resolve(host_session_key)
+}
+
+pub(crate) fn resolve_profile_folder_context(
+    profile_id: &str,
+    folder_id: &str,
+) -> Result<SharedToolContext, String> {
+    let router = lock_hubs()
+        .get(profile_id)
+        .cloned()
+        .ok_or_else(|| "Knowledge ingestion workspace router is not active.".to_string())?;
+    router.context_for_folder(folder_id, None)
 }
 
 pub fn resolve_tool_context(
@@ -554,6 +570,7 @@ impl HubRouter {
         validate_unique_folder_paths(&folders)?;
         self.config.runtime_config.update_from_runtime(runtime);
         let mut state = lock_state(self);
+        let previous_folders = state.folders.clone();
         state.contexts.retain(|_, context| {
             folders
                 .iter()
@@ -580,7 +597,20 @@ impl HubRouter {
         state
             .action_resume_folders
             .retain(|_, folder_id| folders.iter().any(|folder| folder.id == *folder_id));
+        let lifecycle_folders = folders
+            .iter()
+            .filter(|folder| {
+                !previous_folders.iter().any(|previous| {
+                    previous.id == folder.id && same_path(&previous.path, &folder.path)
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         state.folders = folders;
+        drop(state);
+        for folder in lifecycle_folders {
+            let _ = sync_tool_evolution_lifecycle_for_workspace(Path::new(&folder.path));
+        }
         Ok(())
     }
 

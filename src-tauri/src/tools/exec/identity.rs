@@ -13,17 +13,23 @@ pub(super) struct ExecutionIdentity {
     pub(super) command_fingerprint: String,
     pub(super) resource_lock_group: Option<String>,
     pub(super) resource_lock_target: Option<String>,
+    pub(super) process_timeout: Option<crate::tools::execution_timeout::ProcessTimeoutContract>,
 }
 
 pub(super) fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+fn executable_stem(program: &str) -> &str {
+    let basename = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    basename
+        .strip_suffix(".exe")
+        .or_else(|| basename.strip_suffix(".EXE"))
+        .unwrap_or(basename)
+}
+
 fn is_cargo_command(spec: &ExecSpec) -> bool {
-    Path::new(&spec.program)
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .is_some_and(|value| value.eq_ignore_ascii_case("cargo"))
+    executable_stem(&spec.program).eq_ignore_ascii_case("cargo")
         || spec.display.to_ascii_lowercase().contains("cargo ")
         || spec.display.to_ascii_lowercase().contains("tauri build")
 }
@@ -139,7 +145,7 @@ pub(super) fn execution_identity(
         .map(str::to_string)
         .or_else(|| automatic_lock.as_ref().map(|(group, _)| group.clone()));
     let resource_lock_target = automatic_lock.map(|(_, target)| target);
-    let material = json!({
+    let mut material = json!({
         "cwd": cwd.to_string_lossy(),
         "program": spec.program,
         "args": spec.args,
@@ -152,6 +158,9 @@ pub(super) fn execution_identity(
         "post_checks": post_checks,
         "resource_lock_group": resource_lock_group
     });
+    if args.get("job_timeout_ms").is_some() {
+        material["execution_mode"] = json!("job");
+    }
     let command_fingerprint = sha256_hex(&serde_json::to_vec(&material).unwrap_or_default());
     let operation_id = explicit_operation_id
         .or_else(|| deduplicate.then(|| format!("auto:{}", &command_fingerprint[..32])));
@@ -160,5 +169,6 @@ pub(super) fn execution_identity(
         command_fingerprint,
         resource_lock_group,
         resource_lock_target,
+        process_timeout: None,
     }
 }

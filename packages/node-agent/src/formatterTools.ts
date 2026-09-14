@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { access, copyFile, lstat, mkdir, readFile, readdir, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises';
+import { access, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { JsonObject, ToolContext } from './types.js';
 import { runBuffered } from './processes.js';
@@ -45,6 +46,7 @@ interface PlannedFormatFile {
   adapter_id: string;
   config_path: string | null;
   selection_source: string;
+  rust_edition?: string;
 }
 
 interface FormatGroup {
@@ -53,6 +55,7 @@ interface FormatGroup {
   files: string[];
   mutation_risk: string;
   custom: boolean;
+  rust_edition?: string;
   command_template?: CommandTemplate;
 }
 
@@ -372,6 +375,67 @@ async function collectFormatCandidates(root: string, args: JsonObject): Promise<
   return { scope, paths, requested, truncated };
 }
 
+interface CargoRustEditionMetadata {
+  package_present: boolean;
+  package_edition?: string;
+  package_inherits_workspace: boolean;
+  workspace_edition?: string;
+}
+
+export function cargoRustEditionMetadata(content: string): CargoRustEditionMetadata {
+  let section = '';
+  let packagePresent = false;
+  let packageEdition: string | undefined;
+  let packageInheritsWorkspace = false;
+  let workspaceEdition: string | undefined;
+  for (const rawLine of content.split(/\r?\n/)) {
+    const sectionMatch = rawLine.match(/^\s*\[\s*([^\]]+)\s*\]\s*(?:#.*)?$/);
+    if (sectionMatch) {
+      section = sectionMatch[1].trim();
+      if (section === 'package') packagePresent = true;
+      continue;
+    }
+    if (section === 'package') {
+      const direct = rawLine.match(/^\s*edition\s*=\s*["']([^"']+)["']/);
+      if (direct) packageEdition = direct[1];
+      if (/^\s*edition\.workspace\s*=\s*true\b/i.test(rawLine)) packageInheritsWorkspace = true;
+    } else if (section === 'workspace.package') {
+      const workspace = rawLine.match(/^\s*edition\s*=\s*["']([^"']+)["']/);
+      if (workspace) workspaceEdition = workspace[1];
+    }
+  }
+  return {
+    package_present: packagePresent,
+    ...(packageEdition ? { package_edition: packageEdition } : {}),
+    package_inherits_workspace: packageInheritsWorkspace,
+    ...(workspaceEdition ? { workspace_edition: workspaceEdition } : {})
+  };
+}
+
+async function rustEditionForFile(root: string, file: string): Promise<string> {
+  let directory = path.dirname(file);
+  let inheritsWorkspace = false;
+  while (directory === root || directory.startsWith(`${root}${path.sep}`)) {
+    const manifest = path.join(directory, 'Cargo.toml');
+    if (await exists(manifest)) {
+      const metadata = cargoRustEditionMetadata(await readFile(manifest, 'utf8'));
+      if (inheritsWorkspace && metadata.workspace_edition) return metadata.workspace_edition;
+      if (!inheritsWorkspace && metadata.package_present) {
+        if (metadata.package_edition) return metadata.package_edition;
+        if (metadata.package_inherits_workspace) {
+          inheritsWorkspace = true;
+          if (metadata.workspace_edition) return metadata.workspace_edition;
+        } else {
+          return '2015';
+        }
+      }
+    }
+    if (directory === root) break;
+    directory = path.dirname(directory);
+  }
+  return '2021';
+}
+
 async function planFormatFiles(root: string, args: JsonObject): Promise<FormatPlan> {
   const collected = await collectFormatCandidates(root, args);
   const strict = args.strict === true;
@@ -389,15 +453,23 @@ async function planFormatFiles(root: string, args: JsonObject): Promise<FormatPl
     const extension = path.extname(relative).slice(1).toLowerCase();
     const selected = await selectAdapter(root, full, extension, explicit, strict, custom);
     if (!selected) { skipped.push({ path: relative, reason: explicit === 'auto' ? 'unsupported_extension' : 'unsupported_formatter' }); continue; }
-    const planned: PlannedFormatFile = { path: relative, adapter_id: selected.id, config_path: selected.configPath, selection_source: selected.selectionSource };
+    const rustEdition = selected.id === 'rustfmt' ? await rustEditionForFile(root, full) : undefined;
+    const planned: PlannedFormatFile = {
+      path: relative,
+      adapter_id: selected.id,
+      config_path: selected.configPath,
+      selection_source: selected.selectionSource,
+      ...(rustEdition ? { rust_edition: rustEdition } : {})
+    };
     files.push(planned);
-    const groupKey = `${selected.id}\0${selected.configPath ?? ''}`;
+    const groupKey = `${selected.id}\0${selected.configPath ?? ''}\0${rustEdition ?? ''}`;
     const group = groups.get(groupKey) ?? {
       adapter_id: selected.id,
       config_path: selected.configPath,
       files: [],
       mutation_risk: selected.mutationRisk,
       custom: selected.custom,
+      ...(rustEdition ? { rust_edition: rustEdition } : {}),
       ...(selected.commandTemplate ? { command_template: selected.commandTemplate } : {})
     };
     group.files.push(relative);
@@ -445,7 +517,28 @@ async function prepareMirror(root: string, mirrorRoot: string, plan: FormatPlan)
   for (const relative of support) if (await exists(resolveInside(root, relative))) await copyWorkspaceFile(root, mirrorRoot, relative);
 }
 
-async function createMirrorRoot(root: string): Promise<{ parent: string; mirrorRoot: string; createdParent: boolean }> {
+type MirrorLocation = 'workspace' | 'system_temp';
+
+interface MirrorRoot {
+  parent: string;
+  mirrorRoot: string;
+  createdParent: boolean;
+  location: MirrorLocation;
+}
+
+function mirrorWriteUnavailable(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return code === 'EACCES' || code === 'EPERM' || code === 'EROFS';
+}
+
+async function createTemporaryMirrorRoot(): Promise<MirrorRoot> {
+  const parent = await mkdtemp(path.join(tmpdir(), 'ctmcp-format-'));
+  const mirrorRoot = path.join(parent, 'mirror');
+  await mkdir(mirrorRoot);
+  return { parent, mirrorRoot, createdParent: true, location: 'system_temp' };
+}
+
+async function createMirrorRoot(root: string): Promise<MirrorRoot> {
   const parent = path.join(root, '.coding-tools-format');
   let createdParent = false;
   let info;
@@ -457,6 +550,7 @@ async function createMirrorRoot(root: string): Promise<{ parent: string; mirrorR
       createdParent = true;
       info = await lstat(parent);
     } catch (mkdirError) {
+      if (mirrorWriteUnavailable(mkdirError)) return createTemporaryMirrorRoot();
       if ((mkdirError as NodeJS.ErrnoException).code !== 'EEXIST') throw mkdirError;
       info = await lstat(parent);
     }
@@ -467,8 +561,14 @@ async function createMirrorRoot(root: string): Promise<{ parent: string; mirrorR
     });
   }
   const mirrorRoot = path.join(parent, randomUUID());
-  await mkdir(mirrorRoot);
-  return { parent, mirrorRoot, createdParent };
+  try {
+    await mkdir(mirrorRoot);
+  } catch (error) {
+    if (!mirrorWriteUnavailable(error)) throw error;
+    if (createdParent) await rmdir(parent).catch(() => undefined);
+    return createTemporaryMirrorRoot();
+  }
+  return { parent, mirrorRoot, createdParent, location: 'workspace' };
 }
 
 function ignoredMirrorArtifact(relative: string): boolean {
@@ -496,9 +596,13 @@ function changedPaths(before: Map<string, string>, after: Map<string, string>): 
   return [...new Set([...before.keys(), ...after.keys()])].filter(file => before.get(file) !== after.get(file)).sort();
 }
 
-function builtInCommand(adapter: string, files: string[]): { candidates: string[]; args: string[] } {
+export function rustfmtCommandArgs(files: string[], edition = '2021'): string[] {
+  return ['--edition', edition, ...files];
+}
+
+function builtInCommand(adapter: string, files: string[], rustEdition?: string): { candidates: string[]; args: string[] } {
   switch (adapter) {
-    case 'rustfmt': return { candidates: ['rustfmt'], args: files };
+    case 'rustfmt': return { candidates: ['rustfmt'], args: rustfmtCommandArgs(files, rustEdition) };
     case 'prettier': return { candidates: ['prettier'], args: ['--write', ...files] };
     case 'biome': return { candidates: ['biome'], args: ['format', '--write', ...files] };
     case 'dprint': return { candidates: ['dprint'], args: ['fmt', ...files] };
@@ -586,7 +690,7 @@ export function formatterLaunchSpec(
 async function runFormatter(root: string, mirrorRoot: string, group: FormatGroup, timeoutMs: number): Promise<{ unavailable: boolean; stdout: string; stderr: string }> {
   const command = group.command_template
     ? renderCustomCommand(group.command_template, group.files, group.config_path)
-    : { ...builtInCommand(group.adapter_id, group.files), workspaceRelative: false as const };
+    : { ...builtInCommand(group.adapter_id, group.files, group.rust_edition), workspaceRelative: false as const };
   const executable = await resolveExecutable(root, command.candidates, command.workspaceRelative);
   if (!executable) return { unavailable: true, stdout: '', stderr: '' };
   const launch = formatterLaunchSpec(root, executable, command.args);
@@ -724,7 +828,7 @@ export async function formatFilesTool(ctx: ToolContext, key: string, args: JsonO
     }
 
     const originals = await readOriginals(root, plan, args);
-    const { parent, mirrorRoot, createdParent } = await createMirrorRoot(root);
+    const { parent, mirrorRoot, createdParent, location: mirrorLocation } = await createMirrorRoot(root);
     const unavailable = new Set<string>();
     const unavailableFiles = new Set<string>();
     const skipped = [...plan.skipped];
@@ -791,7 +895,8 @@ export async function formatFilesTool(ctx: ToolContext, key: string, args: JsonO
       const bounded = truncatePrefixUtf8(diff, maxDiffBytes);
       const warnings = [
         ...(plan.truncated ? ['max_files limit reached'] : []),
-        ...(unavailable.size ? [`Unavailable formatters were skipped: ${[...unavailable].sort().join(', ')}`] : [])
+        ...(unavailable.size ? [`Unavailable formatters were skipped: ${[...unavailable].sort().join(', ')}`] : []),
+        ...(mirrorLocation === 'system_temp' ? ['Workspace formatter mirror was not writable; used an isolated system temporary directory.'] : [])
       ];
       return ok({
         ...base,
@@ -804,6 +909,7 @@ export async function formatFilesTool(ctx: ToolContext, key: string, args: JsonO
         files_skipped_count: skipped.length,
         unavailable_adapters: [...unavailable].sort(),
         unexpected_changes: [],
+        mirror_location: mirrorLocation,
         diff: bounded.content,
         diff_bytes: Buffer.byteLength(bounded.content),
         diff_truncated: bounded.truncated,

@@ -8,13 +8,25 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { toolNames, tools } from '../dist/catalog.js';
-import { RESTART_SUPERVISED_FLAG, restartSupervisedFromArgv } from '../dist/cliOptions.js';
+import {
+  RESTART_SUPERVISED_FLAG,
+  RESTART_SUPERVISOR_ENV,
+  RESTART_SUPERVISOR_VALUE,
+  restartSupervisedFromArgv
+} from '../dist/cliOptions.js';
 import { captureGitRestoreSnapshot, restoreGitSnapshot } from '../dist/gitTools.js';
+import { cargoRustEditionMetadata, rustfmtCommandArgs } from '../dist/formatterTools.js';
 import { createToolContext } from '../dist/server.js';
 import { callTool } from '../dist/tools.js';
 import { MAX_RETAINED_COMMAND_GRAPHS, pruneRetainedCommandGraphs } from '../dist/processes.js';
-import { fastWorkspaceGitHead } from '../dist/runtimeRevision.js';
-import { AGENT_VERSION, BUILD_GIT_SHA, BUILD_SOURCE_CLEAN, CLIENT_COMPAT_VERSION } from '../dist/version.js';
+import { fastContainingGitRoot, fastWorkspaceGitHead, fastWorkspaceGitIdentity } from '../dist/runtimeRevision.js';
+import {
+  AGENT_VERSION,
+  BUILD_GIT_SHA,
+  BUILD_SOURCE_CLEAN,
+  BUILD_TOOL_EVOLUTION_PROPOSAL_IDS,
+  CLIENT_COMPAT_VERSION
+} from '../dist/version.js';
 
 const execFile = promisify(execFileCallback);
 const nodeProgram = path.basename(process.execPath);
@@ -100,30 +112,113 @@ test('command execution schemas expose the timeout ceilings and deprecate applic
   assert.equal(exec.inputSchema.properties.timeout_ms.maximum, 60 * 60_000);
   assert.equal(exec.inputSchema.properties.post_checks.items.properties.timeout_ms.maximum, 60 * 60_000);
   assert.equal(execMany.inputSchema.properties.commands.items.properties.timeout_ms.maximum, 60 * 60_000);
+  assert.deepEqual(execMany.inputSchema.properties.commands.items.properties.run_if.enum, ['success', 'failure', 'always']);
+  assert.equal(execMany.inputSchema.properties.commands.items.properties.run_if.default, 'success');
+  assert.equal(execMany.inputSchema.properties.commands.items.properties.yield_time_ms.maximum, 30_000);
+  assert.equal(execMany.inputSchema.properties.yield_time_ms.default, 20_000);
+  assert.equal(execMany.inputSchema.properties.yield_time_ms.maximum, 300_000);
   assert.equal(wait.inputSchema.properties.timeout_ms.maximum, 60 * 60_000);
+  assert.equal(wait.inputSchema.properties.timeout_ms.default, 20_000);
   assert.match(wait.inputSchema.properties.heartbeat_ms.description, /deprecated.*ignored.*transport/i);
 });
 
-test('portable restart supervision requires the explicit launcher flag', async () => {
-  assert.equal(restartSupervisedFromArgv(['node', 'cli.js']), false);
-  assert.equal(restartSupervisedFromArgv(['node', 'cli.js', RESTART_SUPERVISED_FLAG]), true);
+test('exec_command exposes a retained focused-to-affected Node test workflow', async t => {
+  const { root, ctx, meta } = await context();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await select(ctx, meta);
+  await writeFile(path.join(root, 'focused.test.mjs'), [
+    "import test from 'node:test';",
+    "import assert from 'node:assert/strict';",
+    "test('focused-case', () => assert.equal(1 + 1, 2));",
+    ''
+  ].join('\n'));
+
+  let result = await callTool(ctx, 'exec_command', {
+    program: nodeProgram,
+    args: ['--test', '--test-name-pattern', 'focused-case', 'focused.test.mjs'],
+    yield_time_ms: 30_000,
+    timeout_ms: 30_000,
+    output_mode: 'summary'
+  }, meta);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.test_runner_capability.runner, 'node');
+  assert.equal(result.test_workflow.current_stage, 'focused');
+  assert.equal(result.test_workflow.next_stage, 'affected');
+  assert.equal(result.test_workflow.advance_condition, 'command_ok=true');
+  assert.deepEqual(result.test_workflow.next_actions[0].required_arguments, []);
+  assert.deepEqual(result.test_workflow.next_actions[0].arguments, {
+    program: nodeProgram,
+    args: ['--test', 'focused.test.mjs'],
+    workdir: '.'
+  });
+
+  result = await callTool(ctx, 'wait_command', {
+    session_id: result.session_id,
+    cursor: result.latest_cursor ?? 0,
+    timeout_ms: 30_000,
+    until: 'finalized',
+    output_mode: 'none'
+  }, meta);
+  assert.equal(result.command_ok, true, JSON.stringify(result));
+  assert.equal(result.test_workflow.current_stage, 'focused');
+  assert.deepEqual(result.test_workflow.next_actions[0].arguments.args, ['--test', 'focused.test.mjs']);
+});
+
+test('portable restart supervision requires both the launcher flag and supervisor contract', async () => {
+  assert.equal(restartSupervisedFromArgv(['node', 'cli.js'], {}), false);
+  assert.equal(restartSupervisedFromArgv(['node', 'cli.js', RESTART_SUPERVISED_FLAG], {}), false);
+  assert.equal(restartSupervisedFromArgv(['node', 'cli.js'], {
+    [RESTART_SUPERVISOR_ENV]: RESTART_SUPERVISOR_VALUE
+  }), false);
+  assert.equal(restartSupervisedFromArgv(['node', 'cli.js', RESTART_SUPERVISED_FLAG], {
+    [RESTART_SUPERVISOR_ENV]: RESTART_SUPERVISOR_VALUE
+  }), true);
 
   const portableScriptPath = fileURLToPath(new URL('../scripts/build-portable.ps1', import.meta.url));
   const portableScript = await readFile(portableScriptPath, 'utf8');
-  assert.doesNotMatch(portableScript, /CTMCP_RESTART_SUPERVISED/);
+  const portableStartTemplate = portableScript.match(/\$startBatTemplate = @'([\s\S]*?)'@/)?.[1];
+  assert.ok(portableStartTemplate, 'portable start-node-agent.bat template should be present');
+  assert.match(portableScript, /set "CTMCP_RESTART_SUPERVISOR=active-v1"/);
   assert.match(portableScript, /"%NODE_EXE%" "%AGENT_ENTRY%" --restart-supervised %\*/);
-  assert.match(portableScript, /Node Agent is already running on port %CTMCP_PORT%/);
-  assert.match(portableScript, /coding-tools-mcp-node/);
-  assert.match(portableScript, /Port %CTMCP_PORT% is already in use by another process/);
+  assert.doesNotMatch(portableStartTemplate, /if not defined CTMCP_PORT set "CTMCP_PORT=3789"/);
+  assert.match(portableStartTemplate, /set "CTMCP_LAUNCH_PORT=3789"/);
+  assert.match(portableStartTemplate, /if defined CTMCP_PORT set "CTMCP_LAUNCH_PORT=%CTMCP_PORT%"/);
+  assert.match(portableStartTemplate, /set "CTMCP_DEFAULT_WORKSPACE=%CTMCP_DATA_DIR%\\workspace"/);
+  assert.match(portableStartTemplate, /if not defined CTMCP_WORKSPACES \(/);
+  assert.match(portableStartTemplate, /if not exist "%CTMCP_DATA_DIR%\\agent\.json" if not exist "%CTMCP_DATA_DIR%\\workspace-profiles\.json" \(/);
+  assert.match(portableStartTemplate, /if not exist "%CTMCP_DEFAULT_WORKSPACE%" mkdir "%CTMCP_DEFAULT_WORKSPACE%"/);
+  assert.match(portableStartTemplate, /set "CTMCP_WORKSPACES=%CTMCP_DEFAULT_WORKSPACE%"/);
+  assert.doesNotMatch(portableStartTemplate, /if not defined CTMCP_WORKSPACES set "CTMCP_WORKSPACES=%CTMCP_DEFAULT_WORKSPACE%"/);
+  assert.match(portableStartTemplate, /Node Agent is already running on port %CTMCP_LAUNCH_PORT%/);
+  assert.match(portableStartTemplate, /coding-tools-mcp-node/);
+  assert.match(portableStartTemplate, /Port %CTMCP_LAUNCH_PORT% is already in use by another process/);
+  assert.match(portableStartTemplate, /\$env:CTMCP_LAUNCH_PORT/);
   assert.match(portableScript, /catch \[System\.UnauthorizedAccessException\]/);
   assert.match(portableScript, /The ZIP is current/);
+  assert.match(portableScript, /Get-Command tar\.exe/);
+  assert.match(portableScript, /& \$tarExecutable -a -c -f \$zipPath -C \$PackagePath \./);
+  assert.doesNotMatch(portableScript, /& \$tarExecutable -a -c -f \$zipPath -C \$packageParent \$packageName/);
+  assert.doesNotMatch(portableScript, /Compress-Archive/);
   assert.match(portableScript, /\[switch\]\$AllowUnreleasedBuild/);
   assert.match(portableScript, /if \(-not \$AllowUnreleasedBuild\) \{/);
+  assert.match(portableScript, /switch-node-agent-to-latest\.ps1'\) -Destination \(Join-Path \$editionPackage 'update-handoff\.ps1'\)/);
+  assert.doesNotMatch(portableStartTemplate, /EXIT_CODE%"=="76/);
+  assert.doesNotMatch(portableScript, /apply-verified-update\.ps1/);
+
+  const handoffPath = fileURLToPath(new URL('../../../scripts/switch-node-agent-to-latest.ps1', import.meta.url));
+  const handoff = await readFile(handoffPath, 'utf8');
+  assert.match(handoff, /\[string\]\$FallbackPackageRoot/);
+  assert.match(handoff, /Target failed health validation; rolling back/);
+  assert.match(handoff, /Wait-NewAgentHealthy[^\r\n]+fallbackManifest\.nodeAgentVersion/);
 
   const repoLauncherPath = fileURLToPath(new URL('../../../start-node-agent.bat', import.meta.url));
   const repoLauncher = await readFile(repoLauncherPath, 'utf8');
-  assert.doesNotMatch(repoLauncher, /CTMCP_RESTART_SUPERVISED/);
+  assert.match(repoLauncher, /set "CTMCP_RESTART_SUPERVISOR=active-v1"/);
   assert.match(repoLauncher, /dist\\cli\.js" --restart-supervised %\*/);
+
+  const devServerPath = fileURLToPath(new URL('../scripts/dev-server.mjs', import.meta.url));
+  const devServer = await readFile(devServerPath, 'utf8');
+  assert.match(devServer, /CTMCP_RESTART_SUPERVISOR:\s*'active-v1'/);
 });
 
 test('server_info reports the package Agent version', async () => {
@@ -141,6 +236,10 @@ test('server_info reports the package Agent version', async () => {
   assert.ok(['revision_match_unverified', 'mismatch', 'dirty_build', 'unknown', 'not_applicable'].includes(info.runtime_revision.trust_state));
   assert.equal(info.runtime_revision.source_workspace, false);
   assert.equal(info.runtime_revision.source_clean, BUILD_SOURCE_CLEAN);
+  assert.ok(Array.isArray(BUILD_TOOL_EVOLUTION_PROPOSAL_IDS));
+  assert.ok(BUILD_TOOL_EVOLUTION_PROPOSAL_IDS.length <= 16);
+  assert.ok(BUILD_TOOL_EVOLUTION_PROPOSAL_IDS.every(value => /^[0-9a-f]{64}$/.test(value)));
+  if (BUILD_SOURCE_CLEAN !== true) assert.deepEqual(BUILD_TOOL_EVOLUTION_PROPOSAL_IDS, []);
   assert.equal(info.runtime_revision.workspace_clean_verified, false);
   assert.equal(info.runtime_revision.workspace_clean_verification_tool, 'git_status');
   assert.ok(info.runtime_revision.trusted === null || info.runtime_revision.trusted === false);
@@ -160,7 +259,22 @@ test('fastWorkspaceGitHead reads repo-local refs and rejects external pointers w
   await mkdir(refDir, { recursive: true });
   await writeFile(path.join(gitDir, 'HEAD'), 'ref: refs/heads/main\n');
   await writeFile(path.join(refDir, 'main'), '0123456789abcdef0123456789abcdef01234567\n');
+  assert.deepEqual(await fastWorkspaceGitIdentity(root), {
+    branch: 'main',
+    head: '0123456789abcdef0123456789abcdef01234567'
+  });
   assert.equal(await fastWorkspaceGitHead(root), '0123456789abcdef0123456789abcdef01234567');
+  const deep = path.join(root, 'src', 'deep');
+  await mkdir(deep, { recursive: true });
+  assert.equal(await fastContainingGitRoot(root, deep), root);
+
+  const nested = path.join(root, 'packages', 'nested');
+  const nestedGit = path.join(nested, '.git');
+  const nestedDeep = path.join(nested, 'src', 'deep');
+  await mkdir(nestedDeep, { recursive: true });
+  await mkdir(nestedGit, { recursive: true });
+  await writeFile(path.join(nestedGit, 'HEAD'), '89abcdef0123456789abcdef0123456789abcdef\n');
+  assert.equal(await fastContainingGitRoot(root, nestedDeep), nested);
 
   const repository = await mkdtemp(path.join(tmpdir(), 'ctmcp-node-git-worktree-'));
   t.after(() => rm(repository, { recursive: true, force: true }));
@@ -174,7 +288,14 @@ test('fastWorkspaceGitHead reads repo-local refs and rejects external pointers w
   await writeFile(path.join(worktreeGit, 'HEAD'), 'ref: refs/heads/linked\n');
   await writeFile(path.join(worktreeGit, 'commondir'), '../..\n');
   await writeFile(path.join(common, 'refs', 'heads', 'linked'), 'fedcba9876543210fedcba9876543210fedcba98\n');
+  assert.deepEqual(await fastWorkspaceGitIdentity(linked), {
+    branch: 'linked',
+    head: 'fedcba9876543210fedcba9876543210fedcba98'
+  });
   assert.equal(await fastWorkspaceGitHead(linked), 'fedcba9876543210fedcba9876543210fedcba98');
+  const linkedDeep = path.join(linked, 'src', 'deep');
+  await mkdir(linkedDeep, { recursive: true });
+  assert.equal(await fastContainingGitRoot(repository, linkedDeep), linked);
 
   const malicious = await mkdtemp(path.join(tmpdir(), 'ctmcp-node-git-malicious-'));
   const external = await mkdtemp(path.join(tmpdir(), 'ctmcp-node-git-external-'));
@@ -183,6 +304,7 @@ test('fastWorkspaceGitHead reads repo-local refs and rejects external pointers w
   await writeFile(path.join(external, 'HEAD'), '0123456789abcdef0123456789abcdef01234567\n');
   await writeFile(path.join(malicious, '.git'), `gitdir: ${external}\n`);
   assert.equal(await fastWorkspaceGitHead(malicious), null);
+  assert.equal(await fastContainingGitRoot(malicious, malicious), null);
 });
 
 test('workspace selection gates access and read_file returns a bounded slice', async () => {
@@ -217,8 +339,35 @@ test('read_many, search_text, list_files and project_map follow the Rust read co
   assert.equal(batch.result_count, 1);
   assert.equal(batch.merged_count, 1);
   assert.deepEqual(batch.results[0].source_indexes, [0, 1]);
+  assert.equal(batch.content_mode, 'numbered');
+  assert.equal(batch.results[0].content_mode, 'numbered');
+  assert.equal(batch.results[0].content, undefined);
+  assert.equal(batch.results[0].content_omitted, true);
   assert.match(batch.results[0].numbered_content, /^\s+1 \| alpha/m);
-  assert.equal(batch.results[0].content, 'alpha\nbeta needle\ngamma needle\ndelta\n');
+
+  const bothContent = await callTool(ctx, 'read_many', {
+    items: [{ path: 'hello.txt', start_line: 1, end_line: 2 }],
+    content_mode: 'both'
+  }, meta);
+  assert.equal(bothContent.content_mode, 'both');
+  assert.equal(bothContent.results[0].content, 'alpha\nbeta needle\n');
+  assert.match(bothContent.results[0].numbered_content, /^\s+1 \| alpha/m);
+
+  const largeLines = Array.from({ length: 500 }, (_, index) => `${String(index + 1).padStart(4, '0')}-${'x'.repeat(80)}`);
+  await writeFile(path.join(root, 'large-read.txt'), `${largeLines.join('\n')}\n`);
+  const numberedOnlyLarge = await callTool(ctx, 'read_many', {
+    items: [{ path: 'large-read.txt', start_line: 1, end_line: 500 }],
+    line_numbers: true,
+    max_total_bytes: 128 * 1024
+  }, meta);
+  const bothLarge = await callTool(ctx, 'read_many', {
+    items: [{ path: 'large-read.txt', start_line: 1, end_line: 500 }],
+    content_mode: 'both',
+    max_total_bytes: 128 * 1024
+  }, meta);
+  const numberedResponseBytes = Buffer.byteLength(JSON.stringify(numberedOnlyLarge));
+  const bothResponseBytes = Buffer.byteLength(JSON.stringify(bothLarge));
+  assert.ok(numberedResponseBytes < bothResponseBytes * 0.7, `${numberedResponseBytes} should be < 70% of ${bothResponseBytes}`);
 
   const firstPage = await callTool(ctx, 'search_text', {
     query: 'needle',
@@ -261,6 +410,53 @@ test('read_many, search_text, list_files and project_map follow the Rust read co
   assert.equal(exactTotal.total_matches, 3);
   assert.ok(exactTotal.files_considered >= exactTotal.scanned_files);
   assert.equal(exactTotal.early_stop_reason, null);
+  assert.equal(exactTotal.exact_total_forced_full_scan, true);
+  assert.match(exactTotal.search_recommendation, /full scan/);
+  assert.ok(exactTotal.warnings.some(warning => warning.includes('calculate_total')));
+
+  const searchPayloadLines = Array.from({ length: 300 }, (_, index) => `needle ${String(index).padStart(3, '0')} ${'x'.repeat(2000)}`);
+  await writeFile(path.join(root, 'large-search.txt'), `${searchPayloadLines.join('\n')}\n`);
+  const boundedPayload = await callTool(ctx, 'search_text', {
+    query: 'needle',
+    path: 'large-search.txt',
+    max_results: 1000,
+    max_preview_bytes: 4096
+  }, meta);
+  assert.equal(boundedPayload.response_limit_reached, true);
+  assert.equal(boundedPayload.truncated, true);
+  assert.equal(boundedPayload.early_stop_reason, 'response_limit');
+  assert.equal(boundedPayload.scan_completed, false);
+  assert.equal(boundedPayload.total_matches_exact, false);
+  assert.ok(boundedPayload.returned_count > 0 && boundedPayload.returned_count < 300);
+  assert.ok(boundedPayload.response_bytes_estimate <= boundedPayload.response_bytes_limit);
+  assert.equal(boundedPayload.next_cursor, boundedPayload.returned_count);
+  assert.ok(boundedPayload.warnings.some(warning => warning.includes('response payload')));
+
+  const boundedPayloadNext = await callTool(ctx, 'search_text', {
+    query: 'needle',
+    path: 'large-search.txt',
+    max_results: 1000,
+    max_preview_bytes: 4096,
+    cursor: boundedPayload.next_cursor
+  }, meta);
+  assert.equal(boundedPayloadNext.matches[0].line, boundedPayload.returned_count + 1);
+
+  const exactPayload = await callTool(ctx, 'search_text', {
+    query: 'needle',
+    path: 'large-search.txt',
+    max_results: 1000,
+    max_preview_bytes: 4096,
+    calculate_total: true
+  }, meta);
+  assert.equal(exactPayload.response_limit_reached, true);
+  assert.equal(exactPayload.truncated, true);
+  assert.equal(exactPayload.scan_completed, true);
+  assert.equal(exactPayload.total_matches_exact, true);
+  assert.equal(exactPayload.total_matches, 300);
+  assert.equal(exactPayload.early_stop_reason, null);
+  assert.equal(exactPayload.exact_total_forced_full_scan, true);
+  assert.ok(exactPayload.returned_count < 300);
+  assert.ok(exactPayload.response_bytes_estimate <= exactPayload.response_bytes_limit);
 
   const filenameOnly = await callTool(ctx, 'search_text', {
     filename_query: 'nested',
@@ -268,7 +464,11 @@ test('read_many, search_text, list_files and project_map follow the Rust read co
   }, meta);
   assert.deepEqual(filenameOnly.files.map(item => item.path), ['nested/test.txt']);
 
-  const counted = await callTool(ctx, 'search_text', { query: 'needle', count_only: true }, meta);
+  const counted = await callTool(ctx, 'search_text', {
+    query: 'needle',
+    count_only: true,
+    include_globs: ['hello.txt', 'nested/test.txt']
+  }, meta);
   assert.equal(counted.total_matches, 3);
   assert.equal(counted.calculate_total, true);
   assert.equal(counted.total_matches_exact, true);
@@ -284,6 +484,81 @@ test('read_many, search_text, list_files and project_map follow the Rust read co
   assert.ok(project.manifests.some(item => item.path === 'package.json' && item.kind === 'npm'));
   assert.equal(project.package_scripts.test, 'node --test');
   assert.ok(project.suggested_commands.some(item => item.command === 'npm run test'));
+});
+
+test('validated search canary preserves exact totals while skipping tail match-detail work', async () => {
+  const { root, ctx } = await context();
+  const runtime = ctx.folderRuntimes.get('repo');
+  assert.ok(runtime);
+  const lines = Array.from({ length: 400 }, (_, index) => `needle ${String(index).padStart(3, '0')} ${'x'.repeat(200)}`);
+  await writeFile(path.join(root, 'canary-search.txt'), `${lines.join('\n')}\n`);
+  const strategy = await runtime.knowledgeStore.upsert({
+    id: '',
+    schemaVersion: 1,
+    scope: 'runtime',
+    target: 'tool_strategy',
+    status: 'validated',
+    trigger: { tool: 'search_text', calculate_total: true },
+    hypothesis: 'Exact total search should preserve semantics while reducing tail detail work.',
+    recommendedAction: { recommendation: 'prefer_bounded_search', calculate_total: false },
+    evidence: {
+      observations: 20,
+      successes: 20,
+      failures: 0,
+      totalDurationMs: 20_000,
+      totalRequestBytes: 2_000,
+      totalResponseBytes: 4_000,
+      firstSeenAtMs: 1,
+      lastSeenAtMs: 20
+    },
+    confidence: 0.8,
+    sourceEventIds: Array.from({ length: 20 }, (_, index) => `seed-${index}`),
+    counterexampleEventIds: [],
+    createdAtMs: 1,
+    updatedAtMs: 20
+  });
+  await runtime.canaryStrategyEngine.refresh();
+  const args = {
+    query: 'needle',
+    path: 'canary-search.txt',
+    max_results: 1,
+    calculate_total: true
+  };
+  const findMeta = async applied => {
+    for (let index = 0; index < 500; index += 1) {
+      const meta = { 'openai/session': `search-canary-${applied ? 'on' : 'off'}-${index}` };
+      const key = ctx.conversations.identity(meta).key;
+      const decision = await runtime.canaryStrategyEngine.decide('search_text', args, key);
+      if (decision?.applied === applied) return meta;
+    }
+    throw new Error(`Unable to find deterministic canary cohort applied=${applied}`);
+  };
+  const controlMeta = await findMeta(false);
+  const canaryMeta = await findMeta(true);
+  await select(ctx, controlMeta);
+  await select(ctx, canaryMeta);
+
+  const control = await callTool(ctx, 'search_text', args, controlMeta);
+  const canary = await callTool(ctx, 'search_text', args, canaryMeta);
+  assert.equal(control.total_matches, 400);
+  assert.equal(canary.total_matches, control.total_matches);
+  assert.equal(canary.total_matches_exact, control.total_matches_exact);
+  assert.equal(canary.returned_count, control.returned_count);
+  assert.equal(canary.next_cursor, control.next_cursor);
+  assert.deepEqual(canary.matches, control.matches);
+  assert.equal(control.exact_total_forced_full_scan, true);
+  assert.equal(canary.exact_total_forced_full_scan, true);
+  assert.equal(control.exact_total_fast_tail, false);
+  assert.equal(canary.exact_total_fast_tail, true);
+  assert.ok(canary.exact_total_fast_tail_skipped_match_details >= 399);
+  assert.equal('knowledge_canary_id' in control, false, 'knowledge metadata stays out of normal tool responses');
+  assert.equal('knowledge_canary_id' in canary, false, 'knowledge metadata stays out of normal tool responses');
+
+  await runtime.knowledgeIngestor.flush();
+  const [impact] = await runtime.canaryImpactStore.list();
+  assert.equal(impact.knowledgeId, strategy.id);
+  assert.equal(impact.controlCalls, 1);
+  assert.equal(impact.interventionCalls, 1);
 });
 
 test('format_files plans safely and applies guarded builtin JSON formatting', async () => {
@@ -331,6 +606,66 @@ test('format_files plans safely and applies guarded builtin JSON formatting', as
   }, meta);
   assert.equal(projectApply.ok, false);
   assert.equal(projectApply.error.code, 'DANGEROUS_OPERATION_REQUIRES_CONFIRMATION');
+});
+
+test('format_files derives Cargo editions and keeps rustfmt groups edition-safe', async () => {
+  const { root, ctx, meta } = await context();
+  await mkdir(path.join(root, 'crate-2021', 'src'), { recursive: true });
+  await mkdir(path.join(root, 'crate-2024', 'src'), { recursive: true });
+  await mkdir(path.join(root, 'member', 'src'), { recursive: true });
+  await writeFile(path.join(root, 'Cargo.toml'), '[workspace]\nmembers = ["member"]\n[workspace.package]\nedition = "2024"\n');
+  await writeFile(path.join(root, 'crate-2021', 'Cargo.toml'), '[package]\nname = "a"\nversion = "0.1.0"\nedition = "2021"\n');
+  await writeFile(path.join(root, 'crate-2024', 'Cargo.toml'), '[package]\nname = "b"\nversion = "0.1.0"\nedition = "2024"\n');
+  await writeFile(path.join(root, 'member', 'Cargo.toml'), '[package]\nname = "member"\nversion = "0.1.0"\nedition.workspace = true\n');
+  await writeFile(path.join(root, 'crate-2021', 'src', 'lib.rs'), 'pub async fn a() {}\n');
+  await writeFile(path.join(root, 'crate-2024', 'src', 'lib.rs'), 'pub async fn b() {}\n');
+  await writeFile(path.join(root, 'member', 'src', 'lib.rs'), 'pub async fn inherited() {}\n');
+  await select(ctx, meta);
+
+  const planned = await callTool(ctx, 'format_files', {
+    paths: ['crate-2021/src/lib.rs', 'crate-2024/src/lib.rs', 'member/src/lib.rs'],
+    mode: 'plan',
+    formatter: 'rustfmt'
+  }, meta);
+  assert.equal(planned.ok, true, JSON.stringify(planned));
+  assert.deepEqual(planned.groups.map(group => group.rust_edition).sort(), ['2021', '2024', '2024']);
+  assert.deepEqual(planned.selection.map(file => file.rust_edition).sort(), ['2021', '2024', '2024']);
+  assert.deepEqual(rustfmtCommandArgs(['src/lib.rs'], '2024'), ['--edition', '2024', 'src/lib.rs']);
+
+  assert.deepEqual(cargoRustEditionMetadata('[package]\nedition = "2024"\n'), {
+    package_present: true,
+    package_edition: '2024',
+    package_inherits_workspace: false
+  });
+  assert.deepEqual(cargoRustEditionMetadata('[package]\nedition.workspace = true\n[workspace.package]\nedition = "2021"\n'), {
+    package_present: true,
+    package_inherits_workspace: true,
+    workspace_edition: '2021'
+  });
+});
+
+test('format_files executes rustfmt with the Cargo edition when rustfmt is available', async t => {
+  try {
+    await execFile('rustfmt', ['--version']);
+  } catch {
+    t.skip('rustfmt is unavailable');
+    return;
+  }
+  const { root, ctx, meta } = await context();
+  await mkdir(path.join(root, 'src'), { recursive: true });
+  await writeFile(path.join(root, 'Cargo.toml'), '[package]\nname = "edition-smoke"\nversion = "0.1.0"\nedition = "2024"\n');
+  await writeFile(path.join(root, 'src', 'lib.rs'), 'pub async fn smoke(){println!("ok");}\n');
+  await select(ctx, meta);
+
+  const checked = await callTool(ctx, 'format_files', {
+    paths: ['src/lib.rs'],
+    mode: 'check',
+    formatter: 'rustfmt',
+    strict: true
+  }, meta);
+  assert.equal(checked.ok, true, JSON.stringify(checked));
+  assert.equal(checked.groups[0].rust_edition, '2024');
+  assert.deepEqual(checked.unavailable_adapters, []);
 });
 
 test('custom formatter uses workspace configuration and executes only after confirmation', async () => {
@@ -404,8 +739,30 @@ for (const file of process.argv.slice(2)) fs.writeFileSync(file, 'HELLO\\n');
     confirm: true
   }, meta);
   assert.equal(result.ok, true);
+  assert.equal(result.mirror_location, 'workspace');
   assert.equal(await pathExists(mirrorParent), true);
   assert.deepEqual(await import('node:fs/promises').then(fs => fs.readdir(mirrorParent)), []);
+});
+
+test('formatter falls back to system temp when the workspace mirror is not writable', { skip: process.platform === 'win32' }, async t => {
+  const { root, ctx, meta } = await context();
+  const file = path.join(root, 'config.json');
+  await writeFile(file, '{"b":2,"a":1}');
+  const mirrorParent = path.join(root, '.coding-tools-format');
+  await mkdir(mirrorParent);
+  await chmod(mirrorParent, 0o555);
+  t.after(async () => chmod(mirrorParent, 0o755).catch(() => undefined));
+  await select(ctx, meta);
+
+  const result = await callTool(ctx, 'format_files', {
+    paths: ['config.json'],
+    mode: 'check'
+  }, meta);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.mirror_location, 'system_temp');
+  assert.deepEqual(result.files_changed, ['config.json']);
+  assert.ok(result.warnings.some(warning => warning.includes('system temporary directory')));
+  assert.equal(await readFile(file, 'utf8'), '{"b":2,"a":1}');
 });
 
 test('custom formatter paths must stay inside the workspace', async () => {
@@ -689,6 +1046,44 @@ test('git_worktree reuses an existing branch and derives a managed default path'
   assert.equal(removed.ok, true, JSON.stringify(removed));
 });
 
+test('Git read tools follow the active linked worktree cwd', async () => {
+  const { root, ctx, meta } = await gitContext();
+  const worktreePath = '.worktrees/read-tools';
+  const linked = path.join(root, worktreePath);
+  const branch = 'feature/read-tools-worktree';
+  const created = await callTool(ctx, 'git_worktree', {
+    action: 'create', path: worktreePath, branch
+  }, meta);
+  assert.equal(created.ok, true, JSON.stringify(created));
+  await callTool(ctx, 'set_default_cwd', { path: worktreePath }, meta);
+  await writeFile(path.join(linked, 'tracked.txt'), 'linked-read-tools\n');
+  await git(linked, 'add', '--', 'tracked.txt');
+  await git(linked, 'commit', '-m', 'linked read tools');
+  const linkedHead = await git(linked, 'rev-parse', 'HEAD');
+
+  const log = await callTool(ctx, 'git_log', { max_count: 1 }, meta);
+  assert.equal(log.ok, true, JSON.stringify(log));
+  assert.equal(log.commits[0].hash, linkedHead);
+  assert.equal(log.commits[0].subject, 'linked read tools');
+
+  const shown = await callTool(ctx, 'git_show', { rev: 'HEAD', include_diff: false }, meta);
+  assert.equal(shown.ok, true, JSON.stringify(shown));
+  assert.match(shown.content, /linked read tools/);
+
+  const blame = await callTool(ctx, 'git_blame', { path: 'tracked.txt', start_line: 1, end_line: 1 }, meta);
+  assert.equal(blame.ok, true, JSON.stringify(blame));
+  assert.equal(blame.lines[0].commit, linkedHead);
+  assert.equal(blame.lines[0].content, 'linked-read-tools');
+
+  await callTool(ctx, 'set_default_cwd', { path: '.' }, meta);
+  const rootLog = await callTool(ctx, 'git_log', { max_count: 1 }, meta);
+  assert.notEqual(rootLog.commits[0].hash, linkedHead);
+
+  await callTool(ctx, 'git_worktree', {
+    action: 'remove', path: worktreePath, delete_branch: true, confirm: true
+  }, meta);
+});
+
 test('git_worktree remove dry-run is non-destructive and does not require confirmation', async () => {
   const { root, ctx, meta } = await gitContext();
   const worktreePath = '.worktrees/dry-remove';
@@ -768,6 +1163,86 @@ test('Git mutators route to a selected nested repository and guard its fingerpri
   assert.equal(staged.repo.repo_path, 'nested-repo');
   assert.equal(await git(nested, 'diff', '--cached', '--name-only'), 'tracked.txt');
   assert.equal(await git(root, 'diff', '--cached', '--name-only'), '');
+});
+
+test('Git mutators keep explicit repo_path workspace-relative and canonicalize pathspecs with default cwd', async () => {
+  const { root, ctx, meta } = await gitContext();
+  const nested = path.join(root, 'nested-repo');
+  await mkdir(nested);
+  await git(nested, 'init');
+  await git(nested, 'config', 'user.email', 'test@example.com');
+  await git(nested, 'config', 'user.name', 'Test User');
+  await writeFile(path.join(nested, 'tracked.txt'), 'before\n');
+  await git(nested, 'add', 'tracked.txt');
+  await git(nested, 'commit', '-m', 'initial');
+  await writeFile(path.join(nested, 'tracked.txt'), 'after\n');
+
+  const selected = await callTool(ctx, 'set_default_cwd', { path: 'nested-repo' }, meta);
+  assert.equal(selected.ok, true, JSON.stringify(selected));
+
+  const repoRelative = await callTool(ctx, 'git_stage', {
+    repo_path: 'nested-repo',
+    paths: ['tracked.txt'],
+    dry_run: true
+  }, meta);
+  assert.equal(repoRelative.ok, true, JSON.stringify(repoRelative));
+  assert.equal(repoRelative.repo.repo_path, 'nested-repo');
+  assert.deepEqual(repoRelative.paths, ['tracked.txt']);
+
+  const workspaceRelative = await callTool(ctx, 'git_stage', {
+    repo_path: 'nested-repo',
+    paths: ['nested-repo/tracked.txt'],
+    dry_run: true
+  }, meta);
+  assert.equal(workspaceRelative.ok, true, JSON.stringify(workspaceRelative));
+  assert.equal(workspaceRelative.repo.repo_path, 'nested-repo');
+  assert.deepEqual(workspaceRelative.paths, ['tracked.txt']);
+
+  const implicitRepo = await callTool(ctx, 'git_stage', {
+    paths: ['tracked.txt'],
+    dry_run: true
+  }, meta);
+  assert.equal(implicitRepo.ok, true, JSON.stringify(implicitRepo));
+  assert.equal(implicitRepo.repo.repo_path, 'nested-repo');
+  assert.deepEqual(implicitRepo.paths, ['tracked.txt']);
+
+  const diffRepoRelative = await callTool(ctx, 'git_diff', {
+    repo_path: 'nested-repo',
+    paths: ['tracked.txt']
+  }, meta);
+  assert.equal(diffRepoRelative.ok, true, JSON.stringify(diffRepoRelative));
+  assert.equal(diffRepoRelative.repo.repo_path, 'nested-repo');
+  assert.deepEqual(diffRepoRelative.paths, ['tracked.txt']);
+  assert.match(diffRepoRelative.diff, /-before/);
+  assert.match(diffRepoRelative.diff, /\+after/);
+
+  const diffWorkspaceRelative = await callTool(ctx, 'git_diff', {
+    repo_path: 'nested-repo',
+    paths: ['nested-repo/tracked.txt']
+  }, meta);
+  assert.equal(diffWorkspaceRelative.ok, true, JSON.stringify(diffWorkspaceRelative));
+  assert.equal(diffWorkspaceRelative.repo.repo_path, 'nested-repo');
+  assert.deepEqual(diffWorkspaceRelative.paths, ['tracked.txt']);
+  assert.equal(diffWorkspaceRelative.diff, diffRepoRelative.diff);
+
+  const implicitDiff = await callTool(ctx, 'git_diff', { paths: ['tracked.txt'] }, meta);
+  assert.equal(implicitDiff.ok, true, JSON.stringify(implicitDiff));
+  assert.equal(implicitDiff.repo.repo_path, 'nested-repo');
+  assert.deepEqual(implicitDiff.paths, ['tracked.txt']);
+
+  const shown = await callTool(ctx, 'git_show', {
+    repo_path: 'nested-repo',
+    rev: 'HEAD',
+    include_diff: false
+  }, meta);
+  assert.equal(shown.ok, true, JSON.stringify(shown));
+  assert.equal(shown.repo.repo_path, 'nested-repo');
+  assert.match(shown.content, /initial/);
+
+  const implicitShow = await callTool(ctx, 'git_show', { rev: 'HEAD', include_diff: false }, meta);
+  assert.equal(implicitShow.ok, true, JSON.stringify(implicitShow));
+  assert.equal(implicitShow.repo.repo_path, 'nested-repo');
+  assert.equal(implicitShow.content, shown.content);
 });
 
 test('git_commit enforces a clean index and returns previous/new HEAD metadata', async () => {
@@ -1068,6 +1543,69 @@ test('exec_many runs a dependency DAG and retains output sessions', async () => 
   assert.equal(sessions.count, 2);
 });
 
+test('exec_many run_if keeps generic finalizers running after dependency failure', async () => {
+  const { ctx, meta } = await context();
+  await select(ctx, meta);
+  const graph = await callTool(ctx, 'exec_many', {
+    mode: 'dag',
+    stop_on_error: true,
+    commands: [
+      { id: 'fail', program: nodeProgram, args: ['-e', 'process.exit(7)'] },
+      { id: 'cleanup', depends_on: ['fail'], run_if: 'always', program: nodeProgram, args: ['-e', 'process.stdout.write("cleanup")'] },
+      { id: 'on-failure', depends_on: ['fail'], run_if: 'failure', program: nodeProgram, args: ['-e', 'process.stdout.write("failure-handler")'] },
+      { id: 'success-only', depends_on: ['fail'], program: nodeProgram, args: ['-e', 'process.stdout.write("must-not-run")'] }
+    ]
+  }, meta);
+  assert.equal(graph.ok, true, JSON.stringify(graph));
+  assert.equal(graph.command_ok, false, JSON.stringify(graph));
+  assert.deepEqual(graph.failed_command_ids, ['fail']);
+  assert.equal(graph.results.find(result => result.id === 'cleanup').stdout, 'cleanup');
+  assert.equal(graph.results.find(result => result.id === 'on-failure').stdout, 'failure-handler');
+  assert.equal(graph.results.find(result => result.id === 'success-only').skipped, true);
+  assert.equal(graph.results.find(result => result.id === 'success-only').skip_reason, 'dependency_failed');
+  assert.equal(graph.results.find(result => result.id === 'cleanup').run_if, 'always');
+  assert.equal(graph.results.find(result => result.id === 'on-failure').run_if, 'failure');
+});
+
+test('exec_many run_if always finalizer runs after a command timeout', async () => {
+  const { ctx, meta } = await context();
+  await select(ctx, meta);
+  const graph = await callTool(ctx, 'exec_many', {
+    mode: 'dag',
+    stop_on_error: true,
+    commands: [
+      { id: 'timeout', program: nodeProgram, args: ['-e', 'setTimeout(() => process.stdout.write("late"), 5000)'], timeout_ms: 150 },
+      { id: 'cleanup', depends_on: ['timeout'], run_if: 'always', program: nodeProgram, args: ['-e', 'process.stdout.write("cleanup-after-timeout")'] }
+    ]
+  }, meta);
+  assert.equal(graph.ok, true, JSON.stringify(graph));
+  assert.equal(graph.command_ok, false, JSON.stringify(graph));
+  assert.deepEqual(graph.failed_command_ids, ['timeout']);
+  assert.equal(graph.results.find(result => result.id === 'cleanup').stdout, 'cleanup-after-timeout');
+  assert.equal(graph.results.find(result => result.id === 'cleanup').run_if, 'always');
+  assert.equal(graph.first_failure?.termination_reason, 'process_timeout');
+});
+
+test('exec_many failure-only branches are neutral skips when dependencies succeed', async () => {
+  const { ctx, meta } = await context();
+  await select(ctx, meta);
+  const graph = await callTool(ctx, 'exec_many', {
+    mode: 'dag',
+    commands: [
+      { id: 'pass', program: nodeProgram, args: ['-e', 'process.stdout.write("pass")'] },
+      { id: 'cleanup', depends_on: ['pass'], run_if: 'always', program: nodeProgram, args: ['-e', 'process.stdout.write("cleanup")'] },
+      { id: 'on-failure', depends_on: ['pass'], run_if: 'failure', program: nodeProgram, args: ['-e', 'process.stdout.write("must-not-run")'] }
+    ]
+  }, meta);
+  assert.equal(graph.ok, true, JSON.stringify(graph));
+  assert.equal(graph.command_ok, true, JSON.stringify(graph));
+  assert.equal(graph.graph_execution_ok, true, JSON.stringify(graph));
+  assert.equal(graph.results.find(result => result.id === 'cleanup').stdout, 'cleanup');
+  assert.equal(graph.results.find(result => result.id === 'on-failure').skipped, true);
+  assert.equal(graph.results.find(result => result.id === 'on-failure').skip_reason, 'run_condition_not_met');
+  assert.deepEqual(graph.conditional_skipped_command_ids, ['on-failure']);
+});
+
 test('exec_many reports failed and skipped command ids with bounded recovery guidance', async () => {
   const { ctx, meta } = await context();
   await select(ctx, meta);
@@ -1078,7 +1616,9 @@ test('exec_many reports failed and skipped command ids with bounded recovery gui
       { id: 'blocked', depends_on: ['fail'], program: nodeProgram, args: ['-e', 'process.stdout.write("never")'] }
     ]
   }, meta);
-  assert.equal(graph.ok, false);
+  assert.equal(graph.ok, true);
+  assert.equal(graph.command_ok, false);
+  assert.equal(graph.graph_execution_ok, false);
   assert.deepEqual(graph.failed_command_ids, ['fail']);
   assert.deepEqual(graph.skipped_command_ids, ['blocked']);
   assert.equal(graph.first_failure.id, 'fail');
@@ -1128,8 +1668,8 @@ test('exec_many cancellation preserves a pre-existing deduplicated child session
   const child = {
     operation_id: 'shared-preexisting-child',
     program: nodeProgram,
-    args: ['-e', 'setTimeout(() => process.stdout.write("shared-finished"), 1_500)'],
-    timeout_ms: 5_000,
+    args: ['-e', 'setTimeout(() => process.exit(0), 30_000)'],
+    timeout_ms: 60_000,
     yield_time_ms: 0,
     output_mode: 'none'
   };
@@ -1163,16 +1703,14 @@ test('exec_many cancellation preserves a pre-existing deduplicated child session
   assert.equal(stillShared.termination_reason, 'running');
   assert.equal(stillShared.process_still_running, true);
 
-  const finalized = await callTool(ctx, 'wait_command', {
+  const cleaned = await callTool(ctx, 'kill_session', {
     session_id: original.session_id,
-    cursor: stillShared.latest_cursor,
-    timeout_ms: 2_000,
-    until: 'finalized',
-    output_mode: 'all'
+    signal: 'KILL',
+    wait_ms: 5_000
   }, meta);
-  assert.equal(finalized.command_ok, true);
-  assert.equal(finalized.termination_reason, 'exited');
-  assert.equal(finalized.stdout, 'shared-finished');
+  assert.equal(cleaned.ok, true, JSON.stringify(cleaned));
+  assert.equal(cleaned.killed, true, JSON.stringify(cleaned));
+  assert.equal(cleaned.process_still_running, false, JSON.stringify(cleaned));
 });
 
 test('exec_many keeps command setup failures inside the graph result', async () => {
@@ -1187,7 +1725,8 @@ test('exec_many keeps command setup failures inside the graph result', async () 
       workdir: 'missing-exec-many-workdir'
     }]
   }, meta);
-  assert.equal(graph.ok, false);
+  assert.equal(graph.ok, true);
+  assert.equal(graph.command_ok, false);
   assert.deepEqual(graph.failed_command_ids, ['missing-workdir']);
   assert.equal(graph.results[0].command_ok, false);
   assert.equal(typeof graph.results[0].error.code, 'string');
@@ -1216,19 +1755,37 @@ test('exec_many detaches long graphs and reattaches without starting duplicate c
   assert.equal(started.graph_status, 'running');
   assert.equal(started.detached, true);
   assert.equal(started.reattached, false);
+  assert.equal(started.result_mode, 'summary');
+  assert.equal(started.result_output_included, false);
+  assert.equal(started.results[0].stdout, undefined);
+  assert.equal(started.graph_yield_ms, 10);
+  assert.equal(started.graph_requested_yield_ms, 10);
   assert.equal(started.next_actions[0].tool, 'exec_many');
-  assert.deepEqual(started.next_actions[0].arguments, { operation_id: operationId, yield_time_ms: 30000, result_mode: 'summary' });
+  assert.deepEqual(started.next_actions[0].arguments, { operation_id: operationId, yield_time_ms: 20000, result_mode: 'summary' });
+
+  const verboseProgress = await callTool(ctx, 'exec_many', {
+    operation_id: operationId,
+    yield_time_ms: 0,
+    result_mode: 'full'
+  }, meta);
+  assert.equal(verboseProgress.graph_completed, false);
+  assert.equal(verboseProgress.result_mode, 'full');
+  assert.equal(verboseProgress.result_output_included, true);
 
   const finalized = await callTool(ctx, 'exec_many', {
     operation_id: operationId,
-    yield_time_ms: 2_000
+    yield_time_ms: 300_000,
+    result_mode: 'full'
   }, meta);
   assert.equal(finalized.ok, true);
+  assert.equal(finalized.graph_requested_yield_ms, 300_000);
+  assert.equal(finalized.graph_yield_ms, 20_000);
   assert.equal(finalized.graph_completed, true);
   assert.equal(finalized.terminal, true);
   assert.equal(finalized.detached, false);
   assert.equal(finalized.reattached, true);
   assert.equal(finalized.commands_executed, 1);
+  assert.equal(finalized.result_mode, 'full');
   assert.equal(finalized.results[0].stdout, 'slow-done');
 
   const sessionsAfterFinal = await callTool(ctx, 'list_sessions', {}, meta);
@@ -1272,7 +1829,8 @@ test('detached exec_many preserves failed and skipped recovery after reattachmen
     yield_time_ms: 2_000
   }, meta);
   assert.equal(finalized.graph_completed, true);
-  assert.equal(finalized.ok, false);
+  assert.equal(finalized.ok, true);
+  assert.equal(finalized.command_ok, false);
   assert.deepEqual(finalized.failed_command_ids, ['fail']);
   assert.deepEqual(finalized.skipped_command_ids, ['blocked']);
   assert.equal(finalized.first_failure.id, 'fail');
@@ -1282,7 +1840,7 @@ test('detached exec_many preserves failed and skipped recovery after reattachmen
   assert.equal(finalized.commands_executed, 1);
 });
 
-test('exec_many status reports failed graph execution without turning the control request into a tool failure', async () => {
+test('exec_many command failures remain successful tool calls and status preserves graph execution failure', async () => {
   const { ctx, meta } = await context();
   await select(ctx, meta);
   const operationId = 'retained-failed-status';
@@ -1290,7 +1848,8 @@ test('exec_many status reports failed graph execution without turning the contro
     operation_id: operationId,
     commands: [{ id: 'fail', program: nodeProgram, args: ['-e', 'process.exit(9)'] }]
   }, meta);
-  assert.equal(failedRun.ok, false);
+  assert.equal(failedRun.ok, true);
+  assert.equal(failedRun.command_ok, false);
   assert.equal(failedRun.graph_execution_ok, false);
 
   const status = await callTool(ctx, 'exec_many', {
@@ -1308,7 +1867,7 @@ test('exec_many status reports failed graph execution without turning the contro
   });
   const runRecord = usage.records.find(record => record.graph_operation_id === operationId && record.graph_action === 'run');
   const statusRecord = usage.records.find(record => record.graph_operation_id === operationId && record.graph_action === 'status');
-  assert.notEqual(runRecord.outcome, 'success');
+  assert.equal(runRecord.outcome, 'success');
   assert.equal(statusRecord.outcome, 'success');
   assert.equal(statusRecord.graph_execution_ok, false);
   assert.equal(statusRecord.control_ok, true);
@@ -1503,8 +2062,13 @@ test('exec_many status defaults to compact results and full detail remains opt-i
     }]
   }, meta);
   assert.equal(completed.graph_completed, true);
-  assert.equal(completed.result_mode, 'full');
-  assert.equal(completed.results[0].stdout.length, 32768);
+  assert.equal(completed.result_mode, 'summary');
+  assert.equal(completed.result_mode_reason, 'large_output');
+  assert.equal(completed.auto_compacted_output_bytes, 32768);
+  assert.equal(completed.result_output_included, false);
+  assert.equal(completed.results[0].stdout, undefined);
+  assert.equal(completed.results[0].stdout_bytes, 32768);
+  assert.equal(completed.results[0].output_refs.stdout.startsWith('output://'), true);
 
   const summary = await callTool(ctx, 'exec_many', { operation_id: operationId, action: 'status' }, meta);
   assert.equal(summary.result_mode, 'summary');

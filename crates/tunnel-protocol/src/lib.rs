@@ -1,11 +1,13 @@
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 4;
 pub const WS_PATH: &str = "/_tunnel/v1";
 pub const ENROLL_PATH_PREFIX: &str = "/_tunnel/enroll";
-pub const WS_SUBPROTOCOL: &str = "coding-tools-tunnel-v3";
+pub const WS_SUBPROTOCOL: &str = "coding-tools-tunnel-v4";
 pub const CLIENT_ID_HEADER: &str = "x-coding-tools-client-id";
 pub const SERVICE_HEADER: &str = "x-coding-tools-service";
+pub const DEVICE_ID_HEADER: &str = "x-coding-tools-device-id";
+pub const WORKER_ID_HEADER: &str = "x-coding-tools-worker-id";
 pub const BUILTIN_MCP_PREFIX: &str = "/builtin/clients";
 pub const BUILTIN_ACTIONS_PREFIX: &str = "/builtin/actions";
 pub const MAX_REQUEST_BODY_BYTES: usize = 8 * 1024 * 1024;
@@ -264,6 +266,8 @@ pub struct EnrollmentResponse {
     pub device_id: String,
     #[serde(default)]
     pub client_id: String,
+    pub server_id: String,
+    pub server_public_key: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -274,19 +278,55 @@ pub struct WorkerDemand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeUpdateOffer {
+    pub update_id: String,
+    pub version: String,
+    pub url: String,
+    pub sha256: String,
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeUpdateState {
+    Downloading,
+    Verified,
+    Draining,
+    Scheduled,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ControlMessage {
     Challenge {
         nonce: String,
         expires_at_unix_ms: u64,
+        server_id: String,
+        server_signature: String,
     },
     Authenticate(DeviceAuthProof),
     HelloAck {
         protocol_version: u16,
         worker_policy: WorkerPolicy,
+        server_id: String,
+        server_signature: String,
     },
     PolicyUpdate {
         worker_policy: WorkerPolicy,
+    },
+    ClientStatus {
+        agent_version: String,
+        client_compat_version: String,
+        build_git_sha: String,
+    },
+    UpdateOffer(NodeUpdateOffer),
+    UpdateStatus {
+        update_id: String,
+        version: String,
+        state: NodeUpdateState,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
     },
     Ready,
     RequestHead {
@@ -337,6 +377,71 @@ pub fn auth_signing_payload(nonce: &str, proof: &DeviceAuthProof) -> Vec<u8> {
         worker_id: &proof.hello.worker_id,
     })
     .expect("auth signing payload is serializable")
+}
+
+#[derive(Serialize)]
+struct ServerChallengeSigningPayload<'a> {
+    protocol_version: u16,
+    nonce: &'a str,
+    expires_at_unix_ms: u64,
+    server_id: &'a str,
+    device_id: &'a str,
+    client_id: &'a str,
+    service: TunnelService,
+    worker_id: &'a str,
+}
+
+pub fn server_challenge_signing_payload(
+    nonce: &str,
+    expires_at_unix_ms: u64,
+    server_id: &str,
+    device_id: &str,
+    client_id: &str,
+    service: TunnelService,
+    worker_id: &str,
+) -> Vec<u8> {
+    serde_json::to_vec(&ServerChallengeSigningPayload {
+        protocol_version: PROTOCOL_VERSION,
+        nonce,
+        expires_at_unix_ms,
+        server_id,
+        device_id,
+        client_id,
+        service,
+        worker_id,
+    })
+    .expect("server challenge signing payload is serializable")
+}
+
+#[derive(Serialize)]
+struct ServerAckSigningPayload<'a> {
+    protocol_version: u16,
+    nonce: &'a str,
+    server_id: &'a str,
+    device_id: &'a str,
+    client_id: &'a str,
+    service: TunnelService,
+    worker_id: &'a str,
+    worker_policy: &'a WorkerPolicy,
+}
+
+pub fn server_ack_signing_payload(
+    nonce: &str,
+    server_id: &str,
+    proof: &DeviceAuthProof,
+    worker_policy: &WorkerPolicy,
+) -> Vec<u8> {
+    serde_json::to_vec(&ServerAckSigningPayload {
+        protocol_version: PROTOCOL_VERSION,
+        nonce,
+        server_id,
+        device_id: &proof.device_id,
+        client_id: &proof.hello.client_id,
+        service: proof.hello.service,
+        worker_id: &proof.hello.worker_id,
+        worker_policy,
+    })
+    .expect("server ack signing payload is serializable")
 }
 
 pub fn valid_client_id(value: &str) -> bool {
@@ -438,6 +543,33 @@ mod tests {
             serde_json::from_str::<ControlMessage>(&encoded).unwrap(),
             message
         );
+
+        for message in [
+            ControlMessage::ClientStatus {
+                agent_version: "0.29.33".into(),
+                client_compat_version: "0.1.58".into(),
+                build_git_sha: "0123456789012345678901234567890123456789".into(),
+            },
+            ControlMessage::UpdateOffer(NodeUpdateOffer {
+                update_id: "update-1".into(),
+                version: "0.29.34".into(),
+                url: "https://updates.example.test/ctnode.zip".into(),
+                sha256: "a".repeat(64),
+                signature: "signature".into(),
+            }),
+            ControlMessage::UpdateStatus {
+                update_id: "update-1".into(),
+                version: "0.29.34".into(),
+                state: NodeUpdateState::Verified,
+                message: None,
+            },
+        ] {
+            let encoded = serde_json::to_string(&message).unwrap();
+            assert_eq!(
+                serde_json::from_str::<ControlMessage>(&encoded).unwrap(),
+                message
+            );
+        }
     }
 
     #[test]
@@ -454,14 +586,30 @@ mod tests {
         };
         assert_eq!(
             String::from_utf8(auth_signing_payload("nonce-1", &proof)).unwrap(),
-            r#"{"protocol_version":3,"nonce":"nonce-1","device_id":"device-1","client_id":"pc-a","service":"mcp","worker_id":"worker-1"}"#
+            r#"{"protocol_version":4,"nonce":"nonce-1","device_id":"device-1","client_id":"pc-a","service":"mcp","worker_id":"worker-1"}"#
         );
     }
 
     #[test]
-    fn protocol_v3_carries_the_authoritative_worker_policy() {
-        assert_eq!(PROTOCOL_VERSION, 3);
-        assert_eq!(WS_SUBPROTOCOL, "coding-tools-tunnel-v3");
+    fn protocol_v4_requires_mutual_server_and_device_authentication() {
+        assert_eq!(PROTOCOL_VERSION, 4);
+        assert_eq!(WS_SUBPROTOCOL, "coding-tools-tunnel-v4");
+        assert_eq!(DEVICE_ID_HEADER, "x-coding-tools-device-id");
+        assert_eq!(WORKER_ID_HEADER, "x-coding-tools-worker-id");
+
+        let challenge_payload = server_challenge_signing_payload(
+            "nonce-1",
+            1234,
+            "server-1",
+            "device-1",
+            "pc-a",
+            TunnelService::Mcp,
+            "worker-1",
+        );
+        assert_eq!(
+            String::from_utf8(challenge_payload).unwrap(),
+            r#"{"protocol_version":4,"nonce":"nonce-1","expires_at_unix_ms":1234,"server_id":"server-1","device_id":"device-1","client_id":"pc-a","service":"mcp","worker_id":"worker-1"}"#
+        );
 
         let policy = WorkerPolicy::default_for(TunnelService::Mcp);
         assert_eq!(policy.start_workers, 4);
@@ -484,6 +632,8 @@ mod tests {
         let message = ControlMessage::HelloAck {
             protocol_version: PROTOCOL_VERSION,
             worker_policy: policy.clone(),
+            server_id: "server-1".into(),
+            server_signature: "server-signature".into(),
         };
         let encoded = serde_json::to_string(&message).expect("policy hello ack");
         assert_eq!(

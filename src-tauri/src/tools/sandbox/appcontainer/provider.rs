@@ -3708,8 +3708,8 @@ mod tests {
     #[test]
     fn acl_path_normalizes_verbatim_paths() {
         assert_eq!(
-            acl_win32_path(Path::new(r"\\?\C:\workspace\coding-tools-mcp")),
-            PathBuf::from(r"C:\workspace\coding-tools-mcp")
+            acl_win32_path(Path::new(r"\\?\E:\work\coding-tools-mcp")),
+            PathBuf::from(r"E:\work\coding-tools-mcp")
         );
         assert_eq!(AclGrantInheritance::None.flags(), NO_INHERITANCE);
     }

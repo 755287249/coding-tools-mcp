@@ -347,6 +347,23 @@ export async function handleManagementConfigurationRoute(
     return false;
   }
 
+  const namedSecretRoute = pathname.match(
+    /^\/admin\/api\/workspaces\/([A-Za-z0-9._-]{1,128})\/secrets\/named\/([A-Za-z0-9._-]{1,128})$/
+  );
+  if (namedSecretRoute && options.workspaceStore && req.method === 'PUT') {
+    const [, workspaceId, reference] = namedSecretRoute;
+    try {
+      const body = await readManagementBody(req);
+      if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('secret update must be an object');
+      const value = (body as Record<string, unknown>).value;
+      if (typeof value !== 'string') throw new Error('secret value must be a string');
+      sendJson(res, 200, await options.workspaceStore.replaceNamedSecret(workspaceId, reference, value));
+    } catch (error) {
+      sendManagementError(res, error);
+    }
+    return true;
+  }
+
   const route = pathname.match(
     /^\/admin\/api\/workspaces\/([A-Za-z0-9._-]{1,128})\/(config|secrets\/(?:oauth-password(?:\/regenerate)?|builtin-tunnel-enrollment-url))$/
   );

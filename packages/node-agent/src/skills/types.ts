@@ -17,6 +17,11 @@ export interface SkillDescriptor {
   contentSha256: string;
   version?: string;
   sizeBytes: number;
+  evolution?: {
+    knowledgeId: string;
+    generation: number;
+    baseContentSha256: string;
+  };
 }
 
 export interface SkillSummary {
@@ -28,6 +33,11 @@ export interface SkillSummary {
   root_relative_path: string;
   content_sha256: string;
   version?: string;
+  evolution?: {
+    knowledge_id: string;
+    generation: number;
+    base_content_sha256: string;
+  };
 }
 
 export interface SkillDiagnostic {
@@ -67,6 +77,13 @@ export function skillSummary(skill: SkillDescriptor): SkillSummary {
     relative_path: skill.relativePath,
     root_relative_path: skill.rootRelativePath,
     content_sha256: skill.contentSha256,
-    ...(skill.version ? { version: skill.version } : {})
+    ...(skill.version ? { version: skill.version } : {}),
+    ...(skill.evolution ? {
+      evolution: {
+        knowledge_id: skill.evolution.knowledgeId,
+        generation: skill.evolution.generation,
+        base_content_sha256: skill.evolution.baseContentSha256
+      }
+    } : {})
   };
 }

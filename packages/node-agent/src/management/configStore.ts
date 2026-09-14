@@ -53,7 +53,7 @@ import {
 const environmentKeys = [
   'CTMCP_HOST', 'CTMCP_PORT', 'CTMCP_PUBLIC_BASE_URL', 'CTMCP_DATA_DIR', 'CTMCP_PERMISSION_MODE', 'CTMCP_TOOL_PROFILE',
   'CTMCP_UI_ENABLED', 'CTMCP_UI_TRUST_PRIVATE_PROXY', 'CTMCP_OAUTH_CLIENT_ID', 'CTMCP_OAUTH_CLIENT_SECRET', 'CTMCP_OAUTH_PASSWORD',
-  'CTMCP_OAUTH_TOKEN_SECRET', 'CTMCP_WORKSPACES', 'CTMCP_BLOCKING_CONCURRENCY',
+  'CTMCP_OAUTH_TOKEN_SECRET', 'CTMCP_OAUTH_TOKEN_TTL_SECONDS', 'CTMCP_WORKSPACES', 'CTMCP_BLOCKING_CONCURRENCY',
   'CTMCP_PROCESS_CONCURRENCY', 'CTMCP_GLOBAL_BLOCKING_CONCURRENCY', 'CTMCP_GLOBAL_PROCESS_CONCURRENCY',
   'CTMCP_ACTIVE_SESSION_LIMIT', 'CTMCP_MAX_OUTPUT_BYTES',
   'CTMCP_ALLOWED_COMMANDS', 'CTMCP_WORKSPACE_LOCAL_ENTRIES', 'CTMCP_WORKSPACE_SCRIPT_EXTENSIONS', 'CTMCP_MAX_PATCH_BYTES',
@@ -506,6 +506,7 @@ export class ConfigStore {
     if (secrets.oauthClientSecret) next.oauthClientSecret = secrets.oauthClientSecret;
     if (secrets.oauthTokenSecret) next.oauthTokenSecret = secrets.oauthTokenSecret;
     if (secrets.tunnelEnrollmentUrl) next.tunnelEnrollmentUrl = secrets.tunnelEnrollmentUrl;
+    if (secrets.named) next.named = { ...(next.named ?? {}), ...secrets.named };
     const secretState = await this.persistSecrets(next);
     this.secrets = secretState.secrets;
     this.secretStorePath = secretState.storePath;
@@ -547,6 +548,49 @@ export class ConfigStore {
       return this.current.oauth.password;
     }
     return this.secrets[key] ?? this.current.oauth.password;
+  }
+
+  secretValue(reference: string): string | undefined {
+    switch (reference) {
+      case 'oauth_password': return process.env.CTMCP_OAUTH_PASSWORD !== undefined
+        ? this.current.oauth.password
+        : this.secrets.oauthPassword;
+      case 'oauth_client_secret': return this.secrets.oauthClientSecret;
+      case 'oauth_token_secret': return this.secrets.oauthTokenSecret;
+      case 'builtin_tunnel_enrollment_url': return this.secrets.tunnelEnrollmentUrl;
+      default: return this.secrets.named?.[reference];
+    }
+  }
+
+  async replaceNamedSecret(reference: string, value: string): Promise<void> {
+    const key = reference.trim();
+    if (!/^[A-Za-z0-9._-]{1,128}$/.test(key)) {
+      throw new Error('Named secret references must use 1-128 letters, numbers, dot, underscore, or hyphen');
+    }
+    if (['oauth_password', 'oauth_client_secret', 'oauth_token_secret', 'builtin_tunnel_enrollment_url'].includes(key)) {
+      throw new Error(`Named secret reference is reserved: ${key}`);
+    }
+    if (!value.trim()) throw new Error(`${key} must not be blank`);
+    if (value.length > 4096) throw new Error(`${key} exceeds 4096 characters`);
+    const nextSecrets: AgentSecrets = {
+      ...this.secrets,
+      named: { ...(this.secrets.named ?? {}), [key]: value }
+    };
+    const secretState = await this.persistSecrets(nextSecrets);
+    this.secrets = secretState.secrets;
+    this.secretStorePath = secretState.storePath;
+  }
+
+  async rotateOAuthPassword(value: string): Promise<void> {
+    if (process.env.CTMCP_OAUTH_PASSWORD !== undefined) {
+      throw new Error('One-time OAuth password rotation is unavailable while CTMCP_OAUTH_PASSWORD overrides the secret store');
+    }
+    if (!value.trim()) throw new Error('oauthPassword must not be blank');
+    const nextSecrets = { ...this.secrets, oauthPassword: value };
+    const secretState = await this.persistSecrets(nextSecrets);
+    this.secrets = secretState.secrets;
+    this.secretStorePath = secretState.storePath;
+    this.current.oauth.password = value;
   }
 
   async replaceSecret(
@@ -1040,7 +1084,7 @@ export class ConfigStore {
     const appliedImmediately: string[] = [];
     const hotApplyDeferredReasons: string[] = [];
     if (runtime) {
-      const folderApply = applyWorkspaceFolderConfiguration(runtime.context, desired.folders);
+      const folderApply = await applyWorkspaceFolderConfiguration(runtime.context, desired.folders);
       if (folderApply.applied) {
         this.current.folders = desired.folders.map(folder => ({ ...folder }));
         appliedImmediately.push('folders');

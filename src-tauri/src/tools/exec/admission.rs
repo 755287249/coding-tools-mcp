@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use serde_json::{json, Value};
 use tokio::sync::OwnedMutexGuard;
@@ -12,8 +12,6 @@ use super::backend::CommandExecutionBoundary;
 use super::identity::{sha256_hex, ExecutionIdentity};
 use super::result::{attach_session_capacity, merge_exec_result};
 use super::spec::ExecSpec;
-
-const AUTO_DEDUPE_COMPLETED_GRACE: Duration = Duration::from_secs(30);
 
 pub(super) enum OperationAdmission {
     Proceed {
@@ -47,9 +45,7 @@ pub(super) async fn admit_operation(
     if let Some(operation_id) = identity.operation_id.as_deref() {
         if let Some(session) = ctx.sessions.get_by_operation(operation_id) {
             let automatic_operation = operation_id.starts_with("auto:");
-            let reuse_session = !automatic_operation
-                || !session.is_finalized()
-                || session.finalized_within(AUTO_DEDUPE_COMPLETED_GRACE);
+            let reuse_session = !automatic_operation || !session.is_finalized();
             if automatic_operation && !reuse_session {
                 ctx.sessions.remove(&session.session_id);
             } else {

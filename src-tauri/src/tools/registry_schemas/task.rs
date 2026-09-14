@@ -46,12 +46,14 @@ pub(super) fn input_schema(name: &str) -> Option<Value> {
             "required": ["task_id"],
             "additionalProperties": false
         }),
-        "pause_task" | "resume_task" => json!({
-            "type": "object",
-            "properties": { "task_id": { "type": "string", "minLength": 1 } },
-            "required": ["task_id"],
-            "additionalProperties": false
-        }),
+        "pause_task" | "resume_task" | "fail_task" | "close_failed_task" | "rollback_task" => {
+            json!({
+                "type": "object",
+                "properties": { "task_id": { "type": "string", "minLength": 1 } },
+                "required": ["task_id"],
+                "additionalProperties": false
+            })
+        }
         "finish_task" => json!({
             "type": "object",
             "properties": {

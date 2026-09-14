@@ -9,7 +9,7 @@ import {
   attachHarnessStatus, beginHarnessTracking, finishHarnessTracking,
   HarnessError, type HarnessTracking
 } from './taskTools.js';
-import { selectedFolderSafe, validatedFolderCwd } from './workspace.js';
+import { resolveExistingPath, selectedFolderSafe, validatedFolderCwd } from './workspace.js';
 import { OutputRedactionContext } from './redaction.js';
 import { validateToolPolicy } from './policy.js';
 import { currentExecutionBinding, runWithExecutionBinding } from './executionScope.js';
@@ -19,9 +19,119 @@ import { canCoalesceToolCall, canonicalToolCall, toolRuntimeFor } from './toolRu
 import { dispatchDomainTool } from './toolDispatch.js';
 import { pendingPermissionBinding, permissionDecision } from './permissionTools.js';
 import { ConversationRoutingError } from './conversation.js';
+import type { KnowledgeCanaryDecision } from './knowledge/canary.js';
+import { selectedSkillAttribution } from './knowledge/skillAttribution.js';
 
 const inflightToolCalls = new WeakMap<ToolContext, Map<string, Promise<JsonObject>>>();
 const conversationSessionRoutes = new WeakMap<object, Map<string, Map<string, string>>>();
+const conversationLearningTasks = new WeakMap<object, Map<string, string>>();
+const ALTERNATE_WORKSPACE_PATH_RECOVERY_TOOLS = new Set([
+  'read_file', 'view_image', 'list_files', 'search_text', 'project_map', 'git_status'
+]);
+
+function learningTaskKey(key: string, folderId: string | undefined): string {
+  return `${key}\u0000${folderId ?? ''}`;
+}
+
+function learningTaskMap(ctx: ToolContext): Map<string, string> {
+  const owner = ctx.conversations as object;
+  let tasks = conversationLearningTasks.get(owner);
+  if (!tasks) {
+    tasks = new Map();
+    conversationLearningTasks.set(owner, tasks);
+  }
+  return tasks;
+}
+
+function resultTask(result: JsonObject): { id: string; status?: string } | undefined {
+  if (!result.task || typeof result.task !== 'object' || Array.isArray(result.task)) return undefined;
+  const task = result.task as JsonObject;
+  if (typeof task.id !== 'string' || !task.id) return undefined;
+  return { id: task.id, ...(typeof task.status === 'string' ? { status: task.status } : {}) };
+}
+
+function terminalTaskOutcome(status: string | undefined): 'verified_success' | 'unverified_success' | 'failure' | 'rolled_back' | undefined {
+  if (status === 'completed') return 'verified_success';
+  if (status === 'completed_unverified') return 'unverified_success';
+  if (status === 'failed_final') return 'failure';
+  if (status === 'rolled_back') return 'rolled_back';
+  return undefined;
+}
+
+function taskLearningAttribution(
+  ctx: ToolContext,
+  key: string,
+  folderId: string | undefined,
+  input: Parameters<ToolContext['usageStore']['recordToolCall']>[0],
+  record: JsonObject
+): { operationId?: string; taskId?: string; conversationContextId: string; taskOutcome?: 'verified_success' | 'unverified_success' | 'failure' | 'rolled_back' } {
+  const routeKey = learningTaskKey(key, folderId);
+  const conversationContextId = createHash('sha256').update(`conversation\0${key}`).digest('hex');
+  const tasks = learningTaskMap(ctx);
+  const returnedTask = resultTask(input.result);
+  const explicitTaskId = typeof input.arguments.task_id === 'string' && input.arguments.task_id.trim()
+    ? input.arguments.task_id.trim()
+    : returnedTask?.id;
+  const candidateOperationIds = [
+    record.conversation_operation_id,
+    input.result.harness_operation_id,
+    input.result.operation_id
+  ].filter((value): value is string => typeof value === 'string' && value.length > 0);
+  let matchedOperation: ReturnType<ToolContext['state']['operations']>[number] | undefined;
+  if (candidateOperationIds.length > 0) {
+    const operations = ctx.state.operations(undefined, 64);
+    for (let index = operations.length - 1; index >= 0; index -= 1) {
+      const operation = operations[index]!;
+      if (candidateOperationIds.includes(operation.id)) {
+        matchedOperation = operation;
+        break;
+      }
+    }
+  }
+  const operationId = matchedOperation?.id;
+  const taskId = explicitTaskId ?? matchedOperation?.task_id ?? tasks.get(routeKey);
+  const taskOutcome = terminalTaskOutcome(returnedTask?.status);
+  if (returnedTask) {
+    if (taskOutcome) tasks.delete(routeKey);
+    else tasks.set(routeKey, returnedTask.id);
+  }
+  if (!taskId) return { ...(operationId ? { operationId } : {}), conversationContextId };
+  return {
+    ...(operationId ? { operationId } : {}),
+    taskId,
+    conversationContextId,
+    ...(taskOutcome ? { taskOutcome } : {})
+  };
+}
+
+function recordToolUsageAndLearn(
+  ctx: ToolContext,
+  key: string,
+  folderId: string | undefined,
+  input: Parameters<ToolContext['usageStore']['recordToolCall']>[0]
+): void {
+  const record = ctx.usageStore.recordToolCall(input);
+  if (folderId) {
+    const runtime = ctx.folderRuntimes.get(folderId);
+    if (runtime) {
+      const taskAttribution = taskLearningAttribution(ctx, key, folderId, input, record);
+      const selection = selectedSkillAttribution(ctx.conversations as object, key, folderId);
+      const skill = selection ? {
+        source: selection.source,
+        name: selection.name,
+        contentSha256: selection.contentSha256,
+        generation: selection.generation
+      } : undefined;
+      const attribution = {
+        ...taskAttribution,
+        ...(skill ? { skill } : {}),
+        ...(selection?.canary ? { canary: { ...selection.canary } } : {})
+      };
+      runtime.knowledgeIngestor.enqueueToolUsage(record, attribution);
+      runtime.toolEvolutionBenchmarkCollector.enqueueToolUsage(record, attribution);
+    }
+  }
+}
 
 function conversationSessionRouteMap(ctx: ToolContext, key: string): Map<string, string> {
   const routeOwner = ctx.conversations as object;
@@ -155,7 +265,8 @@ async function dispatch(
   name: string,
   args: JsonObject,
   meta: unknown,
-  processLifecycle?: ProcessRequestLifecycle
+  processLifecycle?: ProcessRequestLifecycle,
+  knowledgeCanary?: KnowledgeCanaryDecision
 ): Promise<JsonObject> {
   const identity = ctx.conversations.identity(meta);
   const key = identity.key;
@@ -171,6 +282,7 @@ async function dispatch(
     args,
     historyArgs,
     processLifecycle,
+    knowledgeCanary,
     resumeTool: request => callTool(
       ctx,
       request.name,
@@ -251,6 +363,63 @@ function executionBindingFor(
     runtime: runtimeForFolderId(ctx, selectedWorkspaceId),
     selectedWorkspaceId,
     routeSource: 'conversation' as const
+  };
+}
+
+async function enrichAlternateWorkspaceRecovery(
+  ctx: ToolContext,
+  name: string,
+  args: JsonObject,
+  result: JsonObject,
+  binding: { folderId?: string; routeSource?: string } | undefined
+): Promise<JsonObject> {
+  if (result.ok !== false || !binding || binding.routeSource !== 'conversation' || !binding.folderId) return result;
+  if (!ALTERNATE_WORKSPACE_PATH_RECOVERY_TOOLS.has(name)) return result;
+  const error = result.error && typeof result.error === 'object' && !Array.isArray(result.error)
+    ? result.error as JsonObject
+    : undefined;
+  if (!error || error.code !== 'NOT_FOUND') return result;
+  const rawPath = typeof args.path === 'string' ? args.path.trim() : '';
+  if (!rawPath || rawPath === '.') return result;
+
+  const matches: Array<{ folder_id: string; folder_name: string }> = [];
+  for (const folder of ctx.config.folders) {
+    if (folder.id === binding.folderId) continue;
+    try {
+      await resolveExistingPath(folder.path, rawPath);
+      matches.push({ folder_id: folder.id, folder_name: folder.name });
+    } catch {
+      // Preserve the original failure if this path does not safely resolve in the alternate folder.
+    }
+  }
+  if (!matches.length) return result;
+
+  const recoveryActions = matches.slice(0, 8).map(folder => ({
+    action: 'retry_in_workspace',
+    action_id: `workspace-retry-${folder.folder_id}`,
+    tool: name,
+    required_arguments: [],
+    arguments: { ...args, workspace_folder_id: folder.folder_id },
+    reason: 'alternate_workspace_match'
+  }));
+  const details = error.details && typeof error.details === 'object' && !Array.isArray(error.details)
+    ? { ...error.details as JsonObject }
+    : {};
+  return {
+    ...result,
+    error: {
+      ...error,
+      retryable: true,
+      details: {
+        ...details,
+        alternate_workspace_match_count: matches.length,
+        alternate_workspace_matches: matches,
+        recovery_actions: recoveryActions,
+        suggestion: matches.length === 1
+          ? 'Retry this call with the provided workspace_folder_id; the conversation selection will not change.'
+          : 'Choose one matching workspace recovery action; the conversation selection will not change.'
+      }
+    }
   };
 }
 
@@ -447,7 +616,7 @@ export async function callTool(
     sharedPhases.serialization_ms = serializationMs;
     const responseBytes = Buffer.byteLength(serializedShared);
     const folderId = binding.folderId ?? selectedFolderId(ctx, key);
-    ctx.usageStore.recordToolCall({
+    recordToolUsageAndLearn(ctx, key, folderId, {
       tool: canonical.name,
       arguments: telemetryArgs,
       result: shared,
@@ -503,8 +672,9 @@ async function callToolInScope(
   const workspaceAdmission = binding?.runtime?.admission;
   const lockAdmission = workspaceAdmission ?? ctx.hubAdmission;
   const runtimePolicy = toolRuntimeFor(name);
-  const globalLane = runtimePolicy.lane === 'process' ? ctx.hubAdmission.process : runtimePolicy.lane === 'control' ? undefined : ctx.hubAdmission.blocking;
-  const workspaceLane = runtimePolicy.lane === 'process' ? workspaceAdmission?.process : runtimePolicy.lane === 'control' ? undefined : workspaceAdmission?.blocking;
+  const requestAdmission = runtimePolicy.admission === 'request';
+  const globalLane = !requestAdmission ? undefined : runtimePolicy.lane === 'process' ? ctx.hubAdmission.process : ctx.hubAdmission.blocking;
+  const workspaceLane = !requestAdmission ? undefined : runtimePolicy.lane === 'process' ? workspaceAdmission?.process : workspaceAdmission?.blocking;
   let releaseGlobalLane: (() => void) | undefined;
   let releaseWorkspaceLane: (() => void) | undefined;
   let releaseLocks: (() => void) | undefined;
@@ -530,6 +700,7 @@ async function callToolInScope(
   let hookContext: string[] = [];
   let hookPreBlocked = false;
   let hookBlockResult: JsonObject | undefined;
+  let knowledgeCanary: KnowledgeCanaryDecision | undefined;
   if (availableTools.includes(name)) {
     const pre = await ctx.extensions.preToolUse(name, args, hookCwd, hookSessionId, binding?.folderId);
     if (pre.blocked) {
@@ -555,6 +726,13 @@ async function callToolInScope(
     result = hookBlockResult;
   } else {
     try {
+      if (name === 'search_text' && binding?.runtime) {
+        try {
+          knowledgeCanary = await binding.runtime.canaryStrategyEngine.decide(name, args, key);
+        } catch {
+          knowledgeCanary = undefined;
+        }
+      }
       await validateToolPolicy(ctx, key, name, args);
       const denied = skipPermission ? undefined : permissionDecision(ctx, key, name, args, meta);
       if (denied) {
@@ -604,7 +782,7 @@ async function callToolInScope(
           }
           const dispatchStartedAt = performance.now();
           try {
-            result = await dispatch(ctx, name, args, meta, processLifecycle);
+            result = await dispatch(ctx, name, args, meta, processLifecycle, knowledgeCanary);
           } catch (error) {
             result = mapError(error);
           } finally {
@@ -643,6 +821,8 @@ async function callToolInScope(
     }
   }
 
+  result = await enrichAlternateWorkspaceRecovery(ctx, name, args, result, binding);
+
   if (availableTools.includes(name) && !hookPreBlocked) {
     try {
       const post = await ctx.extensions.postToolUse(
@@ -661,10 +841,21 @@ async function callToolInScope(
     }
   }
 
+  const knowledgeCanaryTelemetry = knowledgeCanary ? {
+    knowledge_canary_id: knowledgeCanary.knowledgeId,
+    knowledge_canary_implementation: knowledgeCanary.implementation,
+    knowledge_canary_eligible: true,
+    knowledge_canary_stage: knowledgeCanary.stage,
+    knowledge_canary_selected: knowledgeCanary.applied,
+    knowledge_canary_applied: knowledgeCanary.applied === true && result.exact_total_fast_tail === true,
+    knowledge_canary_bucket: knowledgeCanary.bucket
+  } : undefined;
+
   const durationMs = Date.now() - startedAt;
   Object.assign(result, {
     execution_lane: runtimePolicy.lane,
     admission_lane: runtimePolicy.lane,
+    admission_mode: runtimePolicy.admission,
     admission_scope: workspaceLane ? 'global_and_workspace' : globalLane ? 'global' : 'none',
     admission_queue_wait_ms: queueWaitMs,
     global_admission_wait_ms: globalAdmissionWaitMs,
@@ -697,16 +888,23 @@ async function callToolInScope(
   const responseBytes = Buffer.byteLength(serializedResult);
   const folderId = binding?.folderId ?? selectedFolderId(ctx, key);
   if (requestTiming) {
-    ctx.usageStore.recordToolCall({
-      tool: name,
-      arguments: telemetryArgs,
-      result,
-      startedTsMs: startedAt,
-      durationMs,
-      requestTiming,
-      requestJsonBytes: Buffer.byteLength(JSON.stringify(telemetryArgs)),
-      workspaceId: folderId
-    });
+    if (knowledgeCanaryTelemetry) Object.assign(result, knowledgeCanaryTelemetry);
+    try {
+      recordToolUsageAndLearn(ctx, key, folderId, {
+        tool: name,
+        arguments: telemetryArgs,
+        result,
+        startedTsMs: startedAt,
+        durationMs,
+        requestTiming,
+        requestJsonBytes: Buffer.byteLength(JSON.stringify(telemetryArgs)),
+        workspaceId: folderId
+      });
+    } finally {
+      if (knowledgeCanaryTelemetry) {
+        for (const field of Object.keys(knowledgeCanaryTelemetry)) delete result[field];
+      }
+    }
   }
   ctx.usage.push({ tool: name, startedAt, durationMs, ok: result.ok === true, queueWaitMs, lockWaitMs, responseBytes });
   if (ctx.usage.length > 5_000) ctx.usage.splice(0, 1_000);

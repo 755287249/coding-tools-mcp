@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import { createMcpFixture, mcpRequest, responseJson } from './mcpTestHelpers.mjs';
 
 const ping = { jsonrpc: '2.0', id: 1, method: 'ping', params: {} };
@@ -74,6 +76,8 @@ test('transport errors use HTTP 400 or 403 while JSON-RPC method errors remain H
 
 test('MCP 2026-07-28 supports stateless discovery and cacheable tool listing', async t => {
   const state = await createMcpFixture(t);
+  const packagePath = fileURLToPath(new URL('../package.json', import.meta.url));
+  const packageMetadata = JSON.parse(await readFile(packagePath, 'utf8'));
   const meta = {
     'io.modelcontextprotocol/protocolVersion': '2026-07-28',
     'io.modelcontextprotocol/clientCapabilities': {},
@@ -100,6 +104,7 @@ test('MCP 2026-07-28 supports stateless discovery and cacheable tool listing', a
   assert.equal(discover.ttlMs, 0);
   assert.equal(discover.cacheScope, 'private');
   assert.equal(discover._meta['io.modelcontextprotocol/serverInfo'].name, 'coding-tools-mcp-node');
+  assert.equal(discover._meta['io.modelcontextprotocol/serverInfo'].version, packageMetadata.version);
 
   const promptsResponse = await mcpRequest(state, {
     jsonrpc: '2.0', id: 'prompts', method: 'prompts/list', params: { _meta: meta }
@@ -130,12 +135,14 @@ test('MCP 2026-07-28 supports stateless discovery and cacheable tool listing', a
   assert.ok(Array.isArray(tools.tools));
   assert.equal(tools.ttlMs, 0);
   assert.equal(tools.cacheScope, 'private');
-  assert.equal(tools._meta['io.modelcontextprotocol/serverInfo'].version.length > 0, true);
+  assert.equal(tools._meta['io.modelcontextprotocol/serverInfo'].version, packageMetadata.version);
 
   const legacyInitialize = await mcpRequest(state, {
     jsonrpc: '2.0', id: 'legacy', method: 'initialize', params: { protocolVersion: '2026-07-28' }
   });
-  assert.equal((await responseJson(legacyInitialize)).result.protocolVersion, '2025-11-25');
+  const legacyInitializeResult = (await responseJson(legacyInitialize)).result;
+  assert.equal(legacyInitializeResult.protocolVersion, '2025-11-25');
+  assert.equal(legacyInitializeResult.serverInfo.version, packageMetadata.version);
 
   const modernInitialize = await mcpRequest(state, {
     jsonrpc: '2.0', id: 'modern-init', method: 'initialize', params: { protocolVersion: '2026-07-28', _meta: meta }

@@ -58,6 +58,7 @@ export class StateStore implements StateStoreContract {
   #operations: OperationRecord[] = [];
   #writeTail: Promise<void> = Promise.resolve();
   #operationWriteTails = new Map<string, Promise<void>>();
+  #operationDirectoryReady = new Map<string, Promise<void>>();
 
   constructor(dataDir: string) {
     this.file = path.join(dataDir, 'state.json');
@@ -191,10 +192,28 @@ export class StateStore implements StateStoreContract {
     this.#operations.push(record);
     if (this.#operations.length > 5_000) this.#operations.splice(0, 1_000);
     const file = this.operationsPath(workspaceId);
+    const directory = path.dirname(file);
+    let directoryReady = this.#operationDirectoryReady.get(workspaceId);
+    if (!directoryReady) {
+      directoryReady = mkdir(directory, { recursive: true }).then(() => undefined);
+      this.#operationDirectoryReady.set(workspaceId, directoryReady);
+      directoryReady.catch(() => this.#operationDirectoryReady.delete(workspaceId));
+    }
+    const ready = directoryReady;
+    const line = `${JSON.stringify(record)}\n`;
     const prior = this.#operationWriteTails.get(workspaceId) ?? Promise.resolve();
     const next = prior.catch(() => undefined).then(async () => {
-      await mkdir(path.dirname(file), { recursive: true });
-      await appendFile(file, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+      await ready;
+      try {
+        await appendFile(file, line, { mode: 0o600 });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        const retryReady = mkdir(directory, { recursive: true }).then(() => undefined);
+        this.#operationDirectoryReady.set(workspaceId, retryReady);
+        retryReady.catch(() => this.#operationDirectoryReady.delete(workspaceId));
+        await retryReady;
+        await appendFile(file, line, { mode: 0o600 });
+      }
     });
     this.#operationWriteTails.set(workspaceId, next);
     await next;

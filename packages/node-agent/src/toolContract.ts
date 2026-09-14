@@ -9,6 +9,36 @@ interface ToolErrorFields {
   retryable: boolean;
   details: JsonObject;
 }
+function policyRuleForCode(code: string): string | undefined {
+  switch (code) {
+    case 'NETWORK_COMMAND_BLOCKED': return 'block_network_commands';
+    case 'WORKSPACE_PATH_PROTECTED':
+    case 'PATH_OUTSIDE_WORKSPACE':
+    case 'EXTERNAL_EXECUTION_NOT_ALLOWED':
+    case 'EXECUTABLE_OUTSIDE_WORKSPACE': return 'enforce_workspace_boundary';
+    case 'COMMAND_REJECTED': return 'enforce_command_allowlist';
+    case 'DANGEROUS_OPERATION_REQUIRES_CONFIRMATION': return 'require_dangerous_confirmation';
+    case 'PROTECTED_REPOSITORY_ASSET': return 'protect_repository_metadata';
+    case 'ENVIRONMENT_VARIABLE_PROTECTED': return 'protect_environment_variables';
+    case 'PAYLOAD_TOO_LARGE':
+    case 'COMMAND_TIMEOUT_EXCEEDS_LIMIT': return 'enforce_resource_limits';
+    default: return undefined;
+  }
+}
+
+function preflightDiagnostics(name: string, code: string): JsonObject {
+  if (name !== 'PolicyError') return {};
+  const policyRule = policyRuleForCode(code);
+  return {
+    failure_origin: 'policy_preflight',
+    execution_attempted: false,
+    process_started: false,
+    policy_blocked: true,
+    ...(policyRule ? { policy_rule: policyRule } : {}),
+    diagnostic_summary: `Request was rejected by MCP policy before child-process startup${policyRule ? ` (${policyRule})` : ''}.`
+  };
+}
+
 
 function objectValue(value: unknown): JsonObject | undefined {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -44,12 +74,25 @@ function normalizedErrorFields(result: JsonObject): ToolErrorFields {
   const message = stringValue(raw.message)
     ?? stringValue(result.summary)
     ?? 'Tool call failed.';
+  const code = stringValue(raw.code) ?? 'TOOL_FAILED';
+  const category = stringValue(raw.category) ?? 'tool';
+  const details = objectValue(raw.details) ?? {};
+  const policyDiagnostics = category === 'policy'
+    ? {
+        failure_origin: 'policy_preflight',
+        execution_attempted: false,
+        process_started: false,
+        policy_blocked: true,
+        ...(policyRuleForCode(code) ? { policy_rule: policyRuleForCode(code) } : {}),
+        diagnostic_summary: `Request was rejected by MCP policy before child-process startup${policyRuleForCode(code) ? ` (${policyRuleForCode(code)})` : ''}.`
+      }
+    : {};
   return {
-    code: stringValue(raw.code) ?? 'TOOL_FAILED',
+    code,
     message,
-    category: stringValue(raw.category) ?? 'tool',
+    category,
     retryable: booleanValue(raw.retryable) ?? false,
-    details: objectValue(raw.details) ?? {}
+    details: { ...policyDiagnostics, ...details }
   };
 }
 
@@ -93,12 +136,13 @@ function structuredToolError(error: unknown): ToolErrorFields | undefined {
                 || code === 'DANGEROUS_OPERATION_REQUIRES_CONFIRMATION'
                 || code.endsWith('_NOT_ALLOWED') ? 'policy'
                 : 'tool');
+  const details = objectValue(value.details) ?? {};
   return {
     code,
     message: error instanceof Error ? error.message : stringValue(value.message) ?? code,
     category,
     retryable: booleanValue(value.retryable) ?? false,
-    details: objectValue(value.details) ?? {}
+    details: { ...preflightDiagnostics(name, code), ...details }
   };
 }
 
@@ -242,6 +286,14 @@ function imageContent(value: unknown): JsonObject[] | undefined {
   return items.length === 1 && items[0].type === 'image' ? items : undefined;
 }
 
+function topLevelImageContent(structured: JsonObject): JsonObject[] | undefined {
+  if (structured.content !== undefined) return undefined;
+  const data = stringValue(structured.base64);
+  const mimeType = stringValue(structured.mime_type);
+  if (!data || !mimeType?.startsWith('image/')) return undefined;
+  return [{ type: 'image', data, mimeType }];
+}
+
 export function wrapMcpToolResult(
   toolName: string,
   args: JsonObject,
@@ -249,7 +301,7 @@ export function wrapMcpToolResult(
 ): JsonObject {
   const normalized = normalizeToolResult(structured);
   const isError = normalized.ok === false;
-  const suppliedImages = imageContent(normalized.content);
+  const suppliedImages = imageContent(normalized.content) ?? topLevelImageContent(normalized);
   const useImage = (toolName === 'view_image' || toolName === 'desktop_screenshot')
     && String(args.output ?? 'mcp_image') === 'mcp_image'
     && !isError

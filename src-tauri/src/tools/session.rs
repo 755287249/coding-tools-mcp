@@ -21,8 +21,8 @@ use crate::harness::{model::OperationRecord, Harness};
 use crate::tools::process_child::{ProcessChild, ProcessKillHook, ProcessStdin};
 use crate::tools::workspace::WorkspaceError;
 
+pub use output::{EventDetail, OutputMode, OutputOptions};
 use output::{OutputEvent, ProcessOutputSnapshot, ProcessOutputStream};
-pub use output::{OutputMode, OutputOptions};
 
 #[cfg(test)]
 use output::{
@@ -33,10 +33,11 @@ use output::{
 
 const SESSION_EVENT_BYTES: usize = 1_048_576;
 pub const DEFAULT_ACTIVE_SESSION_LIMIT: usize = 512;
-pub(crate) const WAIT_COMMAND_TIMEOUT_DEFAULT_MS: u64 = 30_000;
+pub(crate) const WAIT_COMMAND_TRANSPORT_SAFE_MS: u64 = 20_000;
+pub(crate) const WAIT_COMMAND_TIMEOUT_DEFAULT_MS: u64 = WAIT_COMMAND_TRANSPORT_SAFE_MS;
 pub(crate) const WAIT_COMMAND_TIMEOUT_MAX_MS: u64 = 60 * 60_000;
 const MAX_RETAINED_FINALIZED_SESSIONS: usize = 128;
-const FINALIZED_SESSION_RETENTION: Duration = Duration::from_secs(900);
+const FINALIZED_SESSION_RETENTION: Duration = Duration::from_secs(60 * 60);
 #[cfg(not(test))]
 pub const DETACHED_SESSION_GRACE: Duration = Duration::from_secs(90);
 #[cfg(test)]
@@ -108,6 +109,9 @@ pub struct ExecSession {
     telemetry_profile_id: Option<String>,
     telemetry_command_kind: String,
     started_ts_ms: u64,
+    process_timeout: Option<crate::tools::execution_timeout::ProcessTimeoutContract>,
+    process_deadline_ts_ms: Option<u64>,
+    process_deadline: Option<Instant>,
     operation_id: Option<String>,
     harness_operations: Mutex<Vec<HarnessOperationTracking>>,
     harness_operation_recorded: Mutex<HashSet<String>>,
@@ -139,11 +143,6 @@ impl ExecSession {
 
     pub fn is_finalized(&self) -> bool {
         self.finalized.load(Ordering::Acquire)
-    }
-
-    pub fn finalized_within(&self, duration: Duration) -> bool {
-        self.finalized_at()
-            .is_some_and(|finished| finished.elapsed() <= duration)
     }
 
     fn finalized_at(&self) -> Option<Instant> {

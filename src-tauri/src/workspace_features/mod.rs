@@ -1,4 +1,5 @@
 mod discovery;
+mod evolved_skills;
 mod external_mcp;
 mod hooks;
 mod skills;
@@ -17,13 +18,16 @@ use crate::workspace::WorkspaceFolder;
 pub use discovery::{
     discover_extensions, ExtensionDiagnostic, HookDescriptor, McpServerDescriptor,
 };
+pub use evolved_skills::{apply_evolved_skill_record, apply_promoted_evolved_skills};
 pub use external_mcp::{call_external_tool, list_external_tools, ExternalTool};
 pub use hooks::{run_post_tool_hooks, run_pre_tool_hooks};
-pub use skills::{discover_skills, SkillDescriptor, SkillDiagnostic};
+pub use skills::{discover_skills, SkillDescriptor, SkillDiagnostic, SkillEvolution};
+pub(crate) use skills_mcp::selected_skill_learning_attribution;
 pub use skills_mcp::{
-    bootstrap_summary as skill_bootstrap_summary, get_prompt as get_skill_prompt,
-    list_prompts as list_skill_prompts, list_resources as list_skill_resources,
-    read_resource as read_skill_resource, rpc_error as skill_rpc_error,
+    bootstrap_summary as skill_bootstrap_summary,
+    get_prompt_for_session as get_skill_prompt_for_session, list_prompts as list_skill_prompts,
+    list_resources as list_skill_resources,
+    read_resource_for_session as read_skill_resource_for_session, rpc_error as skill_rpc_error,
 };
 
 #[derive(Debug, Clone, Serialize)]

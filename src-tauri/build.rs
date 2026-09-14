@@ -23,6 +23,21 @@ fn git_clean(manifest_dir: &PathBuf) -> Option<bool> {
     output.status.success().then(|| output.stdout.is_empty())
 }
 
+fn tool_evolution_proposal_ids(message: &str) -> Vec<String> {
+    message
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("Tool-Evolution-Proposal:"))
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .filter(|value| {
+            value.len() == 64 && value.as_bytes().iter().all(|byte| byte.is_ascii_hexdigit())
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .take(16)
+        .collect()
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=Cargo.toml");
@@ -34,6 +49,17 @@ fn main() {
         .map(|clean| if clean { "true" } else { "false" })
         .unwrap_or("unknown");
     println!("cargo:rustc-env=CTMCP_BUILD_SOURCE_CLEAN={build_source_clean}");
+    let proposal_ids = if build_source_clean == "true" {
+        git_output(&manifest_dir, &["log", "-1", "--pretty=%B"])
+            .map(|message| tool_evolution_proposal_ids(&message))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    println!(
+        "cargo:rustc-env=CTMCP_TOOL_EVOLUTION_PROPOSAL_IDS={}",
+        proposal_ids.join(",")
+    );
 
     if let Some(git_head_path) = git_output(&manifest_dir, &["rev-parse", "--git-path", "HEAD"]) {
         println!("cargo:rerun-if-changed={git_head_path}");

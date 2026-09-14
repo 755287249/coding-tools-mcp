@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use regex::Regex;
 use serde_json::{json, Value};
 
@@ -258,10 +260,7 @@ fn resolve_precise_edit(
     match edit_type {
         "replace" => {
             let old_text = required_edit_text(edit, index, "old_text")?;
-            let replacement = adapt_newlines_to_original(
-                edit.get("new_text").and_then(Value::as_str).unwrap_or(""),
-                original,
-            );
+            let requested_replacement = edit.get("new_text").and_then(Value::as_str).unwrap_or("");
             let targets = resolve_text_targets(original, edit, old_text, index)?;
             Ok(targets
                 .into_iter()
@@ -269,14 +268,18 @@ fn resolve_precise_edit(
                     input_index: index,
                     start_byte,
                     end_byte,
-                    replacement: replacement.clone(),
+                    replacement: adapt_newlines_to_range(
+                        requested_replacement,
+                        original,
+                        start_byte,
+                        end_byte,
+                    ),
                 })
                 .collect())
         }
         "insert_before" | "insert_after" => {
             let anchor = required_edit_text(edit, index, "anchor")?;
-            let text =
-                adapt_newlines_to_original(required_edit_text(edit, index, "text")?, original);
+            let requested_text = required_edit_text(edit, index, "text")?;
             let targets = resolve_text_targets(original, edit, anchor, index)?;
             Ok(targets
                 .into_iter()
@@ -290,7 +293,7 @@ fn resolve_precise_edit(
                         input_index: index,
                         start_byte: position,
                         end_byte: position,
-                        replacement: text.clone(),
+                        replacement: adapt_newlines_to_range(requested_text, original, start, end),
                     }
                 })
                 .collect())
@@ -298,9 +301,9 @@ fn resolve_precise_edit(
         "replace_lines" | "delete_lines" => {
             let start_line = required_line(edit, index, "start_line")?;
             let end_line = required_line(edit, index, "end_line")?;
-            let (start_byte, end_byte) = line_range_bytes(original, start_line, end_line, index)?;
+            let range = line_edit_range(original, start_line, end_line, index)?;
             if let Some(expected) = edit.get("expected_text").and_then(Value::as_str) {
-                let actual = &original[start_byte..end_byte];
+                let actual = &original[range.start_byte..range.content_end];
                 if normalize_newlines(actual) != normalize_newlines(expected) {
                     return Err(WorkspaceError::ToolDetails {
                         code: "EDIT_EXPECTED_TEXT_MISMATCH",
@@ -318,19 +321,32 @@ fn resolve_precise_edit(
                     });
                 }
             }
-            Ok(vec![ResolvedEdit {
-                input_index: index,
-                start_byte,
-                end_byte,
-                replacement: if edit_type == "delete_lines" {
-                    String::new()
-                } else {
-                    adapt_newlines_to_original(
+            if edit_type == "delete_lines" {
+                let delete_start =
+                    if range.trailing_newline_len > 0 || range.preceding_newline_len == 0 {
+                        range.start_byte
+                    } else {
+                        range.start_byte - range.preceding_newline_len
+                    };
+                Ok(vec![ResolvedEdit {
+                    input_index: index,
+                    start_byte: delete_start,
+                    end_byte: range.end_byte,
+                    replacement: String::new(),
+                }])
+            } else {
+                Ok(vec![ResolvedEdit {
+                    input_index: index,
+                    start_byte: range.start_byte,
+                    end_byte: range.content_end,
+                    replacement: adapt_newlines_to_range(
                         edit.get("new_text").and_then(Value::as_str).unwrap_or(""),
                         original,
-                    )
-                },
-            }])
+                        range.start_byte,
+                        range.end_byte,
+                    ),
+                }])
+            }
         }
         other => Err(WorkspaceError::invalid_argument(format!(
             "Unsupported edits[{index}].type: {other}"
@@ -723,26 +739,74 @@ fn normalize_newlines(value: &str) -> String {
     value.replace("\r\n", "\n")
 }
 
-fn preferred_line_ending(value: &str) -> &'static str {
-    let bytes = value.as_bytes();
-    for (index, byte) in bytes.iter().enumerate() {
-        if *byte == b'\n' {
-            return if index > 0 && bytes[index - 1] == b'\r' {
-                "\r\n"
-            } else {
-                "\n"
-            };
-        }
+fn newline_at(value: &str, newline_index: usize) -> &'static str {
+    if newline_index > 0 && value.as_bytes()[newline_index - 1] == b'\r' {
+        "\r\n"
+    } else {
+        "\n"
+    }
+}
+
+pub(super) fn preferred_line_ending_near_range(
+    original: &str,
+    start: usize,
+    end: usize,
+) -> &'static str {
+    let bytes = original.as_bytes();
+    let bounded_start = start.min(bytes.len());
+    let bounded_end = end.max(bounded_start).min(bytes.len());
+
+    if let Some(offset) = bytes[bounded_start..bounded_end]
+        .iter()
+        .position(|byte| *byte == b'\n')
+    {
+        return newline_at(original, bounded_start + offset);
+    }
+    if let Some(offset) = bytes[bounded_end..].iter().position(|byte| *byte == b'\n') {
+        return newline_at(original, bounded_end + offset);
+    }
+    if let Some(index) = bytes[..bounded_start]
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+    {
+        return newline_at(original, index);
     }
     "\n"
 }
 
-pub(super) fn adapt_newlines_to_original(value: &str, original: &str) -> String {
+pub(super) fn adapt_newlines_to_range(
+    value: &str,
+    original: &str,
+    start: usize,
+    end: usize,
+) -> String {
     let normalized = normalize_newlines(value);
-    if preferred_line_ending(original) == "\r\n" {
+    if preferred_line_ending_near_range(original, start, end) == "\r\n" {
         normalized.replace('\n', "\r\n")
     } else {
         normalized
+    }
+}
+
+pub(super) fn newline_style(value: &str) -> &'static str {
+    let bytes = value.as_bytes();
+    let mut has_crlf = false;
+    let mut has_lf = false;
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte != b'\n' {
+            continue;
+        }
+        if index > 0 && bytes[index - 1] == b'\r' {
+            has_crlf = true;
+        } else {
+            has_lf = true;
+        }
+    }
+    match (has_crlf, has_lf) {
+        (true, true) => "mixed",
+        (true, false) => "crlf",
+        (false, true) => "lf",
+        (false, false) => "none",
     }
 }
 
@@ -754,7 +818,7 @@ pub(super) fn line_range_bytes(
 ) -> Result<(usize, usize), WorkspaceError> {
     let mut starts = vec![0usize];
     for (index, byte) in content.bytes().enumerate() {
-        if byte == b'\n' && index + 1 < content.len() {
+        if byte == b'\n' {
             starts.push(index + 1);
         }
     }
@@ -784,10 +848,638 @@ pub(super) fn line_range_bytes(
     Ok((start, end))
 }
 
+#[derive(Debug, Clone, Copy)]
+struct LineEditRange {
+    start_byte: usize,
+    end_byte: usize,
+    content_end: usize,
+    trailing_newline_len: usize,
+    preceding_newline_len: usize,
+}
+
+fn newline_ending_len_at(value: &str, end_offset: usize) -> usize {
+    if end_offset == 0 || value.as_bytes()[end_offset - 1] != b'\n' {
+        return 0;
+    }
+    if end_offset > 1 && value.as_bytes()[end_offset - 2] == b'\r' {
+        2
+    } else {
+        1
+    }
+}
+
+fn line_edit_range(
+    content: &str,
+    start_line: usize,
+    end_line: usize,
+    edit_index: usize,
+) -> Result<LineEditRange, WorkspaceError> {
+    let (start_byte, end_byte) = line_range_bytes(content, start_line, end_line, edit_index)?;
+    let trailing_newline_len = if end_byte > start_byte {
+        newline_ending_len_at(content, end_byte)
+    } else {
+        0
+    };
+    let preceding_newline_len = newline_ending_len_at(content, start_byte);
+    Ok(LineEditRange {
+        start_byte,
+        end_byte,
+        content_end: end_byte - trailing_newline_len,
+        trailing_newline_len,
+        preceding_newline_len,
+    })
+}
+
+#[derive(Debug, Clone)]
+struct LineEndingToken<'a> {
+    content: &'a str,
+    eol: &'static str,
+}
+
+fn line_ending_tokens(value: &str) -> Vec<LineEndingToken<'_>> {
+    let bytes = value.as_bytes();
+    let mut tokens = Vec::new();
+    let mut start = 0usize;
+    while start < bytes.len() {
+        let Some(offset) = bytes[start..].iter().position(|byte| *byte == b'\n') else {
+            tokens.push(LineEndingToken {
+                content: &value[start..],
+                eol: "",
+            });
+            break;
+        };
+        let newline = start + offset;
+        let crlf = newline > start && bytes[newline - 1] == b'\r';
+        tokens.push(LineEndingToken {
+            content: &value[start..if crlf { newline - 1 } else { newline }],
+            eol: if crlf { "\r\n" } else { "\n" },
+        });
+        start = newline + 1;
+    }
+    if bytes.last() == Some(&b'\n') {
+        tokens.push(LineEndingToken {
+            content: "",
+            eol: "",
+        });
+    }
+    tokens
+}
+
+pub(super) fn unchanged_line_ending_changes(original: &str, updated: &str) -> Vec<Value> {
+    let before = line_ending_tokens(original);
+    let after = line_ending_tokens(updated);
+    let mut before_counts = HashMap::<&str, usize>::new();
+    let mut after_counts = HashMap::<&str, usize>::new();
+    for token in &before {
+        *before_counts.entry(token.content).or_default() += 1;
+    }
+    for token in &after {
+        *after_counts.entry(token.content).or_default() += 1;
+    }
+    let unambiguous = |content: &str| {
+        before_counts.get(content) == Some(&1) && after_counts.get(content) == Some(&1)
+    };
+
+    let limit = before.len().min(after.len());
+    let mut prefix = 0usize;
+    while prefix < limit && before[prefix].content == after[prefix].content {
+        prefix += 1;
+    }
+    let mut suffix = 0usize;
+    while suffix < limit - prefix
+        && before[before.len() - 1 - suffix].content == after[after.len() - 1 - suffix].content
+    {
+        suffix += 1;
+    }
+
+    let mut changes = Vec::new();
+    for index in 0..prefix {
+        if before[index].eol == after[index].eol || !unambiguous(before[index].content) {
+            continue;
+        }
+        let allowed_final_deletion_boundary = index == prefix - 1
+            && index == after.len() - 1
+            && after[index].eol.is_empty()
+            && before.len() > after.len();
+        if !allowed_final_deletion_boundary {
+            changes.push(json!({
+                "before_line": index + 1,
+                "after_line": index + 1,
+                "before_eol": before[index].eol,
+                "after_eol": after[index].eol
+            }));
+        }
+    }
+    for offset in 0..suffix {
+        let before_index = before.len() - 1 - offset;
+        let after_index = after.len() - 1 - offset;
+        if before[before_index].eol == after[after_index].eol
+            || !unambiguous(before[before_index].content)
+        {
+            continue;
+        }
+        changes.push(json!({
+            "before_line": before_index + 1,
+            "after_line": after_index + 1,
+            "before_eol": before[before_index].eol,
+            "after_eol": after[after_index].eol
+        }));
+    }
+    changes.sort_by_key(|change| {
+        (
+            change["before_line"].as_u64().unwrap_or(0),
+            change["after_line"].as_u64().unwrap_or(0),
+        )
+    });
+    changes
+}
+
+pub(super) fn assert_no_unexpected_newline_churn(
+    file: &str,
+    original: &str,
+    updated: &str,
+) -> Result<(), WorkspaceError> {
+    let changes = unchanged_line_ending_changes(original, updated);
+    if changes.is_empty() {
+        return Ok(());
+    }
+    let change_count = changes.len();
+    let changes_truncated = change_count > 20;
+    let bounded_changes = changes.into_iter().take(20).collect::<Vec<_>>();
+    Err(WorkspaceError::ToolDetails {
+        code: "EDIT_NEWLINE_CHURN",
+        message: format!("Edit would change line endings on unchanged content in {file}"),
+        category: "validation",
+        retryable: false,
+        details: json!({
+            "path": file,
+            "newline_before": newline_style(original),
+            "newline_after": newline_style(updated),
+            "unchanged_line_ending_change_count": change_count,
+            "unchanged_line_ending_changes": bounded_changes,
+            "changes_truncated": changes_truncated,
+            "suggestion": "Use a precise target range; line-ending normalization must not rewrite untouched content."
+        }),
+    })
+}
+
+fn semantic_lines(value: &str) -> Vec<&str> {
+    value
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+        .collect()
+}
+
+fn edit_text_line_units(value: Option<&str>) -> usize {
+    value
+        .filter(|text| !text.is_empty())
+        .map(|text| semantic_lines(text).len())
+        .unwrap_or(0)
+}
+
+fn expected_edit_line_budget(edits: &[Value]) -> usize {
+    let mut budget = 0usize;
+    for edit in edits {
+        let occurrences = edit
+            .get("expected_occurrences")
+            .and_then(Value::as_u64)
+            .unwrap_or(1)
+            .max(1) as usize;
+        match edit.get("type").and_then(Value::as_str).unwrap_or("") {
+            "replace" => {
+                budget = budget.saturating_add(
+                    occurrences.saturating_mul(
+                        edit_text_line_units(edit.get("old_text").and_then(Value::as_str))
+                            .saturating_add(edit_text_line_units(
+                                edit.get("new_text").and_then(Value::as_str),
+                            )),
+                    ),
+                );
+            }
+            "insert_before" | "insert_after" => {
+                budget = budget.saturating_add(occurrences.saturating_mul(edit_text_line_units(
+                    edit.get("text").and_then(Value::as_str),
+                )));
+            }
+            "replace_lines" => {
+                let start = edit.get("start_line").and_then(Value::as_u64).unwrap_or(1);
+                let end = edit
+                    .get("end_line")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(start);
+                let removed = end.saturating_sub(start).saturating_add(1) as usize;
+                budget = budget.saturating_add(removed.saturating_add(edit_text_line_units(
+                    edit.get("new_text").and_then(Value::as_str),
+                )));
+            }
+            "delete_lines" => {
+                let start = edit.get("start_line").and_then(Value::as_u64).unwrap_or(1);
+                let end = edit
+                    .get("end_line")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(start);
+                budget =
+                    budget.saturating_add(end.saturating_sub(start).saturating_add(1) as usize);
+            }
+            _ => budget = budget.saturating_add(1),
+        }
+    }
+    budget.max(1)
+}
+
+fn bounded_line_edit_distance(
+    before: &[&str],
+    after: &[&str],
+    max_distance: usize,
+) -> Option<usize> {
+    if before.len().abs_diff(after.len()) > max_distance {
+        return None;
+    }
+    let limit = max_distance.min(before.len().saturating_add(after.len()));
+    let mut frontier = HashMap::<isize, usize>::from([(1, 0)]);
+    for distance in 0..=limit {
+        let mut next = HashMap::<isize, usize>::new();
+        let distance_i = distance as isize;
+        let mut diagonal = -distance_i;
+        while diagonal <= distance_i {
+            let down = frontier.get(&(diagonal + 1)).copied();
+            let right = frontier.get(&(diagonal - 1)).copied();
+            let down_rank = down.map(|value| value as isize).unwrap_or(-1);
+            let right_rank = right.map(|value| value as isize).unwrap_or(-1);
+            let mut x =
+                if diagonal == -distance_i || (diagonal != distance_i && right_rank < down_rank) {
+                    down.unwrap_or(0)
+                } else {
+                    right.unwrap_or(0).saturating_add(1)
+                };
+            let mut y = x as isize - diagonal;
+            while x < before.len()
+                && y >= 0
+                && (y as usize) < after.len()
+                && before[x] == after[y as usize]
+            {
+                x += 1;
+                y += 1;
+            }
+            if x >= before.len() && y >= after.len() as isize {
+                return Some(distance);
+            }
+            next.insert(diagonal, x);
+            diagonal += 2;
+        }
+        frontier = next;
+    }
+    None
+}
+
+pub(super) fn edit_blast_radius(original: &str, updated: &str, edits: &[Value]) -> Value {
+    let before = semantic_lines(original);
+    let after = semantic_lines(updated);
+    let limit = before.len().min(after.len());
+    let mut prefix = 0usize;
+    while prefix < limit && before[prefix] == after[prefix] {
+        prefix += 1;
+    }
+    let mut suffix = 0usize;
+    while suffix < limit - prefix
+        && before[before.len() - 1 - suffix] == after[after.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+    let changed_before = before.len().saturating_sub(prefix + suffix);
+    let changed_after = after.len().saturating_sub(prefix + suffix);
+    let span_changed_line_count = changed_before.saturating_add(changed_after);
+    let expected_budget = if edits.is_empty() {
+        span_changed_line_count.max(1)
+    } else {
+        expected_edit_line_budget(edits)
+    };
+    let allowed_changed_line_count = 40usize.max(expected_budget.saturating_mul(12));
+    let bounded_distance =
+        if !edits.is_empty() && span_changed_line_count > allowed_changed_line_count {
+            bounded_line_edit_distance(&before, &after, allowed_changed_line_count)
+        } else {
+            None
+        };
+    let changed_line_count = bounded_distance.unwrap_or(span_changed_line_count);
+    let change_measure = if bounded_distance.is_some() {
+        "bounded_line_diff"
+    } else {
+        "prefix_suffix"
+    };
+    let denominator = before.len().saturating_add(after.len()).max(1);
+    let change_ratio = changed_line_count as f64 / denominator as f64;
+    let excessive = before.len().max(after.len()) >= 80
+        && changed_line_count > allowed_changed_line_count
+        && change_ratio >= 0.6;
+    json!({
+        "before_line_count": before.len(),
+        "after_line_count": after.len(),
+        "changed_before_lines": changed_before,
+        "changed_after_lines": changed_after,
+        "changed_line_count": changed_line_count,
+        "expected_change_line_budget": expected_budget,
+        "allowed_changed_line_count": allowed_changed_line_count,
+        "change_ratio": (change_ratio * 10_000.0).round() / 10_000.0,
+        "change_measure": change_measure,
+        "span_changed_line_count": span_changed_line_count,
+        "excessive": excessive
+    })
+}
+
+pub(super) fn assert_no_unexpected_edit_blast_radius(
+    file: &str,
+    original: &str,
+    updated: &str,
+    edits: &[Value],
+) -> Result<Value, WorkspaceError> {
+    let radius = edit_blast_radius(original, updated, edits);
+    if radius["excessive"].as_bool() != Some(true) {
+        return Ok(radius);
+    }
+    let mut details = radius.as_object().cloned().unwrap_or_default();
+    details.insert("path".into(), json!(file));
+    details.insert(
+        "suggestion".into(),
+        json!("Read the target again and use a narrower precise edit. Large intentional rewrites should describe the full replacement in the edit contract."),
+    );
+    Err(WorkspaceError::ToolDetails {
+        code: "EDIT_BLAST_RADIUS",
+        message: format!(
+            "Edit would change far more content than its guarded edit contract in {file}"
+        ),
+        category: "validation",
+        retryable: false,
+        details: Value::Object(details),
+    })
+}
+
 pub(super) fn byte_to_line(content: &str, byte: usize) -> usize {
     content[..byte]
         .bytes()
         .filter(|value| *value == b'\n')
         .count()
         + 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn apply(original: &str, edits: Vec<Value>) -> String {
+        apply_precise_edits(original, &edits).expect("precise edit should succeed")
+    }
+
+    #[test]
+    fn replace_lines_preserves_mixed_line_endings_and_uses_local_eol() {
+        let original = "alpha\r\nbeta\r\ngamma\ndelta\n";
+        let updated = apply(
+            original,
+            vec![json!({
+                "type": "replace_lines",
+                "start_line": 3,
+                "end_line": 3,
+                "expected_text": "gamma",
+                "new_text": "GAMMA\nSECOND"
+            })],
+        );
+        assert_eq!(updated, "alpha\r\nbeta\r\nGAMMA\nSECOND\ndelta\n");
+        assert_no_unexpected_newline_churn("mixed.txt", original, &updated).unwrap();
+    }
+
+    #[test]
+    fn text_replacement_uses_target_local_eol_in_mixed_file() {
+        let original = "first\nsecond\r\nthird\r\n";
+        let updated = apply(
+            original,
+            vec![json!({
+                "type": "replace",
+                "old_text": "first",
+                "new_text": "FIRST\nEXTRA"
+            })],
+        );
+        assert_eq!(updated, "FIRST\nEXTRA\nsecond\r\nthird\r\n");
+        assert_no_unexpected_newline_churn("mixed.txt", original, &updated).unwrap();
+    }
+
+    #[test]
+    fn replace_lines_keeps_crlf_only_files_crlf() {
+        let original = "alpha\r\nbeta\r\ngamma\r\n";
+        let updated = apply(
+            original,
+            vec![json!({
+                "type": "replace_lines",
+                "start_line": 2,
+                "end_line": 2,
+                "new_text": "BETA\nSECOND"
+            })],
+        );
+        assert_eq!(updated, "alpha\r\nBETA\r\nSECOND\r\ngamma\r\n");
+    }
+
+    #[test]
+    fn replace_lines_preserves_unterminated_final_line() {
+        let original = "alpha\nbeta";
+        let updated = apply(
+            original,
+            vec![json!({
+                "type": "replace_lines",
+                "start_line": 2,
+                "end_line": 2,
+                "new_text": "BETA"
+            })],
+        );
+        assert_eq!(updated, "alpha\nBETA");
+    }
+
+    #[test]
+    fn delete_lines_preserves_normal_middle_line_semantics() {
+        let original = "alpha\nbeta\ngamma\n";
+        let updated = apply(
+            original,
+            vec![json!({
+                "type": "delete_lines",
+                "start_line": 2,
+                "end_line": 2
+            })],
+        );
+        assert_eq!(updated, "alpha\ngamma\n");
+    }
+
+    #[test]
+    fn delete_lines_removes_delimiter_before_unterminated_final_line() {
+        let original = "alpha\nbeta\r\ngamma";
+        let updated = apply(
+            original,
+            vec![json!({
+                "type": "delete_lines",
+                "start_line": 3,
+                "end_line": 3,
+                "expected_text": "gamma"
+            })],
+        );
+        assert_eq!(updated, "alpha\nbeta");
+        assert_no_unexpected_newline_churn("mixed.txt", original, &updated).unwrap();
+    }
+
+    #[test]
+    fn delete_lines_keeps_preceding_newline_for_terminated_final_line() {
+        let original = "alpha\nbeta\n";
+        let updated = apply(
+            original,
+            vec![json!({
+                "type": "delete_lines",
+                "start_line": 2,
+                "end_line": 2
+            })],
+        );
+        assert_eq!(updated, "alpha\n");
+    }
+
+    #[test]
+    fn edit_blast_radius_rejects_whole_file_churn_from_a_narrow_contract() {
+        let original = (1..=200)
+            .map(|index| format!("line-{index}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let updated = (1..=200)
+            .map(|index| format!("rewritten-{index}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let edits = vec![json!({
+            "type": "replace",
+            "old_text": "line-100",
+            "new_text": "LINE-100"
+        })];
+        let radius = edit_blast_radius(&original, &updated, &edits);
+        assert_eq!(radius["excessive"], true);
+        let error =
+            assert_no_unexpected_edit_blast_radius("large.txt", &original, &updated, &edits)
+                .expect_err("semantic churn must be rejected");
+        assert_eq!(error.to_error_value()["code"], "EDIT_BLAST_RADIUS");
+    }
+
+    #[test]
+    fn edit_blast_radius_allows_precise_local_change() {
+        let original = (1..=200)
+            .map(|index| format!("line-{index}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let updated = original.replacen("line-100", "LINE-100", 1);
+        let edits = vec![json!({
+            "type": "replace",
+            "old_text": "line-100",
+            "new_text": "LINE-100"
+        })];
+        let radius = edit_blast_radius(&original, &updated, &edits);
+        assert_eq!(radius["excessive"], false);
+        assert_eq!(radius["changed_line_count"], 2);
+    }
+
+    #[test]
+    fn edit_blast_radius_measures_disjoint_precise_edits() {
+        let original = (1..=200)
+            .map(|index| format!("line-{index}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let updated = original
+            .replacen("line-10", "LINE-10", 1)
+            .replacen("line-190", "LINE-190", 1);
+        let edits = vec![
+            json!({
+                "type": "replace",
+                "old_text": "line-10",
+                "new_text": "LINE-10"
+            }),
+            json!({
+                "type": "replace",
+                "old_text": "line-190",
+                "new_text": "LINE-190"
+            }),
+        ];
+        let radius = edit_blast_radius(&original, &updated, &edits);
+        assert_eq!(radius["excessive"], false);
+        assert_eq!(radius["changed_line_count"], 4);
+        assert_eq!(radius["change_measure"], "bounded_line_diff");
+    }
+
+    #[test]
+    fn newline_churn_detector_identifies_unchanged_content_eol_changes() {
+        let original = "one\ntwo\r\nthree\nfour\r\nfive\n";
+        let updated = "one\r\ntwo\r\nthree\r\nfour\nfive\r\n";
+        let changes = unchanged_line_ending_changes(original, updated);
+        assert_eq!(
+            changes
+                .iter()
+                .map(|change| change["before_line"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![1, 3, 4, 5]
+        );
+        let error = assert_no_unexpected_newline_churn("mixed.txt", original, updated)
+            .expect_err("newline churn must be rejected");
+        assert_eq!(error.to_error_value()["code"], "EDIT_NEWLINE_CHURN");
+    }
+
+    #[test]
+    fn newline_churn_detector_allows_final_deletion_boundary_change() {
+        assert!(unchanged_line_ending_changes("alpha\nbeta", "alpha").is_empty());
+        assert_no_unexpected_newline_churn("final.txt", "alpha\nbeta", "alpha").unwrap();
+    }
+
+    #[test]
+    fn newline_churn_detector_does_not_misalign_repeated_content() {
+        let original = "same\nmiddle\r\nsame\r\n";
+        let updated = apply(
+            original,
+            vec![json!({
+                "type": "delete_lines",
+                "start_line": 1,
+                "end_line": 1
+            })],
+        );
+        assert_eq!(updated, "middle\r\nsame\r\n");
+        assert_no_unexpected_newline_churn("repeat.txt", original, &updated).unwrap();
+    }
+
+    #[test]
+    fn trailing_empty_line_is_addressable_like_node() {
+        let original = "alpha\nbeta\n";
+        assert_eq!(line_range_bytes(original, 3, 3, 0).unwrap(), (11, 11));
+
+        let replaced = apply(
+            original,
+            vec![json!({
+                "type": "replace_lines",
+                "start_line": 3,
+                "end_line": 3,
+                "new_text": "gamma"
+            })],
+        );
+        assert_eq!(replaced, "alpha\nbeta\ngamma");
+        assert_no_unexpected_newline_churn("trailing.txt", original, &replaced).unwrap();
+
+        let deleted = apply(
+            original,
+            vec![json!({
+                "type": "delete_lines",
+                "start_line": 3,
+                "end_line": 3
+            })],
+        );
+        assert_eq!(deleted, "alpha\nbeta");
+        assert_no_unexpected_newline_churn("trailing.txt", original, &deleted).unwrap();
+    }
+
+    #[test]
+    fn newline_style_reports_lf_crlf_mixed_and_none() {
+        assert_eq!(newline_style("alpha\nbeta\n"), "lf");
+        assert_eq!(newline_style("alpha\r\nbeta\r\n"), "crlf");
+        assert_eq!(newline_style("alpha\nbeta\r\n"), "mixed");
+        assert_eq!(newline_style("alpha"), "none");
+    }
 }

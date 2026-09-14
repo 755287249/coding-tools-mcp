@@ -154,6 +154,35 @@ test('MCP protocol header accepts modern and legacy revisions and rejects invali
   );
 });
 
+test('MCP runtime and HTTP boundary emit canonical lifecycle service and transport diagnostics', async t => {
+  const state = await createMcpFixture(t);
+  await assertTransportError(
+    await mcpRequest(state, ping, { headers: { 'mcp-protocol-version': '2024-01-01' } }),
+    400,
+    -32022,
+    'Unsupported MCP protocol version: 2024-01-01',
+    null,
+    {
+      supported: ['2026-07-28', '2025-11-25', '2025-06-18', '2025-03-26'],
+      requested: '2024-01-01'
+    }
+  );
+  await state.runtime.context.usageStore.flush();
+  let queried = await state.runtime.context.usageStore.query({ scope: 'all', exclude_tools: [] });
+  assert.equal(queried.diagnostics_summary.events_by_type.lifecycle_event, 1);
+  assert.equal(queried.diagnostics_summary.events_by_type.service_event, 1);
+  assert.equal(queried.diagnostics_summary.events_by_type.transport_event, 1);
+  assert.equal(queried.diagnostics_summary.transport_errors, 1);
+  assert.deepEqual(queried.diagnostics_summary.top_transport_errors, [{ code: '-32022', count: 1 }]);
+
+  state.runtime.server.closeAllConnections?.();
+  await state.runtime.close();
+  queried = await state.runtime.context.usageStore.query({ scope: 'all', exclude_tools: [] });
+  assert.equal(queried.diagnostics_summary.events_by_type.lifecycle_event, 2);
+  assert.equal(queried.diagnostics_summary.events_by_type.service_event, 2);
+  assert.equal(queried.diagnostics_summary.events_by_type.transport_event, 1);
+});
+
 test('MCP 2026-07-28 rejects client JSON-RPC responses and unknown request methods at the HTTP boundary', async t => {
   const state = await createMcpFixture(t);
 
@@ -364,7 +393,7 @@ test('MCP 2026-07-28 exposes Tasks and projects retained exec sessions through g
   assert.equal(created.result.status, 'working');
   assert.match(created.result.taskId, /^exec:/);
   assert.equal(created.result.pollIntervalMs, 1_000);
-  assert.equal(created.result.ttlMs, 900_000);
+  assert.equal(created.result.ttlMs, 60 * 60_000);
   assert.match(created.result.createdAt, /^\d{4}-\d{2}-\d{2}T/);
 
   const unadvertisedGet = modernRequest('tasks/get', 53, { taskId: created.result.taskId });

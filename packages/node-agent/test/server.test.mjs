@@ -6,7 +6,10 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { PNG } from 'pngjs';
-import { createAgentServer } from '../dist/server.js';
+import { createAgentRuntime } from '../dist/server.js';
+import { toolsForProfile } from '../dist/catalog.js';
+import { knowledgeRecordId } from '../dist/knowledge/store.js';
+import { selectedSkillAttribution } from '../dist/knowledge/skillAttribution.js';
 import { discoverExtensions } from '../dist/extensions/discovery.js';
 import { CLIENT_COMPAT_VERSION } from '../dist/version.js';
 
@@ -83,9 +86,10 @@ test('scoped OAuth PKCE and MCP workspace flow', async t => {
     extensions: { hooks: { enabled: [externalHook.key] }, mcp: { enabled: [externalServer.key] } },
     limits: { blockingConcurrency: 4, processConcurrency: 4, activeSessionLimit: 16, maxOutputBytes: 1024 * 1024 }
   };
-  const server = await createAgentServer(config);
+  const runtime = await createAgentRuntime(config);
+  const server = runtime.server;
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  t.after(() => new Promise(resolve => server.close(resolve)));
+  t.after(() => runtime.close());
   const address = server.address();
   assert.ok(address && typeof address === 'object');
   const localBase = `http://127.0.0.1:${address.port}`;
@@ -132,21 +136,75 @@ test('scoped OAuth PKCE and MCP workspace flow', async t => {
   const releasePrompt = promptList.result.prompts.find(prompt => prompt.name === 'project-skill/repo/release-helper');
   assert.ok(releasePrompt);
   assert.equal(releasePrompt.description, 'Prepare a safe project release.');
+  const skillMeta = { 'openai/session': 'skill-attribution-http' };
   const loadedPrompt = await rpc(endpoint, token, {
-    jsonrpc: '2.0', id: 31, method: 'prompts/get', params: { name: 'project-skill/repo/release-helper' }
+    jsonrpc: '2.0', id: 31, method: 'prompts/get',
+    params: { name: 'project-skill/repo/release-helper', _meta: skillMeta }
   });
   assert.match(loadedPrompt.result.messages[0].content.text, /Run project release checks before packaging\./);
   assert.match(loadedPrompt.result.messages[0].content.text, /never grant permissions|does not grant permissions/i);
+  const folderRuntime = runtime.context.folderRuntimes.get('repo');
+  assert.ok(folderRuntime);
+  const attributedSkill = selectedSkillAttribution(
+    runtime.context.conversations, runtime.context.conversations.identity(skillMeta).key, 'repo'
+  );
+  assert.equal(attributedSkill.name, 'release-helper');
+  assert.equal(attributedSkill.source, 'project');
+  assert.match(attributedSkill.contentSha256, /^[a-f0-9]{64}$/);
+  const contextIds = ['resource-http-a', 'resource-http-b'].map(value =>
+    createHash('sha256').update(`conversation\0${value}`).digest('hex')
+  );
+  const evolutionKnowledge = {
+    id: '',
+    schemaVersion: 1,
+    scope: 'runtime',
+    target: 'tool_evolution',
+    status: 'candidate',
+    trigger: { tool: 'search_text', variant: 'http-resource' },
+    hypothesis: 'Expose pending MCP tool evolution work through opt-in resources.',
+    recommendedAction: { proposal: 'http-resource-fast-path' },
+    evidence: {
+      observations: 5, successes: 5, failures: 0,
+      totalDurationMs: 500, totalRequestBytes: 50, totalResponseBytes: 100,
+      firstSeenAtMs: 100, lastSeenAtMs: 104,
+      conversationContextIds: contextIds
+    },
+    confidence: 0.5,
+    sourceEventIds: ['http-resource-1', 'http-resource-2', 'http-resource-3', 'http-resource-4', 'http-resource-5'],
+    counterexampleEventIds: [],
+    metadata: { proposalType: 'performance' },
+    createdAtMs: 100,
+    updatedAtMs: 104
+  };
+  evolutionKnowledge.id = knowledgeRecordId(evolutionKnowledge);
+  const storedKnowledge = await folderRuntime.knowledgeStore.upsert(evolutionKnowledge);
+  const evolutionProposal = await folderRuntime.toolEvolutionProposalStore.plan(storedKnowledge, 'a'.repeat(40), 105);
+  const evolutionUri = `tool-evolution://coding-tools/repo/${evolutionProposal.proposalId}`;
   const resourceList = await rpc(endpoint, token, { jsonrpc: '2.0', id: 32, method: 'resources/list', params: {} });
   const releaseResource = resourceList.result.resources.find(resource => resource.uri === 'skill://coding-tools/repo/release-helper');
   assert.ok(releaseResource);
+  const evolutionResource = resourceList.result.resources.find(resource => resource.uri === evolutionUri);
+  assert.ok(evolutionResource);
+  assert.equal(evolutionResource.mimeType, 'application/json');
+  assert.equal(evolutionResource._meta['coding-tools/resource-kind'], 'tool-evolution-proposal');
   const loadedResource = await rpc(endpoint, token, {
     jsonrpc: '2.0', id: 33, method: 'resources/read', params: { uri: 'skill://coding-tools/repo/release-helper' }
   });
   assert.match(loadedResource.result.contents[0].text, /^---\nname: release-helper/m);
+  const loadedEvolution = await rpc(endpoint, token, {
+    jsonrpc: '2.0', id: 35, method: 'resources/read', params: { uri: evolutionUri }
+  });
+  const evolutionDocument = JSON.parse(loadedEvolution.result.contents[0].text);
+  assert.equal(evolutionDocument.kind, 'tool_evolution_proposal');
+  assert.equal(evolutionDocument.proposal.tool, 'search_text');
+  assert.equal(
+    evolutionDocument.implementation_contract.required_commit_trailer,
+    `Tool-Evolution-Proposal: ${evolutionProposal.proposalId}`
+  );
+  assert.equal(JSON.stringify(evolutionDocument).includes('http-resource-1'), false);
   const listedResponse = await rpcResponse(endpoint, token, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
   const listedTools = listedResponse.body;
-  assert.equal(listedTools.result.tools.length, 60);
+  assert.equal(listedTools.result.tools.length, toolsForProfile('advanced').length + 1);
   const externalTool = listedTools.result.tools.find(tool => tool.name.includes('__fixture__echo'));
   assert.ok(externalTool);
   const externalCall = await rpc(endpoint, token, {

@@ -4,6 +4,7 @@ import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import type { JsonObject, ToolContext } from './types.js';
 import { runGitBuffered } from './gitProcess.js';
+import { scanExcludedWorktreeContainerPrefixes } from './gitWorktreeBoundaries.js';
 import {
   exists, globRegex, readText, resolveExistingPath, resolveExistingWritePath,
   resolveInside, rootAndCwd, sha256File, walk, WorkspacePathError
@@ -13,7 +14,7 @@ import {
   textDecodingErrorValue, type TextEncoding
 } from './textCodec.js';
 import {
-  adaptNewlinesToOriginal, applyEditProposal, buildEditProposal, EditContractError,
+  adaptNewlinesToRange, applyEditProposal, buildEditProposal, EditContractError,
   editFailure, editRecoveryActions, editResultDiff, fileVersionMismatch,
   preflightPatch, removeEditProposal
 } from './editRecovery.js';
@@ -76,6 +77,243 @@ function newlineStyle(value: string): string {
   if (hasCrLf) return 'crlf';
   if (hasLf) return 'lf';
   return 'none';
+}
+
+interface LineEndingToken {
+  content: string;
+  eol: '' | '\r\n' | '\n';
+}
+
+function lineEndingTokens(value: string): LineEndingToken[] {
+  const tokens: LineEndingToken[] = [];
+  let start = 0;
+  while (start < value.length) {
+    const newline = value.indexOf('\n', start);
+    if (newline < 0) {
+      tokens.push({ content: value.slice(start), eol: '' });
+      break;
+    }
+    const crlf = newline > start && value[newline - 1] === '\r';
+    tokens.push({
+      content: value.slice(start, crlf ? newline - 1 : newline),
+      eol: crlf ? '\r\n' : '\n'
+    });
+    start = newline + 1;
+  }
+  if (value.endsWith('\n')) tokens.push({ content: '', eol: '' });
+  return tokens;
+}
+
+function lineContentCounts(tokens: LineEndingToken[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const token of tokens) counts.set(token.content, (counts.get(token.content) ?? 0) + 1);
+  return counts;
+}
+
+export interface UnchangedLineEndingChange {
+  before_line: number;
+  after_line: number;
+  before_eol: '' | '\r\n' | '\n';
+  after_eol: '' | '\r\n' | '\n';
+}
+
+export function unchangedLineEndingChanges(original: string, updated: string): UnchangedLineEndingChange[] {
+  const before = lineEndingTokens(original);
+  const after = lineEndingTokens(updated);
+  const beforeCounts = lineContentCounts(before);
+  const afterCounts = lineContentCounts(after);
+  const unambiguous = (content: string) => beforeCounts.get(content) === 1 && afterCounts.get(content) === 1;
+  const limit = Math.min(before.length, after.length);
+  let prefix = 0;
+  while (prefix < limit && before[prefix].content === after[prefix].content) prefix += 1;
+
+  let suffix = 0;
+  while (
+    suffix < limit - prefix
+    && before[before.length - 1 - suffix].content === after[after.length - 1 - suffix].content
+  ) suffix += 1;
+
+  const changes: UnchangedLineEndingChange[] = [];
+  for (let index = 0; index < prefix; index += 1) {
+    if (before[index].eol === after[index].eol || !unambiguous(before[index].content)) continue;
+    const allowedFinalDeletionBoundary = index === prefix - 1
+      && index === after.length - 1
+      && after[index].eol === ''
+      && before.length > after.length;
+    if (!allowedFinalDeletionBoundary) {
+      changes.push({
+        before_line: index + 1,
+        after_line: index + 1,
+        before_eol: before[index].eol,
+        after_eol: after[index].eol
+      });
+    }
+  }
+  for (let offset = 0; offset < suffix; offset += 1) {
+    const beforeIndex = before.length - 1 - offset;
+    const afterIndex = after.length - 1 - offset;
+    if (before[beforeIndex].eol === after[afterIndex].eol || !unambiguous(before[beforeIndex].content)) continue;
+    changes.push({
+      before_line: beforeIndex + 1,
+      after_line: afterIndex + 1,
+      before_eol: before[beforeIndex].eol,
+      after_eol: after[afterIndex].eol
+    });
+  }
+  return changes.sort((left, right) => left.before_line - right.before_line || left.after_line - right.after_line);
+}
+
+function assertNoUnexpectedNewlineChurn(file: string, original: string, updated: string): void {
+  const changes = unchangedLineEndingChanges(original, updated);
+  if (!changes.length) return;
+  throw new EditContractError(
+    'EDIT_NEWLINE_CHURN',
+    `Edit would change line endings on unchanged content in ${file}`,
+    'validation',
+    false,
+    {
+      path: file,
+      newline_before: newlineStyle(original),
+      newline_after: newlineStyle(updated),
+      unchanged_line_ending_change_count: changes.length,
+      unchanged_line_ending_changes: changes.slice(0, 20),
+      changes_truncated: changes.length > 20,
+      suggestion: 'Use a precise target range; line-ending normalization must not rewrite untouched content.'
+    }
+  );
+}
+
+export interface EditBlastRadius {
+  before_line_count: number;
+  after_line_count: number;
+  changed_before_lines: number;
+  changed_after_lines: number;
+  changed_line_count: number;
+  expected_change_line_budget: number;
+  allowed_changed_line_count: number;
+  change_ratio: number;
+  change_measure: 'prefix_suffix' | 'bounded_line_diff';
+  span_changed_line_count: number;
+  excessive: boolean;
+}
+
+function semanticLines(value: string): string[] {
+  return value.replaceAll('\r\n', '\n').split('\n');
+}
+
+function editTextLineUnits(value: unknown): number {
+  if (typeof value !== 'string' || value.length === 0) return 0;
+  return semanticLines(value).length;
+}
+
+function expectedEditLineBudget(edits: readonly JsonObject[]): number {
+  let budget = 0;
+  for (const edit of edits) {
+    const occurrences = Math.max(1, Number.isSafeInteger(edit.expected_occurrences) ? Number(edit.expected_occurrences) : 1);
+    switch (String(edit.type ?? '')) {
+      case 'replace':
+        budget += occurrences * (editTextLineUnits(edit.old_text) + editTextLineUnits(edit.new_text));
+        break;
+      case 'insert_before':
+      case 'insert_after':
+        budget += occurrences * editTextLineUnits(edit.text);
+        break;
+      case 'replace_lines': {
+        const start = Number(edit.start_line);
+        const end = Number(edit.end_line);
+        const removed = Number.isInteger(start) && Number.isInteger(end) && end >= start ? end - start + 1 : 1;
+        budget += removed + editTextLineUnits(edit.new_text);
+        break;
+      }
+      case 'delete_lines': {
+        const start = Number(edit.start_line);
+        const end = Number(edit.end_line);
+        budget += Number.isInteger(start) && Number.isInteger(end) && end >= start ? end - start + 1 : 1;
+        break;
+      }
+      default:
+        budget += 1;
+    }
+  }
+  return Math.max(1, budget);
+}
+
+function boundedLineEditDistance(before: readonly string[], after: readonly string[], maxDistance: number): number | undefined {
+  if (Math.abs(before.length - after.length) > maxDistance) return undefined;
+  const limit = Math.min(maxDistance, before.length + after.length);
+  let frontier = new Map<number, number>([[1, 0]]);
+  for (let distance = 0; distance <= limit; distance += 1) {
+    const next = new Map<number, number>();
+    for (let diagonal = -distance; diagonal <= distance; diagonal += 2) {
+      const down = frontier.get(diagonal + 1);
+      const right = frontier.get(diagonal - 1);
+      let x = diagonal === -distance || (diagonal !== distance && (right ?? -1) < (down ?? -1))
+        ? down ?? 0
+        : (right ?? 0) + 1;
+      let y = x - diagonal;
+      while (x < before.length && y < after.length && before[x] === after[y]) {
+        x += 1;
+        y += 1;
+      }
+      if (x >= before.length && y >= after.length) return distance;
+      next.set(diagonal, x);
+    }
+    frontier = next;
+  }
+  return undefined;
+}
+
+export function editBlastRadius(original: string, updated: string, edits: readonly JsonObject[] = []): EditBlastRadius {
+  const before = semanticLines(original);
+  const after = semanticLines(updated);
+  const limit = Math.min(before.length, after.length);
+  let prefix = 0;
+  while (prefix < limit && before[prefix] === after[prefix]) prefix += 1;
+  let suffix = 0;
+  while (suffix < limit - prefix && before[before.length - 1 - suffix] === after[after.length - 1 - suffix]) suffix += 1;
+  const changedBefore = Math.max(0, before.length - prefix - suffix);
+  const changedAfter = Math.max(0, after.length - prefix - suffix);
+  const spanChangedLineCount = changedBefore + changedAfter;
+  const expectedBudget = edits.length ? expectedEditLineBudget(edits) : Math.max(1, spanChangedLineCount);
+  const allowedChangedLineCount = Math.max(40, expectedBudget * 12);
+  const boundedDistance = edits.length && spanChangedLineCount > allowedChangedLineCount
+    ? boundedLineEditDistance(before, after, allowedChangedLineCount)
+    : undefined;
+  const changedLineCount = boundedDistance ?? spanChangedLineCount;
+  const changeMeasure = boundedDistance === undefined ? 'prefix_suffix' : 'bounded_line_diff';
+  const denominator = Math.max(1, before.length + after.length);
+  const changeRatio = changedLineCount / denominator;
+  return {
+    before_line_count: before.length,
+    after_line_count: after.length,
+    changed_before_lines: changedBefore,
+    changed_after_lines: changedAfter,
+    changed_line_count: changedLineCount,
+    expected_change_line_budget: expectedBudget,
+    allowed_changed_line_count: allowedChangedLineCount,
+    change_ratio: Number(changeRatio.toFixed(4)),
+    change_measure: changeMeasure,
+    span_changed_line_count: spanChangedLineCount,
+    excessive: Math.max(before.length, after.length) >= 80
+      && changedLineCount > allowedChangedLineCount
+      && changeRatio >= 0.6
+  };
+}
+
+function assertNoUnexpectedEditBlastRadius(file: string, original: string, updated: string, edits: readonly JsonObject[]): EditBlastRadius {
+  const radius = editBlastRadius(original, updated, edits);
+  if (!radius.excessive) return radius;
+  throw new EditContractError(
+    'EDIT_BLAST_RADIUS',
+    `Edit would change far more content than its guarded edit contract in ${file}`,
+    'validation',
+    false,
+    {
+      path: file,
+      ...radius,
+      suggestion: 'Read the target again and use a narrower precise edit. Large intentional rewrites should describe the full replacement in the edit contract.'
+    }
+  );
 }
 
 function numberedContent(content: string, startLine: number): string {
@@ -188,6 +426,12 @@ export async function readManyTool(ctx: ToolContext, key: string, args: JsonObje
   const maxTotal = Math.max(1, Math.min(4_194_304, Number(args.max_total_bytes ?? 262_144)));
   const defaultMax = Math.max(1, Math.min(1_048_576, Number(args.max_bytes_per_file ?? 131_072)));
   const lineNumbers = args.line_numbers === true;
+  const requestedContentMode = String(args.content_mode ?? (lineNumbers ? 'numbered' : 'plain'));
+  if (!['plain', 'numbered', 'both'].includes(requestedContentMode)) {
+    throw new Error('content_mode must be one of: plain, numbered, both');
+  }
+  const includePlainContent = requestedContentMode !== 'numbered';
+  const includeNumberedContent = requestedContentMode !== 'plain';
   const results: JsonObject[] = [];
   let remaining = maxTotal;
   let failed = 0;
@@ -208,11 +452,18 @@ export async function readManyTool(ctx: ToolContext, key: string, args: JsonObje
       });
       remaining -= Number(result.bytes_read ?? 0);
       truncated ||= result.truncated === true;
+      const plainContent = String(result.content ?? '');
+      const numbered = includeNumberedContent
+        ? numberedContent(plainContent, Number(result.start_line ?? 1))
+        : undefined;
+      if (!includePlainContent) delete result.content;
       results.push({
         ...result,
         index: request.index,
         source_indexes: request.source_indexes,
-        ...(lineNumbers ? { numbered_content: numberedContent(String(result.content ?? ''), Number(result.start_line ?? 1)) } : {})
+        content_mode: requestedContentMode,
+        ...(!includePlainContent ? { content_omitted: true } : {}),
+        ...(numbered === undefined ? {} : { numbered_content: numbered })
       });
     } catch (error) {
       failed += 1;
@@ -235,11 +486,17 @@ export async function readManyTool(ctx: ToolContext, key: string, args: JsonObje
     result_count: normalized.length,
     merged_count: normalized.reduce((sum, item) => sum + Math.max(0, item.source_indexes.length - 1), 0),
     failed_count: failed,
+    content_mode: requestedContentMode,
     bytes_read: maxTotal - remaining,
     max_total_bytes: maxTotal,
     truncated,
     warnings: truncated ? ['one or more reads were truncated'] : []
   });
+}
+
+async function workspaceScanExcludedPrefixes(root: string, base: string): Promise<string[]> {
+  if (path.relative(root, base) !== '') return [];
+  return scanExcludedWorktreeContainerPrefixes(root);
 }
 
 export async function projectMapTool(ctx: ToolContext, key: string, args: JsonObject): Promise<JsonObject> {
@@ -251,13 +508,15 @@ export async function projectMapTool(ctx: ToolContext, key: string, args: JsonOb
   const maxEntries = Math.max(1, Math.min(10_000, Number(args.max_entries ?? 1_000)));
   const maxDepth = Math.max(1, Math.min(20, Number(args.max_depth ?? 4)));
   const includeIgnored = args.include_ignored === true;
+  const excludedPrefixes = await workspaceScanExcludedPrefixes(root, base);
   const entries = await walk(root, base, {
     maxDepth,
     maxResults: Math.min(60_000, maxFiles + maxEntries + 1),
     includeDirectories: true,
     includeHidden: args.include_hidden === true,
     includeIgnored,
-    includeGenerated: args.include_generated === true
+    includeGenerated: args.include_generated === true,
+    excludedPrefixes
   });
   const tree = entries.slice(0, maxEntries).map(entry => ({
     path: entry.path,
@@ -323,6 +582,7 @@ export async function projectMapTool(ctx: ToolContext, key: string, args: JsonOb
   return ok({
     path: selected.display,
     scanned_files: scanned.length,
+    scan_excluded_worktree_container_count: excludedPrefixes.length,
     languages,
     manifests: manifests.sort((left, right) => String(left.path).localeCompare(String(right.path))),
     entrypoints: [...entrypoints].sort(),
@@ -344,13 +604,15 @@ export async function listFilesTool(ctx: ToolContext, key: string, args: JsonObj
   const maxResults = Math.max(1, Math.min(50_000, Number(args.max_results ?? 1_000)));
   const recursive = args.recursive !== false;
   const maxDepth = recursive ? Math.max(1, Math.min(20, Number(args.max_depth ?? 20))) : 1;
+  const excludedPrefixes = recursive ? await workspaceScanExcludedPrefixes(root, base) : [];
   let entries = await walk(root, base, {
     maxDepth: recursive ? maxDepth : 0,
     maxResults: 50_000,
     includeDirectories: true,
     includeHidden: args.include_hidden === true,
     includeIgnored: args.include_ignored === true,
-    includeGenerated: args.include_generated === true
+    includeGenerated: args.include_generated === true,
+    excludedPrefixes
   });
   const rawPatterns = [...(Array.isArray(args.patterns) ? args.patterns.map(String) : []), ...(args.glob ? [String(args.glob)] : [])];
   const includePatterns = (rawPatterns.length ? rawPatterns : ['**']).map(globRegex);
@@ -364,6 +626,7 @@ export async function listFilesTool(ctx: ToolContext, key: string, args: JsonObj
     path: selected.display,
     entries: output,
     returned_count: output.length,
+    scan_excluded_worktree_container_count: excludedPrefixes.length,
     entry_types: [...entryTypes],
     recursive,
     max_depth: maxDepth,
@@ -372,7 +635,16 @@ export async function listFilesTool(ctx: ToolContext, key: string, args: JsonObj
   });
 }
 
-export async function searchTextTool(ctx: ToolContext, key: string, args: JsonObject): Promise<JsonObject> {
+export interface SearchTextExecutionOptions {
+  exactTotalFastTail?: boolean;
+}
+
+export async function searchTextTool(
+  ctx: ToolContext,
+  key: string,
+  args: JsonObject,
+  options: SearchTextExecutionOptions = {}
+): Promise<JsonObject> {
   const selected = await resolveExistingPath(rootAndCwd(ctx, key).root, String(args.path ?? '.'));
   const root = selected.root;
   const base = selected.full;
@@ -397,20 +669,27 @@ export async function searchTextTool(ctx: ToolContext, key: string, args: JsonOb
   const filesOnly = args.files_only === true;
   const countOnly = args.count_only === true;
   const calculateTotal = countOnly || args.calculate_total === true;
+  const exactTotalFastTail = options.exactTotalFastTail === true && calculateTotal && !countOnly;
   const includeRaw = [...(Array.isArray(args.include_globs) ? args.include_globs.map(String) : []), ...(args.glob ? [String(args.glob)] : [])];
   const include = includeRaw.map(globRegex);
   const exclude = (Array.isArray(args.exclude_globs) ? args.exclude_globs : []).map(String).map(globRegex);
   const filenameMatcher = filenameQuery ? regexFor(filenameQuery, args.filename_regex === true, args.filename_case_sensitive === true) : undefined;
   const queryMatchers = queries.map(query => regexFor(query.query, query.regex, query.caseSensitive, true));
+  const excludedPrefixes = await workspaceScanExcludedPrefixes(root, base);
   const entries = (await walk(root, base, {
     maxDepth: 20,
     maxResults: 50_000,
     includeHidden: args.include_hidden === true,
     includeIgnored: args.include_ignored === true,
-    includeGenerated: args.include_generated === true
+    includeGenerated: args.include_generated === true,
+    excludedPrefixes
   })).filter(entry => entry.type === 'file').sort((left, right) => left.path.localeCompare(right.path));
   const matches: JsonObject[] = [];
   const files: JsonObject[] = [];
+  const responseBytesLimit = 128 * 1024;
+  const contextLineBytesLimit = Math.min(maxPreview, 2_048);
+  let responseBytesEstimate = 0;
+  let responseLimitReached = false;
   const queryCounts = queries.map(() => 0);
   let filesConsidered = 0;
   let scannedFiles = 0;
@@ -420,6 +699,8 @@ export async function searchTextTool(ctx: ToolContext, key: string, args: JsonOb
   let truncated = false;
   let stoppedEarly = false;
   let stop = false;
+  let fastTailActive = false;
+  let fastTailSkippedMatchDetails = 0;
 
   for (const entry of entries) {
     if (stop) break;
@@ -451,19 +732,26 @@ export async function searchTextTool(ctx: ToolContext, key: string, args: JsonOb
         const matcher = queryMatchers[queryIndex];
         matcher.lastIndex = 0;
         for (const found of lines[lineIndex].matchAll(matcher)) {
-          const start = found.index ?? 0;
-          const value = found[0] ?? '';
-          const end = start + value.length;
           queryCounts[queryIndex] += 1;
-          fileMatchCount += 1;
           if (!fileRecorded) { matchedFiles += 1; fileRecorded = true; }
+          if (fastTailActive) {
+            fastTailSkippedMatchDetails += 1;
+            continue;
+          }
+          fileMatchCount += 1;
           if (fileMatchCount > maxMatchesPerFile) continue;
           if (skipped < cursor) { skipped += 1; continue; }
           if (filesOnly) {
             if (!files.some(item => item.path === entry.path)) {
               if (files.length >= maxResults) {
                 truncated = true;
-                if (calculateTotal) continue;
+                if (calculateTotal) {
+                  if (exactTotalFastTail) {
+                    fastTailActive = true;
+                    fastTailSkippedMatchDetails += 1;
+                  }
+                  continue;
+                }
                 stoppedEarly = true;
                 stop = true;
                 break;
@@ -473,13 +761,25 @@ export async function searchTextTool(ctx: ToolContext, key: string, args: JsonOb
             continue;
           }
           if (countOnly) continue;
+          if (responseLimitReached) continue;
           if (matches.length >= maxResults) {
             truncated = true;
-            if (calculateTotal) continue;
+            if (calculateTotal) {
+              if (exactTotalFastTail) {
+                fastTailActive = true;
+                fastTailSkippedMatchDetails += 1;
+              }
+              continue;
+            }
             stoppedEarly = true;
             stop = true;
             break;
           }
+          const start = found.index ?? 0;
+          const value = found[0] ?? '';
+          const end = start + value.length;
+          const boundedMatch = truncatePrefixUtf8(value, maxPreview);
+          const boundedQuery = truncatePrefixUtf8(query.query, 1_024);
           const item: JsonObject = {
             match_id: stableMatchId(entry.path, lineIndex + 1, queryIndex, query.query),
             path: entry.path,
@@ -487,14 +787,45 @@ export async function searchTextTool(ctx: ToolContext, key: string, args: JsonOb
             column: [...lines[lineIndex].slice(0, start)].length + 1,
             end_column: [...lines[lineIndex].slice(0, end)].length + 1,
             query_index: queryIndex,
-            query: query.query,
-            match: value,
+            query: boundedQuery.content,
+            match: boundedMatch.content,
             preview: previewAround(lines[lineIndex], start, end, maxPreview)
           };
+          if (boundedQuery.truncated) item.query_truncated = true;
+          if (boundedMatch.truncated) item.match_truncated = true;
           if (contextLines > 0) {
-            item.before = lines.slice(Math.max(0, lineIndex - contextLines), lineIndex);
-            item.after = lines.slice(lineIndex + 1, Math.min(lines.length, lineIndex + 1 + contextLines));
+            let contextTruncated = false;
+            const boundContextLine = (line: string) => {
+              const bounded = truncatePrefixUtf8(line, contextLineBytesLimit);
+              contextTruncated ||= bounded.truncated;
+              return bounded.content;
+            };
+            item.before = lines.slice(Math.max(0, lineIndex - contextLines), lineIndex).map(boundContextLine);
+            item.after = lines.slice(lineIndex + 1, Math.min(lines.length, lineIndex + 1 + contextLines)).map(boundContextLine);
+            if (contextTruncated) item.context_truncated = true;
           }
+          let itemBytes = Buffer.byteLength(JSON.stringify(item));
+          if (matches.length === 0 && itemBytes > responseBytesLimit && (item.before || item.after)) {
+            delete item.before;
+            delete item.after;
+            item.context_omitted_due_to_response_limit = true;
+            itemBytes = Buffer.byteLength(JSON.stringify(item));
+          }
+          if (responseBytesEstimate + itemBytes > responseBytesLimit) {
+            truncated = true;
+            responseLimitReached = true;
+            if (calculateTotal) {
+              if (exactTotalFastTail) {
+                fastTailActive = true;
+                fastTailSkippedMatchDetails += 1;
+              }
+              continue;
+            }
+            stoppedEarly = true;
+            stop = true;
+            break;
+          }
+          responseBytesEstimate += itemBytes;
           matches.push(item);
         }
       }
@@ -502,9 +833,20 @@ export async function searchTextTool(ctx: ToolContext, key: string, args: JsonOb
   }
   const returned = filesOnly ? files.length : matches.length;
   const normalized = requestedMax !== maxResults || requestedPreview !== maxPreview || requestedContext !== contextLines;
-  const searchRecommendation = stoppedEarly && String(args.path ?? '.') === '.' && !includeRaw.length && !filenameQuery
-    ? 'Search stopped at max_results. Narrow path/include_globs/filename_query, or set calculate_total=true only when an exact total is required.'
-    : null;
+  const exactTotalForcedFullScan = calculateTotal && !countOnly && truncated && !stoppedEarly;
+  const truncationReason = responseLimitReached ? 'response_limit' : truncated ? 'result_limit' : null;
+  const earlyStopReason = stoppedEarly ? truncationReason : null;
+  const searchRecommendation = exactTotalForcedFullScan
+    ? `calculate_total=true forced a full scan after the ${responseLimitReached ? 'response payload' : 'result'} limit was reached. Omit calculate_total for discovery, narrow path/include_globs/filename_query, or use count_only=true when only the exact count is needed.`
+    : responseLimitReached
+      ? 'Search stopped at the response payload limit. Continue with next_cursor, reduce context_lines/max_preview_bytes, or narrow path/include_globs.'
+      : stoppedEarly && String(args.path ?? '.') === '.' && !includeRaw.length && !filenameQuery
+        ? 'Search stopped at max_results. Narrow path/include_globs/filename_query, or set calculate_total=true only when an exact total is required.'
+        : null;
+  const warnings = [
+    ...(truncated ? [responseLimitReached ? 'response payload limit reached' : 'result limit reached'] : []),
+    ...(exactTotalForcedFullScan ? [`calculate_total forced a full scan after the ${responseLimitReached ? 'response payload' : 'result'} limit was reached`] : [])
+  ];
   return ok({
     query: args.query ?? null,
     queries: queries.map((query, index) => ({ index, query: query.query, regex: query.regex, case_sensitive: query.caseSensitive, matches: queryCounts[index] })),
@@ -517,17 +859,25 @@ export async function searchTextTool(ctx: ToolContext, key: string, args: JsonOb
     returned_count: returned,
     matched_files: matchedFiles,
     files_considered: filesConsidered,
+    scan_excluded_worktree_container_count: excludedPrefixes.length,
     scanned_files: scannedFiles,
     skipped_large_files: skippedLargeFiles,
     cursor,
     next_cursor: truncated ? cursor + returned : null,
     scan_completed: !stoppedEarly,
-    early_stop_reason: stoppedEarly ? 'result_limit' : null,
+    early_stop_reason: earlyStopReason,
     search_recommendation: searchRecommendation,
+    exact_total_forced_full_scan: exactTotalForcedFullScan,
+    exact_total_fast_tail: fastTailActive,
+    exact_total_fast_tail_skipped_match_details: fastTailSkippedMatchDetails,
+    response_bytes_limit: responseBytesLimit,
+    response_bytes_estimate: responseBytesEstimate,
+    context_line_bytes_limit: contextLineBytesLimit,
+    response_limit_reached: responseLimitReached,
     arguments_normalized: normalized,
     normalized_arguments: normalized ? { max_results: maxResults, max_preview_bytes: maxPreview, context_lines: contextLines } : null,
     truncated,
-    warnings: truncated ? ['result limit reached'] : []
+    warnings
   });
 }
 
@@ -632,6 +982,29 @@ function lineRangeOffsets(value: string, startLine: number, endLine: number, edi
   };
 }
 
+interface LineEditRange extends TextRange {
+  contentEnd: number;
+  trailingNewline: '' | '\r\n' | '\n';
+  precedingNewline: '' | '\r\n' | '\n';
+}
+
+function newlineEndingAt(value: string, endOffset: number): '' | '\r\n' | '\n' {
+  if (endOffset <= 0 || value[endOffset - 1] !== '\n') return '';
+  return endOffset > 1 && value[endOffset - 2] === '\r' ? '\r\n' : '\n';
+}
+
+function lineEditRange(value: string, startLine: number, endLine: number, editIndex: number): LineEditRange {
+  const range = lineRangeOffsets(value, startLine, endLine, editIndex);
+  const trailingNewline = range.end > range.start ? newlineEndingAt(value, range.end) : '';
+  const precedingNewline = newlineEndingAt(value, range.start);
+  return {
+    ...range,
+    contentEnd: range.end - trailingNewline.length,
+    trailingNewline,
+    precedingNewline
+  };
+}
+
 function contextMatches(value: string, range: TextRange, edit: JsonObject, matchMode: string): boolean {
   const before = typeof edit.before_context === 'string' ? edit.before_context : undefined;
   const after = typeof edit.after_context === 'string' ? edit.after_context : undefined;
@@ -716,10 +1089,10 @@ function resolveTextRanges(value: string, target: string, edit: JsonObject, edit
   return ranges;
 }
 
-function replaceTextRanges(value: string, ranges: TextRange[], replacement: (matched: string) => string): string {
+function replaceTextRanges(value: string, ranges: TextRange[], replacement: (matched: string, range: TextRange) => string): string {
   let updated = value;
   for (const range of [...ranges].reverse()) {
-    updated = updated.slice(0, range.start) + replacement(value.slice(range.start, range.end)) + updated.slice(range.end);
+    updated = updated.slice(0, range.start) + replacement(value.slice(range.start, range.end), range) + updated.slice(range.end);
   }
   return updated;
 }
@@ -861,9 +1234,51 @@ function validatePreciseEditContract(edits: JsonObject[]): void {
   }
 }
 
-function applyEdits(original: string, edits: JsonObject[]): string {
+function tryApplyOriginalSnapshotTextEdits(original: string, edits: JsonObject[]): string | null {
+  if (edits.length < 2 || !edits.slice(1).some(edit => edit.start_line !== undefined && edit.end_line !== undefined)) return null;
+  const operations: Array<TextRange & { replacement: string }> = [];
+  try {
+    for (let editIndex = 0; editIndex < edits.length; editIndex += 1) {
+      const edit = edits[editIndex];
+      const type = String(edit.type);
+      if (!['replace', 'insert_before', 'insert_after'].includes(type)) return null;
+      const target = type === 'replace' ? String(edit.old_text ?? '') : String(edit.anchor ?? '');
+      if (!target) return null;
+      const ranges = resolveTextRanges(original, target, edit, editIndex);
+      for (const range of ranges) {
+        const matched = original.slice(range.start, range.end);
+        const inserted = adaptNewlinesToRange(
+          String(type === 'replace' ? edit.new_text ?? '' : edit.text ?? ''),
+          original,
+          range.start,
+          range.end
+        );
+        const replacement = type === 'replace'
+          ? inserted
+          : type === 'insert_before'
+            ? `${inserted}${matched}`
+            : `${matched}${inserted}`;
+        operations.push({ ...range, replacement });
+      }
+    }
+  } catch {
+    return null;
+  }
+  const ordered = [...operations].sort((left, right) => left.start - right.start || left.end - right.end);
+  for (let index = 1; index < ordered.length; index += 1) {
+    if (ordered[index]!.start < ordered[index - 1]!.end) return null;
+  }
   let text = original;
-  const newline = original.includes('\r\n') ? '\r\n' : '\n';
+  for (const operation of [...ordered].reverse()) {
+    text = text.slice(0, operation.start) + operation.replacement + text.slice(operation.end);
+  }
+  return text;
+}
+
+function applyEdits(original: string, edits: JsonObject[]): string {
+  const snapshotApplied = tryApplyOriginalSnapshotTextEdits(original, edits);
+  if (snapshotApplied !== null) return snapshotApplied;
+  let text = original;
   for (let editIndex = 0; editIndex < edits.length; editIndex += 1) {
     const edit = edits[editIndex];
     switch (String(edit.type)) {
@@ -871,37 +1286,27 @@ function applyEdits(original: string, edits: JsonObject[]): string {
         const oldText = String(edit.old_text ?? '');
         if (!oldText) throw new EditContractError('INVALID_ARGUMENT', `edits[${editIndex}].old_text is required`);
         const ranges = resolveTextRanges(text, oldText, edit, editIndex);
-        const replacement = adaptNewlinesToOriginal(String(edit.new_text ?? ''), original);
-        text = replaceTextRanges(text, ranges, () => replacement);
+        text = replaceTextRanges(text, ranges, (_matched, range) =>
+          adaptNewlinesToRange(String(edit.new_text ?? ''), text, range.start, range.end));
         break;
       }
       case 'replace_lines': {
-        const lines = text.split(/\r?\n/);
         const start = Number(edit.start_line);
         const end = Number(edit.end_line);
-        if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < start || end > lines.length) {
+        const range = lineEditRange(text, start, end, editIndex);
+        const actual = text.slice(range.start, range.contentEnd);
+        if (typeof edit.expected_text === 'string'
+          && actual.replaceAll('\r\n', '\n') !== edit.expected_text.replaceAll('\r\n', '\n')) {
           throw new EditContractError(
-            'EDIT_LINE_RANGE_INVALID',
-            `edits[${editIndex}] line range ${start}-${end} is invalid`,
-            'validation',
-            false,
-            { edit_index: editIndex, start_line: start, end_line: end, total_lines: lines.length }
+            'EDIT_EXPECTED_TEXT_MISMATCH',
+            `edits[${editIndex}] line range content did not match expected_text`,
+            'conflict',
+            true,
+            { edit_index: editIndex, start_line: start, end_line: end, actual_text: actual }
           );
         }
-        if (typeof edit.expected_text === 'string') {
-          const actual = lines.slice(start - 1, end).join(newline);
-          if (actual.replaceAll('\r\n', '\n') !== edit.expected_text.replaceAll('\r\n', '\n')) {
-            throw new EditContractError(
-              'EDIT_EXPECTED_TEXT_MISMATCH',
-              `edits[${editIndex}] line range content did not match expected_text`,
-              'conflict',
-              true,
-              { edit_index: editIndex, start_line: start, end_line: end, actual_text: actual }
-            );
-          }
-        }
-        lines.splice(start - 1, end - start + 1, ...adaptNewlinesToOriginal(String(edit.new_text ?? ''), original).split(/\r?\n/));
-        text = lines.join(newline);
+        const replacement = adaptNewlinesToRange(String(edit.new_text ?? ''), text, range.start, range.end);
+        text = text.slice(0, range.start) + replacement + text.slice(range.contentEnd);
         break;
       }
       case 'insert_before':
@@ -909,39 +1314,33 @@ function applyEdits(original: string, edits: JsonObject[]): string {
         const anchor = String(edit.anchor ?? '');
         if (!anchor) throw new EditContractError('INVALID_ARGUMENT', `edits[${editIndex}].anchor is required`);
         const ranges = resolveTextRanges(text, anchor, edit, editIndex);
-        const insertion = adaptNewlinesToOriginal(String(edit.text ?? ''), original);
-        text = replaceTextRanges(text, ranges, matched => edit.type === 'insert_before'
-          ? `${insertion}${matched}`
-          : `${matched}${insertion}`);
+        text = replaceTextRanges(text, ranges, (matched, range) => {
+          const insertion = adaptNewlinesToRange(String(edit.text ?? ''), text, range.start, range.end);
+          return edit.type === 'insert_before'
+            ? `${insertion}${matched}`
+            : `${matched}${insertion}`;
+        });
         break;
       }
       case 'delete_lines': {
-        const lines = text.split(/\r?\n/);
         const start = Number(edit.start_line);
         const end = Number(edit.end_line);
-        if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < start || end > lines.length) {
+        const range = lineEditRange(text, start, end, editIndex);
+        const actual = text.slice(range.start, range.contentEnd);
+        if (typeof edit.expected_text === 'string'
+          && actual.replaceAll('\r\n', '\n') !== edit.expected_text.replaceAll('\r\n', '\n')) {
           throw new EditContractError(
-            'EDIT_LINE_RANGE_INVALID',
-            `edits[${editIndex}] line range ${start}-${end} is invalid`,
-            'validation',
-            false,
-            { edit_index: editIndex, start_line: start, end_line: end, total_lines: lines.length }
+            'EDIT_EXPECTED_TEXT_MISMATCH',
+            `edits[${editIndex}] line range content did not match expected_text`,
+            'conflict',
+            true,
+            { edit_index: editIndex, start_line: start, end_line: end, actual_text: actual }
           );
         }
-        if (typeof edit.expected_text === 'string') {
-          const actual = lines.slice(start - 1, end).join(newline);
-          if (actual.replaceAll('\r\n', '\n') !== edit.expected_text.replaceAll('\r\n', '\n')) {
-            throw new EditContractError(
-              'EDIT_EXPECTED_TEXT_MISMATCH',
-              `edits[${editIndex}] line range content did not match expected_text`,
-              'conflict',
-              true,
-              { edit_index: editIndex, start_line: start, end_line: end, actual_text: actual }
-            );
-          }
-        }
-        lines.splice(start - 1, end - start + 1);
-        text = lines.join(newline);
+        const deleteStart = range.trailingNewline || !range.precedingNewline
+          ? range.start
+          : range.start - range.precedingNewline.length;
+        text = text.slice(0, deleteStart) + text.slice(range.end);
         break;
       }
       default:
@@ -949,6 +1348,151 @@ function applyEdits(original: string, edits: JsonObject[]): string {
     }
   }
   return text;
+}
+
+const MAX_DIRECT_EDIT_RECOVERY_BYTES = 32 * 1024;
+
+function boundedDirectRecoveryAction(action: JsonObject): JsonObject | undefined {
+  return Buffer.byteLength(JSON.stringify(action)) <= MAX_DIRECT_EDIT_RECOVERY_BYTES ? action : undefined;
+}
+
+function editTarget(edit: JsonObject): string | undefined {
+  const type = String(edit.type ?? '');
+  if (type === 'replace') return typeof edit.old_text === 'string' && edit.old_text ? edit.old_text : undefined;
+  if (type === 'insert_before' || type === 'insert_after') {
+    return typeof edit.anchor === 'string' && edit.anchor ? edit.anchor : undefined;
+  }
+  return undefined;
+}
+
+function guardedCandidateRecoveryActions(
+  original: string,
+  file: string,
+  actualSha256: string,
+  edits: JsonObject[],
+  error: EditContractError
+): JsonObject[] {
+  if (error.code !== 'EDIT_MATCH_COUNT_MISMATCH' || edits.length !== 1 || Number(error.details.edit_index ?? -1) !== 0) return [];
+  const edit = edits[0]!;
+  const target = editTarget(edit);
+  if (!target) return [];
+  let ranges: TextRange[];
+  try {
+    ranges = textRanges(original, target, edit, 0);
+  } catch {
+    return [];
+  }
+  if (ranges.length <= 1) return [];
+  const actions: JsonObject[] = [];
+  for (let candidateIndex = 0; candidateIndex < Math.min(8, ranges.length); candidateIndex += 1) {
+    const range = ranges[candidateIndex]!;
+    const startLine = lineNumberAt(original, range.start);
+    const endLine = lineNumberAt(original, Math.max(range.start, range.end - 1));
+    const guardedEdit: JsonObject = {
+      ...structuredClone(edit),
+      expected_occurrences: 1,
+      start_line: startLine,
+      end_line: endLine
+    };
+    try {
+      const guardedRanges = textRanges(original, target, guardedEdit, 0);
+      if (guardedRanges.length !== 1 || guardedRanges[0]!.start !== range.start || guardedRanges[0]!.end !== range.end) continue;
+      validatePreciseEditContract([guardedEdit]);
+      const updated = applyEdits(original, [guardedEdit]);
+      if (updated === original) continue;
+      assertNoUnexpectedNewlineChurn(file, original, updated);
+      assertNoUnexpectedEditBlastRadius(file, original, updated, [guardedEdit]);
+    } catch {
+      continue;
+    }
+    const action = boundedDirectRecoveryAction({
+      action: 'retry_match_candidate',
+      action_id: `edit-candidate-${candidateIndex + 1}`,
+      tool: 'edit',
+      required_arguments: [],
+      candidate_line: startLine,
+      arguments: {
+        files: [{
+          path: file,
+          expected_sha256: actualSha256,
+          edits: [guardedEdit]
+        }]
+      },
+      reason: 'edit_match_candidate_revalidated'
+    });
+    if (action) actions.push(action);
+  }
+  return actions;
+}
+
+function directRetryGuardedEditAction(
+  original: string,
+  file: string,
+  actualSha256: string,
+  edits: JsonObject[]
+): JsonObject | undefined {
+  if (edits.length === 0) return undefined;
+  try {
+    validatePreciseEditContract(edits);
+    const updated = applyEdits(original, edits);
+    if (updated === original) return undefined;
+    assertNoUnexpectedNewlineChurn(file, original, updated);
+    assertNoUnexpectedEditBlastRadius(file, original, updated, edits);
+  } catch {
+    return undefined;
+  }
+  return boundedDirectRecoveryAction({
+    action: 'retry_guarded_edit',
+    action_id: 'edit-current-version',
+    tool: 'edit',
+    required_arguments: [],
+    arguments: {
+      files: [{
+        path: file,
+        expected_sha256: actualSha256,
+        edits: structuredClone(edits)
+      }]
+    },
+    reason: 'edit_revalidated_on_current_content'
+  });
+}
+
+function staleSingleFileEditError(
+  file: string,
+  expectedSha256: string,
+  actualSha256: string,
+  original: string,
+  edits: JsonObject[]
+): EditContractError {
+  const base = fileVersionMismatch(file, expectedSha256, actualSha256);
+  const direct = directRetryGuardedEditAction(original, file, actualSha256, edits);
+  if (!direct) return base;
+  return new EditContractError(base.code, base.message, base.category, base.retryable, {
+    ...base.details,
+    direct_recovery_action_count: 1,
+    recovery_actions: [direct, ...(Array.isArray(base.details.recovery_actions) ? base.details.recovery_actions as JsonObject[] : [])]
+  });
+}
+
+function enrichSingleFileEditError(
+  error: unknown,
+  file: string,
+  actualSha256: string,
+  original: string,
+  edits: JsonObject[]
+): unknown {
+  const enriched = enrichEditError(error, file, actualSha256);
+  if (!(enriched instanceof EditContractError)) return enriched;
+  const direct = guardedCandidateRecoveryActions(original, file, actualSha256, edits, enriched);
+  if (!direct.length) return enriched;
+  return new EditContractError(enriched.code, enriched.message, enriched.category, enriched.retryable, {
+    ...enriched.details,
+    direct_recovery_action_count: direct.length,
+    recovery_actions: [
+      ...direct,
+      ...(Array.isArray(enriched.details.recovery_actions) ? enriched.details.recovery_actions as JsonObject[] : [])
+    ]
+  });
 }
 
 interface PreparedEdit {
@@ -961,6 +1505,7 @@ interface PreparedEdit {
   encoding: TextEncoding;
   bom: boolean;
   beforeHash: string;
+  blastRadius: EditBlastRadius;
 }
 
 function enrichEditError(error: unknown, file: string, actualSha256: string): unknown {
@@ -992,6 +1537,8 @@ async function prepareEdit(ctx: ToolContext, key: string, args: JsonObject): Pro
   try {
     validatePreciseEditContract(edits);
     const updated = applyEdits(original, edits);
+    assertNoUnexpectedNewlineChurn(display, original, updated);
+    const blastRadius = assertNoUnexpectedEditBlastRadius(display, original, updated, edits);
     return {
       file,
       path: display,
@@ -1001,7 +1548,8 @@ async function prepareEdit(ctx: ToolContext, key: string, args: JsonObject): Pro
       updatedBytes: encodeText(updated, decoded.encoding, decoded.bom),
       encoding: decoded.encoding,
       bom: decoded.bom,
-      beforeHash
+      beforeHash,
+      blastRadius
     };
   } catch (error) {
     throw enrichEditError(error, display, beforeHash);
@@ -1041,8 +1589,9 @@ export async function editFileTool(ctx: ToolContext, key: string, args: JsonObje
     const decoded = await readDecodedTextFile(file);
     const original = decoded.text;
     const beforeHash = createHash('sha256').update(decoded.bytes).digest('hex');
+    const directEdits = Array.isArray(args.edits) ? args.edits as JsonObject[] : [];
     if (args.expected_sha256 && String(args.expected_sha256).toLowerCase() !== beforeHash.toLowerCase()) {
-      throw fileVersionMismatch(display, String(args.expected_sha256), beforeHash);
+      throw staleSingleFileEditError(display, String(args.expected_sha256), beforeHash, original, directEdits);
     }
 
     let updated: string;
@@ -1054,7 +1603,7 @@ export async function editFileTool(ctx: ToolContext, key: string, args: JsonObje
       proposalId = applied.proposalId;
       proposalApplyFormat = applied.applyFormat;
     } else {
-      const edits = Array.isArray(args.edits) ? args.edits as JsonObject[] : [];
+      const edits = directEdits;
       if (!edits.length) throw new EditContractError('INVALID_ARGUMENT', 'edits or apply_proposal is required');
       try {
         validatePreciseEditContract(edits);
@@ -1066,11 +1615,13 @@ export async function editFileTool(ctx: ToolContext, key: string, args: JsonObje
       } catch (error) {
         const proposal = buildEditProposal(ctx, key, display, beforeHash, original, edits);
         if (proposal) return ok(proposal);
-        throw enrichEditError(error, display, beforeHash);
+        throw enrichSingleFileEditError(error, display, beforeHash, original, edits);
       }
     }
 
     if (updated === original) throw new EditContractError('PATCH_FAILED', 'Edits produced no changes.');
+    assertNoUnexpectedNewlineChurn(display, original, updated);
+    const blastRadius = assertNoUnexpectedEditBlastRadius(display, original, updated, directEdits);
     const updatedBytes = encodeText(updated, decoded.encoding, decoded.bom);
     const afterHash = createHash('sha256').update(updatedBytes).digest('hex');
     const dryRun = args.dry_run === true;
@@ -1109,6 +1660,7 @@ export async function editFileTool(ctx: ToolContext, key: string, args: JsonObje
       commit_ms: Math.max(0, Math.round(completed - planFinished)),
       total_ms: Math.max(0, Math.round(completed - started))
     };
+    const boundedDiff = editResultDiff(display, original, updated);
     return ok({
       status: proposalId ? 'proposal_applied' : 'edited',
       proposal_id: proposalId ?? null,
@@ -1124,9 +1676,16 @@ export async function editFileTool(ctx: ToolContext, key: string, args: JsonObje
       after_sha256: afterHash,
       edit_plan: editPlan,
       encoding: decoded.encoding,
+      newline_before: newlineStyle(original),
+      newline_after: newlineStyle(updated),
+      newline_guard: 'passed',
+      blast_radius_guard: 'passed',
+      blast_radius: blastRadius,
       phase_durations_ms: phaseDurationsMs,
       bom: decoded.bom,
-      diff: editResultDiff(display, original, updated),
+      diff: boundedDiff.content,
+      diff_bytes: boundedDiff.bytes,
+      diff_truncated: boundedDiff.truncated,
       affected_files: [{ path: display, operation: 'update' }],
       files_created: [],
       files_modified: [display],
@@ -1227,7 +1786,12 @@ export async function editManyTool(ctx: ToolContext, key: string, args: JsonObje
       before_sha256: item.beforeHash,
       after_sha256: createHash('sha256').update(item.updatedBytes).digest('hex'),
       encoding: item.encoding,
-      bom: item.bom
+      bom: item.bom,
+      newline_before: newlineStyle(item.original),
+      newline_after: newlineStyle(item.updated),
+      newline_guard: 'passed',
+      blast_radius_guard: 'passed',
+      blast_radius: item.blastRadius
     }));
     const editPlan = dryRun ? (() => {
       const replayFiles = files.map((file, fileIndex) => ({

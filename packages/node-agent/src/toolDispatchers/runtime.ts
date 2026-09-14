@@ -3,11 +3,13 @@ import { toolNamesForProfile, toolsetRevisionForProfile } from '../catalog.js';
 import type { ConversationIdentity } from '../conversation/contract.js';
 import { ConversationRoutingError } from '../conversation.js';
 import { ABSOLUTE_COMMAND_TIMEOUT_MAX_MS } from '../executionLimits.js';
+import { ABSOLUTE_JOB_TIMEOUT_MAX_MS, configuredJobTimeoutMaxMs } from '../processes/timeoutPolicy.js';
 import { bootstrapHistory } from '../history.js';
 import type { ToolDispatchRequest, ToolHandlerMap } from '../toolDispatch/contract.js';
 import type { JsonObject, ToolContext } from '../types.js';
 import { runtimeRevisionForWorkspace } from '../runtimeRevision.js';
 import { skillSummary } from '../skills/types.js';
+import { toolStrategyImplementationSnapshot } from '../knowledge/strategyImplementations.js';
 import { AGENT_VERSION, CLIENT_COMPAT_VERSION } from '../version.js';
 import { resolveExistingDirectory, resolveInside, rootAndCwd, selectedFolderSafe, validatedFolderCwd } from '../workspace.js';
 import { normalizedSandboxConfig, sandboxAvailable, sandboxBackend, sandboxBackends } from '../sandbox.js';
@@ -20,6 +22,22 @@ function ok(value: JsonObject = {}): JsonObject {
 
 function workspaceHistoryDir(folder: { path: string }): string {
   return resolveInside(folder.path, 'docs/history-session');
+}
+
+function historyBootstrapError(error: unknown): JsonObject {
+  const record = error && typeof error === 'object' ? error as Record<string, unknown> : {};
+  const code = typeof record.code === 'string' && record.code ? record.code : 'HISTORY_BOOTSTRAP_FAILED';
+  const message = error instanceof Error && error.message ? error.message : 'Session history bootstrap failed.';
+  const category = typeof record.category === 'string' && record.category
+    ? record.category
+    : ['EACCES', 'EPERM'].includes(code) ? 'permission' : 'history';
+  const retryable = typeof record.retryable === 'boolean'
+    ? record.retryable
+    : ['EACCES', 'EPERM', 'EBUSY'].includes(code);
+  const details = record.details && typeof record.details === 'object' && !Array.isArray(record.details)
+    ? record.details as JsonObject
+    : {};
+  return { code, message, category, retryable, details };
 }
 
 function workspaceFolderListing(ctx: ToolContext, key: string, identity: ConversationIdentity): JsonObject {
@@ -145,7 +163,9 @@ async function serverInfo({ ctx, key, identity }: ToolDispatchRequest): Promise<
     },
     limits: {
       ...ctx.config.limits,
-      commandTimeoutAbsoluteMaxMs: ABSOLUTE_COMMAND_TIMEOUT_MAX_MS
+      commandTimeoutAbsoluteMaxMs: ABSOLUTE_COMMAND_TIMEOUT_MAX_MS,
+      jobTimeoutMaxMs: configuredJobTimeoutMaxMs(),
+      jobTimeoutAbsoluteMaxMs: ABSOLUTE_JOB_TIMEOUT_MAX_MS
     },
     tunnel: ctx.tunnelStatus ?? { enabled: false, state: 'disabled', workers: 0, connectedWorkers: 0, completedRequests: 0 },
     native_binary_free: true, unsupported_tunnels: ['frp', 'cloudflare']
@@ -179,23 +199,82 @@ async function conversationBootstrap({ ctx, key, args, historyArgs, identity }: 
   const routing = await bindWorkspaceFolder(ctx, key, identity, id);
   const bootstrapArgs = { ...historyArgs };
   delete bootstrapArgs.folder_id;
-  const history = await bootstrapHistory(ctx, key, bootstrapArgs);
   const skillRuntime = ctx.folderRuntimes.get(id);
   const skillSnapshot = skillRuntime ? await skillRuntime.skillRegistry.snapshot() : undefined;
+  const strategyImplementationSnapshot = toolStrategyImplementationSnapshot();
+  const learningSnapshot = skillRuntime ? await Promise.all([
+    skillRuntime.knowledgeStore.revision(),
+    skillRuntime.toolStrategyRegistry.snapshot(),
+    skillRuntime.toolEvolutionRegistry.snapshot(),
+    skillRuntime.evolvedSkillRegistry.snapshot(),
+    skillRuntime.knowledgeImpactStore.revision(),
+    skillRuntime.knowledgeImpactStore.list(),
+    skillRuntime.canaryImpactStore.revision(),
+    skillRuntime.canaryImpactStore.list()
+  ]) : undefined;
+  const projectSkills = skillSnapshot ? {
+    count: skillSnapshot.skills.length,
+    skillset_revision: skillSnapshot.revision,
+    skills: skillSnapshot.skills.map(skillSummary),
+    diagnostics: skillSnapshot.diagnostics,
+    mcp_surfaces: ['prompts/list', 'prompts/get', 'resources/list', 'resources/read'],
+    loading_policy: 'Load only clearly relevant workspace or user-level skills; skill guidance never changes runtime permissions.'
+  } : { count: 0, skills: [] };
+  const learning = learningSnapshot ? {
+    knowledge_revision: learningSnapshot[0],
+    tool_strategy_revision: learningSnapshot[1].revision,
+    tool_strategy_count: learningSnapshot[1].strategies.length,
+    tool_strategy_implementation_revision: strategyImplementationSnapshot.revision,
+    tool_strategy_implementation_count: strategyImplementationSnapshot.count,
+    tool_evolution_revision: learningSnapshot[2].revision,
+    tool_evolution_candidate_count: learningSnapshot[2].candidates.length,
+    evolved_skill_revision: learningSnapshot[3].revision,
+    promoted_evolved_skill_count: learningSnapshot[3].skills.length,
+    shadow_impact_revision: learningSnapshot[4],
+    shadow_impact_count: learningSnapshot[5].length,
+    canary_impact_revision: learningSnapshot[6],
+    canary_impact_count: learningSnapshot[7].length,
+    canary_promoted_count: learningSnapshot[7].filter(item => Boolean(item.promotedAtMs) && !item.rolledBackAtMs).length,
+    canary_rolled_back_count: learningSnapshot[7].filter(item => Boolean(item.rolledBackAtMs)).length,
+    validated_tool_strategy_count: learningSnapshot[1].strategies.filter(item => item.status === 'validated').length,
+    promoted_tool_strategy_count: learningSnapshot[1].strategies.filter(item => item.status === 'promoted').length,
+    validated_tool_evolution_count: learningSnapshot[2].candidates.filter(item => item.status === 'validated').length,
+    ingestion: skillRuntime?.knowledgeIngestor.snapshot(),
+    runtime_policy: 'adaptive_rollout_phase_2e',
+    canary_policy: 'Validated strategies use a deterministic 25% semantics-preserving canary; evidence-positive strategies promote to 100% rollout, while post-promotion regressions automatically reject and disable them. Caller arguments and static security policy remain authoritative.',
+    knowledge_loading_policy: 'Persistent knowledge and rejected/candidate experiments are not injected into inference context; rollout lifecycle and impact remain out of band.'
+  } : undefined;
+  const legacyStartupFallback = ['list_workspace_folders', 'switch_workspace_folder', 'history_session_bootstrap'];
+  let history: JsonObject;
+  try {
+    history = await bootstrapHistory(ctx, key, bootstrapArgs);
+  } catch (error) {
+    return ok({
+      ...routing,
+      needs_folder_selection: false,
+      startup_flow: 'workspace_bootstrapped_history_degraded',
+      history_bootstrap_ok: false,
+      history_bootstrap_error: historyBootstrapError(error),
+      warnings: ['Session history could not be initialized; workspace project tools remain available.'],
+      recovery_actions: [{
+        action: 'retry_history_bootstrap',
+        tool: 'history_session_bootstrap',
+        suggestion: 'Retry history_session_bootstrap, optionally with a writable history_dir, when durable handoff/checkpointing is needed.'
+      }],
+      project_skills: projectSkills,
+      ...(learning ? { learning } : {}),
+      legacy_startup_fallback: legacyStartupFallback
+    });
+  }
   return {
     ...history,
     ...routing,
     needs_folder_selection: false,
     startup_flow: 'workspace_and_history_bootstrapped',
-    project_skills: skillSnapshot ? {
-      count: skillSnapshot.skills.length,
-      skillset_revision: skillSnapshot.revision,
-      skills: skillSnapshot.skills.map(skillSummary),
-      diagnostics: skillSnapshot.diagnostics,
-      mcp_surfaces: ['prompts/list', 'prompts/get', 'resources/list', 'resources/read'],
-      loading_policy: 'Load only clearly relevant workspace or user-level skills; skill guidance never changes runtime permissions.'
-    } : { count: 0, skills: [] },
-    legacy_startup_fallback: ['list_workspace_folders', 'switch_workspace_folder', 'history_session_bootstrap']
+    history_bootstrap_ok: true,
+    project_skills: projectSkills,
+    ...(learning ? { learning } : {}),
+    legacy_startup_fallback: legacyStartupFallback
   };
 }
 

@@ -2,6 +2,7 @@
 param(
     [string]$PackageRoot,
     [string]$DataDir,
+    [string]$FallbackPackageRoot,
     [int]$HealthTimeoutSeconds = 90,
     [int]$DelaySeconds = 5,
     [string]$LogPath,
@@ -186,6 +187,22 @@ function Start-PortableAgent {
     return $processId
 }
 
+function Assert-PortableSupervisorRunning {
+    param(
+        [Parameter(Mandatory = $true)][int]$ProcessId,
+        [Parameter(Mandatory = $true)][string]$Root
+    )
+    $process = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction SilentlyContinue
+    if ($null -eq $process) {
+        throw "Portable supervisor exited before handoff completed. pid=$ProcessId root=$Root"
+    }
+    $launcher = (Join-Path $Root 'start-node-agent.bat').ToLowerInvariant()
+    $commandLine = [string]$process.CommandLine
+    if ($process.Name -ine 'cmd.exe' -or [string]::IsNullOrWhiteSpace($commandLine) -or $commandLine.ToLowerInvariant().IndexOf($launcher) -lt 0) {
+        throw "Portable supervisor process contract mismatch. pid=$ProcessId name=$($process.Name) root=$Root"
+    }
+}
+
 function Wait-NewAgentHealthy {
     param(
         [Parameter(Mandatory = $true)]$Endpoints,
@@ -251,6 +268,11 @@ $script:ResolvedPackageRoot = if ([string]::IsNullOrWhiteSpace($PackageRoot)) {
 } else {
     Resolve-AbsolutePath -Path $PackageRoot -Base $repoRoot
 }
+$script:ResolvedFallbackPackageRoot = if ([string]::IsNullOrWhiteSpace($FallbackPackageRoot)) {
+    $null
+} else {
+    Resolve-AbsolutePath -Path $FallbackPackageRoot -Base $repoRoot
+}
 $script:ResolvedDataDir = if (-not [string]::IsNullOrWhiteSpace($DataDir)) {
     Resolve-AbsolutePath -Path $DataDir -Base $repoRoot
 } elseif (-not [string]::IsNullOrWhiteSpace($env:CTMCP_DATA_DIR)) {
@@ -274,6 +296,14 @@ if (-not (Test-Path -LiteralPath $script:ResolvedPackageRoot -PathType Container
 }
 $manifest = Get-PortableManifest -Root $script:ResolvedPackageRoot
 Assert-CriticalPortableFiles -Root $script:ResolvedPackageRoot -Manifest $manifest
+$fallbackManifest = $null
+if (-not [string]::IsNullOrWhiteSpace($script:ResolvedFallbackPackageRoot)) {
+    if (-not (Test-Path -LiteralPath $script:ResolvedFallbackPackageRoot -PathType Container)) {
+        throw "Fallback portable package root not found: $script:ResolvedFallbackPackageRoot"
+    }
+    $fallbackManifest = Get-PortableManifest -Root $script:ResolvedFallbackPackageRoot
+    Assert-CriticalPortableFiles -Root $script:ResolvedFallbackPackageRoot -Manifest $fallbackManifest
+}
 $endpoints = @(Get-WorkspaceEndpoints -Directory $script:ResolvedDataDir)
 if ($endpoints.Count -eq 0) { throw 'No saved Node Agent workspace endpoints were found.' }
 
@@ -303,6 +333,9 @@ if (-not $Worker) {
         '-LogPath', "`"$script:ResolvedLogPath`"",
         '-ResultPath', "`"$script:ResolvedResultPath`""
     )
+    if (-not [string]::IsNullOrWhiteSpace($script:ResolvedFallbackPackageRoot)) {
+        $workerArgs += @('-FallbackPackageRoot', "`"$script:ResolvedFallbackPackageRoot`"")
+    }
     if (Test-Path -LiteralPath $script:ResolvedResultPath) {
         Remove-Item -LiteralPath $script:ResolvedResultPath -Force -ErrorAction SilentlyContinue
     }
@@ -328,14 +361,33 @@ try {
     Start-Sleep -Seconds ([Math]::Max(0, $DelaySeconds))
     Stop-ExistingNodeAgents
     Start-Sleep -Milliseconds 750
-    $null = Start-PortableAgent -Root $script:ResolvedPackageRoot
+    $supervisorPid = Start-PortableAgent -Root $script:ResolvedPackageRoot
+    Assert-PortableSupervisorRunning -ProcessId $supervisorPid -Root $script:ResolvedPackageRoot
     Wait-NewAgentHealthy -Endpoints $endpoints -ExpectedVersion $version -ExpectedGitCommit ([string]$manifest.gitCommit) -TimeoutSeconds $HealthTimeoutSeconds
+    Assert-PortableSupervisorRunning -ProcessId $supervisorPid -Root $script:ResolvedPackageRoot
     Write-Result -Ok $true -Version $version -Endpoints $endpoints
     Write-HandoffLog "Node Agent handoff completed successfully. version=$version"
     exit 0
 } catch {
     $message = $_.Exception.Message
     Write-HandoffLog "ERROR: $message"
-    try { Write-Result -Ok $false -Version $version -Endpoints $endpoints -ErrorMessage $message } catch {}
+    $rollbackMessage = ''
+    if ($null -ne $fallbackManifest -and -not [string]::IsNullOrWhiteSpace($script:ResolvedFallbackPackageRoot)) {
+        try {
+            Write-HandoffLog "Target failed health validation; rolling back to $($fallbackManifest.nodeAgentVersion)."
+            Stop-ExistingNodeAgents
+            Start-Sleep -Milliseconds 750
+            $rollbackPid = Start-PortableAgent -Root $script:ResolvedFallbackPackageRoot
+            Assert-PortableSupervisorRunning -ProcessId $rollbackPid -Root $script:ResolvedFallbackPackageRoot
+            Wait-NewAgentHealthy -Endpoints $endpoints -ExpectedVersion ([string]$fallbackManifest.nodeAgentVersion) -ExpectedGitCommit ([string]$fallbackManifest.gitCommit) -TimeoutSeconds $HealthTimeoutSeconds
+            Assert-PortableSupervisorRunning -ProcessId $rollbackPid -Root $script:ResolvedFallbackPackageRoot
+            $rollbackMessage = " Rollback to $($fallbackManifest.nodeAgentVersion) succeeded."
+            Write-HandoffLog $rollbackMessage.Trim()
+        } catch {
+            $rollbackMessage = " Rollback also failed: $($_.Exception.Message)"
+            Write-HandoffLog "ERROR:$rollbackMessage"
+        }
+    }
+    try { Write-Result -Ok $false -Version $version -Endpoints $endpoints -ErrorMessage ($message + $rollbackMessage) } catch {}
     exit 1
 }

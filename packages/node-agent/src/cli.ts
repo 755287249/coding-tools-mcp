@@ -4,7 +4,8 @@ import { restartSupervisedFromArgv } from './cliOptions.js';
 import { CANONICAL_SCHEMA_VERSION } from './config.js';
 import type { WorkspaceRuntimeRecord } from './management.js';
 import { createAgentRuntime, type AgentRuntime } from './server.js';
-import { AGENT_VERSION, CLIENT_COMPAT_VERSION } from './version.js';
+import { prepareNodeUpdatePackage, scheduleNodeUpdateHandoff } from './liveUpdate.js';
+import { AGENT_VERSION, BUILD_GIT_SHA, CLIENT_COMPAT_VERSION } from './version.js';
 import { BuiltinTunnelManager } from './tunnel.js';
 
 const configIndex = process.argv.indexOf('--config');
@@ -16,7 +17,7 @@ const workspaceStore = new ApplicationConfigStore(application);
 const runtimeRegistry = new Map<string, WorkspaceRuntimeRecord>();
 
 const RESTART_EXIT_CODE = 75;
-const restartSupervised = restartSupervisedFromArgv(process.argv);
+const restartSupervised = restartSupervisedFromArgv(process.argv, process.env);
 interface RunningWorkspace {
   id: string;
   name: string;
@@ -50,6 +51,8 @@ const requestRestart = restartSupervised ? () => {
   void stop().finally(() => process.exit(RESTART_EXIT_CODE));
 } : undefined;
 
+const acceptedUpdateIds = new Set<string>();
+
 try {
   for (const workspace of application.workspaces) {
     const primary = workspace.id === workspaceStore.primaryWorkspaceId;
@@ -60,6 +63,8 @@ try {
     }
     const configStore = workspaceStore.workspace(workspace.id).store;
     const runtime = await createAgentRuntime(config, {
+      secretResolver: reference => configStore.secretValue(reference),
+      persistOAuthPassword: password => configStore.rotateOAuthPassword(password),
       ...(primary ? { configStore, workspaceStore } : {}),
       ...(primary && requestRestart ? { requestRestart } : {}),
       runtimeRegistry
@@ -69,7 +74,44 @@ try {
         workspace.id,
         endpoint.publicUrl,
         endpoint.enrollmentCompleted
-      )
+      ),
+      clientStatus: {
+        agent_version: AGENT_VERSION,
+        client_compat_version: CLIENT_COMPAT_VERSION,
+        build_git_sha: BUILD_GIT_SHA
+      },
+      ...(primary ? {
+        onUpdateOffer: async (control, sendStatus) => {
+          const updateId = String(control.update_id ?? '');
+          const targetVersion = String(control.version ?? '');
+          if (!restartSupervised) throw new Error('Node Agent live update requires the portable restart supervisor');
+          if (acceptedUpdateIds.has(updateId)) return;
+          acceptedUpdateIds.add(updateId);
+          runtime.context.tunnelStatus!.updateId = updateId;
+          runtime.context.tunnelStatus!.updateTargetVersion = targetVersion;
+          runtime.context.tunnelStatus!.updateState = 'downloading';
+          runtime.context.tunnelStatus!.updateError = undefined;
+          await sendStatus({ update_id: updateId, version: targetVersion, state: 'downloading' });
+          try {
+            const prepared = await prepareNodeUpdatePackage(control, config.dataDir);
+            runtime.context.tunnelStatus!.updateState = 'verified';
+            await sendStatus({
+              update_id: updateId,
+              version: targetVersion,
+              state: 'verified',
+              message: prepared.gitCommit
+            });
+            await scheduleNodeUpdateHandoff(prepared, config.dataDir);
+            runtime.context.tunnelStatus!.updateState = 'scheduled';
+            await sendStatus({ update_id: updateId, version: targetVersion, state: 'scheduled' });
+          } catch (error) {
+            acceptedUpdateIds.delete(updateId);
+            runtime.context.tunnelStatus!.updateState = 'failed';
+            runtime.context.tunnelStatus!.updateError = error instanceof Error ? error.message : String(error);
+            throw error;
+          }
+        }
+      } : {})
     });
     const runtimeRecord = runtimeRegistry.get(workspace.id);
     if (runtimeRecord) runtimeRecord.tunnel = tunnel;

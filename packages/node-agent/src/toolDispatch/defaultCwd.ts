@@ -75,9 +75,10 @@ export function applyDefaultCwdArgs(name: string, args: JsonObject, defaultCwd: 
     if (typeof effective.path === 'string') effective.path = relativePath(base, effective.path, workspaceRoot);
   } else if (name === 'read_many') {
     prefixArrayPaths(effective, 'items', ['path'], base, workspaceRoot);
-  } else if (name === 'git_diff') {
-    if (typeof effective.path === 'string') effective.path = relativePath(base, effective.path, workspaceRoot);
-    prefixStringArray(effective, 'paths', base, workspaceRoot);
+  } else if (name === 'git_diff' || name === 'git_show') {
+    // Git read targets use the same coordinate contract as Git mutators:
+    // repo_path is workspace-relative and pathspecs are repo-relative.
+    if (effective.repo_path === undefined) effective.repo_path = base;
   } else if (name === 'format_files') {
     prefixStringArray(effective, 'paths', base, workspaceRoot);
     if (!Array.isArray(effective.paths) && ['changed', 'staged', 'project'].includes(String(effective.scope ?? ''))) {
@@ -92,8 +93,9 @@ export function applyDefaultCwdArgs(name: string, args: JsonObject, defaultCwd: 
   } else if (name === 'file_ops') {
     prefixArrayPaths(effective, 'operations', ['path', 'destination'], base, workspaceRoot);
   } else if (['git_branch', 'git_stage', 'git_commit', 'git_push', 'git_restore', 'git_worktree'].includes(name)) {
-    if (typeof effective.repo_path === 'string') effective.repo_path = relativePath(base, effective.repo_path, workspaceRoot);
-    prefixStringArray(effective, 'paths', base, workspaceRoot);
+    // Git mutator repo_path is workspace-relative; pathspecs are repo-relative.
+    // Only an omitted repo_path inherits the conversation default cwd.
+    if (effective.repo_path === undefined) effective.repo_path = base;
   }
 
   return effective;

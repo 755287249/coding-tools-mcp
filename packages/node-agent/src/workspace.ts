@@ -418,6 +418,7 @@ export interface WalkOptions {
   includeIgnored?: boolean;
   includeGenerated?: boolean;
   includeDirectories?: boolean;
+  excludedPrefixes?: string[];
 }
 
 export interface WalkEntry {
@@ -434,6 +435,11 @@ function hiddenPath(relative: string): boolean {
 function fixedExcluded(name: string, options: WalkOptions): boolean {
   if (name.toLowerCase() === '.git') return true;
   return options.includeGenerated !== true && DEFAULT_EXCLUDED_NAMES.has(name);
+}
+
+function prefixExcluded(relative: string, options: WalkOptions): boolean {
+  const normalized = relative.replaceAll('\\', '/');
+  return (options.excludedPrefixes ?? []).some(prefix => normalized === prefix || normalized.startsWith(`${prefix}/`));
 }
 
 async function rulesForStart(root: string, start: string, options: WalkOptions): Promise<{ rules: IgnoreRule[]; blocked: boolean }> {
@@ -493,6 +499,7 @@ export async function walk(rootValue: string, startValue: string, options: WalkO
       if (fixedExcluded(entry.name, options)) continue;
       const full = path.join(directory, entry.name);
       const relative = relativeInside(root, full).replaceAll('\\', '/');
+      if (prefixExcluded(relative, options)) continue;
       if (!options.includeHidden && hiddenPath(relative)) continue;
       let info;
       try { info = await lstat(full); } catch { continue; }

@@ -3,9 +3,10 @@ use base64::Engine;
 use coding_tools_tunnel_protocol::{
     valid_client_id, EnrollmentRequest, EnrollmentResponse, ENROLL_PATH_PREFIX,
 };
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
@@ -20,6 +21,25 @@ pub(super) struct StoredDeviceIdentity {
     pub(super) client_id: String,
     pub(super) private_key: String,
     enrolled: bool,
+    #[serde(default)]
+    pub(super) server_id: String,
+    #[serde(default)]
+    pub(super) server_public_key: String,
+}
+
+fn expected_server_id(public_key: &str) -> AppResult<String> {
+    let key = decode_server_verifying_key(public_key)?;
+    Ok(URL_SAFE_NO_PAD.encode(Sha256::digest(key.to_bytes())))
+}
+
+fn has_pinned_server_identity(identity: &StoredDeviceIdentity) -> bool {
+    identity.server_id.len() == 43
+        && identity
+            .server_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        && expected_server_id(&identity.server_public_key)
+            .is_ok_and(|expected| expected == identity.server_id)
 }
 
 pub(super) async fn load_or_enroll_device_identity(
@@ -38,20 +58,22 @@ pub(super) async fn load_or_enroll_device_identity(
 
     if let Some(identity) = stored
         .as_ref()
-        .filter(|identity| identity.enrolled && enrollment_url.is_none())
+        .filter(|identity| identity.enrolled && has_pinned_server_identity(identity))
     {
         return Ok(identity.clone());
     }
 
     let mut identity = match stored {
-        Some(identity) if !identity.enrolled => identity,
-        _ => {
+        Some(identity) => identity,
+        None => {
             let signing_key = SigningKey::generate(&mut OsRng);
             let identity = StoredDeviceIdentity {
                 device_id: Uuid::new_v4().simple().to_string(),
                 client_id: client_id.to_string(),
                 private_key: URL_SAFE_NO_PAD.encode(signing_key.to_bytes()),
                 enrolled: false,
+                server_id: String::new(),
+                server_public_key: String::new(),
             };
             save_device_identity(profile_id, &identity)?;
             identity
@@ -59,7 +81,11 @@ pub(super) async fn load_or_enroll_device_identity(
     };
 
     let enrollment_url = enrollment_url.ok_or_else(|| {
-        AppError::Message("內建 WSS 隧道尚未註冊。請貼上伺服器產生的一次性註冊連結。".into())
+        if identity.enrolled {
+            AppError::Message("內建 WSS 隧道 v4 需要重新註冊一次，以綁定伺服器身分金鑰。".into())
+        } else {
+            AppError::Message("內建 WSS 隧道尚未註冊。請貼上伺服器產生的一次性註冊連結。".into())
+        }
     })?;
     let enrollment_url = parse_enrollment_url(public_url, &enrollment_url)?;
     let signing_key = decode_signing_key(&identity.private_key)?;
@@ -106,9 +132,23 @@ pub(super) async fn load_or_enroll_device_identity(
             "內建隧道伺服器回傳了無效的 Client ID。".into(),
         ));
     }
+    if enrolled.server_id.len() != 43
+        || !enrolled
+            .server_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        || expected_server_id(&enrolled.server_public_key)
+            .map_or(true, |expected| expected != enrolled.server_id)
+    {
+        return Err(AppError::Message(
+            "內建隧道伺服器回傳了無效的伺服器身分。".into(),
+        ));
+    }
 
     identity.client_id = enrolled_client_id;
     identity.enrolled = true;
+    identity.server_id = enrolled.server_id;
+    identity.server_public_key = enrolled.server_public_key;
     save_device_identity(profile_id, &identity)?;
     SecretStore::set(profile_id, ENROLLMENT_URL_KEY, "")?;
     Ok(identity)
@@ -127,6 +167,17 @@ pub(super) fn decode_signing_key(value: &str) -> AppResult<SigningKey> {
         .try_into()
         .map_err(|_| AppError::Message("內建隧道裝置私鑰長度無效。".into()))?;
     Ok(SigningKey::from_bytes(&bytes))
+}
+
+pub(super) fn decode_server_verifying_key(value: &str) -> AppResult<VerifyingKey> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(value.trim().as_bytes())
+        .map_err(|_| AppError::Message("內建隧道伺服器公鑰格式無效。".into()))?;
+    let bytes: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| AppError::Message("內建隧道伺服器公鑰長度無效。".into()))?;
+    VerifyingKey::from_bytes(&bytes)
+        .map_err(|_| AppError::Message("內建隧道伺服器公鑰無效。".into()))
 }
 
 pub(super) fn parse_enrollment_url(public_url: &str, value: &str) -> AppResult<reqwest::Url> {

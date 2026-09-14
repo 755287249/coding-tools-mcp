@@ -51,7 +51,12 @@ pub(super) fn input_schema(name: &str) -> Option<Value> {
                 },
                 "context_lines": { "type": "integer", "minimum": 0, "maximum": 500, "default": 20 },
                 "merge_overlaps": { "type": "boolean", "default": true },
-                "line_numbers": { "type": "boolean", "default": false },
+                "line_numbers": { "type": "boolean", "default": false, "description": "Compatibility shortcut: when true and content_mode is omitted, return numbered-only content." },
+                "content_mode": {
+                    "type": "string",
+                    "enum": ["plain", "numbered", "both"],
+                    "description": "Choose one content representation to avoid duplicate payloads. Defaults to numbered when line_numbers=true, otherwise plain. Use both only when both representations are required."
+                },
                 "max_total_bytes": { "type": "integer", "minimum": 1, "maximum": 4194304, "default": 262144 },
                 "max_bytes_per_file": { "type": "integer", "minimum": 1, "maximum": 1048576, "default": 131072 }
             },

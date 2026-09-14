@@ -10,7 +10,7 @@ use crate::tools::workspace::WorkspaceError;
 use super::hunk::apply_hunks;
 use super::parser::parse_unified_diff;
 use super::precise_edit::{
-    adapt_newlines_to_original, byte_to_line, expected_occurrences, line_range_bytes,
+    adapt_newlines_to_range, byte_to_line, expected_occurrences, line_range_bytes,
     required_edit_text, whitespace_text_candidates,
 };
 use super::support::{sha256_hex, unified_diff};
@@ -89,7 +89,6 @@ pub(super) fn build_edit_proposal(
     }
     let old_text = required_edit_text(edit, 0, "old_text")?;
     let requested_replacement = edit.get("new_text").and_then(Value::as_str).unwrap_or("");
-    let replacement = adapt_newlines_to_original(requested_replacement, original);
     let search_range = match (
         edit.get("start_line").and_then(Value::as_u64),
         edit.get("end_line").and_then(Value::as_u64),
@@ -103,6 +102,8 @@ pub(super) fn build_edit_proposal(
         return Ok(None);
     }
     let (start_byte, end_byte) = candidates[0];
+    let replacement =
+        adapt_newlines_to_range(requested_replacement, original, start_byte, end_byte);
     let actual_text = original[start_byte..end_byte].to_string();
     let proposal_id = Uuid::new_v4().simple().to_string();
     let proposal = EditProposal {
@@ -263,7 +264,12 @@ pub(super) fn apply_edit_proposal(
         (proposal.replacement.clone(), "accept")
     };
 
-    let replacement = adapt_newlines_to_original(&replacement, original);
+    let replacement = adapt_newlines_to_range(
+        &replacement,
+        original,
+        proposal.start_byte,
+        proposal.end_byte,
+    );
     let mut updated = original.to_string();
     updated.replace_range(proposal.start_byte..proposal.end_byte, &replacement);
     Ok((updated, Some(proposal_id.to_string()), apply_format))
@@ -297,7 +303,7 @@ fn apply_restricted_proposal_patch(
             }),
         });
     }
-    let updated = apply_hunks(proposed_text, &files[0].hunks).map_err(|error| {
+    let updated = apply_hunks(proposed_text, &files[0].hunks, None).map_err(|error| {
         WorkspaceError::ToolDetails {
             code: "EDIT_PROPOSAL_PATCH_MISMATCH",
             message: "Proposal patch did not apply exactly to the proposed replacement.".into(),
@@ -346,6 +352,27 @@ mod tests {
         } else {
             panic!("fixture patch should be inefficient")
         }
+    }
+
+    #[test]
+    fn proposal_uses_candidate_local_line_ending() {
+        let original = "first\nsecond\r\nthird\r\n";
+        let proposal = build_edit_proposal(
+            "mixed.txt",
+            "hash",
+            original,
+            &[json!({
+                "type": "replace",
+                "old_text": "first",
+                "new_text": "FIRST\nEXTRA"
+            })],
+        )
+        .expect("proposal build should succeed")
+        .expect("proposal should be produced");
+        assert_eq!(
+            proposal["proposed_content"],
+            "FIRST\nEXTRA\nsecond\r\nthird\r\n"
+        );
     }
 
     #[test]

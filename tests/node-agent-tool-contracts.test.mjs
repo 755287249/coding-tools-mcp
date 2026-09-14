@@ -22,7 +22,7 @@ test('every Rust catalog tool has an explicit Node regression reference', async 
   const testSource = (await Promise.all(testFiles.map(name => readFile(path.join(directory, name), 'utf8')))).join('\n');
   const missing = toolNames.filter(name => !new RegExp(`\\b${escapePattern(name)}\\b`).test(testSource));
 
-  assert.equal(toolNames.length, 58);
+  assert.equal(toolNames.length, 59);
   assert.deepEqual(missing, []);
 });
 
@@ -124,7 +124,7 @@ test('Rust and Node edits share replay-plan and phase-latency contracts', async 
     assert.match(rustUsage, new RegExp(marker));
     assert.match(nodeTelemetry, new RegExp(marker));
   }
-  for (const marker of ['repeated_failures', 'wasted_duration_ms', 'max_attempt_count', 'legacy_adjacent_retry_count', 'Stop retrying unchanged arguments']) {
+  for (const marker of ['repeated_failures', 'wasted_duration_ms', 'max_attempt_count', 'friction_score', 'deterministic_error_weight', 'legacy_adjacent_retry_count', 'Stop retrying unchanged arguments']) {
     assert.match(rustUsage, new RegExp(marker));
     assert.match(nodeTelemetry, new RegExp(marker));
   }

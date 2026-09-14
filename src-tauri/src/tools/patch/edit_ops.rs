@@ -10,7 +10,10 @@ use uuid::Uuid;
 use crate::tools::context::ToolContext;
 use crate::tools::workspace::{tool_ok, WorkspaceError};
 
-use super::precise_edit::{apply_precise_edits, validate_precise_edit_contract};
+use super::precise_edit::{
+    apply_precise_edits, assert_no_unexpected_edit_blast_radius,
+    assert_no_unexpected_newline_churn, newline_style, validate_precise_edit_contract,
+};
 use super::proposal::{
     apply_edit_proposal, build_edit_proposal, remove_edit_proposal, EDIT_PROPOSAL_TTL,
 };
@@ -128,6 +131,20 @@ pub(super) fn run_file(ctx: &ToolContext, args: &Value) -> Result<Value, Workspa
     if updated == original {
         return Err(patch_failed("Edits produced no changes."));
     }
+    assert_no_unexpected_newline_churn(&resolved.display, &original, &updated)?;
+    let blast_radius_edits = args
+        .get("edits")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let blast_radius = assert_no_unexpected_edit_blast_radius(
+        &resolved.display,
+        &original,
+        &updated,
+        blast_radius_edits,
+    )?;
+    let newline_before = newline_style(&original);
+    let newline_after = newline_style(&updated);
     let after_sha256 = sha256_hex(updated.as_bytes());
     let diff = unified_diff(&resolved.display, &original, &updated, false, false);
     let change_id = if dry_run {
@@ -210,6 +227,11 @@ pub(super) fn run_file(ctx: &ToolContext, args: &Value) -> Result<Value, Workspa
         "before_sha256": before_sha256,
         "after_sha256": after_sha256,
         "edit_plan": edit_plan,
+        "newline_before": newline_before,
+        "newline_after": newline_after,
+        "newline_guard": "passed",
+        "blast_radius_guard": "passed",
+        "blast_radius": blast_radius,
         "diff": diff,
         "phase_durations_ms": phase_durations_ms,
         "affected_files": [{ "path": resolved.display, "operation": "update" }],
@@ -379,6 +401,16 @@ pub(super) fn run_many(ctx: &ToolContext, args: &Value) -> Result<Value, Workspa
         if updated == original {
             return Err(patch_failed(format!("Edits produced no changes: {path}")));
         }
+        assert_no_unexpected_newline_churn(&resolved.display, &original, &updated).map_err(
+            |error| enrich_edit_many_error(error, &resolved.display, &before_sha256, file_index),
+        )?;
+        let blast_radius =
+            assert_no_unexpected_edit_blast_radius(&resolved.display, &original, &updated, edits)
+                .map_err(|error| {
+                enrich_edit_many_error(error, &resolved.display, &before_sha256, file_index)
+            })?;
+        let newline_before = newline_style(&original);
+        let newline_after = newline_style(&updated);
         let after_sha256 = sha256_hex(updated.as_bytes());
         diffs.push_str(&unified_diff(
             &resolved.display,
@@ -392,7 +424,12 @@ pub(super) fn run_many(ctx: &ToolContext, args: &Value) -> Result<Value, Workspa
         file_versions.push(json!({
             "path": resolved.display,
             "before_sha256": before_sha256,
-            "after_sha256": after_sha256
+            "after_sha256": after_sha256,
+            "newline_before": newline_before,
+            "newline_after": newline_after,
+            "newline_guard": "passed",
+            "blast_radius_guard": "passed",
+            "blast_radius": blast_radius
         }));
         affected.push(json!({"path": resolved.display, "operation": "update"}));
     }

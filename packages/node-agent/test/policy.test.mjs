@@ -42,6 +42,11 @@ async function expectPolicyError(ctx, meta, tool, args, code) {
   const result = await callTool(ctx, tool, args, meta);
   assert.equal(result.ok, false, JSON.stringify(result));
   assert.equal(result.error.code, code, JSON.stringify(result));
+  assert.equal(result.error.details.failure_origin, 'policy_preflight', JSON.stringify(result));
+  assert.equal(result.error.details.execution_attempted, false, JSON.stringify(result));
+  assert.equal(result.error.details.process_started, false, JSON.stringify(result));
+  assert.equal(result.error.details.policy_blocked, true, JSON.stringify(result));
+  assert.match(result.error.details.diagnostic_summary, /rejected by MCP policy before child-process startup/i);
   return result;
 }
 
@@ -78,6 +83,11 @@ test('portable sandbox resolution keeps Linux commands inside the target and rej
 
   await assert.rejects(
     resolvePortableCommandSpec(ctx, key, { script: 'echo no', shell: 'powershell', confirm: true }),
+    error => error?.code === 'SANDBOX_COMMAND_UNSUPPORTED'
+  );
+
+  await assert.rejects(
+    resolvePortableCommandSpec(ctx, key, { program: 'node.exe', args: ['--version'] }),
     error => error?.code === 'SANDBOX_COMMAND_UNSUPPORTED'
   );
 
@@ -134,6 +144,25 @@ test('Windows exec_command launches npm through the resolved command shim', { sk
   assert.match(result.stderr, /^(?:npm warn Unknown env config "[^"]+"[^\n]*\n)*$/);
 });
 
+test('nonzero child exit is diagnosed as process failure, not policy rejection', async t => {
+  const { ctx, meta } = await fixture(t);
+  const result = await callTool(ctx, 'exec_command', {
+    program: nodeProgram,
+    args: ['-e', 'process.exit(7)'],
+    yield_time_ms: 30_000,
+    output_mode: 'all'
+  }, meta);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.transport_ok, true, JSON.stringify(result));
+  assert.equal(result.command_ok, false, JSON.stringify(result));
+  assert.equal(result.process_exit_code, 7, JSON.stringify(result));
+  assert.equal(result.failure_origin, 'child_process', JSON.stringify(result));
+  assert.equal(result.policy_blocked, false, JSON.stringify(result));
+  assert.equal(result.execution_attempted, true, JSON.stringify(result));
+  assert.equal(result.process_started, true, JSON.stringify(result));
+  assert.match(result.diagnostic_summary, /policy did not block execution/i);
+});
+
 test('explicit shell and dangerous commands require confirmation and protect repository assets', async t => {
   const { ctx, meta, key } = await fixture(t);
   await assert.rejects(
@@ -158,9 +187,10 @@ test('allowlist, environment and network policies run before process creation', 
   await expectPolicyError(guarded.ctx, guarded.meta, 'exec_command', {
     program: nodeProgram, args: ['-e', 'process.stdout.write("x")'], env: { PATH: 'blocked' }
   }, 'ENVIRONMENT_VARIABLE_PROTECTED');
-  await expectPolicyError(guarded.ctx, guarded.meta, 'exec_command', {
+  const networkBlocked = await expectPolicyError(guarded.ctx, guarded.meta, 'exec_command', {
     program: nodeProgram, args: ['-e', 'fetch("https://example.invalid")']
   }, 'NETWORK_COMMAND_BLOCKED');
+  assert.equal(networkBlocked.error.details.policy_rule, 'block_network_commands');
   assert.equal(sessions(guarded.ctx).size, 0);
 
   const trusted = await fixture(t, 'trusted');
@@ -201,6 +231,19 @@ test('exec_many validates every child before starting any process', async t => {
   assert.equal(sessions(ctx).size, 0);
 });
 
+test('exec_many rejects conditional run_if outside dag mode', async t => {
+  const { ctx, meta } = await fixture(t);
+  const result = await expectPolicyError(ctx, meta, 'exec_many', {
+    mode: 'sequential',
+    commands: [
+      { id: 'first', program: nodeProgram, args: ['-e', 'process.stdout.write("first")'] },
+      { id: 'cleanup', depends_on: ['first'], run_if: 'always', program: nodeProgram, args: ['-e', 'process.stdout.write("cleanup")'] }
+    ]
+  }, 'INVALID_ARGUMENT');
+  assert.match(result.error.message, /run_if=failure or run_if=always requires dag mode/);
+  assert.equal(sessions(ctx).size, 0);
+});
+
 test('exec_many rejects invalid graph structure before starting any process', async t => {
   const { ctx, meta } = await fixture(t);
   const base = { program: nodeProgram, args: ['-e', 'process.stdout.write("should-not-run")'] };
@@ -208,6 +251,8 @@ test('exec_many rejects invalid graph structure before starting any process', as
     { name: 'duplicate ids', commands: [{ id: 'same', ...base }, { id: 'same', ...base }], message: /duplicate exec_many command id: same/ },
     { name: 'unknown dependency', commands: [{ id: 'known', depends_on: ['missing'], ...base }], message: /depends on unknown command missing/ },
     { name: 'self dependency', commands: [{ id: 'self', depends_on: ['self'], ...base }], message: /cannot depend on itself/ },
+    { name: 'invalid run condition', commands: [{ id: 'invalid-run-if', run_if: 'sometimes', ...base }], message: /run_if must be success, failure, or always/ },
+    { name: 'conditional run without dependency', commands: [{ id: 'cleanup', run_if: 'always', ...base }], message: /run_if=always requires depends_on/ },
     {
       name: 'cycle',
       commands: [{ id: 'left', depends_on: ['right'], ...base }, { id: 'right', depends_on: ['left'], ...base }],
@@ -268,6 +313,6 @@ test('workdir and timeout stay within configured command bounds', async t => {
   ctx.config.limits.commandTimeoutMaxMs = 1_800_000;
   await expectPolicyError(ctx, meta, 'exec_command', {
     program: nodeProgram, args: ['-e', ''], timeout_ms: 1_800_001
-  }, 'INVALID_ARGUMENT');
+  }, 'COMMAND_TIMEOUT_EXCEEDS_LIMIT');
   assert.equal(sessions(ctx).size, 0);
 });

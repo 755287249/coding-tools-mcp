@@ -64,6 +64,7 @@ app/package.json
 LICENSE.txt                  project license
 start-node-agent.bat         validate runtime, start Agent, and open UI after health is ready
 open-management-ui.bat       open the configured local UI port
+update-handoff.ps1           verified whole-portable live-update handoff with health rollback
 portable-manifest.json       edition/application/runtime/build metadata
 SHA256SUMS.txt               per-file checksums
 README-PORTABLE.txt          edition-specific operator instructions
@@ -102,6 +103,7 @@ An existing process, user, or machine `CTMCP_DATA_DIR` environment variable take
 4. Require the build runtime to be Windows x64 at or above the minimum major version.
 5. Confirm `bundled-node` contains `runtime/node.exe` and its license.
 6. Confirm `system-node` contains neither `runtime/node.exe` nor `runtime/NODE-LICENSE.txt`.
-7. Generate and validate a separate `SHA256SUMS.txt` for each edition, then report both ZIP SHA-256 values.
-8. Extract each ZIP to a path containing spaces and smoke-test its launcher, `/health`, `/ui`, and static UI assets on isolated ports and data directories.
-9. Do not put either Portable ZIP or a Node runtime inside the Skill ZIP; the Skill remains a small rules/workflow package.
+7. Confirm `update-handoff.ps1` exists at ZIP root and is covered by each edition's `SHA256SUMS.txt`.
+8. Generate and validate a separate `SHA256SUMS.txt` for each edition, then report both ZIP SHA-256 values.
+9. Extract each ZIP to a path containing spaces and smoke-test its launcher, `/health`, `/ui`, and static UI assets on isolated ports and data directories.
+10. Do not put either Portable ZIP or a Node runtime inside the Skill ZIP; the Skill remains a small rules/workflow package.

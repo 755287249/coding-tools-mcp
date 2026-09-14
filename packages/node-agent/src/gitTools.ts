@@ -35,7 +35,7 @@ async function runGitAt(cwd: string, args: string[], timeoutMs = 30_000, input?:
 }
 
 async function runGit(ctx: ToolContext, key: string, args: string[], timeoutMs = 30_000, input?: string): Promise<GitResult> {
-  return runGitAt(rootAndCwd(ctx, key).root, args, timeoutMs, input);
+  return runGitAt(rootAndCwd(ctx, key).cwd, args, timeoutMs, input);
 }
 
 async function stagedPathsAt(root: string): Promise<string[]> {
@@ -102,20 +102,24 @@ function targetMetadata(target: GitTarget): JsonObject {
 }
 
 async function resolveGitTarget(ctx: ToolContext, key: string, args: JsonObject): Promise<GitTarget> {
-  const workspaceRoot = rootAndCwd(ctx, key).root;
-  const repoPath = String(args.repo_path ?? '.');
-  const resolved = await resolveExistingPath(workspaceRoot, repoPath);
+  const { root: workspaceRoot } = rootAndCwd(ctx, key);
+  const requestedRepoPath = String(args.repo_path ?? '.');
+  const resolved = await resolveExistingPath(workspaceRoot, requestedRepoPath);
   const info = await stat(resolved.full);
   if (!info.isDirectory()) throw new Error('repo_path must be a directory');
-  const values = await Promise.all([
-    runGitAt(resolved.full, ['rev-parse', '--show-toplevel'], 5_000),
-    runGitAt(resolved.full, ['rev-parse', '--absolute-git-dir'], 5_000),
-    runGitAt(resolved.full, ['rev-parse', '--git-common-dir'], 5_000),
-    runGitAt(resolved.full, ['rev-parse', '--abbrev-ref', 'HEAD'], 5_000),
-    runGitAt(resolved.full, ['rev-parse', 'HEAD'], 5_000)
+  const [metadata, branchResult] = await Promise.all([
+    runGitAt(resolved.full, ['rev-parse', '--show-toplevel', '--absolute-git-dir', '--git-common-dir', 'HEAD'], 5_000),
+    runGitAt(resolved.full, ['symbolic-ref', '--quiet', '--short', 'HEAD'], 5_000)
   ]);
-  if (values[0].code !== 0) throw new Error('NOT_GIT_REPOSITORY');
-  const [root, gitDir, commonDir, branch, head] = values.map(result => result.stdout.trim());
+  if (metadata.code !== 0) {
+    const detail = (metadata.stderr || metadata.stdout || 'not a git repository').trim();
+    throw new Error(`NOT_GIT_REPOSITORY: ${detail}`);
+  }
+  const values = metadata.stdout.split(/\r?\n/).filter(Boolean);
+  if (values.length < 4) throw new Error('GIT_REPOSITORY_METADATA_INCOMPLETE');
+  const [root, gitDir, commonDir, head] = values;
+  const branch = branchResult.code === 0 && branchResult.stdout.trim() ? branchResult.stdout.trim() : 'HEAD';
+  const repoPath = relativeInside(workspaceRoot, root).replaceAll('\\', '/') || '.';
   const fingerprint = createHash('sha256')
     .update([root, gitDir, commonDir || gitDir, branch || 'HEAD', head || 'missing'].join('\0'))
     .digest('hex');
@@ -152,7 +156,11 @@ async function resolveExistingGitPath(ctx: ToolContext, key: string, value: unkn
   display: string;
   isDirectory: boolean;
 }> {
-  const resolved = await resolveExistingPath(rootAndCwd(ctx, key).root, String(value ?? '.'));
+  const { root, cwd } = rootAndCwd(ctx, key);
+  const requested = String(value ?? '.');
+  const resolved = requested === '.'
+    ? await resolveExistingPath(root, relativeInside(root, cwd))
+    : await resolveExistingPath(root, requested);
   const info = await stat(resolved.full);
   return {
     root: resolved.root,
@@ -162,16 +170,25 @@ async function resolveExistingGitPath(ctx: ToolContext, key: string, value: unkn
   };
 }
 
+function canonicalRepoRelativePath(target: GitTarget | undefined, value: string): string {
+  const normalized = value.replaceAll('\\', '/').replace(/^\.\//, '');
+  if (!target || target.repoPath === '.') return normalized;
+  const prefix = `${target.repoPath.replace(/[\\/]+$/, '')}/`;
+  return normalized.startsWith(prefix) ? normalized.slice(prefix.length) : normalized;
+}
+
 function gitPaths(ctx: ToolContext, key: string, args: JsonObject, protectedWrites = false, target?: GitTarget): string[] {
   rootAndCwd(ctx, key);
   const values = Array.isArray(args.paths) ? args.paths.map(String) : args.path ? [String(args.path)] : [];
   return values.map(value => {
     validateWorkspaceUserPath(value, { allowDot: false });
+    const canonical = canonicalRepoRelativePath(target, value);
+    validateWorkspaceUserPath(canonical, { allowDot: false });
     if (protectedWrites) {
-      const workspacePath = target && target.repoPath !== '.' ? `${target.repoPath.replace(/[\\/]+$/, '')}/${value}` : value;
+      const workspacePath = target && target.repoPath !== '.' ? `${target.repoPath.replace(/[\\/]+$/, '')}/${canonical}` : canonical;
       rejectProtectedWritePath(workspacePath);
     }
-    return value.replaceAll('\\', '/');
+    return canonical;
   });
 }
 
@@ -389,19 +406,22 @@ async function ensureExpectedHead(target: GitTarget, expected: unknown): Promise
 }
 
 export async function gitStatusTool(ctx: ToolContext, key: string, args: JsonObject): Promise<JsonObject> {
-  const resolved = await resolveExistingGitPath(ctx, key, args.path ?? '.');
-  const rootCheck = await runGitAt(resolved.full, ['rev-parse', '--show-toplevel'], 10_000);
-  if (rootCheck.code !== 0) {
+  let target: GitTarget;
+  try {
+    target = await resolveGitTarget(ctx, key, { repo_path: args.path ?? '.' });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!message.startsWith('NOT_GIT_REPOSITORY:')) throw error;
     return ok({
       is_repo: false,
       clean: true,
       entries: [],
-      warnings: [(rootCheck.stderr || rootCheck.stdout || 'not a git repository').trim()]
+      warnings: [message.slice('NOT_GIT_REPOSITORY:'.length).trim() || 'not a git repository']
     });
   }
   const argv = ['status', '--porcelain=v1', '-b'];
   if (args.include_untracked === false) argv.push('--untracked-files=no');
-  const result = await runGitAt(resolved.full, argv, 10_000);
+  const result = await runGitAt(target.root, argv, 10_000);
   if (result.code !== 0) return gitReadFailure(result);
   const lines = result.stdout.split(/\r?\n/).filter(Boolean);
   const totalLines = lines.length;
@@ -428,12 +448,10 @@ export async function gitStatusTool(ctx: ToolContext, key: string, args: JsonObj
     entries.push(entry);
     if (entries.length >= maxEntries) break;
   }
-  const headResult = await runGitAt(resolved.full, ['rev-parse', 'HEAD'], 5_000);
-  const target = await resolveGitTarget(ctx, key, { repo_path: args.path ?? '.' });
   return ok({
     is_repo: true,
     branch,
-    head: headResult.code === 0 ? headResult.stdout.trim() : '',
+    head: target.head === 'missing' ? '' : target.head,
     upstream,
     ahead,
     behind,
@@ -447,16 +465,24 @@ export async function gitStatusTool(ctx: ToolContext, key: string, args: JsonObj
 }
 
 export async function gitDiffTool(ctx: ToolContext, key: string, args: JsonObject): Promise<JsonObject> {
-  const { root } = rootAndCwd(ctx, key);
+  // Validate caller-supplied pathspecs before repository probing so workspace
+  // security errors keep precedence even when the selected directory is not a Git repo.
+  gitPaths(ctx, key, args, false);
+  let target: GitTarget;
+  try {
+    target = await resolveGitTarget(ctx, key, args);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!message.startsWith('NOT_GIT_REPOSITORY:')) throw error;
+    return ok({ diff: '', files: [], truncated: false, warnings: ['not a git repository'] });
+  }
+  const root = target.root;
   const requestedContext = boundedInteger(args.context_lines, 3, 0, 1_000);
   const context = Math.min(requestedContext, 20);
   const maxBytes = boundedInteger(args.max_bytes, 262_144, 1_024, 1_048_576);
   const staged = args.staged === true;
   const unstaged = args.unstaged !== false;
-  const paths = gitPaths(ctx, key, args);
-  if (!(await isGitRepoAt(root))) {
-    return ok({ diff: '', files: [], truncated: false, warnings: ['not a git repository'] });
-  }
+  const paths = gitPaths(ctx, key, args, false, target);
   const chunks: string[] = [];
   if (unstaged) {
     const result = await runGitDiff(root, context, paths, false);
@@ -477,6 +503,9 @@ export async function gitDiffTool(ctx: ToolContext, key: string, args: JsonObjec
   return ok({
     diff,
     files: parseDiffFiles(diff),
+    repo: targetMetadata(target),
+    repo_fingerprint: target.fingerprint,
+    paths,
     arguments_normalized: normalized,
     normalized_arguments: normalized ? { context_lines: context } : null,
     truncated,
@@ -486,19 +515,21 @@ export async function gitDiffTool(ctx: ToolContext, key: string, args: JsonObjec
 }
 
 export async function gitLogTool(ctx: ToolContext, key: string, args: JsonObject): Promise<JsonObject> {
-  const resolved = await resolveExistingGitPath(ctx, key, args.path ?? '.');
+  const requestedPath = String(args.path ?? '.');
+  const resolved = await resolveExistingGitPath(ctx, key, requestedPath);
   const ref = validateGitRef(args.ref, 'HEAD');
   const maxCount = boundedInteger(args.max_count, 20, 1, 100);
   const skip = boundedInteger(args.skip, 0, 0, 10_000);
-  if (!(await isGitRepoAt(resolved.root))) {
+  const gitCwd = resolved.isDirectory ? resolved.full : path.dirname(resolved.full);
+  if (!(await isGitRepoAt(gitCwd))) {
     return ok({ is_repo: false, commits: [], truncated: false, warnings: [] });
   }
   const argv = [
     'log', `--max-count=${maxCount + 1}`, `--skip=${skip}`, '--date=iso-strict',
     '--pretty=format:%H%x1f%h%x1f%an%x1f%ae%x1f%ad%x1f%s%x1e', ref
   ];
-  if (resolved.display !== '.') argv.push('--', resolved.display);
-  const result = await runGitAt(resolved.root, argv, 10_000);
+  if (requestedPath !== '.') argv.push('--', resolved.isDirectory ? '.' : path.basename(resolved.full));
+  const result = await runGitAt(gitCwd, argv, 10_000);
   if (result.code !== 0) return gitReadFailure(result);
   const commits = result.stdout.split('\x1e').flatMap(record => {
     const fields = record.trim().split('\x1f').map(value => value.trim());
@@ -522,16 +553,19 @@ export async function gitLogTool(ctx: ToolContext, key: string, args: JsonObject
 }
 
 export async function gitShowTool(ctx: ToolContext, key: string, args: JsonObject): Promise<JsonObject> {
-  const { root } = rootAndCwd(ctx, key);
-  if (!(await isGitRepoAt(root))) {
+  let target: GitTarget;
+  try {
+    target = await resolveGitTarget(ctx, key, args);
+  } catch {
     return ok({ is_repo: false, content: '', files: [], truncated: false, warnings: [] });
   }
+  const root = target.root;
   const rev = validateGitRef(args.rev, 'HEAD');
   const requestedContext = boundedInteger(args.context_lines, 3, 0, 1_000);
   const context = Math.min(requestedContext, 20);
   const maxBytes = boundedInteger(args.max_bytes, 262_144, 1, 1_048_576);
   const includeDiff = args.include_diff !== false;
-  const paths = gitPaths(ctx, key, args);
+  const paths = gitPaths(ctx, key, args, false, target);
   const argv = ['show', '--no-ext-diff', '--format=fuller', `--unified=${context}`];
   if (!includeDiff) argv.push('--no-patch');
   argv.push(rev);
@@ -548,6 +582,9 @@ export async function gitShowTool(ctx: ToolContext, key: string, args: JsonObjec
     content,
     output: content,
     files: parseDiffFiles(content),
+    repo: targetMetadata(target),
+    repo_fingerprint: target.fingerprint,
+    paths,
     arguments_normalized: normalized,
     normalized_arguments: normalized ? { context_lines: context } : null,
     truncated,
@@ -562,7 +599,8 @@ export async function gitBlameTool(ctx: ToolContext, key: string, args: JsonObje
   if (!requestedPath) throw new Error('path is required');
   const resolved = await resolveExistingGitPath(ctx, key, requestedPath);
   if (resolved.isDirectory) throw new Error('IS_DIRECTORY');
-  if (!(await isGitRepoAt(resolved.root))) {
+  const gitCwd = path.dirname(resolved.full);
+  if (!(await isGitRepoAt(gitCwd))) {
     return ok({ is_repo: false, path: resolved.display, lines: [], truncated: false, warnings: [] });
   }
   const rev = args.rev === undefined ? null : validateGitRef(args.rev);
@@ -578,8 +616,8 @@ export async function gitBlameTool(ctx: ToolContext, key: string, args: JsonObje
   finalLine = Math.min(finalLine, startLine + maxLines - 1);
   const argv = ['blame', '--line-porcelain', '-L', `${startLine},${finalLine}`];
   if (rev) argv.push(rev);
-  argv.push('--', resolved.display);
-  const result = await runGitAt(resolved.root, argv, 60_000);
+  argv.push('--', path.basename(resolved.full));
+  const result = await runGitAt(gitCwd, argv, 60_000);
   if (result.code !== 0) return gitReadFailure(result);
   let lines = parseGitBlamePorcelain(result.stdout);
   if (lines.length > maxLines) {
@@ -701,6 +739,9 @@ export async function gitWorktreeTool(ctx: ToolContext, key: string, args: JsonO
   const worktrees = await listGitWorktrees(target.root, workspaceRoot);
   const entry = worktrees.find(item => normalizedLocalPath(item.absolutePath) === normalizedLocalPath(fullPath));
   if (!entry) return fail('GIT_WORKTREE_NOT_FOUND', `Linked worktree is not registered: ${displayPath}`);
+  const survivingGitRoot = worktrees.find(item =>
+    !item.bare && normalizedLocalPath(item.absolutePath) !== normalizedLocalPath(fullPath)
+  )?.absolutePath ?? workspaceRoot;
   if (entry.locked && args.force !== true) return fail('GIT_WORKTREE_LOCKED', `Linked worktree is locked: ${displayPath}`);
   if (args.force !== true) {
     const status = await runGitAt(fullPath, ['status', '--porcelain=v1', '--untracked-files=normal'], 10_000);
@@ -719,7 +760,7 @@ export async function gitWorktreeTool(ctx: ToolContext, key: string, args: JsonO
   const removed = await runGitAt(target.root, removeArgs, 60_000);
   const warnings: string[] = [];
   if (removed.code !== 0) {
-    const remaining = await listGitWorktrees(target.root, workspaceRoot);
+    const remaining = await listGitWorktrees(await exists(target.root) ? target.root : survivingGitRoot, workspaceRoot);
     const stillRegistered = remaining.some(item => normalizedLocalPath(item.absolutePath) === normalizedLocalPath(fullPath));
     if (stillRegistered) return gitReadFailure(removed);
     warnings.push(`worktree registration removed but Git reported cleanup failure: ${(removed.stderr || removed.stdout).trim()}`);
@@ -733,7 +774,7 @@ export async function gitWorktreeTool(ctx: ToolContext, key: string, args: JsonO
   }
   let branchDeleted = false;
   if (args.delete_branch === true && entry.branch) {
-    const deleted = await runGitAt(target.root, ['branch', args.force === true ? '-D' : '-d', entry.branch], 30_000);
+    const deleted = await runGitAt(survivingGitRoot, ['branch', args.force === true ? '-D' : '-d', entry.branch], 30_000);
     if (deleted.code === 0) {
       branchDeleted = true;
     } else {
@@ -751,18 +792,21 @@ export async function gitWorktreeTool(ctx: ToolContext, key: string, args: JsonO
     branch_deleted: branchDeleted,
     default_cwd: ctx.conversations.peekCwdFor(key, folder.id),
     repo: targetMetadata(target),
-    worktrees: await listGitWorktrees(target.root, workspaceRoot),
+    worktrees: await listGitWorktrees(survivingGitRoot, workspaceRoot),
     warnings
   });
 }
 
 export async function gitStageTool(ctx: ToolContext, key: string, args: JsonObject): Promise<JsonObject> {
-  const preflightPaths = gitPaths(ctx, key, args, true);
+  const preflightPaths = gitPaths(ctx, key, args, false);
+  if (String(args.repo_path ?? '.') === '.') {
+    for (const file of preflightPaths) rejectProtectedWritePath(file);
+  }
   const target = await resolveGitTarget(ctx, key, args);
   const mismatch = repoTargetMismatch(target, args.expected_repo_fingerprint);
   if (mismatch) return mismatch;
   await ensureExpectedHead(target, args.expected_head);
-  const paths = target.repoPath === '.' ? preflightPaths : gitPaths(ctx, key, args, true, target);
+  const paths = gitPaths(ctx, key, args, true, target);
   if (args.all !== true && !paths.length) throw new Error('paths or all=true is required');
   const argv = args.all === true ? ['add', '-A'] : ['add', '--', ...paths];
   if (args.dry_run === true) return ok({ dry_run: true, applied: false, paths, all: args.all === true, command: ['git', ...argv], repo: targetMetadata(target), warnings: [] });
@@ -781,14 +825,13 @@ export async function gitStageTool(ctx: ToolContext, key: string, args: JsonObje
 }
 
 export async function gitCommitTool(ctx: ToolContext, key: string, args: JsonObject): Promise<JsonObject> {
-  const preflightPaths = gitPaths(ctx, key, args, true);
   const target = await resolveGitTarget(ctx, key, args);
   const mismatch = repoTargetMismatch(target, args.expected_repo_fingerprint);
   if (mismatch) return mismatch;
   await ensureExpectedHead(target, args.expected_head);
   const message = String(args.message ?? '');
   if (!message.trim() || message.length > 10_000) throw new Error('message must be between 1 and 10000 characters');
-  const paths = target.repoPath === '.' ? preflightPaths : gitPaths(ctx, key, args, true, target);
+  const paths = gitPaths(ctx, key, args, true, target);
   const all = args.all === true;
   const stagedByTool = paths.length > 0 || all;
   const requireCleanIndex = args.require_clean_index_before === undefined ? stagedByTool : args.require_clean_index_before === true;
@@ -1029,7 +1072,7 @@ function nulPaths(value: string): string[] {
   return value.split('\0').filter(Boolean).map(item => item.replaceAll('\\', '/'));
 }
 
-export async function captureGitRestoreSnapshot(ctx: ToolContext, key: string, paths: string[], repoRoot = rootAndCwd(ctx, key).root): Promise<GitRestoreSnapshot> {
+export async function captureGitRestoreSnapshot(ctx: ToolContext, key: string, paths: string[], repoRoot = rootAndCwd(ctx, key).cwd): Promise<GitRestoreSnapshot> {
   const head = await runGitAt(repoRoot, ['rev-parse', 'HEAD']);
   if (head.code !== 0) throw new Error('GIT_RESTORE_SNAPSHOT_FAILED');
   const common = ['--binary', '--full-index', '--no-ext-diff', '--', ...paths];
@@ -1067,7 +1110,7 @@ export async function restoreGitSnapshot(
   ctx: ToolContext,
   key: string,
   snapshot: GitRestoreSnapshot,
-  repoRoot = rootAndCwd(ctx, key).root
+  repoRoot = rootAndCwd(ctx, key).cwd
 ): Promise<{ ok: boolean; steps: JsonObject[] }> {
   const steps: JsonObject[] = [];
   if (!snapshot.changedPaths.length) return { ok: true, steps };
@@ -1102,13 +1145,12 @@ export async function restoreGitSnapshot(
 }
 
 export async function gitRestoreTool(ctx: ToolContext, key: string, args: JsonObject): Promise<JsonObject> {
-  const preflightPaths = gitPaths(ctx, key, args, true);
   const target = await resolveGitTarget(ctx, key, args);
   const mismatch = repoTargetMismatch(target, args.expected_repo_fingerprint);
   if (mismatch) return mismatch;
   await ensureExpectedHead(target, args.expected_head);
   if (ctx.config.securityPolicy.requireWriteConfirmation && args.confirm !== true) return fail('DANGEROUS_OPERATION_REQUIRES_CONFIRMATION', 'git_restore discards or unstages changes and requires confirm=true');
-  const paths = target.repoPath === '.' ? preflightPaths : gitPaths(ctx, key, args, true, target);
+  const paths = gitPaths(ctx, key, args, true, target);
   if (!paths.length) throw new Error('paths are required');
   const argv = ['restore'];
   const staged = args.staged === true;

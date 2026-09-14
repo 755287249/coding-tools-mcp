@@ -122,11 +122,18 @@ fn exec_command_rejects_host_scope_even_with_confirmation() {
             "confirm": true
         }),
     );
-    assert_eq!(out["error"]["code"], "POLICY_REJECTED");
-    assert!(out["summary"]
-        .as_str()
-        .unwrap_or("")
-        .contains("EXTERNAL_EXECUTION_NOT_ALLOWED"));
+    assert_eq!(out["error"]["code"], "EXTERNAL_EXECUTION_NOT_ALLOWED");
+    assert_eq!(
+        out["error"]["details"]["failure_origin"],
+        "policy_preflight"
+    );
+    assert_eq!(out["error"]["details"]["execution_attempted"], false);
+    assert_eq!(out["error"]["details"]["process_started"], false);
+    assert_eq!(out["error"]["details"]["policy_blocked"], true);
+    assert_eq!(
+        out["error"]["details"]["policy_rule"],
+        "enforce_workspace_boundary"
+    );
 }
 
 #[test]
@@ -342,11 +349,9 @@ fn exec_command_rejects_shell_chaining() {
 }
 
 #[test]
-fn safe_permission_mode_blocks_network_looking_command() {
-    let policy = coding_tools_mcp_desktop_lib::tools::policy::PolicySettings {
-        permission_mode: "safe".into(),
-        ..Default::default()
-    };
+fn explicit_network_policy_blocks_network_looking_command() {
+    let mut policy = coding_tools_mcp_desktop_lib::tools::policy::PolicySettings::default();
+    policy.security_policy.block_network_commands = true;
     let err = coding_tools_mcp_desktop_lib::tools::policy::validate_tool_arguments(
         "exec_command",
         &json!({"cmd": "curl https://example.com"}),

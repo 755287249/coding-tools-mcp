@@ -9,10 +9,11 @@ pub(super) fn input_schema(name: &str) -> Option<Value> {
             "properties": {
                 "session_id": { "type": "string", "minLength": 1 },
                 "cursor": { "type": "integer", "minimum": 0, "default": 0 },
-                "timeout_ms": { "type": "integer", "minimum": 0, "maximum": WAIT_COMMAND_TIMEOUT_MAX_MS, "default": WAIT_COMMAND_TIMEOUT_DEFAULT_MS, "description": "Server-side event wait, separate from the child-process timeout. The MCP transport sends a heartbeat every 10 seconds to keep long requests alive. Use output_or_exit for live incremental status; the wait window may be up to 60 minutes." },
-                "heartbeat_ms": { "type": "integer", "minimum": 0, "maximum": 30000, "default": 0, "description": "Deprecated compatibility field. Accepted but ignored for application wait timing; MCP transport heartbeats keep long requests alive automatically." },
+                "timeout_ms": { "type": "integer", "minimum": 0, "maximum": WAIT_COMMAND_TIMEOUT_MAX_MS, "default": WAIT_COMMAND_TIMEOUT_DEFAULT_MS, "description": "Requested server-side event wait, separate from the child-process timeout. Values up to 60 minutes are accepted for compatibility, but each MCP response waits at most 20 seconds and returns retained next_actions so proxy heartbeat behavior cannot cause a lost response." },
+                "heartbeat_ms": { "type": "integer", "minimum": 0, "maximum": 30000, "default": 0, "description": "Deprecated compatibility field. Accepted but ignored for application wait timing; long waits are transport-safely chunked instead of relying on proxy heartbeat forwarding." },
                 "until": { "type": "string", "enum": ["output_or_exit", "exit", "finalized"], "default": "output_or_exit" },
                 "output_mode": { "type": "string", "enum": ["delta", "tail", "all", "none", "summary"], "default": "delta" },
+                "event_detail": { "type": "string", "enum": ["compact", "full"], "default": "compact", "description": "For delta output, compact returns sequence/stream/stream_offset metadata while stdout/stderr carry the data once. full additionally includes per-event decoded offsets, encoding, and data for callers that need exact stdout/stderr interleaving." },
                 "max_output_bytes": { "type": "integer", "minimum": 1, "maximum": 1048576, "default": 65536 },
                 "tail_lines": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 100 }
             },

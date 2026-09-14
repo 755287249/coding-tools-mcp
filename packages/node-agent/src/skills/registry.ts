@@ -3,6 +3,8 @@ import { lstat, readFile, readdir, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { parseSkillMarkdown } from './parser.js';
+import { applyPromotedEvolvedSkills } from '../knowledge/evolvedSkills.js';
+import type { EvolvedSkillRecord } from '../knowledge/types.js';
 import type {
   SkillDescriptor,
   SkillDiagnostic,
@@ -45,6 +47,8 @@ export interface SkillRegistryOptions {
   active?: boolean;
   /** Skill control keys disabled for this workspace profile. */
   disabledSkillKeys?: readonly string[];
+  /** Promoted machine-evolved guidance. It may augment discovered Skills but never create or enable one. */
+  evolvedSkillProvider?: () => Promise<readonly EvolvedSkillRecord[]>;
 }
 
 const WORKSPACE_DISCOVERY_ROOTS: readonly WorkspaceDiscoveryRoot[] = [
@@ -301,7 +305,19 @@ export class SkillRegistry {
         scope: skill.scope
       });
     }
-    const skills = [...selected.values()].sort((left, right) => left.name.localeCompare(right.name));
+    let skills = [...selected.values()].sort((left, right) => left.name.localeCompare(right.name));
+    if (this.options.evolvedSkillProvider) {
+      try {
+        const effective = applyPromotedEvolvedSkills(skills, await this.options.evolvedSkillProvider());
+        skills = effective.skills;
+        diagnostics.push(...effective.diagnostics);
+      } catch (error) {
+        diagnostics.push({
+          code: 'EVOLVED_SKILL_LOAD_FAILED',
+          message: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
     return { skills, diagnostics, scannedAtMs: Date.now() };
   }
 

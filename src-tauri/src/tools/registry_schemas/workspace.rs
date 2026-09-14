@@ -40,6 +40,7 @@ pub(super) fn input_schema(name: &str) -> Option<Value> {
                 "min_duration_ms": { "type": "integer", "minimum": 0, "default": 0 },
                 "since_ts_ms": { "type": "integer", "minimum": 0, "default": 0 },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 100 },
+                "cursor": { "type": "integer", "minimum": 0, "maximum": 10000, "default": 0 },
                 "aggregate": { "type": "boolean", "default": true },
                 "include_records": { "type": "boolean", "default": false },
                 "include_payloads": { "type": "boolean", "default": false },

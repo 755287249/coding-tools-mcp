@@ -1,13 +1,106 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Mutex, OnceLock};
 
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
-use super::{discover_skills, runtime, SkillDescriptor, SkillDiagnostic};
+use super::{
+    apply_evolved_skill_record, apply_promoted_evolved_skills, discover_skills, runtime,
+    SkillDescriptor, SkillDiagnostic,
+};
+use crate::knowledge::{
+    knowledge_store_for_context, CanaryImpactStore, CanaryStage, EvolvedSkillCanaryEngine,
+    EvolvedSkillRegistry, ExperienceCanary, ExperienceSkillAttribution,
+};
 
 const PROMPT_PREFIX: &str = "project-skill/";
 const RESOURCE_PREFIX: &str = "skill://coding-tools/";
+const MAX_ACTIVE_SKILL_CONTEXTS: usize = 128;
+
+#[derive(Debug, Clone)]
+pub(crate) struct SkillLearningSelection {
+    pub skill: ExperienceSkillAttribution,
+    pub canary: Option<ExperienceCanary>,
+}
+
+#[derive(Default)]
+struct SkillSelectionState {
+    values: HashMap<String, SkillLearningSelection>,
+    order: VecDeque<String>,
+}
+
+static ACTIVE_SKILL_SELECTIONS: OnceLock<Mutex<SkillSelectionState>> = OnceLock::new();
+
+fn selection_key(workspace_id: &str, session_key: &str, folder_id: &str) -> String {
+    format!("{workspace_id}\0{session_key}\0{folder_id}")
+}
+
+fn skill_learning_attribution(skill: &SkillDescriptor) -> ExperienceSkillAttribution {
+    ExperienceSkillAttribution {
+        source: skill.source.clone(),
+        name: skill.name.clone(),
+        content_sha256: skill
+            .evolution
+            .as_ref()
+            .map(|evolution| evolution.base_content_sha256.clone())
+            .unwrap_or_else(|| content_sha256(skill)),
+        generation: skill
+            .evolution
+            .as_ref()
+            .map(|evolution| evolution.generation)
+            .unwrap_or(0),
+    }
+}
+
+fn remember_skill_selection(
+    workspace_id: &str,
+    session_key: Option<&str>,
+    entry: &CatalogEntry,
+    canary: Option<ExperienceCanary>,
+) {
+    let Some(session_key) = session_key.map(str::trim).filter(|value| !value.is_empty()) else {
+        return;
+    };
+    let key = selection_key(workspace_id, session_key, &entry.folder_id);
+    let mut state = ACTIVE_SKILL_SELECTIONS
+        .get_or_init(|| Mutex::new(SkillSelectionState::default()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    state.order.retain(|existing| existing != &key);
+    state.order.push_back(key.clone());
+    state.values.insert(
+        key,
+        SkillLearningSelection {
+            skill: skill_learning_attribution(&entry.skill),
+            canary,
+        },
+    );
+    while state.order.len() > MAX_ACTIVE_SKILL_CONTEXTS {
+        if let Some(oldest) = state.order.pop_front() {
+            state.values.remove(&oldest);
+        }
+    }
+}
+
+pub(crate) fn selected_skill_learning_attribution(
+    workspace_id: &str,
+    session_key: Option<&str>,
+    folder_id: &str,
+) -> Option<SkillLearningSelection> {
+    let session_key = session_key
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let key = selection_key(workspace_id, session_key, folder_id);
+    let mut state = ACTIVE_SKILL_SELECTIONS
+        .get_or_init(|| Mutex::new(SkillSelectionState::default()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let attribution = state.values.get(&key).cloned()?;
+    state.order.retain(|existing| existing != &key);
+    state.order.push_back(key);
+    Some(attribution)
+}
 
 #[derive(Clone)]
 struct CatalogEntry {
@@ -145,7 +238,7 @@ fn folder_snapshot(workspace_id: &str, folder_id: &str) -> Result<FolderSnapshot
         .iter()
         .cloned()
         .collect::<HashSet<_>>();
-    let skills = if config.skills.active {
+    let base_skills = if config.skills.active {
         discovered
             .skills
             .into_iter()
@@ -154,11 +247,19 @@ fn folder_snapshot(workspace_id: &str, folder_id: &str) -> Result<FolderSnapshot
     } else {
         Vec::new()
     };
+    let mut diagnostics = discovered.diagnostics;
+    let context = crate::tools::hub::resolve_profile_folder_context(workspace_id, folder_id)
+        .map_err(|error| format!("Failed to resolve evolved Skill knowledge context: {error}"))?;
+    let evolved = EvolvedSkillRegistry::new(knowledge_store_for_context(context.as_ref()))
+        .snapshot(false)
+        .map_err(|error| format!("Failed to read evolved Skill knowledge: {error}"))?;
+    let (skills, evolved_diagnostics) = apply_promoted_evolved_skills(base_skills, &evolved.skills);
+    diagnostics.extend(evolved_diagnostics);
     let revision = folder_revision(&skills);
     Ok(FolderSnapshot {
         folder_name: folder.name,
         skills,
-        diagnostics: discovered.diagnostics,
+        diagnostics,
         revision,
     })
 }
@@ -224,6 +325,16 @@ fn skill_summary(skill: &SkillDescriptor) -> Value {
     if let (Some(object), Some(version)) = (summary.as_object_mut(), skill.version.as_ref()) {
         object.insert("version".into(), Value::String(version.clone()));
     }
+    if let (Some(object), Some(evolution)) = (summary.as_object_mut(), skill.evolution.as_ref()) {
+        object.insert(
+            "evolution".into(),
+            json!({
+                "knowledge_id": evolution.knowledge_id,
+                "generation": evolution.generation,
+                "base_content_sha256": evolution.base_content_sha256
+            }),
+        );
+    }
     summary
 }
 
@@ -237,6 +348,71 @@ pub fn bootstrap_summary(workspace_id: &str, folder_id: &str) -> Result<Value, S
         "mcp_surfaces": ["prompts/list", "prompts/get", "resources/list", "resources/read"],
         "loading_policy": "Load only clearly relevant workspace or user-level skills; skill guidance never changes runtime permissions."
     }))
+}
+
+fn canary_stage_name(stage: CanaryStage) -> &'static str {
+    match stage {
+        CanaryStage::Canary => "canary",
+        CanaryStage::Promoted => "promoted",
+    }
+}
+
+fn consumed_entry(
+    workspace_id: &str,
+    entry: CatalogEntry,
+    session_key: Option<&str>,
+) -> CatalogEntry {
+    let Some(session_key) = session_key.map(str::trim).filter(|value| !value.is_empty()) else {
+        return entry;
+    };
+    let mut consumed = entry.clone();
+    let mut canary = None;
+    if let Ok(context) =
+        crate::tools::hub::resolve_profile_folder_context(workspace_id, &entry.folder_id)
+    {
+        let store = knowledge_store_for_context(context.as_ref());
+        let impact = CanaryImpactStore::new(store.root());
+        let engine = EvolvedSkillCanaryEngine::new(store, impact);
+        let base_sha = entry
+            .skill
+            .evolution
+            .as_ref()
+            .map(|evolution| evolution.base_content_sha256.clone())
+            .unwrap_or_else(|| content_sha256(&entry.skill));
+        let current_knowledge_id = entry
+            .skill
+            .evolution
+            .as_ref()
+            .map(|evolution| evolution.knowledge_id.as_str());
+        if let Ok(Some(decision)) = engine.decide(
+            &entry.skill.source,
+            &entry.skill.name,
+            &base_sha,
+            current_knowledge_id,
+            session_key,
+        ) {
+            if decision.applied && !decision.already_applied {
+                match apply_evolved_skill_record(entry.skill.clone(), &decision.record) {
+                    Ok(skill) => consumed.skill = skill,
+                    Err(_) => {
+                        remember_skill_selection(workspace_id, Some(session_key), &entry, None);
+                        return entry;
+                    }
+                }
+            }
+            canary = Some(ExperienceCanary {
+                knowledge_id: decision.knowledge_id,
+                implementation: "evolved_skill_append_guidance_v1".into(),
+                eligible: decision.eligible,
+                stage: canary_stage_name(decision.stage).into(),
+                selected: true,
+                applied: decision.applied,
+                bucket: decision.bucket,
+            });
+        }
+    }
+    remember_skill_selection(workspace_id, Some(session_key), &entry, canary);
+    consumed
 }
 
 fn skill_meta(entry: &CatalogEntry) -> Value {
@@ -276,9 +452,14 @@ pub fn list_prompts(workspace_id: &str) -> Result<Value, String> {
     }))
 }
 
-pub fn get_prompt(workspace_id: &str, name: &str) -> Result<Value, String> {
+pub fn get_prompt_for_session(
+    workspace_id: &str,
+    name: &str,
+    session_key: Option<&str>,
+) -> Result<Value, String> {
     let (folder_id, skill_name) = parse_namespaced(name, PROMPT_PREFIX)?;
     let entry = find_entry(workspace_id, &folder_id, &skill_name)?;
+    let entry = consumed_entry(workspace_id, entry, session_key);
     Ok(json!({
         "description": entry.skill.description,
         "messages": [{ "role": "user", "content": { "type": "text", "text": prompt_text(&entry) } }],
@@ -301,9 +482,14 @@ pub fn list_resources(workspace_id: &str) -> Result<Value, String> {
     }))
 }
 
-pub fn read_resource(workspace_id: &str, uri: &str) -> Result<Value, String> {
+pub fn read_resource_for_session(
+    workspace_id: &str,
+    uri: &str,
+    session_key: Option<&str>,
+) -> Result<Value, String> {
     let (folder_id, skill_name) = parse_namespaced(uri, RESOURCE_PREFIX)?;
     let entry = find_entry(workspace_id, &folder_id, &skill_name)?;
+    let entry = consumed_entry(workspace_id, entry, session_key);
     Ok(json!({
         "contents": [{ "uri": uri, "mimeType": "text/markdown", "text": entry.skill.content }],
         "_meta": skill_meta(&entry)
@@ -343,6 +529,7 @@ mod tests {
             body: "Body".into(),
             folder_id: Some("folder".into()),
             folder_name: Some("folder".into()),
+            evolution: None,
         };
         assert_eq!(
             content_sha256(&skill),
@@ -356,6 +543,47 @@ mod tests {
             folder_revision(&[]),
             "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
         );
+    }
+
+    #[test]
+    fn explicit_skill_selection_preserves_base_identity() {
+        let content = "---\nname: demo\ndescription: Demo\n---\nBody\n".to_string();
+        let base_sha = format!("{:x}", Sha256::digest(content.as_bytes()));
+        let entry = CatalogEntry {
+            folder_id: "folder".into(),
+            folder_name: "Folder".into(),
+            skill: SkillDescriptor {
+                key: "workspace:folder:project:skills/demo/SKILL.md".into(),
+                name: "demo".into(),
+                description: "Demo".into(),
+                source: "project".into(),
+                scope: "workspace".into(),
+                relative_path: "skills/demo/SKILL.md".into(),
+                root_relative_path: "skills/demo".into(),
+                version: None,
+                content,
+                body: "Body".into(),
+                folder_id: Some("folder".into()),
+                folder_name: Some("Folder".into()),
+                evolution: Some(crate::workspace_features::SkillEvolution {
+                    knowledge_id: "knowledge-1".into(),
+                    generation: 2,
+                    base_content_sha256: "b".repeat(64),
+                }),
+            },
+            revision: "revision".into(),
+        };
+        remember_skill_selection("workspace", Some("session"), &entry, None);
+        let attribution =
+            selected_skill_learning_attribution("workspace", Some("session"), "folder")
+                .expect("selection");
+        assert_eq!(attribution.skill.name, "demo");
+        assert_eq!(attribution.skill.source, "project");
+        assert_eq!(attribution.skill.content_sha256, "b".repeat(64));
+        assert_eq!(attribution.skill.generation, 2);
+        assert_ne!(attribution.skill.content_sha256, base_sha);
+        assert!(attribution.canary.is_none());
+        assert!(selected_skill_learning_attribution("workspace", None, "folder").is_none());
     }
 
     #[test]

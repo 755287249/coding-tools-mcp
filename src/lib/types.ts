@@ -17,6 +17,7 @@ export interface TunnelConfig {
 export interface AuthConfig {
   type: string;
   oauth_client_id: string;
+  oauth_token_ttl_seconds?: number;
   use_shared_secrets?: boolean;
 }
 

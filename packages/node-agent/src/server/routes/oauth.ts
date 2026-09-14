@@ -50,7 +50,7 @@ export async function handleOAuthRoute(
   }
   if (localPathname === '/oauth/authorize' && req.method === 'POST') {
     const form = new URLSearchParams((await readRequestBody(req, 8192)).toString());
-    const output = oauth.authorizeSubmit(form, base);
+    const output = await oauth.authorizeSubmitOneTime(form, base);
     if (output.location) {
       res.writeHead(output.status, {
         location: output.location,

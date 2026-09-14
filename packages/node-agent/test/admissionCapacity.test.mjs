@@ -7,7 +7,7 @@ import { createToolContext } from '../dist/server.js';
 import { disposeProcessSessions, ProcessRequestLifecycle } from '../dist/processes.js';
 import { callTool } from '../dist/tools.js';
 
-function config(folders, dataDir) {
+function config(folders, dataDir, processConcurrency = 1) {
   return {
     host: '127.0.0.1', port: 0, dataDir, permissionMode: 'trusted',
     management: { enabled: false },
@@ -15,9 +15,9 @@ function config(folders, dataDir) {
     folders,
     limits: {
       blockingConcurrency: 1,
-      processConcurrency: 1,
+      processConcurrency,
       globalBlockingConcurrency: 1,
-      globalProcessConcurrency: 1,
+      globalProcessConcurrency: processConcurrency,
       activeSessionLimit: 512,
       maxOutputBytes: 1024 * 1024
     }
@@ -34,7 +34,7 @@ async function waitFor(read, timeoutMs = 2_000) {
   throw new Error('timed out waiting for admission state');
 }
 
-async function fixture(t) {
+async function fixture(t, processConcurrency = 1) {
   const rootA = await mkdtemp(path.join(tmpdir(), 'ctmcp-admission-a-'));
   const rootB = await mkdtemp(path.join(tmpdir(), 'ctmcp-admission-b-'));
   const dataDir = await mkdtemp(path.join(tmpdir(), 'ctmcp-admission-data-'));
@@ -43,7 +43,7 @@ async function fixture(t) {
   const ctx = await createToolContext(config([
     { id: 'a', name: 'A', path: rootA },
     { id: 'b', name: 'B', path: rootB }
-  ], dataDir));
+  ], dataDir, processConcurrency));
   t.after(async () => {
     await disposeProcessSessions(ctx);
     await Promise.allSettled([ctx.conversations.flush(), ctx.usageStore.flush()]);
@@ -106,4 +106,70 @@ test('cancelling an admission wait removes the waiter without releasing another 
   releaseGlobal();
   releaseGlobal();
   assert.equal(ctx.hubAdmission.blocking.active, 0);
+});
+
+test('exec_many orchestrator does not hold process admission and each child is admitted independently', async t => {
+  const { ctx } = await fixture(t);
+  const meta = { 'openai/session': 'exec-many-child-admission' };
+  await callTool(ctx, 'switch_workspace_folder', { folder_id: 'a' }, meta);
+  const runtime = ctx.folderRuntimes.get('a');
+  const graph = await callTool(ctx, 'exec_many', {
+    operation_id: 'exec-many-child-admission',
+    mode: 'parallel',
+    max_parallel: 2,
+    yield_time_ms: 0,
+    commands: [
+      { id: 'one', program: 'node', args: ['-e', 'setTimeout(() => process.stdout.write("one"), 180)'], timeout_ms: 5_000 },
+      { id: 'two', program: 'node', args: ['-e', 'setTimeout(() => process.stdout.write("two"), 180)'], timeout_ms: 5_000 }
+    ]
+  }, meta);
+
+  assert.equal(graph.ok, true, JSON.stringify(graph));
+  assert.equal(graph.graph_completed, false);
+  assert.equal(graph.admission_mode, 'children');
+  assert.equal(graph.admission_scope, 'none');
+  await waitFor(() =>
+    ctx.hubAdmission.process.active === 1
+    && runtime.admission.process.active === 1
+    && [...runtime.sessions.values()].filter(session => !session.finalizedAt).length === 1
+  );
+  assert.equal([...runtime.sessions.values()].filter(session => !session.finalizedAt).length, 1);
+
+  const finalized = await callTool(ctx, 'exec_many', {
+    operation_id: 'exec-many-child-admission',
+    yield_time_ms: 2_000,
+    result_mode: 'full'
+  }, meta);
+  assert.equal(finalized.graph_completed, true, JSON.stringify(finalized));
+  assert.equal(finalized.graph_execution_ok, true, JSON.stringify(finalized));
+  assert.equal(finalized.results.length, 2);
+  assert.ok(finalized.results.every(result => result.admission_mode === 'child'));
+  assert.ok(finalized.results.every(result => result.admission_scope === 'global_and_workspace'));
+  assert.equal(ctx.hubAdmission.process.active, 0);
+  assert.equal(runtime.admission.process.active, 0);
+});
+
+test('exec_many serializes io_heavy children independently of ordinary process concurrency', async t => {
+  const { ctx } = await fixture(t, 2);
+  const meta = { 'openai/session': 'exec-many-io-heavy' };
+  await callTool(ctx, 'switch_workspace_folder', { folder_id: 'a' }, meta);
+  const startedAt = Date.now();
+  const graph = await callTool(ctx, 'exec_many', {
+    operation_id: 'exec-many-io-heavy',
+    mode: 'parallel',
+    max_parallel: 2,
+    yield_time_ms: 2_000,
+    result_mode: 'full',
+    commands: [
+      { id: 'one', resource_class: 'io_heavy', program: 'node', args: ['-e', 'setTimeout(() => process.stdout.write("one"), 220)'], timeout_ms: 5_000 },
+      { id: 'two', resource_class: 'io_heavy', program: 'node', args: ['-e', 'setTimeout(() => process.stdout.write("two"), 220)'], timeout_ms: 5_000 }
+    ]
+  }, meta);
+
+  assert.equal(graph.graph_completed, true, JSON.stringify(graph));
+  assert.equal(graph.graph_execution_ok, true, JSON.stringify(graph));
+  assert.ok(Date.now() - startedAt >= 400, JSON.stringify(graph));
+  assert.ok(graph.results.every(result => result.resource_class === 'io_heavy'));
+  assert.ok(graph.results.every(result => result.io_heavy_admission_limit === 1));
+  assert.ok(graph.results.some(result => result.io_heavy_admission_wait_ms >= 150), JSON.stringify(graph.results));
 });

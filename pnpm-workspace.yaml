@@ -3,6 +3,7 @@ packages:
 
 sharedWorkspaceLockfile: true
 injectWorkspacePackages: true
+pmOnFail: ignore
 
 allowBuilds:
   esbuild: true

@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createPublicKey, verify as verifySignature } from 'node:crypto';
+import {
+  createHash, createPublicKey, generateKeyPairSync, sign as signSignature,
+  verify as verifySignature
+} from 'node:crypto';
 import { createServer } from 'node:http';
 import { mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -8,10 +11,12 @@ import path from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
 import { createToolContext } from '../dist/server.js';
 import {
-  authSigningPayload, builtinEndpointForClient, BuiltinTunnelManager, parseBuiltinPublicUrl, publicTunnelSecurityError, tunnelPathAllowed,
-  BUILTIN_TUNNEL_DEMAND_TTL_MS, BUILTIN_TUNNEL_LOCAL_CONNECT_TIMEOUT_MS,
+  authSigningPayload, builtinEndpointForClient, BuiltinTunnelManager, parseBuiltinPublicUrl,
+  publicTunnelSecurityError, serverAckSigningPayload, serverChallengeSigningPayload,
+  tunnelPathAllowed, BUILTIN_TUNNEL_DEMAND_TTL_MS, BUILTIN_TUNNEL_LOCAL_CONNECT_TIMEOUT_MS,
   BUILTIN_TUNNEL_LOCAL_REQUEST_TIMEOUT_MS, TUNNEL_PROTOCOL_VERSION, TUNNEL_SUBPROTOCOL
 } from '../dist/tunnel.js';
+import { loadOrEnroll } from '../dist/tunnel/identity.js';
 import {
   configuredBurstWarmFloor, configuredMaxConnecting, jitteredLimit,
   normalizeWorkerPolicy, poolAdjustment, workerShouldRecycle
@@ -35,6 +40,67 @@ const defaultPolicy = {
   burst_warm_seconds: 120,
   revision: 1
 };
+
+const testServerKeyPair = generateKeyPairSync('ed25519');
+const testServerPublicKeyRaw = Buffer.from(
+  testServerKeyPair.publicKey.export({ format: 'der', type: 'spki' })
+).subarray(-32).toString('base64url');
+const testServerId = createHash('sha256')
+  .update(Buffer.from(testServerPublicKeyRaw, 'base64url'))
+  .digest('base64url');
+
+function enrollmentResponse(deviceId, clientId) {
+  return {
+    device_id: deviceId,
+    client_id: clientId,
+    server_id: testServerId,
+    server_public_key: testServerPublicKeyRaw
+  };
+}
+
+function sendSignedServerChallenge(socket, request, nonce) {
+  const expiresAtUnixMs = Date.now() + 30_000;
+  const deviceId = String(request.headers['x-coding-tools-device-id'] ?? '');
+  const clientId = String(request.headers['x-coding-tools-client-id'] ?? '');
+  const workerId = String(request.headers['x-coding-tools-worker-id'] ?? '');
+  assert.ok(deviceId);
+  assert.ok(clientId);
+  assert.ok(workerId);
+  const serverSignature = signSignature(
+    null,
+    serverChallengeSigningPayload(nonce, expiresAtUnixMs, testServerId, deviceId, clientId, workerId),
+    testServerKeyPair.privateKey
+  ).toString('base64url');
+  socket.send(JSON.stringify({
+    kind: 'challenge',
+    nonce,
+    expires_at_unix_ms: expiresAtUnixMs,
+    server_id: testServerId,
+    server_signature: serverSignature
+  }));
+}
+
+function sendSignedServerAck(socket, nonce, authenticate, workerPolicy) {
+  const serverSignature = signSignature(
+    null,
+    serverAckSigningPayload(
+      nonce,
+      testServerId,
+      authenticate.device_id,
+      authenticate.hello.client_id,
+      authenticate.hello.worker_id,
+      workerPolicy
+    ),
+    testServerKeyPair.privateKey
+  ).toString('base64url');
+  socket.send(JSON.stringify({
+    kind: 'hello_ack',
+    protocol_version: TUNNEL_PROTOCOL_VERSION,
+    worker_policy: workerPolicy,
+    server_id: testServerId,
+    server_signature: serverSignature
+  }));
+}
 
 async function waitFor(predicate, message, timeoutMs = 5000) {
   const started = Date.now();
@@ -65,13 +131,13 @@ async function closeServer(server) {
   await new Promise(resolve => server.close(() => resolve()));
 }
 
-test('built-in tunnel URL derives the v3 websocket endpoint', () => {
+test('built-in tunnel URL derives the v4 websocket endpoint', () => {
   const endpoint = parseBuiltinPublicUrl('https://tunnel.example/builtin/clients/device_1/mcp');
   assert.equal(endpoint.clientId, 'device_1');
   assert.equal(endpoint.baseUrl, 'https://tunnel.example/builtin/clients/device_1');
   assert.equal(endpoint.websocketUrl, 'wss://tunnel.example/_tunnel/v1');
-  assert.equal(TUNNEL_PROTOCOL_VERSION, 3);
-  assert.equal(TUNNEL_SUBPROTOCOL, 'coding-tools-tunnel-v3');
+  assert.equal(TUNNEL_PROTOCOL_VERSION, 4);
+  assert.equal(TUNNEL_SUBPROTOCOL, 'coding-tools-tunnel-v4');
   assert.equal(BUILTIN_TUNNEL_DEMAND_TTL_MS, 3_000);
   assert.equal(BUILTIN_TUNNEL_LOCAL_CONNECT_TIMEOUT_MS, 10_000);
   assert.equal(BUILTIN_TUNNEL_LOCAL_REQUEST_TIMEOUT_MS, 5 * 60_000);
@@ -89,7 +155,7 @@ test('built-in tunnel rebuilds the public endpoint from the authoritative client
 
 test('authentication signing payload matches the Rust field order and names', () => {
   const payload = authSigningPayload('nonce', 'device', 'client', 'worker');
-  assert.equal(payload.toString(), '{"protocol_version":3,"nonce":"nonce","device_id":"device","client_id":"client","service":"mcp","worker_id":"worker"}');
+  assert.equal(payload.toString(), '{"protocol_version":4,"nonce":"nonce","device_id":"device","client_id":"client","service":"mcp","worker_id":"worker"}');
 });
 
 test('built-in tunnel rejects non-HTTPS and non-client MCP paths', () => {
@@ -220,6 +286,58 @@ test('built-in tunnel exposes only scoped MCP and OAuth routes', () => {
   assert.equal(tunnelPathAllowed(config, '/builtin/clients/device_1/../ui'), false);
 });
 
+test('built-in tunnel reuses an enrolled identity when a stale enrollment URL remains after restart', async () => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'ctmcp-tunnel-restart-'));
+  const stateFile = path.join(dataDir, 'identity.enc.json');
+  const tokenSecret = 'a sufficiently long restart test token secret';
+  const initialEndpoint = parseBuiltinPublicUrl('https://tunnel.example/builtin/clients/provisional_1/mcp');
+  const enrollmentUrl = 'https://tunnel.example/_tunnel/enroll/TESTCODE';
+  const config = {
+    oauth: { tokenSecret },
+    tunnel: {
+      enabled: true,
+      publicUrl: initialEndpoint.publicUrl,
+      enrollmentUrl,
+      stateFile
+    }
+  };
+  let enrollmentCalls = 0;
+  const enrolled = await loadOrEnroll(config, initialEndpoint, async (_url, init) => {
+    enrollmentCalls += 1;
+    const body = JSON.parse(String(init?.body ?? '{}'));
+    return new Response(JSON.stringify(enrollmentResponse(body.device_id, 'server_assigned_1')), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    });
+  });
+
+  assert.equal(enrolled.enrollmentCompleted, true);
+  assert.equal(enrolled.identity.enrolled, true);
+  assert.equal(enrolled.identity.clientId, 'server_assigned_1');
+  assert.equal(enrollmentCalls, 1);
+
+  const restartedEndpoint = parseBuiltinPublicUrl('https://tunnel.example/builtin/clients/server_assigned_1/mcp');
+  const restarted = await loadOrEnroll({
+    ...config,
+    tunnel: {
+      ...config.tunnel,
+      publicUrl: restartedEndpoint.publicUrl,
+      enrollmentUrl
+    }
+  }, restartedEndpoint, async () => {
+    enrollmentCalls += 1;
+    throw new Error('an enrolled identity must not re-enroll during restart');
+  });
+
+  assert.equal(restarted.enrollmentCompleted, false);
+  assert.equal(enrollmentCalls, 1);
+  assert.equal(restarted.identity.enrolled, true);
+  assert.equal(restarted.identity.clientId, enrolled.identity.clientId);
+  assert.equal(restarted.identity.deviceId, enrolled.identity.deviceId);
+  assert.equal(restarted.identity.privateKeyDer, enrolled.identity.privateKeyDer);
+  assert.equal(restarted.identity.publicKeyRaw, enrolled.identity.publicKeyRaw);
+});
+
 test('dynamic built-in tunnel performs enrollment, auth, forwarding, scale-up and scale-down', async t => {
   const dataDir = await mkdtemp(path.join(tmpdir(), 'ctmcp-tunnel-'));
   const stateFile = path.join(dataDir, 'identity.enc.json');
@@ -283,7 +401,7 @@ test('dynamic built-in tunnel performs enrollment, auth, forwarding, scale-up an
     const nonce = `nonce-${allSockets.size}`;
     assert.equal(request.headers['x-coding-tools-client-id'], 'server_assigned_1');
     assert.equal(request.headers['x-coding-tools-service'], 'mcp');
-    socket.send(JSON.stringify({ kind: 'challenge', nonce, expires_at_unix_ms: Date.now() + 30_000 }));
+    sendSignedServerChallenge(socket, request, nonce);
     socket.on('close', () => { readySockets.delete(socket); allSockets.delete(socket); });
     socket.on('message', (data, isBinary) => {
       try {
@@ -303,7 +421,7 @@ test('dynamic built-in tunnel performs enrollment, auth, forwarding, scale-up an
             Buffer.from(control.signature, 'base64url')
           );
           assert.equal(valid, true);
-          socket.send(JSON.stringify({ kind: 'hello_ack', protocol_version: 3, worker_policy: growPolicy }));
+          sendSignedServerAck(socket, nonce, control, growPolicy);
         } else if (control.kind === 'ready') {
           readySockets.add(socket);
         } else if (control.kind === 'response_head') {
@@ -349,7 +467,7 @@ test('dynamic built-in tunnel performs enrollment, auth, forwarding, scale-up an
       const body = JSON.parse(String(init?.body ?? '{}'));
       enrolledPublicKey = body.public_key;
       assert.equal(body.client_id, 'provisional_1');
-      return new Response(JSON.stringify({ device_id: body.device_id, client_id: 'server_assigned_1' }), {
+      return new Response(JSON.stringify(enrollmentResponse(body.device_id, 'server_assigned_1')), {
         status: 200,
         headers: { 'content-type': 'application/json' }
       });
@@ -512,9 +630,9 @@ test('built-in tunnel bounds local connect and overall request phases without le
     worker.send(JSON.stringify({ kind: 'request_end', request_id: requestId }));
   };
 
-  wss.on('connection', socket => {
+  wss.on('connection', (socket, request) => {
     worker = socket;
-    socket.send(JSON.stringify({ kind: 'challenge', nonce: 'timeout-test', expires_at_unix_ms: Date.now() + 30_000 }));
+    sendSignedServerChallenge(socket, request, 'timeout-test');
     socket.on('pong', data => pongPayloads.push(Buffer.from(data).toString('utf8')));
     socket.on('message', (data, isBinary) => {
       if (isBinary) {
@@ -523,7 +641,7 @@ test('built-in tunnel bounds local connect and overall request phases without le
       }
       const control = JSON.parse(data.toString());
       if (control.kind === 'authenticate') {
-        socket.send(JSON.stringify({ kind: 'hello_ack', protocol_version: 3, worker_policy: policy }));
+        sendSignedServerAck(socket, 'timeout-test', control, policy);
       } else if (control.kind === 'ready') {
         readyCount += 1;
         activeRequestId = undefined;
@@ -573,7 +691,7 @@ test('built-in tunnel bounds local connect and overall request phases without le
     },
     enrollmentFetch: async (_url, init) => {
       const body = JSON.parse(String(init?.body ?? '{}'));
-      return new Response(JSON.stringify({ device_id: body.device_id, client_id: 'device_1' }), {
+      return new Response(JSON.stringify(enrollmentResponse(body.device_id, 'device_1')), {
         status: 200,
         headers: { 'content-type': 'application/json' }
       });
@@ -725,9 +843,9 @@ test('built-in tunnel cancels delayed local responses and keeps the worker reusa
     worker.send(JSON.stringify({ kind: 'request_end', request_id: requestId }));
   };
 
-  wss.on('connection', socket => {
+  wss.on('connection', (socket, request) => {
     worker = socket;
-    socket.send(JSON.stringify({ kind: 'challenge', nonce: 'cancel-test', expires_at_unix_ms: Date.now() + 30_000 }));
+    sendSignedServerChallenge(socket, request, 'cancel-test');
     socket.on('pong', data => pongPayloads.push(Buffer.from(data).toString('utf8')));
     socket.on('message', (data, isBinary) => {
       if (isBinary) {
@@ -736,7 +854,7 @@ test('built-in tunnel cancels delayed local responses and keeps the worker reusa
       }
       const control = JSON.parse(data.toString());
       if (control.kind === 'authenticate') {
-        socket.send(JSON.stringify({ kind: 'hello_ack', protocol_version: 3, worker_policy: policy }));
+        sendSignedServerAck(socket, 'cancel-test', control, policy);
       } else if (control.kind === 'ready') {
         readyCount += 1;
         activeRequestId = undefined;
@@ -775,7 +893,7 @@ test('built-in tunnel cancels delayed local responses and keeps the worker reusa
     reconcileIntervalMs: 20,
     enrollmentFetch: async (_url, init) => {
       const body = JSON.parse(String(init?.body ?? '{}'));
-      return new Response(JSON.stringify({ device_id: body.device_id, client_id: 'device_1' }), {
+      return new Response(JSON.stringify(enrollmentResponse(body.device_id, 'device_1')), {
         status: 200,
         headers: { 'content-type': 'application/json' }
       });

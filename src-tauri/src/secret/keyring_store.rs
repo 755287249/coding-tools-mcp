@@ -6,28 +6,16 @@ pub struct SecretStore;
 impl SecretStore {
     #[cfg(test)]
     pub fn remove_workspace_secrets(profile_id: &str) -> AppResult<()> {
-        DataStore::update_file(|data| {
-            data.workspace_secrets.remove(profile_id);
-            Ok(())
-        })
+        let mut store = DataStore::load()?;
+        store.remove_workspace_secrets(profile_id)
     }
 
     pub fn set(profile_id: &str, key: &str, value: &str) -> AppResult<()> {
-        DataStore::update_file(|data| {
-            workspace_secret_map(data, profile_id).insert(key.to_string(), value.to_string());
-            Ok(())
-        })
+        DataStore::write_workspace_secret_latest(profile_id, key, value)
     }
 
     pub fn get(profile_id: &str, key: &str) -> AppResult<Option<String>> {
-        DataStore::read_file(|data| {
-            Ok(data
-                .workspace_secrets
-                .get(profile_id)
-                .and_then(|secrets| secrets.get(key))
-                .filter(|value| !value.is_empty())
-                .cloned())
-        })
+        DataStore::read_workspace_secret_latest(profile_id, key)
     }
 
     pub fn regenerate(profile_id: &str, key: &str) -> AppResult<String> {
@@ -38,6 +26,14 @@ impl SecretStore {
 
     pub fn get_shared(key: &str) -> AppResult<Option<String>> {
         DataStore::read_file(|data| Ok(data.shared_secrets.get(key).cloned()))
+    }
+
+    pub fn set_shared(key: &str, value: &str) -> AppResult<()> {
+        DataStore::update_file(|data| {
+            data.shared_secrets
+                .insert(key.to_string(), value.to_string());
+            Ok(())
+        })
     }
 
     pub fn get_app(scope: &str, item_id: &str) -> AppResult<Option<String>> {
@@ -61,16 +57,6 @@ impl SecretStore {
             Ok(())
         })
     }
-
-}
-
-fn workspace_secret_map<'a>(
-    data: &'a mut crate::data::AppData,
-    profile_id: &str,
-) -> &'a mut std::collections::HashMap<String, String> {
-    data.workspace_secrets
-        .entry(profile_id.to_string())
-        .or_default()
 }
 
 fn random_secret() -> String {

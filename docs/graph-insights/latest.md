@@ -40,7 +40,7 @@ Node React PWA
 
 Public HTTPS
   → Rust Tunnel Server
-  → coding-tools-tunnel-v3 workers
+  → coding-tools-tunnel-v4 workers
   → Desktop 或 Node local listener
 ```
 

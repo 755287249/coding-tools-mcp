@@ -21,7 +21,7 @@ Existing workspace data is not migrated automatically: missing legacy tunnel fie
 | MCP protected-resource metadata | `/.well-known/oauth-protected-resource/builtin/clients/<client-id>/mcp` |
 | Actions | `/builtin/actions/<client-id>` |
 
-The WSS subprotocol is `coding-tools-tunnel-v3` and the wire protocol version is `3`. Protocol v2 clients are intentionally rejected.
+The WSS subprotocol is `coding-tools-tunnel-v4` and the wire protocol version is `4`. Older clients are intentionally rejected because v4 requires mutual server/device authentication.
 
 ## Components
 
@@ -49,8 +49,8 @@ Shared protocol definitions live in `crates/tunnel-protocol`. The server is in `
 2. The CLI creates a random one-time code, stores only its SHA-256 digest, and prints a short-lived HTTPS link.
 3. The user pastes the link into the workspace.
 4. The desktop app generates an Ed25519 keypair and device ID locally, then stores the private key in the operating-system secret store before contacting the server.
-5. The server treats the Client ID bound to the enrollment code as authoritative, returns it to the desktop app, and stores only the device ID, Client ID, public key, allowed services, timestamps, and revocation state.
-6. The desktop app rebuilds and saves the public route from that server-assigned Client ID, then clears the link from the local secret store.
+5. The server treats the Client ID bound to the enrollment code as authoritative, returns it together with the server's persistent Ed25519 identity (`server_id` plus public key), and stores only the device ID, Client ID, public key, allowed services, timestamps, and revocation state.
+6. The desktop app verifies that `server_id = base64url(SHA-256(server_public_key))`, pins that server identity beside the device identity, rebuilds and saves the public route from the server-assigned Client ID, then clears the link from the local secret store.
 
 An interrupted enrollment response is safely retryable: the same code, device ID, and public key return the original successful result and server-assigned Client ID. A different device cannot reuse the consumed code.
 
@@ -58,16 +58,17 @@ MCP and Actions in the same workspace share one device identity. Pasting a fresh
 
 ## WSS authentication
 
-No shared token, per-client token, or Bearer credential is supported.
+No shared token, per-client token, or Bearer token is supported. TLS still validates the HTTPS/WSS hostname and CA chain, but the long-lived tunnel binding is an independent application-layer Ed25519 server identity, so ordinary TLS certificate renewal or CA replacement does not break enrollment.
 
-1. Client connects with Client ID, service, and `coding-tools-tunnel-v3` headers.
-2. Server sends a random nonce with a ten-second expiration.
-3. Client signs a canonical payload containing protocol version, nonce, device ID, Client ID, service, and worker ID.
-4. Server loads the registered Ed25519 public key from SQLite, checks revocation and service permission, verifies the signature, and only then registers the worker route.
-5. Server returns the authoritative worker policy in `hello_ack`.
-6. Client sends `Ready`, handles one HTTP transaction, and returns to the ready pool.
+1. Client connects with Client ID, service, device ID, worker ID, and the `coding-tools-tunnel-v4` subprotocol.
+2. Server sends a random short-lived nonce, its pinned `server_id`, and an Ed25519 signature over protocol version, nonce, expiry, server ID, device ID, Client ID, service, and worker ID.
+3. Client verifies the server ID and signature against the public key pinned during enrollment **before it sends any device proof**.
+4. Client signs the canonical device-auth payload containing protocol version, nonce, device ID, Client ID, service, and worker ID.
+5. Server loads the registered device Ed25519 public key from SQLite, checks revocation and service permission, verifies the signature, and only then registers the worker route.
+6. Server signs the final handshake transcript, including the authenticated device/route identity and authoritative worker policy, and returns it in `hello_ack`.
+7. Client verifies that signed acknowledgement before accepting the worker policy or sending `Ready`.
 
-A captured authentication response cannot be replayed on another connection because each challenge is random and short-lived.
+A captured authentication response cannot be replayed on another connection because each challenge is random and short-lived. A WSS endpoint with a valid HTTPS certificate but a different application-layer server key is rejected by an already-enrolled client.
 
 The server stores independent MCP and Actions policies. Each policy applies separately to every `(Client ID, service)` route: the default is 4 startup workers, 2 minimum idle, 4 maximum idle, and 16 maximum workers per client service. The desktop opens one bootstrap connection, learns the policy, and grows or gracefully shrinks the pool. Admin changes are pushed live to idle workers; the server also refuses connections above the route-level maximum.
 
@@ -119,6 +120,10 @@ MCP preserves the complete public path because the local listener exposes the sa
 - HTTPS/WSS only
 - strict Client ID and device ID character set
 - Ed25519 device keys generated locally
+- persistent Ed25519 server identity pinned at enrollment; `server_id` is SHA-256 of the server public key
+- server challenge is verified before the client reveals its device proof
+- final `hello_ack` is signed over the authenticated identities and worker policy
+- HTTPS certificate rotation is independent of the pinned server identity
 - server stores public keys, not private keys
 - one-time enrollment codes stored as SHA-256 digests
 - atomic SQLite enrollment consumption and device revocation
@@ -134,7 +139,7 @@ MCP preserves the complete public path because the local listener exposes the sa
 
 ## Deployment
 
-The public server listens on internal port `8088`. The optional management server listens on a separately configured internal address such as `0.0.0.0:8089`. Prefer binding published ports to loopback or a private Docker network; do not expose Admin on the public internet. Mount the complete `/data` directory as a private named volume; it contains `tunnel.db` with the most recent 2,000 Admin WebUI log entries and daily tracing files under `/data/logs`.
+The public server listens on internal port `8088`. The optional management server listens on a separately configured internal address such as `0.0.0.0:8089`. Prefer binding published ports to loopback or a private Docker network; do not expose Admin on the public internet. Mount the complete `/data` directory as a private named volume; it contains `tunnel.db`, the persistent `server-identity.json` used for application-layer pinning, the most recent 2,000 Admin WebUI log entries, and daily tracing files under `/data/logs`. The identity path can be overridden with `CODING_TOOLS_TUNNEL_SERVER_IDENTITY`. Back up this server identity with the database: replacing or losing it intentionally causes pinned clients to reject the server and requires re-enrollment; replacing only the HTTPS certificate does not.
 
 An optional Compose example (build, secrets, healthcheck, volume) is under `services/tunnel-server/compose.example.yml`. See that directory’s README for step-by-step create/start/enroll commands. Caddy must route these public paths before the FRP fallback:
 
@@ -145,6 +150,10 @@ An optional Compose example (build, secrets, healthcheck, volume) is under `serv
 /.well-known/oauth-authorization-server/builtin/*
 /.well-known/oauth-protected-resource/builtin/*
 ```
+
+## v3 to v4 migration
+
+Existing enrolled v3 clients do not silently trust a new server key. Their existing device private key is preserved, but they fail closed until a one-time enrollment succeeds and records the v4 server pin. After that migration, stale enrollment URLs are ignored as before. Server identity rotation is likewise fail-closed; there is no silent key rollover in v4.
 
 ## Validation
 

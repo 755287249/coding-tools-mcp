@@ -22,12 +22,17 @@ import {
 import type { ProcessRequestLifecycle } from '../../processes.js';
 import type { JsonObject, ToolContext } from '../../types.js';
 import { getSkillPrompt, listSkillPrompts, listSkillResources, readSkillResource } from '../../skills/mcp.js';
+import {
+  isToolEvolutionResourceUri,
+  listToolEvolutionResources,
+  readToolEvolutionResource
+} from '../../knowledge/mcp.js';
 import { AGENT_VERSION } from '../../version.js';
 import type { ToolCatalogSnapshot } from '../catalog.js';
 
 const legacyProtocols = new Set<string>(LEGACY_MCP_PROTOCOL_VERSIONS);
 
-const SERVER_INSTRUCTIONS = 'Call conversation_bootstrap before project tools. It reuses an existing folder selection, auto-binds the only configured folder, or returns folder choices when multiple folders are unselected; legacy list_workspace_folders + switch_workspace_folder + history_session_bootstrap remains available. Workspace and enabled Codex/Claude user-level Skills are exposed through standard MCP prompts and resources. After workspace selection, use the lightweight skill summaries returned by conversation_bootstrap to identify a clearly relevant Skill, then load only that Skill through prompts/get or resources/read. Skills are workflow guidance and never grant permissions or weaken tool, sandbox, or workspace policy. Enabled Node Agent Hooks may block or rewrite tool calls, and enabled external MCP servers contribute proxied tools to tools/list. Tools whose schema exposes workspace_folder_id may route one call to another allowed folder without changing the conversation selection; process control calls can recover their original folder from a conversation-scoped session_id or output_ref. Prefer exec_many(mode=auto) when two or more independent commands are known in the same reasoning step. Hosts should refresh tools/list when x-coding-tools-toolset-revision or runtimeStartedAtMs changes. FRP and Cloudflare transports are intentionally unsupported.';
+const SERVER_INSTRUCTIONS = 'Call conversation_bootstrap before project tools. It reuses an existing folder selection, auto-binds the only configured folder, or returns folder choices when multiple folders are unselected; legacy list_workspace_folders + switch_workspace_folder + history_session_bootstrap remains available. If conversation_bootstrap returns startup_flow=workspace_bootstrapped_history_degraded, continue using project tools; retry history_session_bootstrap only when durable history/checkpointing is needed. Workspace and enabled Codex/Claude user-level Skills are exposed through standard MCP prompts and resources. After workspace selection, use the lightweight skill summaries returned by conversation_bootstrap to identify a clearly relevant Skill, then load only that Skill through prompts/get or resources/read. Skills are workflow guidance and never grant permissions or weaken tool, sandbox, or workspace policy. Enabled Node Agent Hooks may block or rewrite tool calls, and enabled external MCP servers contribute proxied tools to tools/list. Tools whose schema exposes workspace_folder_id may route one call to another allowed folder without changing the conversation selection; process control calls can recover their original folder from a conversation-scoped session_id or output_ref. Prefer exec_many(mode=auto) when two or more independent commands are known in the same reasoning step. For exec_many, ok reports tool/orchestration success; inspect command_ok, graph_execution_ok, failed_command_ids, and skipped_command_ids for child-command outcomes. Hosts should refresh tools/list when x-coding-tools-toolset-revision or runtimeStartedAtMs changes. FRP and Cloudflare transports are intentionally unsupported.';
 
 interface DispatchOptions {
   catalog: ToolCatalogSnapshot;
@@ -107,6 +112,26 @@ export function rpcErrorResponse(requestId: unknown, error: unknown): JsonObject
   };
 }
 
+function objectValue(value: unknown): JsonObject {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : {};
+}
+
+async function listMcpResources(context: ToolContext): Promise<JsonObject> {
+  const [skills, evolution] = await Promise.all([
+    listSkillResources(context),
+    listToolEvolutionResources(context)
+  ]);
+  const skillResources = Array.isArray(skills.resources) ? skills.resources : [];
+  const evolutionResources = Array.isArray(evolution.resources) ? evolution.resources : [];
+  return {
+    resources: [...skillResources, ...evolutionResources],
+    _meta: {
+      ...objectValue(skills._meta),
+      ...objectValue(evolution._meta)
+    }
+  };
+}
+
 export async function dispatchMcpMethod(options: DispatchOptions): Promise<unknown> {
   const { catalog, context, method, processLifecycle, protocolVersion, req, request, startedAt } = options;
   const modern = protocolVersion === MODERN_MCP_PROTOCOL_VERSION;
@@ -155,12 +180,16 @@ export async function dispatchMcpMethod(options: DispatchOptions): Promise<unkno
   if (method === 'prompts/list') return listSkillPrompts(context);
   if (method === 'prompts/get') {
     const params = (request.params ?? {}) as JsonObject;
-    return getSkillPrompt(context, String(params.name ?? ''));
+    const meta = markMcpConversationMetadata(params._meta);
+    return getSkillPrompt(context, String(params.name ?? ''), context.conversations.identity(meta).key);
   }
-  if (method === 'resources/list') return listSkillResources(context);
+  if (method === 'resources/list') return listMcpResources(context);
   if (method === 'resources/read') {
     const params = (request.params ?? {}) as JsonObject;
-    return readSkillResource(context, String(params.uri ?? ''));
+    const uri = String(params.uri ?? '');
+    if (isToolEvolutionResourceUri(uri)) return readToolEvolutionResource(context, uri);
+    const meta = markMcpConversationMetadata(params._meta);
+    return readSkillResource(context, uri, context.conversations.identity(meta).key);
   }
   if (method === 'tools/list') {
     return { tools: catalog.tools, toolsetRevision: catalog.revision };

@@ -9,7 +9,7 @@
 | `8088` | 公開隧道：WSS、註冊 POST、MCP / Actions 代理、`/health` |
 | `8089` | 選用 Admin WebUI（不會掛在公開路由器上） |
 
-線上協定：**`coding-tools-tunnel-v3`**（版本 `3`）。v2 用戶端會被拒絕。設計說明：[`docs/builtin-wss-tunnel.md`](../../docs/builtin-wss-tunnel.md)。
+線上協定：**`coding-tools-tunnel-v4`**（版本 `4`）。舊版用戶端會被拒絕，因為 v4 強制 Server/Device 雙向 Ed25519 驗證。設計說明：[`docs/builtin-wss-tunnel.md`](../../docs/builtin-wss-tunnel.md)。
 
 ## 驗證模型（現行）
 

@@ -19,7 +19,14 @@ $workspace = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $manifestPath = Join-Path $workspace 'src-tauri\Cargo.toml'
 $packageJsonPath = Join-Path $workspace 'package.json'
 $versionSyncScript = Join-Path $workspace 'scripts\sync-version.mjs'
-$releaseExe = Join-Path $workspace 'src-tauri\target\release\coding-tools-mcp-desktop.exe'
+$cargoTargetRoot = if ([string]::IsNullOrWhiteSpace($env:CARGO_TARGET_DIR)) {
+    Join-Path $workspace 'src-tauri\target'
+} elseif ([System.IO.Path]::IsPathRooted($env:CARGO_TARGET_DIR)) {
+    [System.IO.Path]::GetFullPath($env:CARGO_TARGET_DIR)
+} else {
+    [System.IO.Path]::GetFullPath((Join-Path $workspace $env:CARGO_TARGET_DIR))
+}
+$releaseExe = Join-Path $cargoTargetRoot 'release\coding-tools-mcp-desktop.exe'
 
 Push-Location $workspace
 try {

@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::platform::wsl::std_command_for_workspace_with_env;
-use crate::tools::workspace::{tool_ok, Workspace, WorkspaceError};
+use crate::tools::workspace::{relative_display, tool_ok, Workspace, WorkspaceError};
 
 #[derive(Debug, Clone)]
 struct GitTarget {
@@ -80,7 +80,6 @@ impl GitWorktreeEntry {
 
 pub fn git_status(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
     let path = args.get("path").and_then(Value::as_str).unwrap_or(".");
-    let resolved = ws.resolve_existing(path)?;
     let max_entries = args
         .get("max_entries")
         .and_then(Value::as_u64)
@@ -90,27 +89,28 @@ pub fn git_status(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError>
         .and_then(Value::as_bool)
         .unwrap_or(true);
 
-    let root_check = run_git(
-        &resolved.path,
-        &["rev-parse", "--show-toplevel"],
-        Duration::from_secs(10),
-    )?;
-    if !root_check.success {
-        return Ok(tool_ok(json!({
-            "is_repo": false,
-            "clean": true,
-            "entries": [],
-            "warnings": [root_check.stderr.trim()]
-        })));
-    }
-
-    let target = resolve_git_target(ws, &json!({"repo_path": path}))?;
+    let target = match resolve_git_target(ws, &json!({"repo_path": path})) {
+        Ok(target) => target,
+        Err(WorkspaceError::Tool {
+            code: "NOT_GIT_REPOSITORY",
+            message,
+            ..
+        }) => {
+            return Ok(tool_ok(json!({
+                "is_repo": false,
+                "clean": true,
+                "entries": [],
+                "warnings": [message]
+            })))
+        }
+        Err(error) => return Err(error),
+    };
 
     let mut status_args = vec!["status", "--porcelain=v1", "-b"];
     if !include_untracked {
         status_args.push("--untracked-files=no");
     }
-    let completed = run_git(&resolved.path, &status_args, Duration::from_secs(10))?;
+    let completed = run_git(&target.root, &status_args, Duration::from_secs(10))?;
     if !completed.success && completed.exit_code != 0 {
         return Err(git_error(&completed.stderr));
     }
@@ -155,11 +155,10 @@ pub fn git_status(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError>
         }
     }
 
-    let head = git_rev_parse(&resolved.path, "HEAD").unwrap_or_default();
     Ok(tool_ok(json!({
         "is_repo": true,
         "branch": branch,
-        "head": head,
+        "head": target.head,
         "upstream": upstream,
         "ahead": ahead,
         "behind": behind,
@@ -173,6 +172,7 @@ pub fn git_status(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError>
 }
 
 pub fn git_diff(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
+    let target = resolve_git_target(ws, args)?;
     let staged = args.get("staged").and_then(Value::as_bool).unwrap_or(false);
     let unstaged = args
         .get("unstaged")
@@ -188,22 +188,9 @@ pub fn git_diff(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
         .and_then(Value::as_u64)
         .unwrap_or(262_144) as usize;
 
-    let mut path_filters: Vec<String> = Vec::new();
-    if let Some(p) = args.get("path").and_then(Value::as_str) {
-        path_filters.push(p.to_string());
-    }
-    if let Some(paths) = args.get("paths").and_then(Value::as_array) {
-        for p in paths {
-            if let Some(s) = p.as_str() {
-                path_filters.push(s.to_string());
-            }
-        }
-    }
-    for p in &path_filters {
-        ws.reject_unsafe_text(p)?;
-    }
+    let path_filters = git_read_paths(ws, &target, args)?;
 
-    if !is_git_repo(ws.root()) {
+    if !is_git_repo(&target.root) {
         return Ok(tool_ok(json!({
             "diff": "",
             "files": [],
@@ -214,10 +201,10 @@ pub fn git_diff(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
 
     let mut chunks = Vec::new();
     if unstaged {
-        chunks.push(run_git_diff(ws.root(), context, &path_filters, false)?);
+        chunks.push(run_git_diff(&target.root, context, &path_filters, false)?);
     }
     if staged {
-        chunks.push(run_git_diff(ws.root(), context, &path_filters, true)?);
+        chunks.push(run_git_diff(&target.root, context, &path_filters, true)?);
     }
     let mut combined = chunks.join("\n");
     if !combined.is_empty() && !combined.ends_with('\n') {
@@ -233,6 +220,9 @@ pub fn git_diff(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
     Ok(tool_ok(json!({
         "diff": diff_text,
         "files": files,
+        "repo": target.metadata(),
+        "repo_fingerprint": target.fingerprint,
+        "paths": path_filters,
         "arguments_normalized": requested_context != context,
         "normalized_arguments": if requested_context != context {
             json!({ "context_lines": context })
@@ -326,7 +316,8 @@ pub fn git_log(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
 }
 
 pub fn git_show(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
-    if !is_git_repo(ws.root()) {
+    let target = resolve_git_target(ws, args)?;
+    if !is_git_repo(&target.root) {
         return Ok(tool_ok(json!({
             "is_repo": false,
             "content": "",
@@ -351,20 +342,7 @@ pub fn git_show(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
         .and_then(Value::as_bool)
         .unwrap_or(true);
 
-    let mut path_filters: Vec<String> = Vec::new();
-    if let Some(p) = args.get("path").and_then(Value::as_str) {
-        path_filters.push(p.to_string());
-    }
-    if let Some(paths) = args.get("paths").and_then(Value::as_array) {
-        for p in paths {
-            if let Some(s) = p.as_str() {
-                path_filters.push(s.to_string());
-            }
-        }
-    }
-    for p in &path_filters {
-        ws.reject_unsafe_text(p)?;
-    }
+    let path_filters = git_read_paths(ws, &target, args)?;
 
     let unified = format!("--unified={context}");
     let mut cmd_args = vec!["show", "--no-ext-diff", "--format=fuller", unified.as_str()];
@@ -379,7 +357,7 @@ pub fn git_show(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
         }
     }
 
-    let completed = run_git(ws.root(), &cmd_args, Duration::from_secs(10))?;
+    let completed = run_git(&target.root, &cmd_args, Duration::from_secs(10))?;
     if !completed.success {
         return Err(git_error(&completed.stderr));
     }
@@ -396,6 +374,9 @@ pub fn git_show(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
         "rev": rev,
         "content": content,
         "files": files,
+        "repo": target.metadata(),
+        "repo_fingerprint": target.fingerprint,
+        "paths": path_filters,
         "arguments_normalized": requested_context != context,
         "normalized_arguments": if requested_context != context {
             json!({ "context_lines": context })
@@ -1480,21 +1461,65 @@ fn resolve_git_target(ws: &Workspace, args: &Value) -> Result<GitTarget, Workspa
             "repo_path must be a directory",
         ));
     }
-    let root = git_value(&resolved.path, &["rev-parse", "--show-toplevel"])
-        .map(PathBuf::from)
-        .ok_or_else(|| WorkspaceError::Tool {
+    let metadata = run_git(
+        &resolved.path,
+        &[
+            "rev-parse",
+            "--show-toplevel",
+            "--absolute-git-dir",
+            "--git-common-dir",
+            "HEAD",
+        ],
+        Duration::from_secs(5),
+    )?;
+    if !metadata.success {
+        let message = metadata.stderr.trim();
+        return Err(WorkspaceError::Tool {
             code: "NOT_GIT_REPOSITORY",
-            message: "repo_path is not inside a Git repository".into(),
+            message: if message.is_empty() {
+                "repo_path is not inside a Git repository".into()
+            } else {
+                message.to_string()
+            },
             category: "validation",
             retryable: false,
-        })?;
-    let git_dir = git_value(&resolved.path, &["rev-parse", "--absolute-git-dir"])
-        .unwrap_or_else(|| "missing".into());
-    let common_dir = git_value(&resolved.path, &["rev-parse", "--git-common-dir"])
-        .unwrap_or_else(|| git_dir.clone());
-    let branch = git_value(&resolved.path, &["rev-parse", "--abbrev-ref", "HEAD"])
-        .unwrap_or_else(|| "HEAD".into());
-    let head = git_rev_parse(&resolved.path, "HEAD").unwrap_or_else(|| "missing".into());
+        });
+    }
+    let values = metadata
+        .stdout
+        .lines()
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if values.len() < 4 {
+        return Err(WorkspaceError::Tool {
+            code: "GIT_REPOSITORY_METADATA_INCOMPLETE",
+            message: "Git repository metadata response was incomplete".into(),
+            category: "runtime",
+            retryable: true,
+        });
+    }
+    let root = PathBuf::from(values[0]);
+    let git_dir = values[1].to_string();
+    let common_dir = if values[2].is_empty() {
+        git_dir.clone()
+    } else {
+        values[2].to_string()
+    };
+    let head = if values[3].is_empty() {
+        "missing".into()
+    } else {
+        values[3].to_string()
+    };
+    let branch_result = run_git(
+        &resolved.path,
+        &["symbolic-ref", "--quiet", "--short", "HEAD"],
+        Duration::from_secs(5),
+    )?;
+    let branch = if branch_result.success && !branch_result.stdout.trim().is_empty() {
+        branch_result.stdout.trim().to_string()
+    } else {
+        "HEAD".into()
+    };
     let fingerprint = format!(
         "{:x}",
         Sha256::digest(
@@ -1509,8 +1534,13 @@ fn resolve_git_target(ws: &Workspace, args: &Value) -> Result<GitTarget, Workspa
             .as_bytes(),
         )
     );
+    let canonical_repo_path = relative_display(ws.root(), &root);
     let target = GitTarget {
-        repo_path: repo_path.to_string(),
+        repo_path: if canonical_repo_path.is_empty() {
+            ".".to_string()
+        } else {
+            canonical_repo_path
+        },
         root,
         git_dir,
         common_dir,
@@ -1575,6 +1605,44 @@ fn validate_branch_name(root: &Path, name: &str) -> Result<(), WorkspaceError> {
     }
 }
 
+fn canonical_repo_relative_path(target: &GitTarget, value: &str) -> String {
+    let normalized = value.replace('\\', "/");
+    let normalized = normalized.strip_prefix("./").unwrap_or(&normalized);
+    if target.repo_path != "." {
+        let prefix = format!("{}/", target.repo_path.trim_end_matches(['/', '\\']));
+        if let Some(relative) = normalized.strip_prefix(&prefix) {
+            return relative.to_string();
+        }
+    }
+    normalized.to_string()
+}
+
+fn git_read_paths(
+    ws: &Workspace,
+    target: &GitTarget,
+    args: &Value,
+) -> Result<Vec<String>, WorkspaceError> {
+    let mut paths = Vec::new();
+    if let Some(path) = args.get("path").and_then(Value::as_str) {
+        ws.reject_unsafe_text(path)?;
+        let canonical = canonical_repo_relative_path(target, path);
+        ws.reject_unsafe_text(&canonical)?;
+        paths.push(canonical);
+    }
+    if let Some(items) = args.get("paths").and_then(Value::as_array) {
+        for item in items {
+            let path = item
+                .as_str()
+                .ok_or_else(|| WorkspaceError::invalid_argument("paths entries must be strings"))?;
+            ws.reject_unsafe_text(path)?;
+            let canonical = canonical_repo_relative_path(target, path);
+            ws.reject_unsafe_text(&canonical)?;
+            paths.push(canonical);
+        }
+    }
+    Ok(paths)
+}
+
 fn git_paths(
     ws: &Workspace,
     target: &GitTarget,
@@ -1587,17 +1655,19 @@ fn git_paths(
                 .as_str()
                 .ok_or_else(|| WorkspaceError::invalid_argument("paths entries must be strings"))?;
             ws.reject_unsafe_text(path)?;
+            let canonical = canonical_repo_relative_path(target, path);
+            ws.reject_unsafe_text(&canonical)?;
             let workspace_path = if target.repo_path == "." {
-                path.to_string()
+                canonical.clone()
             } else {
                 format!(
                     "{}/{}",
                     target.repo_path.trim_end_matches(['/', '\\']),
-                    path
+                    canonical
                 )
             };
             ws.reject_protected_write_path(&workspace_path)?;
-            paths.push(path.to_string());
+            paths.push(canonical);
         }
     }
     Ok(paths)
@@ -1982,12 +2052,112 @@ fn git_error(message: &str) -> WorkspaceError {
 
 #[cfg(test)]
 mod tests {
-    use super::{git_transaction_head_changed, git_worktree, wait_for_child_output};
+    use super::{
+        canonical_repo_relative_path, git_diff, git_show, git_transaction_head_changed,
+        git_worktree, wait_for_child_output, GitTarget,
+    };
     use crate::tools::workspace::{Workspace, WorkspaceError};
     use serde_json::json;
     use std::fs;
+    use std::path::PathBuf;
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn git_pathspecs_accept_repo_or_workspace_relative_inputs_and_return_repo_relative_paths() {
+        let target = GitTarget {
+            repo_path: "nested-repo".into(),
+            root: PathBuf::from("nested-repo"),
+            git_dir: "git-dir".into(),
+            common_dir: "git-dir".into(),
+            branch: "main".into(),
+            head: "head".into(),
+            fingerprint: "fingerprint".into(),
+        };
+        assert_eq!(
+            canonical_repo_relative_path(&target, "tracked.txt"),
+            "tracked.txt"
+        );
+        assert_eq!(
+            canonical_repo_relative_path(&target, "nested-repo/tracked.txt"),
+            "tracked.txt"
+        );
+        assert_eq!(
+            canonical_repo_relative_path(&target, "nested-repo\\tracked.txt"),
+            "tracked.txt"
+        );
+    }
+
+    #[test]
+    fn git_diff_resolves_nested_repo_and_canonicalizes_workspace_relative_pathspecs() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let nested = workspace.path().join("nested-repo");
+        fs::create_dir(&nested).expect("nested repo");
+        let run = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(&nested)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run(&["init"]);
+        fs::write(nested.join("tracked.txt"), "before\n").expect("write fixture");
+        run(&["add", "tracked.txt"]);
+        run(&[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-m",
+            "initial",
+        ]);
+        fs::write(nested.join("tracked.txt"), "after\n").expect("update fixture");
+        let ws = Workspace::new(workspace.path().to_path_buf()).expect("workspace model");
+
+        let repo_relative = git_diff(
+            &ws,
+            &json!({"repo_path": "nested-repo", "paths": ["tracked.txt"]}),
+        )
+        .expect("repo relative diff");
+        assert_eq!(repo_relative["ok"], true, "{repo_relative}");
+        assert_eq!(repo_relative["repo"]["repo_path"], "nested-repo");
+        assert_eq!(repo_relative["paths"], json!(["tracked.txt"]));
+        assert!(repo_relative["diff"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("-before"));
+        assert!(repo_relative["diff"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("+after"));
+
+        let workspace_relative = git_diff(
+            &ws,
+            &json!({"repo_path": "nested-repo", "paths": ["nested-repo/tracked.txt"]}),
+        )
+        .expect("workspace relative diff");
+        assert_eq!(workspace_relative["paths"], json!(["tracked.txt"]));
+        assert_eq!(workspace_relative["diff"], repo_relative["diff"]);
+
+        let shown = git_show(
+            &ws,
+            &json!({"repo_path": "nested-repo", "rev": "HEAD", "include_diff": false}),
+        )
+        .expect("nested repo show");
+        assert_eq!(shown["ok"], true, "{shown}");
+        assert_eq!(shown["repo"]["repo_path"], "nested-repo");
+        assert!(shown["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("initial"));
+    }
 
     #[test]
     fn transaction_head_change_returns_retryable_conflict_metadata() {

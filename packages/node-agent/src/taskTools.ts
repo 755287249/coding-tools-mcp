@@ -6,12 +6,15 @@ import type {
 } from './types.js';
 import { attachHarnessOperation } from './processes.js';
 import { runGitBuffered } from './gitProcess.js';
+import { worktreeContainerPrefixesFromPorcelain } from './gitWorktreeBoundaries.js';
 import { operationResultSummary } from './operationSummary.js';
-import { rootAndCwd, selectedFolder } from './workspace.js';
+import { relativeInside, resolveInside, rootAndCwd, selectedFolder } from './workspace.js';
+import { fastContainingGitRoot, fastWorkspaceGitIdentity } from './runtimeRevision.js';
 
 const BASELINE_SKIPPED_NAMES = new Set([
   '.git', '.mcp-probe-kit', 'node_modules', 'target', 'dist', 'build', '.svelte-kit'
 ]);
+const BASELINE_READ_CONCURRENCY = 16;
 
 export class HarnessError extends Error {
   readonly code: string;
@@ -35,6 +38,7 @@ export interface HarnessTracking {
   operation?: OperationRecord;
   baselineChecked?: boolean;
   baselineCaptureMs?: number;
+  baselineBeforeWrite?: ProjectBaseline;
 }
 
 function elapsedPhaseMs(startedAt: number): number {
@@ -79,12 +83,15 @@ async function workspaceContext(ctx: ToolContext, key: string) {
   await ctx.state.migrateWorkspace(folder.id, workspaceId);
   const { cwd } = rootAndCwd(ctx, key);
   const workspaceRoot = await realpath(folder.path).catch(() => path.resolve(folder.path));
-  let taskRoot = workspaceRoot;
-  const topLevel = await git(cwd, ['rev-parse', '--show-toplevel']);
-  if (topLevel.code === 0 && topLevel.stdout.trim()) {
-    const candidate = await realpath(topLevel.stdout.trim()).catch(() => path.resolve(topLevel.stdout.trim()));
-    const relative = path.relative(workspaceRoot, candidate);
-    if (!relative || (!relative.startsWith('..') && !path.isAbsolute(relative))) taskRoot = candidate;
+  const fastTaskRoot = await fastContainingGitRoot(workspaceRoot, cwd);
+  let taskRoot = fastTaskRoot ?? workspaceRoot;
+  if (!fastTaskRoot) {
+    const topLevel = await git(cwd, ['rev-parse', '--show-toplevel']);
+    if (topLevel.code === 0 && topLevel.stdout.trim()) {
+      const candidate = await realpath(topLevel.stdout.trim()).catch(() => path.resolve(topLevel.stdout.trim()));
+      const relative = path.relative(workspaceRoot, candidate);
+      if (!relative || (!relative.startsWith('..') && !path.isAbsolute(relative))) taskRoot = candidate;
+    }
   }
   const scopeId = path.relative(workspaceRoot, taskRoot) === '' ? workspaceId : await harnessWorkspaceId(taskRoot);
   return { folder, workspaceId, scopeId, taskRoot };
@@ -124,6 +131,8 @@ async function git(cwd: string, args: string[]): Promise<{ code: number | null; 
 }
 
 async function gitIdentity(root: string): Promise<Pick<ProjectBaseline, 'branch' | 'head'>> {
+  const fast = await fastWorkspaceGitIdentity(root);
+  if (fast) return fast;
   const [branch, head] = await Promise.all([
     git(root, ['rev-parse', '--abbrev-ref', 'HEAD']),
     git(root, ['rev-parse', 'HEAD'])
@@ -136,14 +145,30 @@ async function gitIdentity(root: string): Promise<Pick<ProjectBaseline, 'branch'
   };
 }
 
-async function gitBaselinePaths(root: string): Promise<string[] | undefined> {
-  const listed = await git(root, ['ls-files', '--cached', '--others', '--exclude-standard', '-z']);
-  if (listed.code !== 0) return undefined;
-  return [...new Set(listed.stdout
+function gitPathList(output: string): string[] {
+  return output
     .split('\0')
     .map(value => value.replaceAll('\\', '/'))
-    .filter(value => value.length > 0 && !value.endsWith('/')))]
-    .sort(comparePaths);
+    .filter(value => value.length > 0 && !value.endsWith('/'));
+}
+
+async function gitBaselinePaths(root: string): Promise<string[] | undefined> {
+  const [tracked, untracked, worktrees] = await Promise.all([
+    git(root, ['ls-files', '--cached', '-z']),
+    git(root, ['ls-files', '--others', '--exclude-standard', '-z']),
+    git(root, ['worktree', 'list', '--porcelain', '-z'])
+  ]);
+  if (tracked.code !== 0 || untracked.code !== 0) return undefined;
+  const excludedPrefixes = worktrees.code === 0
+    ? worktreeContainerPrefixesFromPorcelain(root, worktrees.stdout)
+    : [];
+  const outsideManagedWorktreeContainer = (relative: string): boolean => !excludedPrefixes.some(prefix =>
+    relative === prefix || relative.startsWith(`${prefix}/`)
+  );
+  return [...new Set([
+    ...gitPathList(tracked.stdout),
+    ...gitPathList(untracked.stdout).filter(outsideManagedWorktreeContainer)
+  ])].sort(comparePaths);
 }
 
 async function baselineEntry(root: string, relative: string): Promise<ProjectBaseline['entries'][number] | undefined> {
@@ -166,18 +191,27 @@ async function baselineEntry(root: string, relative: string): Promise<ProjectBas
   }
 }
 
+async function baselineEntriesForPaths(root: string, paths: string[]): Promise<ProjectBaseline['entries']> {
+  if (!paths.length) return [];
+  const results = new Array<ProjectBaseline['entries'][number] | undefined>(paths.length);
+  let nextIndex = 0;
+  const worker = async (): Promise<void> => {
+    while (nextIndex < paths.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await baselineEntry(root, paths[index]);
+    }
+  };
+  const workerCount = Math.min(BASELINE_READ_CONCURRENCY, paths.length);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return results.filter((entry): entry is ProjectBaseline['entries'][number] => Boolean(entry));
+}
+
 async function baselineEntries(root: string): Promise<ProjectBaseline['entries']> {
   const gitPaths = await gitBaselinePaths(root);
-  if (gitPaths) {
-    const entries: ProjectBaseline['entries'] = [];
-    for (const relative of gitPaths) {
-      const entry = await baselineEntry(root, relative);
-      if (entry) entries.push(entry);
-    }
-    return entries;
-  }
+  if (gitPaths) return baselineEntriesForPaths(root, gitPaths);
 
-  const entries: ProjectBaseline['entries'] = [];
+  const paths: string[] = [];
   async function visit(directory: string, relative: string): Promise<void> {
     let children;
     try { children = await readdir(directory, { withFileTypes: true }); }
@@ -191,28 +225,15 @@ async function baselineEntries(root: string): Promise<ProjectBaseline['entries']
         await visit(full, childRelative);
         continue;
       }
-      if (!child.isFile()) continue;
-      let bytes: Buffer;
-      try { bytes = await readFile(full); } catch { continue; }
-      entries.push({
-        path: childRelative.replaceAll('\\', '/'),
-        exists: true,
-        is_binary: bytes.includes(0),
-        sha256: createHash('sha256').update(bytes).digest('hex'),
-        bytes: bytes.length
-      });
+      if (child.isFile()) paths.push(childRelative.replaceAll('\\', '/'));
     }
   }
   await visit(root, '');
-  entries.sort((left, right) => comparePaths(left.path, right.path));
-  return entries;
+  paths.sort(comparePaths);
+  return baselineEntriesForPaths(root, paths);
 }
 
-export async function captureBaseline(root: string): Promise<ProjectBaseline> {
-  const [entries, identity] = await Promise.all([
-    baselineEntries(root),
-    gitIdentity(root)
-  ]);
+function worktreeFingerprint(entries: ProjectBaseline['entries']): string {
   const fingerprint = createHash('sha256');
   for (const entry of entries) {
     fingerprint.update(Buffer.from(entry.path));
@@ -221,9 +242,17 @@ export async function captureBaseline(root: string): Promise<ProjectBaseline> {
     size.writeBigUInt64LE(BigInt(entry.bytes));
     fingerprint.update(size);
   }
+  return fingerprint.digest('hex');
+}
+
+export async function captureBaseline(root: string): Promise<ProjectBaseline> {
+  const [entries, identity] = await Promise.all([
+    baselineEntries(root),
+    gitIdentity(root)
+  ]);
   return {
     ...identity,
-    worktree_fingerprint: fingerprint.digest('hex'),
+    worktree_fingerprint: worktreeFingerprint(entries),
     entries,
     captured_at: now()
   };
@@ -241,7 +270,7 @@ function canTransition(from: TaskStatus, to: TaskStatus): boolean {
   return (from === 'active' && ['paused', 'verifying', 'failed', 'completed_unverified'].includes(to))
     || (from === 'paused' && to === 'active')
     || (from === 'verifying' && ['completed', 'completed_unverified', 'failed'].includes(to))
-    || (from === 'failed' && ['active', 'rolled_back'].includes(to));
+    || (from === 'failed' && ['active', 'failed_final', 'rolled_back'].includes(to));
 }
 
 function taskForArgs(ctx: ToolContext, workspaceId: string, scopeId: string, args: JsonObject): TaskRecord | undefined {
@@ -265,6 +294,21 @@ export async function checkTaskBaseline(
     changes.push('git_identity');
   }
   if (current.worktree_fingerprint !== task.expected_fingerprint) {
+    changes.push('worktree_fingerprint');
+  }
+  return { matches: changes.length === 0, current, changes };
+}
+
+export async function checkTaskOriginalBaseline(
+  root: string,
+  task: TaskRecord
+): Promise<{ matches: boolean; current: ProjectBaseline; changes: string[] }> {
+  const current = await captureBaseline(root);
+  const changes: string[] = [];
+  if (current.branch !== task.baseline.branch || current.head !== task.baseline.head) {
+    changes.push('git_identity');
+  }
+  if (current.worktree_fingerprint !== task.baseline.worktree_fingerprint) {
     changes.push('worktree_fingerprint');
   }
   return { matches: changes.length === 0, current, changes };
@@ -676,6 +720,50 @@ export async function setTaskStatus(ctx: ToolContext, key: string, status: TaskS
   return { ok: true, task };
 }
 
+export async function failTask(ctx: ToolContext, key: string, args: JsonObject): Promise<JsonObject> {
+  return setTaskStatus(ctx, key, 'failed', args);
+}
+
+export async function closeFailedTask(ctx: ToolContext, key: string, args: JsonObject): Promise<JsonObject> {
+  return setTaskStatus(ctx, key, 'failed_final', args);
+}
+
+export async function rollbackTask(ctx: ToolContext, key: string, args: JsonObject): Promise<JsonObject> {
+  const { workspaceId, taskRoot } = await workspaceContext(ctx, key);
+  const task = requireTask(ctx, workspaceId, args.task_id);
+  if (task.status !== 'failed') {
+    throw new HarnessError('INVALID_TASK_TRANSITION', `Cannot transition ${task.status} to rolled_back`);
+  }
+  const check = await checkTaskOriginalBaseline(taskRootFor(task, taskRoot), task);
+  if (!check.matches) {
+    throw new HarnessError(
+      'ROLLBACK_NOT_VERIFIED',
+      'Workspace does not match the task baseline; rollback cannot be finalized.',
+      true,
+      {
+        changes: check.changes,
+        expected_branch: task.baseline.branch ?? null,
+        expected_head: task.baseline.head ?? null,
+        expected_fingerprint: task.baseline.worktree_fingerprint,
+        current_branch: check.current.branch ?? null,
+        current_head: check.current.head ?? null,
+        current_fingerprint: check.current.worktree_fingerprint,
+        recovery_actions: [
+          { action: 'inspect_project_state', tool: 'project_state' },
+          { action: 'inspect_workspace_diff', tool: 'git_diff' }
+        ]
+      }
+    );
+  }
+  task.status = 'rolled_back';
+  task.updated_at = now();
+  await ctx.state.setTask(workspaceId, task, event(workspaceId, task.id, 'task_status_changed', {
+    status: 'rolled_back',
+    baseline_verified: true
+  }));
+  return { ok: true, task, baseline_verified: true };
+}
+
 export async function finishTask(ctx: ToolContext, key: string, args: JsonObject): Promise<JsonObject> {
   const { taskRoot, workspaceId } = await workspaceContext(ctx, key);
   const task = requireTask(ctx, workspaceId, args.task_id);
@@ -867,6 +955,69 @@ function operationInput(args: JsonObject): JsonObject {
   return { arguments_present: true, reason: args.reason ?? null };
 }
 
+interface EditMutationProof {
+  path: string;
+  afterSha256: string;
+}
+
+function editMutationProofs(name: string, result: JsonObject): EditMutationProof[] | undefined {
+  if (!['edit', 'edit_file', 'edit_many'].includes(name) || result.ok !== true) return undefined;
+  if (typeof result.path === 'string' && typeof result.after_sha256 === 'string') {
+    return [{ path: result.path, afterSha256: result.after_sha256 }];
+  }
+  if (!Array.isArray(result.results)) return undefined;
+  const proofs: EditMutationProof[] = [];
+  for (const item of result.results) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return undefined;
+    const value = item as JsonObject;
+    if (value.changed !== true) continue;
+    if (typeof value.path !== 'string' || typeof value.after_sha256 !== 'string') return undefined;
+    proofs.push({ path: value.path, afterSha256: value.after_sha256 });
+  }
+  return proofs;
+}
+
+async function refreshEditExpectedStateIncremental(
+  ctx: ToolContext,
+  key: string,
+  tracking: HarnessTracking,
+  result: JsonObject
+): Promise<{ refreshed: boolean; fileCount: number }> {
+  if (!tracking.taskId || !tracking.workspaceId || !tracking.taskRoot || !tracking.baselineBeforeWrite) {
+    return { refreshed: false, fileCount: 0 };
+  }
+  const proofs = editMutationProofs(String(result.tool ?? ''), result);
+  if (proofs === undefined) return { refreshed: false, fileCount: 0 };
+  const baseline = tracking.baselineBeforeWrite;
+  const entries = new Map(baseline.entries.map(entry => [entry.path, entry]));
+  const workspaceRoot = rootAndCwd(ctx, key).root;
+  let refreshedFiles = 0;
+  for (const proof of proofs) {
+    let relative: string;
+    try {
+      const absolute = resolveInside(workspaceRoot, proof.path);
+      relative = relativeInside(tracking.taskRoot, absolute).replaceAll('\\', '/');
+    } catch {
+      return { refreshed: false, fileCount: 0 };
+    }
+    if (!relative || relative === '.' || !entries.has(relative)) continue;
+    const updated = await baselineEntry(tracking.taskRoot, relative);
+    if (!updated || updated.sha256.toLowerCase() !== proof.afterSha256.toLowerCase()) {
+      return { refreshed: false, fileCount: 0 };
+    }
+    entries.set(relative, updated);
+    refreshedFiles += 1;
+  }
+  const ordered = [...entries.values()].sort((left, right) => comparePaths(left.path, right.path));
+  const task = requireTask(ctx, tracking.workspaceId, tracking.taskId);
+  task.baseline.branch = baseline.branch;
+  task.baseline.head = baseline.head;
+  task.expected_fingerprint = worktreeFingerprint(ordered);
+  task.updated_at = now();
+  await ctx.state.setTask(task.scope_id ?? tracking.workspaceId, task);
+  return { refreshed: true, fileCount: refreshedFiles };
+}
+
 export async function beginHarnessTracking(
   ctx: ToolContext,
   key: string,
@@ -880,12 +1031,14 @@ export async function beginHarnessTracking(
   const { workspaceId, scopeId, taskRoot } = await workspaceContext(ctx, key);
   let taskId: string | undefined;
   let baselineCaptureMs = 0;
+  let baselineBeforeWrite: ProjectBaseline | undefined;
   if (tracksTask) {
     const task = ctx.state.task(scopeId);
     if (task) {
       if (needsBaseline) {
         const baselineStartedAt = performance.now();
         const baselineCheck = await checkTaskBaseline(taskRoot, task);
+        baselineBeforeWrite = baselineCheck.current;
         baselineCaptureMs += elapsedPhaseMs(baselineStartedAt);
         if (!baselineCheck.matches) {
           const previous = {
@@ -941,7 +1094,13 @@ export async function beginHarnessTracking(
   }
   return {
     workspaceId,
-    ...(taskId ? { taskId, taskRoot, baselineChecked: needsBaseline, baselineCaptureMs } : {}),
+    ...(taskId ? {
+      taskId,
+      taskRoot,
+      baselineChecked: needsBaseline,
+      baselineCaptureMs,
+      ...(baselineBeforeWrite ? { baselineBeforeWrite } : {})
+    } : {}),
     ...(operation ? { operation } : {})
   };
 }
@@ -989,9 +1148,20 @@ export async function finishHarnessTracking(
       name
     )).catch(() => undefined);
     if (succeeded && tracking.baselineChecked && ctx.config.securityPolicy.enforceHarnessBaseline) {
-      const baselineStartedAt = performance.now();
-      await refreshExpectedState(ctx, tracking.workspaceId, tracking.taskRoot ?? selectedFolder(ctx, key).path, tracking.taskId).catch(() => undefined);
-      addPhaseDuration(result, 'baseline_capture_ms', elapsedPhaseMs(baselineStartedAt));
+      const refreshStartedAt = performance.now();
+      let refreshMode = 'full';
+      let refreshFileCount = 0;
+      const editResult = { ...result, tool: name };
+      const incremental = await refreshEditExpectedStateIncremental(ctx, key, tracking, editResult).catch(() => ({ refreshed: false, fileCount: 0 }));
+      if (incremental.refreshed) {
+        refreshMode = 'incremental_verified_edit';
+        refreshFileCount = incremental.fileCount;
+      } else {
+        await refreshExpectedState(ctx, tracking.workspaceId, tracking.taskRoot ?? selectedFolder(ctx, key).path, tracking.taskId).catch(() => undefined);
+      }
+      result.baseline_refresh_mode = refreshMode;
+      result.baseline_refresh_file_count = refreshFileCount;
+      addPhaseDuration(result, 'baseline_refresh_ms', elapsedPhaseMs(refreshStartedAt));
     }
   }
   if (tracking.operation && tracking.workspaceId && !deferredProcessOperation) {

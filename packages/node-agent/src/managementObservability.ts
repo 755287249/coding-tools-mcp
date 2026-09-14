@@ -528,9 +528,11 @@ export function validateManagementHealthPayload(pathname: string, value: unknown
   return { ok: false, detail: 'Unsupported health payload contract.' };
 }
 
+const MANAGEMENT_HEALTH_PROBE_TIMEOUT_MS = 5_000;
+
 async function fixedProbe(baseUrl: string, pathname: string, label: string): Promise<HealthItem> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 2_000);
+  const timeout = setTimeout(() => controller.abort(), MANAGEMENT_HEALTH_PROBE_TIMEOUT_MS);
   const startedAt = Date.now();
   try {
     const response = await fetch(new URL(pathname, baseUrl), {
@@ -569,7 +571,7 @@ async function fixedProbe(baseUrl: string, pathname: string, label: string): Pro
 
 async function mcpAuthenticationProbe(baseUrl: string): Promise<HealthItem> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 2_000);
+  const timeout = setTimeout(() => controller.abort(), MANAGEMENT_HEALTH_PROBE_TIMEOUT_MS);
   const startedAt = Date.now();
   const endpoint = new URL('/mcp', baseUrl);
   try {

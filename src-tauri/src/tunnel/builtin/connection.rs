@@ -3,10 +3,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use coding_tools_tunnel_protocol::{
-    auth_signing_payload, ClientHello, ControlMessage, DeviceAuthProof, WorkerPolicy,
-    CLIENT_ID_HEADER, PROTOCOL_VERSION, SERVICE_HEADER, WS_SUBPROTOCOL,
+    auth_signing_payload, server_ack_signing_payload, server_challenge_signing_payload,
+    ClientHello, ControlMessage, DeviceAuthProof, WorkerPolicy, CLIENT_ID_HEADER, DEVICE_ID_HEADER,
+    PROTOCOL_VERSION, SERVICE_HEADER, WORKER_ID_HEADER, WS_SUBPROTOCOL,
 };
-use ed25519_dalek::Signer;
+use ed25519_dalek::{Signature, Signer, Verifier};
 use futures_util::StreamExt;
 use tokio::time::timeout;
 use tokio_tungstenite::connect_async;
@@ -47,6 +48,19 @@ pub(super) async fn connect_authenticated_worker(
             .map_err(|error| format!("invalid service header: {error}"))?,
     );
     request.headers_mut().insert(
+        DEVICE_ID_HEADER,
+        config
+            .device_id
+            .parse()
+            .map_err(|error| format!("invalid device id header: {error}"))?,
+    );
+    request.headers_mut().insert(
+        WORKER_ID_HEADER,
+        worker_id
+            .parse()
+            .map_err(|error| format!("invalid worker id header: {error}"))?,
+    );
+    request.headers_mut().insert(
         SEC_WEBSOCKET_PROTOCOL,
         WS_SUBPROTOCOL
             .parse()
@@ -63,21 +77,41 @@ pub(super) async fn connect_authenticated_worker(
         .and_then(|value| value.to_str().ok())
         != Some(WS_SUBPROTOCOL)
     {
-        return Err("server did not accept coding-tools-tunnel-v3".into());
+        return Err(format!("server did not accept {WS_SUBPROTOCOL}"));
     }
 
     let (mut sink, mut stream) = socket.split();
-    let (nonce, expires_at_unix_ms) = match receive_control(&mut sink, &mut stream).await? {
-        ControlMessage::Challenge {
-            nonce,
-            expires_at_unix_ms,
-        } => (nonce, expires_at_unix_ms),
-        ControlMessage::Error { message, .. } => return Err(message),
-        _ => return Err("server did not issue a device authentication challenge".into()),
-    };
+    let (nonce, expires_at_unix_ms, server_id, server_signature) =
+        match receive_control(&mut sink, &mut stream).await? {
+            ControlMessage::Challenge {
+                nonce,
+                expires_at_unix_ms,
+                server_id,
+                server_signature,
+            } => (nonce, expires_at_unix_ms, server_id, server_signature),
+            ControlMessage::Error { message, .. } => return Err(message),
+            _ => return Err("server did not issue a device authentication challenge".into()),
+        };
     if unix_ms() > expires_at_unix_ms {
         return Err("server authentication challenge already expired".into());
     }
+    if server_id != config.server_id {
+        return Err("tunnel server identity does not match the enrolled server".into());
+    }
+    verify_server_signature(
+        &config.server_verifying_key,
+        &server_challenge_signing_payload(
+            &nonce,
+            expires_at_unix_ms,
+            &server_id,
+            &config.device_id,
+            &config.client_id,
+            config.service,
+            worker_id,
+        ),
+        &server_signature,
+        "challenge",
+    )?;
 
     let mut proof = DeviceAuthProof {
         hello: ClientHello {
@@ -95,13 +129,28 @@ pub(super) async fn connect_authenticated_worker(
             .sign(&auth_signing_payload(&nonce, &proof))
             .to_bytes(),
     );
-    send_control(&mut sink, &ControlMessage::Authenticate(proof)).await?;
+    send_control(&mut sink, &ControlMessage::Authenticate(proof.clone())).await?;
 
     let initial_policy = match receive_control(&mut sink, &mut stream).await? {
         ControlMessage::HelloAck {
             protocol_version,
             worker_policy,
-        } if protocol_version == PROTOCOL_VERSION => worker_policy,
+            server_id,
+            server_signature,
+        } if protocol_version == PROTOCOL_VERSION => {
+            if server_id != config.server_id {
+                return Err(
+                    "tunnel server acknowledgement identity changed during authentication".into(),
+                );
+            }
+            verify_server_signature(
+                &config.server_verifying_key,
+                &server_ack_signing_payload(&nonce, &server_id, &proof, &worker_policy),
+                &server_signature,
+                "acknowledgement",
+            )?;
+            worker_policy
+        }
         ControlMessage::Error { message, .. } => return Err(message),
         _ => return Err("server did not acknowledge tunnel device authentication".into()),
     };
@@ -114,6 +163,22 @@ pub(super) async fn connect_authenticated_worker(
     })
 }
 
+fn verify_server_signature(
+    key: &ed25519_dalek::VerifyingKey,
+    payload: &[u8],
+    encoded_signature: &str,
+    context: &str,
+) -> Result<(), String> {
+    let signature = URL_SAFE_NO_PAD
+        .decode(encoded_signature.as_bytes())
+        .map_err(|_| format!("tunnel server {context} signature is invalid"))?;
+    let signature: [u8; 64] = signature
+        .try_into()
+        .map_err(|_| format!("tunnel server {context} signature has invalid length"))?;
+    key.verify(payload, &Signature::from_bytes(&signature))
+        .map_err(|_| format!("tunnel server {context} signature is invalid"))
+}
+
 pub(super) fn unix_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -121,4 +186,38 @@ pub(super) fn unix_ms() -> u64 {
         .as_millis()
         .try_into()
         .unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ed25519_dalek::SigningKey;
+
+    #[test]
+    fn rejects_server_signature_from_a_different_key() {
+        let trusted = SigningKey::from_bytes(&[41_u8; 32]);
+        let attacker = SigningKey::from_bytes(&[42_u8; 32]);
+        let payload = b"signed-server-challenge";
+        let forged = URL_SAFE_NO_PAD.encode(attacker.sign(payload).to_bytes());
+
+        let error =
+            verify_server_signature(&trusted.verifying_key(), payload, &forged, "challenge")
+                .expect_err("a different server key must not be accepted");
+        assert!(error.contains("signature is invalid"));
+    }
+
+    #[test]
+    fn accepts_server_signature_from_the_pinned_key() {
+        let trusted = SigningKey::from_bytes(&[43_u8; 32]);
+        let payload = b"signed-server-ack";
+        let signature = URL_SAFE_NO_PAD.encode(trusted.sign(payload).to_bytes());
+
+        verify_server_signature(
+            &trusted.verifying_key(),
+            payload,
+            &signature,
+            "acknowledgement",
+        )
+        .expect("the pinned server key should verify");
+    }
 }

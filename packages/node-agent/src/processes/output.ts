@@ -20,6 +20,7 @@ interface ProcessViewOptions {
   cursor?: number;
   max_output_bytes?: number;
   output_mode?: string;
+  event_detail?: string;
   tail_lines?: number;
   request_timed_out?: boolean;
   deduplicated?: boolean;
@@ -164,14 +165,17 @@ function outputView(session: ProcessSession, options: ProcessViewOptions): {
       selectedBytes += eventBytes;
     }
     const nextCursor = selected.at(-1)?.sequence ?? Math.min(effectiveCursor, latestCursor);
+    const eventDetail = String(options.event_detail ?? 'full').trim().toLowerCase() === 'compact' ? 'compact' : 'full';
     const events = selected.map(event => ({
       sequence: event.sequence,
       stream: event.stream,
       stream_offset: event.offset,
-      decoded_offset: event.offset,
-      offset: event.offset,
-      encoding: 'utf-8',
-      data: event.data
+      ...(eventDetail === 'full' ? {
+        decoded_offset: event.offset,
+        offset: event.offset,
+        encoding: 'utf-8',
+        data: event.data
+      } : {})
     }));
     return {
       mode,
@@ -202,6 +206,20 @@ export function processResult(session: ProcessSession, options: ProcessViewOptio
   const verificationOk = session.postChecksPending ? null : (session.verificationOk ?? true);
   const executionOk = session.endedAt ? reason === 'exited' && session.exitCode === 0 : null;
   const commandOk = executionOk === null || verificationOk === null ? null : executionOk && verificationOk;
+  const failureOrigin = commandOk !== false
+    ? null
+    : executionOk === true && verificationOk === false
+      ? 'post_check'
+      : reason === 'exited'
+        ? 'child_process'
+        : 'process_lifecycle';
+  const diagnosticSummary = failureOrigin === 'post_check'
+    ? 'Child process completed, but post-check verification failed. MCP policy did not block execution.'
+    : failureOrigin === 'child_process'
+      ? `Child process started and exited with code ${session.exitCode ?? 'unknown'}. MCP policy did not block execution.`
+      : failureOrigin === 'process_lifecycle'
+        ? `Child process started but ended because of ${reason}. MCP policy did not block execution.`
+        : null;
   let stdout = view.stdout;
   let stderr = view.stderr;
   let redactionCount = 0;
@@ -217,11 +235,18 @@ export function processResult(session: ProcessSession, options: ProcessViewOptio
     }
   }
   return {
-    ok: commandOk !== false,
+    // A retained process result means the MCP request and child launch were accepted.
+    // Command success is reported independently through command_ok, matching Rust.
+    ok: true,
     command_ok: commandOk,
     execution_ok: executionOk,
     verification_ok: verificationOk,
     transport_ok: true,
+    failure_origin: failureOrigin,
+    policy_blocked: false,
+    execution_attempted: true,
+    process_started: true,
+    ...(diagnosticSummary ? { diagnostic_summary: diagnosticSummary } : {}),
     session_id: session.id,
     startup: startupDiagnosticsJson(session.startupDiagnostics),
     workspace_folder_id: session.folderId,
@@ -231,6 +256,8 @@ export function processResult(session: ProcessSession, options: ProcessViewOptio
     command: session.command,
     program: session.program,
     args: session.argv,
+    ...(session.testRunnerCapability ? { test_runner_capability: session.testRunnerCapability } : {}),
+    ...(session.testWorkflow ? { test_workflow: session.testWorkflow } : {}),
     shell: session.shell ? 'shell' : 'none',
     cwd: session.cwd,
     interactive: session.interactive,
@@ -239,14 +266,27 @@ export function processResult(session: ProcessSession, options: ProcessViewOptio
     termination_reason: reason,
     recoverable: recoverable(reason),
     suggestion: recoverySuggestion(reason),
+    ...(session.timeoutContract ? {
+      execution_mode: session.timeoutContract.executionMode,
+      requested_process_timeout_ms: session.timeoutContract.requestedTimeoutMs,
+      effective_process_timeout_ms: session.timeoutContract.effectiveTimeoutMs,
+      process_timeout_limit_ms: session.timeoutContract.limitMs,
+      process_deadline_ts_ms: session.processDeadlineMs,
+      process_timeout_remaining_ms: session.endedAt ? 0 : Math.max(0, (session.processDeadlineMs ?? session.startedAt) - Date.now()),
+      timeout_clamped: false,
+      polling_extends_process_deadline: false,
+      timeout_scope: 'process'
+    } : {}),
     request_timed_out: options.request_timed_out === true,
     process_timed_out: reason === 'process_timeout',
     process_still_running: !session.endedAt,
-    process_id: session.child?.pid ?? null,
+    process_id: session.child?.pid ?? session.processId ?? null,
+    restart_recoverable: Boolean(session.durableDirectory),
     exit_code: session.exitCode ?? null,
     process_exit_code: session.exitCode ?? null,
     signal: session.signal ?? null,
     output_mode: view.mode,
+    event_detail: view.mode === 'delta' ? (String(options.event_detail ?? 'full').trim().toLowerCase() === 'compact' ? 'compact' : 'full') : 'none',
     stdout,
     stderr,
     stdout_bytes: session.stdoutBytes,

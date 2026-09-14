@@ -87,6 +87,7 @@ struct RpcExecutionContext {
     request_timing: Option<ToolRequestTiming>,
     request_json_bytes: usize,
     protocol_version: String,
+    host_session_key: Option<String>,
 }
 
 fn unix_timestamp_ms() -> u128 {
@@ -130,6 +131,7 @@ async fn mcp_get(State(state): State<ListenerState>, headers: HeaderMap) -> Resp
         return mcp_info().await;
     }
     if let Some(response) = validate_standard_connection(&state, &headers, false) {
+        record_transport_response(&state.workspace_id, &headers, &response, None);
         return response;
     }
     method_not_allowed("POST")
@@ -140,6 +142,7 @@ async fn mcp_delete(State(state): State<ListenerState>, headers: HeaderMap) -> R
         return method_not_allowed("GET, POST");
     }
     if let Some(response) = validate_standard_connection(&state, &headers, false) {
+        record_transport_response(&state.workspace_id, &headers, &response, None);
         return response;
     }
     method_not_allowed("POST")
@@ -165,11 +168,25 @@ async fn mcp_post(
     Json(body): Json<Value>,
 ) -> Response {
     let standard_transport = state.transport_mode != "legacy-json";
+    let diagnostic_workspace_id = state.workspace_id.clone();
+    let diagnostic_method = body.get("method").and_then(Value::as_str);
     if standard_transport {
         if let Some(response) = validate_standard_connection(&state, &headers, true) {
+            record_transport_response(
+                &diagnostic_workspace_id,
+                &headers,
+                &response,
+                diagnostic_method,
+            );
             return response;
         }
         if let Some(response) = validate_json_rpc_message(&body) {
+            record_transport_response(
+                &diagnostic_workspace_id,
+                &headers,
+                &response,
+                diagnostic_method,
+            );
             return response;
         }
         let modern_header = headers
@@ -177,19 +194,38 @@ async fn mcp_post(
             .and_then(|value| value.to_str().ok())
             .is_some_and(|value| value.trim() == MODERN_PROTOCOL_VERSION);
         if modern_header && json_rpc_response_message(&body) {
-            return transport_error_with_id(
+            let response = transport_error_with_id(
                 StatusCode::BAD_REQUEST,
                 -32600,
                 body.get("id").cloned().unwrap_or(Value::Null),
                 "Streamable HTTP accepts only JSON-RPC requests or notifications from clients",
             );
+            record_transport_response(
+                &diagnostic_workspace_id,
+                &headers,
+                &response,
+                diagnostic_method,
+            );
+            return response;
         }
         if let Some(response) = validate_modern_request(&headers, &body) {
+            record_transport_response(
+                &diagnostic_workspace_id,
+                &headers,
+                &response,
+                diagnostic_method,
+            );
             return response;
         }
         let runtime = state.mcp.runtime_config();
         if let Some(response) = validate_modern_tool_headers(&headers, &body, &runtime.tool_profile)
         {
+            record_transport_response(
+                &diagnostic_workspace_id,
+                &headers,
+                &response,
+                diagnostic_method,
+            );
             return response;
         }
     } else if let Some(response) = require_mcp_auth(&state, &headers) {
@@ -217,7 +253,10 @@ async fn mcp_post(
         .get("params")
         .and_then(|params| params.get("_meta"))
         .and_then(|meta| meta.get("openai/session"))
-        .and_then(Value::as_str);
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let host_session_key_owned = host_session_key.map(str::to_string);
     let arguments = format_request_log_value(&argument_value);
     let is_notification = body.get("method").is_some() && body.get("id").is_none();
     let is_response = json_rpc_response_message(&body);
@@ -272,12 +311,14 @@ async fn mcp_post(
         && method == "subscriptions/listen"
     {
         if request_id.is_null() {
-            return transport_error_with_id(
+            let response = transport_error_with_id(
                 StatusCode::BAD_REQUEST,
                 -32600,
                 request_id,
                 "subscriptions/listen requires a JSON-RPC request id",
             );
+            record_transport_response(&diagnostic_workspace_id, &headers, &response, Some(&method));
+            return response;
         }
         if modern_subscription_notifications(&body).is_none() {
             return json_no_store(json!({
@@ -333,6 +374,7 @@ async fn mcp_post(
         && !modern_client_supports_elicitation(&body)
         && !modern_request_has_input_responses(&body);
     let response_id = request_id.clone();
+    let diagnostic_method_name = method.clone();
     let missing_elicitation_tool = tool_name.clone();
     let execution = execute_rpc(
         RpcExecutionContext {
@@ -347,6 +389,7 @@ async fn mcp_post(
             request_timing,
             request_json_bytes,
             protocol_version,
+            host_session_key: host_session_key_owned,
         },
         body,
         fast_path,
@@ -362,7 +405,7 @@ async fn mcp_post(
             .and_then(Value::as_str)
             == Some("input_required")
     {
-        return transport_error_with_data(
+        let transport_response = transport_error_with_data(
             StatusCode::BAD_REQUEST,
             -32021,
             response_id,
@@ -371,6 +414,13 @@ async fn mcp_post(
             ),
             json!({ "requiredCapabilities": { "elicitation": {} } }),
         );
+        record_transport_response(
+            &diagnostic_workspace_id,
+            &headers,
+            &transport_response,
+            Some(&diagnostic_method_name),
+        );
+        return transport_response;
     }
     if standard_transport && is_notification {
         StatusCode::ACCEPTED.into_response()
@@ -457,6 +507,7 @@ async fn execute_rpc(mut context: RpcExecutionContext, body: Value, fast_path: b
                     outcome,
                     response: Some(&response),
                     worker_error: None,
+                    host_session_key: context.host_session_key.as_deref(),
                     redact_telemetry: context.state.redact_telemetry,
                 });
             }
@@ -534,6 +585,7 @@ async fn execute_rpc(mut context: RpcExecutionContext, body: Value, fast_path: b
                     outcome: "worker_failed",
                     response: None,
                     worker_error: Some(&worker_error),
+                    host_session_key: context.host_session_key.as_deref(),
                     redact_telemetry: context.state.redact_telemetry,
                 });
             }
@@ -579,25 +631,16 @@ fn validate_standard_connection(
         };
         if !is_supported_protocol_version(version.trim()) {
             let requested = version.trim();
-            return Some(
-                (
-                    StatusCode::BAD_REQUEST,
-                    [(CACHE_CONTROL, "no-store")],
-                    Json(json!({
-                        "jsonrpc": "2.0",
-                        "id": Value::Null,
-                        "error": {
-                            "code": -32022,
-                            "message": format!("Unsupported MCP protocol version: {requested}"),
-                            "data": {
-                                "supported": SUPPORTED_PROTOCOL_VERSIONS,
-                                "requested": requested
-                            }
-                        }
-                    })),
-                )
-                    .into_response(),
-            );
+            return Some(transport_error_with_data(
+                StatusCode::BAD_REQUEST,
+                -32022,
+                Value::Null,
+                &format!("Unsupported MCP protocol version: {requested}"),
+                json!({
+                    "supported": SUPPORTED_PROTOCOL_VERSIONS,
+                    "requested": requested
+                }),
+            ));
         }
     }
 
@@ -660,6 +703,57 @@ fn modern_request_detected(headers: &HeaderMap, body: &Value) -> bool {
     header_modern || body_modern
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TransportDiagnostic {
+    status: u16,
+    code: i64,
+}
+
+fn attach_transport_diagnostic(mut response: Response, status: StatusCode, code: i64) -> Response {
+    response.extensions_mut().insert(TransportDiagnostic {
+        status: status.as_u16(),
+        code,
+    });
+    response
+}
+
+fn record_transport_response(
+    workspace_id: &str,
+    headers: &HeaderMap,
+    response: &Response,
+    method: Option<&str>,
+) {
+    let Some(diagnostic) = response.extensions().get::<TransportDiagnostic>() else {
+        return;
+    };
+    let mut fields = json!({
+        "rpc_error_code": diagnostic.code.to_string(),
+        "http_status": diagnostic.status,
+        "transport_mode": "streamable-http"
+    });
+    if let Some(fields) = fields.as_object_mut() {
+        if let Some(protocol_version) = headers
+            .get("mcp-protocol-version")
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            fields.insert("protocol_version".into(), json!(protocol_version));
+        }
+        if let Some(method) = method.filter(|value| !value.is_empty()) {
+            fields.insert("method".into(), json!(method));
+        }
+    }
+    crate::mcp::record_diagnostic_event(
+        workspace_id,
+        "transport_event",
+        "mcp_transport_error",
+        "error",
+        "transport",
+        fields,
+    );
+}
+
 fn transport_error_with_data(
     status: StatusCode,
     code: i64,
@@ -667,29 +761,37 @@ fn transport_error_with_data(
     message: &str,
     data: Value,
 ) -> Response {
-    (
+    attach_transport_diagnostic(
+        (
+            status,
+            [(CACHE_CONTROL, "no-store")],
+            Json(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": { "code": code, "message": message, "data": data }
+            })),
+        )
+            .into_response(),
         status,
-        [(CACHE_CONTROL, "no-store")],
-        Json(json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": { "code": code, "message": message, "data": data }
-        })),
+        code,
     )
-        .into_response()
 }
 
 fn transport_error_with_id(status: StatusCode, code: i64, id: Value, message: &str) -> Response {
-    (
+    attach_transport_diagnostic(
+        (
+            status,
+            [(CACHE_CONTROL, "no-store")],
+            Json(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": { "code": code, "message": message }
+            })),
+        )
+            .into_response(),
         status,
-        [(CACHE_CONTROL, "no-store")],
-        Json(json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": { "code": code, "message": message }
-        })),
+        code,
     )
-        .into_response()
 }
 
 fn decode_mcp_header_value(value: &str) -> Option<String> {
@@ -1021,19 +1123,23 @@ fn with_authenticate_challenge(
 }
 
 fn transport_error(status: StatusCode, code: i64, message: &str) -> Response {
-    (
+    attach_transport_diagnostic(
+        (
+            status,
+            [(CACHE_CONTROL, "no-store")],
+            Json(json!({
+                "jsonrpc": "2.0",
+                "id": Value::Null,
+                "error": {
+                    "code": code,
+                    "message": message
+                }
+            })),
+        )
+            .into_response(),
         status,
-        [(CACHE_CONTROL, "no-store")],
-        Json(json!({
-            "jsonrpc": "2.0",
-            "id": Value::Null,
-            "error": {
-                "code": code,
-                "message": message
-            }
-        })),
+        code,
     )
-        .into_response()
 }
 
 fn json_no_store(value: Value) -> Response {
@@ -1257,7 +1363,7 @@ mod tests {
         authorization_metadata_path, bind_listener, build_router, configured_route_prefix,
         decode_mcp_header_value, mcp_discovery_payload, mcp_get, mcp_info, mcp_post,
         origin_matches_listener, prefixed_route, protected_resource_metadata_path,
-        validate_modern_tool_headers, ListenerState,
+        validate_modern_tool_headers, ListenerState, TransportDiagnostic,
     };
 
     fn test_state(transport_mode: &str) -> (TempDir, TempDir, ListenerState) {
@@ -1699,6 +1805,8 @@ mod tests {
             discovered["result"]["capabilities"],
             json!({
                 "tools": {"listChanged": false},
+                "prompts": {"listChanged": false},
+                "resources": {"subscribe": false, "listChanged": false},
                 "extensions": {"io.modelcontextprotocol/tasks": {}}
             })
         );
@@ -2047,11 +2155,25 @@ mod tests {
         headers.insert("mcp-protocol-version", "unsupported".parse().unwrap());
         let response = mcp_get(State(state.clone()), headers).await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.extensions().get::<TransportDiagnostic>(),
+            Some(&TransportDiagnostic {
+                status: 400,
+                code: -32022
+            })
+        );
 
         let mut headers = HeaderMap::new();
         headers.insert("origin", "https://attacker.example".parse().unwrap());
         let response = mcp_get(State(state), headers).await;
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            response.extensions().get::<TransportDiagnostic>(),
+            Some(&TransportDiagnostic {
+                status: 403,
+                code: -32000
+            })
+        );
     }
 
     #[tokio::test]

@@ -4,7 +4,11 @@ use crate::tools::workspace::WorkspaceError;
 
 use super::parser::{Hunk, HunkLine};
 
-pub(super) fn apply_hunks(original: &str, hunks: &[Hunk]) -> Result<String, WorkspaceError> {
+pub(super) fn apply_hunks(
+    original: &str,
+    hunks: &[Hunk],
+    file: Option<&str>,
+) -> Result<String, WorkspaceError> {
     let line_ending = if original.contains("\r\n") {
         "\r\n"
     } else {
@@ -31,19 +35,28 @@ pub(super) fn apply_hunks(original: &str, hunks: &[Hunk]) -> Result<String, Work
                 HunkLine::Add(_) => None,
             })
             .collect();
+        let hunk_new: Vec<String> = hunk
+            .lines
+            .iter()
+            .filter_map(|l| match l {
+                HunkLine::Context(s) | HunkLine::Add(s) => Some(s.clone()),
+                HunkLine::Remove(_) => None,
+            })
+            .collect();
 
         let preferred = hunk.old_start.map(|line| {
             ((line.saturating_sub(1)) as i64 + offset)
                 .max(0)
                 .min(lines.len() as i64) as usize
         });
-        let pos = match find_hunk_position(&lines, &hunk_old, preferred, hunk_index) {
-            Ok(position) => position,
-            Err(error) => {
-                issues.push(error);
-                continue;
-            }
-        };
+        let pos =
+            match find_hunk_position(&lines, &hunk_old, &hunk_new, preferred, hunk_index, file) {
+                Ok(position) => position,
+                Err(error) => {
+                    issues.push(error);
+                    continue;
+                }
+            };
 
         let mut idx = pos;
         let mut added = 0i64;
@@ -103,8 +116,10 @@ pub(super) fn apply_hunks(original: &str, hunks: &[Hunk]) -> Result<String, Work
 fn find_hunk_position(
     lines: &[String],
     pattern: &[String],
+    replacement: &[String],
     preferred: Option<usize>,
     hunk_index: usize,
+    file: Option<&str>,
 ) -> Result<usize, WorkspaceError> {
     if pattern.is_empty() {
         return Ok(preferred.unwrap_or(lines.len()).min(lines.len()));
@@ -156,23 +171,37 @@ fn find_hunk_position(
                 }]
             }),
         }),
-        _ => Err(WorkspaceError::ToolDetails {
-            code: "PATCH_CONTEXT_AMBIGUOUS",
-            message: format!(
-                "Hunk {hunk_index} context matched multiple locations; add more context or line numbers."
-            ),
-            category: "validation",
-            retryable: false,
-            details: json!({
-                "hunk_index": hunk_index,
-                "candidate_lines": candidates
+        _ => {
+            let recovery_actions = if let Some(path) = file {
+                candidates
                     .iter()
-                    .map(|position| position + 1)
-                    .collect::<Vec<_>>(),
-                "nearby_contexts": nearby_contexts(lines, &candidates, 3),
-                "recommended_tool": "edit",
-                "suggestion": "Use edit with exact old_text and expected_sha256, or add unique surrounding lines to this hunk.",
-                "recovery_actions": [{
+                    .take(8)
+                    .enumerate()
+                    .map(|(candidate_index, position)| {
+                        json!({
+                            "action": "apply_candidate_range",
+                            "action_id": format!("patch-candidate-{hunk_index}-{}", candidate_index + 1),
+                            "tool": "edit",
+                            "required_arguments": [],
+                            "candidate_line": position + 1,
+                            "arguments": {
+                                "files": [{
+                                    "path": path,
+                                    "edits": [{
+                                        "type": "replace_lines",
+                                        "start_line": position + 1,
+                                        "end_line": position + pattern.len(),
+                                        "expected_text": pattern.join("\n"),
+                                        "new_text": replacement.join("\n")
+                                    }]
+                                }]
+                            },
+                            "reason": "patch_context_ambiguous"
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                vec![json!({
                     "action": "select_candidate_range",
                     "tool": "edit",
                     "required_arguments": ["files"],
@@ -181,9 +210,28 @@ fn find_hunk_position(
                         .map(|position| position + 1)
                         .collect::<Vec<_>>(),
                     "reason": "patch_context_ambiguous"
-                }]
-            }),
-        }),
+                })]
+            };
+            Err(WorkspaceError::ToolDetails {
+                code: "PATCH_CONTEXT_AMBIGUOUS",
+                message: format!(
+                    "Hunk {hunk_index} context matched multiple locations; add more context or line numbers."
+                ),
+                category: "validation",
+                retryable: false,
+                details: json!({
+                    "hunk_index": hunk_index,
+                    "candidate_lines": candidates
+                        .iter()
+                        .map(|position| position + 1)
+                        .collect::<Vec<_>>(),
+                    "nearby_contexts": nearby_contexts(lines, &candidates, 3),
+                    "recommended_tool": "edit",
+                    "suggestion": "Choose one candidate recovery action to apply the hunk as a guarded precise edit, or add unique patch context.",
+                    "recovery_actions": recovery_actions
+                }),
+            })
+        }
     }
 }
 

@@ -50,7 +50,8 @@ Both editions contain the same compiled application and production dependencies 
 - Default runtime data to `%LOCALAPPDATA%\CodingToolsMCPNode` unless `CTMCP_DATA_DIR` is already set.
 - Preserve support for `CTMCP_PORT`, command-line arguments, supervised restart exit code `75`, and `--no-browser` in both editions.
 - The bundled launcher must use only its bundled runtime. The system launcher must validate the runtime found on `PATH` and must not claim to bundle Node.js.
-- Generate checksums independently after each edition is finalized.
+- Generate checksums independently after each edition is finalized, including the root `update-handoff.ps1` used for verified live-update handoff and rollback.
+- Place portable package contents directly at the ZIP root. Do not wrap them in an additional top-level directory.
 - Do not embed Portable ZIPs or `node.exe` in this Skill; keep the Skill under the upload size limit.
 
 ## Outputs

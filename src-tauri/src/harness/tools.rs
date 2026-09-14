@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use serde_json::{json, Value};
 
+use crate::knowledge::{enqueue_task_outcome, KnowledgeTaskOutcome};
 use crate::tools::workspace::{tool_ok, WorkspaceError};
 use crate::tools::ToolContext;
 
@@ -16,6 +17,9 @@ pub const TOOL_NAMES: &[&str] = &[
     "update_task",
     "pause_task",
     "resume_task",
+    "fail_task",
+    "close_failed_task",
+    "rollback_task",
     "finish_task",
     "task_context",
     "list_task_events",
@@ -31,6 +35,9 @@ pub fn call(ctx: &ToolContext, name: &str, args: &Value) -> Result<Value, Worksp
         "update_task" => update_task(ctx, args),
         "pause_task" => transition(ctx, args, TaskStatus::Paused),
         "resume_task" => transition(ctx, args, TaskStatus::Active),
+        "fail_task" => transition(ctx, args, TaskStatus::Failed),
+        "close_failed_task" => close_failed_task(ctx, args),
+        "rollback_task" => rollback_task(ctx, args),
         "finish_task" => finish_task(ctx, args),
         "task_context" => task_context(ctx, args),
         "list_task_events" => list_task_events(ctx, args),
@@ -148,6 +155,12 @@ fn finalize_verifying_task(
         .harness
         .transition(&task.id, TaskStatus::Completed)
         .map_err(map_error)?;
+    enqueue_task_outcome(
+        ctx,
+        &completed.id,
+        KnowledgeTaskOutcome::VerifiedSuccess,
+        completed.updated_at.parse::<u64>().unwrap_or(0),
+    );
     Ok((completed, change))
 }
 
@@ -217,6 +230,58 @@ fn transition(
     Ok(json!({"task": task}))
 }
 
+fn close_failed_task(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
+    let task = ctx
+        .harness
+        .transition(task_id(args)?, TaskStatus::FailedFinal)
+        .map_err(map_error)?;
+    enqueue_task_outcome(
+        ctx,
+        &task.id,
+        KnowledgeTaskOutcome::Failure,
+        task.updated_at.parse::<u64>().unwrap_or(0),
+    );
+    Ok(json!({"task": task}))
+}
+
+fn rollback_task(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
+    let task_id = task_id(args)?;
+    let current = ctx.harness.task(task_id).map_err(map_error)?;
+    if current.status != TaskStatus::Failed {
+        return Err(tool_error(
+            "INVALID_TASK_TRANSITION",
+            format!("Cannot transition {:?} to rolled_back", current.status),
+        ));
+    }
+    let (matches, baseline) = ctx
+        .harness
+        .original_baseline_matches(task_id)
+        .map_err(map_error)?;
+    if !matches {
+        return Err(tool_error(
+            "ROLLBACK_NOT_VERIFIED",
+            format!(
+                "Workspace does not match the task baseline; rollback cannot be finalized. expected_branch={:?} current_branch={:?} expected_head={:?} current_head={:?}",
+                current.baseline.branch,
+                baseline.branch,
+                current.baseline.head,
+                baseline.head
+            ),
+        ));
+    }
+    let task = ctx
+        .harness
+        .transition(task_id, TaskStatus::RolledBack)
+        .map_err(map_error)?;
+    enqueue_task_outcome(
+        ctx,
+        &task.id,
+        KnowledgeTaskOutcome::RolledBack,
+        task.updated_at.parse::<u64>().unwrap_or(0),
+    );
+    Ok(json!({"task": task, "baseline_verified": true}))
+}
+
 fn finish_task(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
     let task_id = task_id(args)?;
     let allow_unverified = args
@@ -252,6 +317,14 @@ fn finish_task(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError>
         .harness
         .finish_task(task_id, summary, status)
         .map_err(map_error)?;
+    if task.status == TaskStatus::CompletedUnverified {
+        enqueue_task_outcome(
+            ctx,
+            &task.id,
+            KnowledgeTaskOutcome::UnverifiedSuccess,
+            task.updated_at.parse::<u64>().unwrap_or(0),
+        );
+    }
     let summary = stored_change_summary(ctx, &task, &change)?;
     Ok(json!({
         "task": task,
@@ -598,7 +671,10 @@ fn tool_error(code: &'static str, message: impl Into<String>) -> WorkspaceError 
         category: "permission",
         retryable: matches!(
             code,
-            "TASK_ALREADY_ACTIVE" | "FILE_CHANGED_EXTERNALLY" | "BASELINE_STALE"
+            "TASK_ALREADY_ACTIVE"
+                | "FILE_CHANGED_EXTERNALLY"
+                | "BASELINE_STALE"
+                | "ROLLBACK_NOT_VERIFIED"
         ),
     }
 }
@@ -646,6 +722,58 @@ mod tests {
         let errors = errors["operations"].as_array().expect("error operations");
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0]["id"], "two");
+    }
+
+    #[test]
+    fn failed_task_is_recoverable_until_explicitly_closed() {
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        let harness = tempfile::tempdir().expect("harness tempdir");
+        std::fs::write(workspace.path().join("tracked.txt"), "initial\n").expect("tracked file");
+        let ctx =
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .expect("tool context");
+        let started =
+            start_task(&ctx, &json!({"objective": "recoverable failure"})).expect("start task");
+        let task_id = started["task"]["id"].as_str().expect("task id");
+
+        let failed =
+            transition(&ctx, &json!({"task_id": task_id}), TaskStatus::Failed).expect("fail task");
+        assert_eq!(failed["task"]["status"], "failed");
+        assert!(ctx.harness.current_task().expect("current task").is_some());
+
+        let closed =
+            close_failed_task(&ctx, &json!({"task_id": task_id})).expect("close failed task");
+        assert_eq!(closed["task"]["status"], "failed_final");
+        assert!(ctx.harness.current_task().expect("current task").is_none());
+    }
+
+    #[test]
+    fn rollback_task_requires_original_baseline() {
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        let harness = tempfile::tempdir().expect("harness tempdir");
+        let tracked = workspace.path().join("tracked.txt");
+        std::fs::write(&tracked, "initial\n").expect("tracked file");
+        let ctx =
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .expect("tool context");
+        let started =
+            start_task(&ctx, &json!({"objective": "verified rollback"})).expect("start task");
+        let task_id = started["task"]["id"].as_str().expect("task id");
+        transition(&ctx, &json!({"task_id": task_id}), TaskStatus::Failed).expect("fail task");
+
+        std::fs::write(&tracked, "changed\n").expect("change tracked file");
+        let rejected = rollback_task(&ctx, &json!({"task_id": task_id}));
+        assert!(rejected.is_err());
+        assert_eq!(
+            ctx.harness.task(task_id).expect("failed task").status,
+            TaskStatus::Failed
+        );
+
+        std::fs::write(&tracked, "initial\n").expect("restore tracked file");
+        let rolled_back = rollback_task(&ctx, &json!({"task_id": task_id})).expect("rollback task");
+        assert_eq!(rolled_back["task"]["status"], "rolled_back");
+        assert_eq!(rolled_back["baseline_verified"], true);
+        assert!(ctx.harness.current_task().expect("current task").is_none());
     }
 
     #[test]

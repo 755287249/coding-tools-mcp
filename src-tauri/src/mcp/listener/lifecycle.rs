@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use axum::http::HeaderMap;
+use serde_json::json;
 use tokio::sync::oneshot;
 
 use crate::auth::{external_base_url, require_configured_secret, OAuthRuntime};
@@ -70,13 +71,27 @@ pub fn spawn_listener(
         } else {
             external_base_url(&HeaderMap::new(), port, &configured_public_url)
         };
-        Some(Arc::new(OAuthRuntime::try_new(
-            oauth_base,
-            auth.oauth_client_id.clone(),
-            oauth_client_secret.clone(),
-            oauth_password,
-            oauth_token_secret,
-        )?))
+        let password_workspace_id = workspace_id.clone();
+        let use_shared_secrets = auth.use_shared_secrets;
+        let password_persister = Arc::new(move |value: &str| {
+            if use_shared_secrets {
+                SecretStore::set_shared("oauth_password", value)
+            } else {
+                SecretStore::set(&password_workspace_id, "oauth_password", value)
+            }
+            .map_err(|error| error.to_string())
+        });
+        Some(Arc::new(
+            OAuthRuntime::try_new_with_password_persister(
+                oauth_base,
+                auth.oauth_client_id.clone(),
+                oauth_client_secret.clone(),
+                oauth_password,
+                oauth_token_secret,
+                Some(password_persister),
+            )?
+            .with_token_ttl_seconds(auth.oauth_token_ttl_seconds)?,
+        ))
     } else {
         None
     };
@@ -97,8 +112,32 @@ pub fn spawn_listener(
     let listener = bind_listener(&bind_address, port)?;
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let profile_id = state.workspace_id.clone();
+    crate::mcp::record_diagnostic_event(
+        &profile_id,
+        "lifecycle_event",
+        "runtime_created",
+        "info",
+        "none",
+        json!({ "runtime_kind": "rust_desktop" }),
+    );
     let handle = crate::task_runtime::spawn(async move {
         let result = serve(listener, state, shutdown_rx).await;
+        crate::mcp::record_diagnostic_event(
+            &profile_id,
+            "service_event",
+            "mcp_listener_stopped",
+            if result.is_ok() { "info" } else { "error" },
+            if result.is_ok() { "none" } else { "process" },
+            json!({ "service": "mcp_listener", "service_ok": result.is_ok() }),
+        );
+        crate::mcp::record_diagnostic_event(
+            &profile_id,
+            "lifecycle_event",
+            "runtime_closed",
+            if result.is_ok() { "info" } else { "error" },
+            if result.is_ok() { "none" } else { "process" },
+            json!({ "runtime_kind": "rust_desktop", "runtime_ok": result.is_ok() }),
+        );
         if let Err(err) = &result {
             append_profile_log_buffered(
                 &profile_id,
@@ -123,6 +162,14 @@ async fn serve(
     let listening_address = listener.local_addr()?;
     let app = build_router(state);
 
+    crate::mcp::record_diagnostic_event(
+        &profile_id,
+        "service_event",
+        "mcp_listener_started",
+        "info",
+        "none",
+        json!({ "service": "mcp_listener", "transport_mode": transport_mode }),
+    );
     append_profile_log_buffered(
         &profile_id,
         "stdout.log",

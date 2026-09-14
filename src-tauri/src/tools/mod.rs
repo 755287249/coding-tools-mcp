@@ -2,6 +2,7 @@ pub mod context;
 mod desktop;
 pub mod dispatch;
 pub mod exec;
+pub(crate) mod execution_timeout;
 pub mod file;
 pub mod file_action;
 pub mod git;
@@ -30,6 +31,7 @@ pub use context::{
     ExecutionLimits, RuntimeToolConfig, SharedRuntimeToolConfig, SharedToolContext, ToolContext,
     ABSOLUTE_COMMAND_TIMEOUT_MAX_MS, DEFAULT_COMMAND_TIMEOUT_MAX_MS,
 };
+pub(crate) use dispatch::call_tool_async_with_canary_sample_key;
 /// 唯一工具执行入口；MCP 与 Actions 必须调用这些共享入口，不得分叉实现。
 pub use dispatch::{call_tool, call_tool_async};
 pub use policy::{validate_actions_exposure, PolicySettings};

@@ -103,6 +103,25 @@ export async function handleMcpRoute(
   const { base, catalog, config, context, oauth, pathname, server, startedAt } = options;
   if (pathname !== '/mcp') return false;
 
+  const sendTransportIssue = (issue: McpTransportIssue, method?: string): void => {
+    const fields: JsonObject = {
+      rpc_error_code: String(issue.code),
+      http_status: issue.status,
+      transport_mode: 'streamable-http'
+    };
+    const protocolVersion = mcpProtocolVersion(req.headers);
+    if (protocolVersion !== undefined) fields.protocol_version = protocolVersion;
+    if (method) fields.method = method;
+    context.usageStore.recordDiagnosticEvent({
+      eventType: 'transport_event',
+      event: 'mcp_transport_error',
+      severity: 'error',
+      failureDomain: 'transport',
+      fields
+    });
+    sendMcpTransportError(res, issue);
+  };
+
   let requestId: unknown = null;
   let lifecycle: McpToolCallLifecycle | undefined;
   let stream: StreamingJsonResponse | undefined;
@@ -113,7 +132,7 @@ export async function handleMcpRoute(
       currentListenerPort(server, config.port)
     );
     if (connectionIssue) {
-      sendMcpTransportError(res, connectionIssue);
+      sendTransportIssue(connectionIssue);
       return true;
     }
     if (!oauth.verifyBearer(req.headers, base)) {
@@ -136,12 +155,12 @@ export async function handleMcpRoute(
       const issue: McpTransportIssue = tooLarge
         ? { status: 400, code: -32600, message: 'request body too large' }
         : { status: 400, code: -32700, message: 'Parse error' };
-      sendMcpTransportError(res, issue);
+      sendTransportIssue(issue);
       return true;
     }
     const validated = validateJsonRpcMessage(parsed);
     if ('status' in validated) {
-      sendMcpTransportError(res, validated);
+      sendTransportIssue(validated);
       return true;
     }
     const request = validated.body;
@@ -149,7 +168,7 @@ export async function handleMcpRoute(
     const method = validated.method ?? '';
     if (validated.kind === 'response') {
       if (mcpProtocolVersion(req.headers) === MODERN_MCP_PROTOCOL_VERSION) {
-        sendMcpTransportError(res, {
+        sendTransportIssue({
           status: 400,
           code: -32600,
           id: requestId,
@@ -163,7 +182,7 @@ export async function handleMcpRoute(
 
     const modernIssue = validateModernMcpRequest(req.headers, request);
     if (modernIssue) {
-      sendMcpTransportError(res, modernIssue);
+      sendTransportIssue(modernIssue, method);
       return true;
     }
     const requestedTool = method === 'tools/call'
@@ -171,7 +190,7 @@ export async function handleMcpRoute(
       : undefined;
     const mirroredHeaderIssue = validateModernMcpToolHeaders(req.headers, request, requestedTool);
     if (mirroredHeaderIssue) {
-      sendMcpTransportError(res, mirroredHeaderIssue);
+      sendTransportIssue(mirroredHeaderIssue, method);
       return true;
     }
     const missingElicitationIssue = requestedTool
@@ -179,7 +198,7 @@ export async function handleMcpRoute(
       : undefined;
     if (missingElicitationIssue) {
       missingElicitationIssue.id = requestId;
-      sendMcpTransportError(res, missingElicitationIssue);
+      sendTransportIssue(missingElicitationIssue, method);
       return true;
     }
     const protocolVersion = isModernMcpRequest(req.headers, request)
@@ -199,12 +218,12 @@ export async function handleMcpRoute(
 
     if (method === 'subscriptions/listen' && protocolVersion === MODERN_MCP_PROTOCOL_VERSION) {
       if (validated.kind !== 'request') {
-        sendMcpTransportError(res, {
+        sendTransportIssue({
           status: 400,
           code: -32600,
           id: requestId,
           message: 'subscriptions/listen requires a JSON-RPC request id'
-        });
+        }, method);
         return true;
       }
       const requestedNotifications = requestedSubscriptionNotifications(request);

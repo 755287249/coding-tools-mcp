@@ -70,6 +70,13 @@ pub struct WorkerSnapshot {
     pub last_seen_at_unix_ms: u64,
     pub requests_completed: u64,
     pub last_error: Option<String>,
+    pub agent_version: Option<String>,
+    pub client_compat_version: Option<String>,
+    pub build_git_sha: Option<String>,
+    pub update_id: Option<String>,
+    pub update_target_version: Option<String>,
+    pub update_state: Option<String>,
+    pub update_message: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -465,6 +472,13 @@ impl Observability {
                     last_seen_at_unix_ms: now,
                     requests_completed: 0,
                     last_error: None,
+                    agent_version: None,
+                    client_compat_version: None,
+                    build_git_sha: None,
+                    update_id: None,
+                    update_target_version: None,
+                    update_state: None,
+                    update_message: None,
                 },
             );
         self.log(
@@ -486,6 +500,50 @@ impl Observability {
             observability: self.clone(),
             worker_id: worker_id.into(),
             disconnected: false,
+        }
+    }
+
+    pub fn worker_client_status(
+        &self,
+        worker_id: &str,
+        agent_version: &str,
+        client_compat_version: &str,
+        build_git_sha: &str,
+    ) {
+        if let Some(worker) = self
+            .inner
+            .workers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get_mut(worker_id)
+        {
+            worker.agent_version = Some(agent_version.into());
+            worker.client_compat_version = Some(client_compat_version.into());
+            worker.build_git_sha = Some(build_git_sha.into());
+            worker.last_seen_at_unix_ms = now_unix_ms();
+        }
+    }
+
+    pub fn worker_update_status(
+        &self,
+        worker_id: &str,
+        update_id: &str,
+        version: &str,
+        state: &str,
+        message: Option<&str>,
+    ) {
+        if let Some(worker) = self
+            .inner
+            .workers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get_mut(worker_id)
+        {
+            worker.update_id = Some(update_id.into());
+            worker.update_target_version = Some(version.into());
+            worker.update_state = Some(state.into());
+            worker.update_message = message.map(str::to_owned);
+            worker.last_seen_at_unix_ms = now_unix_ms();
         }
     }
 
@@ -827,7 +885,23 @@ mod tests {
     fn worker_lifecycle_is_visible() {
         let telemetry = Observability::new();
         let worker = telemetry.connect_worker("worker-1", "device-1", "pc-a", "mcp");
+        telemetry.worker_client_status(
+            "worker-1",
+            "0.29.33",
+            "0.1.58",
+            "0123456789012345678901234567890123456789",
+        );
+        telemetry.worker_update_status("worker-1", "update-1", "0.29.34", "verified", None);
         telemetry.worker_state("worker-1", "idle");
+        let snapshot = telemetry
+            .workers()
+            .into_iter()
+            .next()
+            .expect("worker snapshot");
+        assert_eq!(snapshot.agent_version.as_deref(), Some("0.29.33"));
+        assert_eq!(snapshot.client_compat_version.as_deref(), Some("0.1.58"));
+        assert_eq!(snapshot.update_target_version.as_deref(), Some("0.29.34"));
+        assert_eq!(snapshot.update_state.as_deref(), Some("verified"));
         assert_eq!(telemetry.dashboard().idle_workers, 1);
         drop(worker);
         assert!(telemetry.workers().is_empty());

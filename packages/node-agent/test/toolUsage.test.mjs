@@ -6,6 +6,8 @@ import path from 'node:path';
 import { createToolContext } from '../dist/server.js';
 import { callTool } from '../dist/tools.js';
 import {
+  DIAGNOSTICS_LOG_FILE,
+  DIAGNOSTICS_SCHEMA_VERSION,
   TOOL_USAGE_LOG_FILE,
   TOOL_USAGE_QUEUE_CAPACITY,
   TOOL_USAGE_SCHEMA_VERSION,
@@ -230,6 +232,297 @@ test('outcome taxonomy separates recoverable tool failures from internal errors'
   for (const [code, , expected] of cases) assert.equal(byCode.get(code), expected, code);
 });
 
+test('canonical diagnostics envelope separates transport failures from tool failures', async t => {
+  const contract = JSON.parse(await readFile(new URL('../../../docs/specs/diagnostics/contract-v1.json', import.meta.url), 'utf8'));
+  assert.equal(contract.schema_version, DIAGNOSTICS_SCHEMA_VERSION);
+  assert.equal(contract.structured_log.file, DIAGNOSTICS_LOG_FILE);
+  assert.equal(contract.compatibility.legacy_file, TOOL_USAGE_LOG_FILE);
+  assert.equal(contract.compatibility.dual_write, true);
+  assert.equal(contract.compatibility.dual_write_default, true);
+  assert.equal(contract.compatibility.legacy_write_env, 'CODING_TOOLS_DIAGNOSTICS_LEGACY_WRITE');
+  assert.equal(contract.compatibility.legacy_read_preserved, true);
+  assert.equal(contract.compatibility.retirement_requires_compatibility_window, true);
+  assert.equal(contract.compatibility.query_deduplicates_by, 'diagnostic_event_id');
+  assert.equal(contract.records_pagination.cursor_origin, 'latest');
+  assert.equal(contract.records_pagination.page_order, 'oldest_to_newest');
+  assert.equal(contract.records_pagination.max_cursor, 10_000);
+  assert.equal(contract.host_kinds.node, 'node_agent');
+  assert.equal(contract.diagnostics_summary.sanitized, true);
+  assert.ok(contract.diagnostics_summary.log_health_fields.includes('write_failures'));
+  assert.ok(contract.diagnostics_summary.log_health_fields.includes('legacy_compat_write_failures'));
+  const { dataDir } = await fixture(t);
+  const store = new ToolUsageStore(dataDir, {
+    profileId: 'diagnostics-profile', runtimeBootId: 'diagnostics-runtime', serverVersion: '0.19.0'
+  });
+
+  const toolFailure = store.recordToolCall({
+    tool: 'edit_file',
+    arguments: { path: 'main.txt' },
+    result: { ok: false, harness_operation_id: 'harness-op-1', error: { code: 'E_FAIL', category: 'runtime', retryable: false, details: {} } },
+    startedTsMs: 1_000,
+    durationMs: 5,
+    requestTiming: requestTiming()
+  });
+  assert.equal(toolFailure.diagnostic_schema_version, DIAGNOSTICS_SCHEMA_VERSION);
+  assert.equal(toolFailure.event_type, 'tool_call');
+  assert.equal(toolFailure.host_kind, 'node_agent');
+  assert.equal(toolFailure.host_version, '0.19.0');
+  assert.equal(toolFailure.severity, 'error');
+  assert.equal(toolFailure.failure_domain, 'tool');
+  assert.equal(toolFailure.timestamp_ms, 1_000);
+  assert.equal(toolFailure.conversation_operation_id, 'harness-op-1');
+
+  const processSession = store.recordAsyncSession({
+    sessionId: 'session-1',
+    commandKind: 'node_test',
+    startedTsMs: 1_100,
+    completedTsMs: 1_120,
+    childProcessTotalMs: 20,
+    exitCode: 0,
+    terminationReason: 'exited',
+    stdoutBytes: 12,
+    stderrBytes: 0
+  });
+  assert.equal(processSession.diagnostic_schema_version, DIAGNOSTICS_SCHEMA_VERSION);
+  assert.equal(processSession.event_type, 'process_session');
+  assert.equal(processSession.host_kind, 'node_agent');
+  assert.equal(processSession.severity, 'info');
+  assert.equal(processSession.failure_domain, 'none');
+  assert.equal(processSession.timestamp_ms, 1_100);
+  assert.equal(processSession.conversation_operation_id, null);
+
+  const recoveryEvent = store.recordDiagnosticEvent({
+    eventType: 'recovery_event',
+    event: 'recovery_attempt',
+    severity: 'info',
+    failureDomain: 'none',
+    fields: { tool: 'edit_file', recovery_succeeded: true }
+  });
+  assert.equal(recoveryEvent.event_type, 'recovery_event');
+  assert.equal(recoveryEvent.event, 'recovery_attempt');
+  assert.equal(recoveryEvent.recovery_succeeded, true);
+  assert.ok(Number(recoveryEvent.timestamp_ms) > 0);
+  assert.equal(recoveryEvent.conversation_operation_id, null);
+  assert.match(recoveryEvent.diagnostic_event_id, /^[0-9a-f-]{36}$/i);
+  for (const field of contract.common_fields) {
+    assert.equal(Object.hasOwn(toolFailure, field), true, `tool_call missing ${field}`);
+    assert.equal(Object.hasOwn(processSession, field), true, `process_session missing ${field}`);
+    assert.equal(Object.hasOwn(recoveryEvent, field), true, `recovery_event missing ${field}`);
+  }
+
+  store.recordDiagnosticEvent({
+    eventType: 'transport_event',
+    event: 'mcp_transport_error',
+    severity: 'error',
+    failureDomain: 'transport',
+    fields: { rpc_error_code: '-32022', http_status: 400 }
+  });
+
+  store.enqueue(toolRecord({
+    started_ts_ms: 1_200,
+    completed_ts_ms: 1_201,
+    event_type: 'transport_event',
+    severity: 'error',
+    failure_domain: 'transport',
+    outcome: 'rpc_error',
+    outcome_class: 'transport_error',
+    is_error: false,
+    rpc_error_code: '-32603',
+    telemetry_dropped_before: 3,
+    arguments_sha256: 'd'.repeat(64)
+  }));
+  await store.flush();
+
+  const queried = await store.query({ scope: 'all', exclude_tools: [] });
+  assert.equal(Number.isSafeInteger(queried.log_bytes_read), true);
+  assert.deepEqual(
+    Object.keys(queried).sort(),
+    [...contract.query_response.fields].sort(),
+    'Node diagnostics query keys must match the shared contract exactly'
+  );
+  assert.equal(queried.aggregate.errors, 2, 'legacy combined error count remains compatible');
+  assert.equal(queried.aggregate.tool_errors, 1);
+  assert.equal(queried.aggregate.transport_errors, 1);
+  assert.equal(queried.aggregate.tool_errors_by_code.E_FAIL, 1);
+  assert.equal(queried.aggregate.transport_errors_by_code['-32603'], 1);
+  assert.equal(queried.diagnostics_contract.schema_version, DIAGNOSTICS_SCHEMA_VERSION);
+  assert.equal(queried.diagnostics_contract.host_kind, 'node_agent');
+  assert.equal(queried.diagnostics_contract.structured_log_file, DIAGNOSTICS_LOG_FILE);
+  assert.equal(queried.diagnostics_contract.compatibility.legacy_file, TOOL_USAGE_LOG_FILE);
+  assert.equal(queried.diagnostics_contract.compatibility.dual_write, true);
+  assert.equal(queried.diagnostics_contract.legacy_errors_include_transport, true);
+  assert.equal(queried.diagnostics_summary.schema_version, DIAGNOSTICS_SCHEMA_VERSION);
+  assert.equal(queried.diagnostics_summary.host_kind, 'node_agent');
+  assert.equal(queried.diagnostics_summary.calls, 2);
+  assert.equal(queried.diagnostics_summary.tool_errors, 1);
+  assert.equal(queried.diagnostics_summary.transport_errors, 2);
+  assert.deepEqual(queried.diagnostics_summary.events_by_type, {
+    process_session: 1,
+    recovery_event: 1,
+    tool_call: 1,
+    transport_event: 2
+  });
+  assert.equal(queried.diagnostics_summary.persisted_dropped_records, 3);
+  assert.deepEqual(queried.diagnostics_summary.top_tool_errors, [{ code: 'E_FAIL', count: 1 }]);
+  assert.deepEqual(queried.diagnostics_summary.top_transport_errors, [
+    { code: '-32022', count: 1 },
+    { code: '-32603', count: 1 }
+  ]);
+  assert.equal(queried.diagnostics_summary.log_health.queue_capacity, TOOL_USAGE_QUEUE_CAPACITY);
+  assert.equal(queried.diagnostics_summary.log_health.pending_records, 0);
+  assert.equal(queried.diagnostics_summary.log_health.pending_dropped_records, 0);
+  assert.equal(queried.diagnostics_summary.log_health.write_failures, 0);
+  assert.equal(queried.diagnostics_summary.log_health.legacy_compat_write_failures, 0);
+  assert.equal(queried.diagnostics_summary.log_health.write_error_present, false);
+  assert.ok(Number(queried.diagnostics_summary.log_health.last_successful_write_ts_ms) > 0);
+  assert.equal(queried.diagnostics_summary.sanitized, true);
+  assert.deepEqual(
+    Object.keys(queried.diagnostics_summary).sort(),
+    [...contract.diagnostics_summary.fields].sort(),
+    'Node diagnostics summary keys must match the shared contract exactly'
+  );
+  assert.deepEqual(
+    Object.keys(queried.diagnostics_summary.log_health).sort(),
+    [...contract.diagnostics_summary.log_health_fields].sort(),
+    'Node log health keys must match the shared contract exactly'
+  );
+  assert.doesNotMatch(JSON.stringify(queried.diagnostics_summary), /main\.txt|arguments|stdout|stderr/i);
+});
+
+test('recovery attempts emit linked canonical recovery events without duplicating tool payloads', async t => {
+  const { dataDir } = await fixture(t);
+  const store = new ToolUsageStore(dataDir, {
+    profileId: 'recovery-events-profile', runtimeBootId: 'recovery-events-runtime', serverVersion: '0.19.0'
+  });
+  const toolCall = store.recordToolCall({
+    tool: 'edit_file',
+    arguments: { retry_of_call_sequence: 7, path: 'do-not-copy.txt' },
+    result: { ok: true, stdout: 'do-not-copy-output' },
+    startedTsMs: 3_000,
+    durationMs: 4,
+    requestTiming: requestTiming()
+  });
+  await store.flush();
+
+  const canonical = (await readFile(path.join(dataDir, 'logs', DIAGNOSTICS_LOG_FILE), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  const recovery = canonical.find(record => record.event_type === 'recovery_event');
+  assert.ok(recovery);
+  assert.equal(recovery.linked_diagnostic_event_id, toolCall.diagnostic_event_id);
+  assert.equal(recovery.retry_of_call_sequence, 7);
+  assert.equal(recovery.recovery_succeeded, true);
+  assert.equal(Object.hasOwn(recovery, 'arguments'), false);
+  assert.doesNotMatch(JSON.stringify(recovery), /do-not-copy/);
+
+  const queried = await store.query({ scope: 'all', exclude_tools: [] });
+  assert.equal(queried.diagnostics_summary.events_by_type.tool_call, 1);
+  assert.equal(queried.diagnostics_summary.events_by_type.recovery_event, 1);
+});
+
+test('canonical diagnostics log dual-writes with stable ids and query deduplicates compatibility copies', async t => {
+  const { dataDir } = await fixture(t);
+  const store = new ToolUsageStore(dataDir, {
+    profileId: 'migration-profile', runtimeBootId: 'migration-runtime', serverVersion: '0.19.0'
+  });
+  const record = store.recordToolCall({
+    tool: 'server_info', arguments: {}, result: { ok: true },
+    startedTsMs: 4_000, durationMs: 3, requestTiming: requestTiming()
+  });
+  assert.match(record.diagnostic_event_id, /^[0-9a-f-]{36}$/i);
+  await store.flush();
+
+  const canonical = (await readFile(path.join(dataDir, 'logs', DIAGNOSTICS_LOG_FILE), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  const legacy = (await readFile(path.join(dataDir, 'logs', TOOL_USAGE_LOG_FILE), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  assert.equal(canonical.length, 1);
+  assert.equal(legacy.length, 1);
+  assert.equal(canonical[0].diagnostic_event_id, record.diagnostic_event_id);
+  assert.equal(legacy[0].diagnostic_event_id, record.diagnostic_event_id);
+
+  const queried = await store.query({ scope: 'all', exclude_tools: [], include_records: true });
+  assert.equal(queried.aggregate.calls, 1);
+  assert.equal(queried.matched_lines, 1);
+  assert.equal(queried.diagnostics_contract.compatibility.query_deduplicates_by, 'diagnostic_event_id');
+  assert.equal(queried.diagnostics_contract.migration.duplicate_records_ignored, 1);
+});
+
+test('legacy diagnostics writer can retire while query keeps reading historical legacy records', async t => {
+  const { dataDir } = await fixture(t);
+  const store = new ToolUsageStore(dataDir, {
+    profileId: 'retirement-profile',
+    runtimeBootId: 'retirement-runtime',
+    serverVersion: '0.19.0',
+    legacyWriteEnabled: false
+  });
+  store.recordToolCall({
+    tool: 'server_info', arguments: {}, result: { ok: true },
+    startedTsMs: 5_000, durationMs: 2, requestTiming: requestTiming()
+  });
+  await store.flush();
+
+  const logDir = path.join(dataDir, 'logs');
+  await access(path.join(logDir, DIAGNOSTICS_LOG_FILE));
+  await assert.rejects(access(path.join(logDir, TOOL_USAGE_LOG_FILE)));
+
+  const historical = toolRecord({
+    diagnostic_event_id: 'legacy-history-1',
+    workspace_id: 'retirement-profile',
+    runtime_boot_id: 'legacy-runtime',
+    started_ts_ms: 4_000,
+    completed_ts_ms: 4_001,
+    tool: 'read_file',
+    tool_family: 'read'
+  });
+  await appendFile(path.join(logDir, TOOL_USAGE_LOG_FILE), `${JSON.stringify(historical)}\n`, 'utf8');
+
+  const queried = await store.query({ scope: 'all', exclude_tools: [], include_records: true });
+  assert.equal(queried.diagnostics_contract.compatibility.dual_write, false);
+  assert.equal(queried.diagnostics_contract.compatibility.legacy_read_preserved, true);
+  assert.equal(queried.diagnostics_contract.compatibility.legacy_write_env, 'CODING_TOOLS_DIAGNOSTICS_LEGACY_WRITE');
+  assert.equal(queried.aggregate.calls, 2);
+  assert.equal(queried.diagnostics_contract.migration.legacy_scanned_lines, 1);
+  assert.equal(queried.diagnostics_contract.migration.canonical_scanned_lines, 1);
+});
+
+test('query records paginate backward from the latest window while preserving page order', async t => {
+  const { dataDir } = await fixture(t);
+  const store = new ToolUsageStore(dataDir, {
+    profileId: 'pagination-profile',
+    runtimeBootId: 'pagination-runtime',
+    serverVersion: '0.19.0',
+    legacyWriteEnabled: false
+  });
+  for (let index = 1; index <= 5; index += 1) {
+    store.recordToolCall({
+      tool: 'server_info', arguments: {}, result: { ok: true },
+      startedTsMs: index * 1_000, durationMs: 1, requestTiming: requestTiming()
+    });
+  }
+  await store.flush();
+
+  const summaryOnly = await store.query({ scope: 'all', exclude_tools: [], include_records: false, limit: 2, cursor: 2 });
+  assert.equal(summaryOnly.records_pagination, null);
+
+  const first = await store.query({ scope: 'all', exclude_tools: [], include_records: true, limit: 2, cursor: 0 });
+  assert.deepEqual(first.records.map(record => record.started_ts_ms), [4_000, 5_000]);
+  assert.deepEqual(first.records_pagination, {
+    cursor: 0,
+    next_cursor: 2,
+    total: 5,
+    limit: 2,
+    cursor_origin: 'latest',
+    page_order: 'oldest_to_newest',
+    cursor_limit_reached: false
+  });
+
+  const second = await store.query({ scope: 'all', exclude_tools: [], include_records: true, limit: 2, cursor: 2 });
+  assert.deepEqual(second.records.map(record => record.started_ts_ms), [2_000, 3_000]);
+  assert.equal(second.records_pagination.next_cursor, 4);
+
+  const third = await store.query({ scope: 'all', exclude_tools: [], include_records: true, limit: 2, cursor: 4 });
+  assert.deepEqual(third.records.map(record => record.started_ts_ms), [1_000]);
+  assert.equal(third.records_pagination.next_cursor, null);
+  assert.equal(third.records_pagination.total, 5);
+});
+
 test('wait request timeout is classified separately from process timeout', async t => {
   const { dataDir } = await fixture(t);
   const store = new ToolUsageStore(dataDir, {
@@ -306,10 +599,13 @@ test('repeated failure detection resets on success and burst while counting conc
   assert.equal(repeated.chain_count, 2);
   assert.equal(repeated.wasted_duration_ms, 3);
   assert.equal(repeated.max_attempt_count, 3);
+  assert.ok(repeated.friction_score > 0);
   assert.equal(repeated.top[0].signature, concurrent.failure_signature);
   assert.equal(repeated.top[0].retry_count, 2);
   assert.equal(repeated.top[0].max_attempt_count, 3);
   assert.equal(repeated.top[0].error_code, 'EDIT_MATCH_COUNT_MISMATCH');
+  assert.equal(repeated.top[0].deterministic_error_weight, 2);
+  assert.ok(repeated.top[0].friction_score > 0);
   assert.match(repeated.recovery_hint, /Stop retrying unchanged arguments/);
 });
 

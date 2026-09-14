@@ -9,7 +9,7 @@ Narrow reverse HTTP tunnel for Coding Tools MCP. **Caddy (or another reverse pro
 | `8088` | Public tunnel: WSS, enrollment POST, MCP / Actions proxy, `/health` |
 | `8089` | Optional Admin WebUI (never mounted on the public router) |
 
-Wire protocol: **`coding-tools-tunnel-v3`** (version `3`). Protocol v2 clients are rejected. Design notes: [`docs/builtin-wss-tunnel.md`](../../docs/builtin-wss-tunnel.md).
+Wire protocol: **`coding-tools-tunnel-v4`** (version `4`). Older clients are rejected because v4 requires mutual Ed25519 server/device authentication. Design notes: [`docs/builtin-wss-tunnel.md`](../../docs/builtin-wss-tunnel.md).
 
 ## Authentication model (current)
 

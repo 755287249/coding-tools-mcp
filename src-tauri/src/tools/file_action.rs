@@ -66,6 +66,7 @@ pub struct PlannedFile {
     pub adapter_id: String,
     pub config_path: Option<String>,
     pub selection_source: String,
+    pub rust_edition: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -81,6 +82,7 @@ pub struct ActionGroup {
     pub files: Vec<String>,
     pub mutation_risk: String,
     pub custom: bool,
+    pub rust_edition: Option<String>,
     command_template: Option<CustomCommandTemplate>,
 }
 
@@ -130,7 +132,7 @@ const ADAPTERS: &[AdapterSpec] = &[
     AdapterSpec {
         id: "rustfmt",
         extensions: &["rs"],
-        config_names: &["rustfmt.toml", ".rustfmt.toml"],
+        config_names: &["rustfmt.toml", ".rustfmt.toml", "Cargo.toml"],
         mutation_risk: "targeted",
     },
     AdapterSpec {
@@ -327,7 +329,8 @@ pub fn plan_actions(ws: &Workspace, request: &ActionRequest) -> Result<ActionPla
     let files_requested = paths.len();
     let mut files = Vec::new();
     let mut skipped = Vec::new();
-    let mut groups: BTreeMap<(String, Option<String>), ActionGroup> = BTreeMap::new();
+    let mut groups: BTreeMap<(String, Option<String>, Option<String>), ActionGroup> =
+        BTreeMap::new();
 
     for path in paths {
         let display = relative_path(ws.root(), &path);
@@ -367,20 +370,28 @@ pub fn plan_actions(ws: &Workspace, request: &ActionRequest) -> Result<ActionPla
             .config_path
             .as_ref()
             .map(|value| relative_path(ws.root(), value));
+        let rust_edition =
+            (selected.id == "rustfmt").then(|| rust_edition_for_file(ws.root(), &path));
         let planned = PlannedFile {
             path: display.clone(),
             adapter_id: selected.id.clone(),
             config_path: config_path.clone(),
             selection_source: selected.selection_source.into(),
+            rust_edition: rust_edition.clone(),
         };
         let group = groups
-            .entry((selected.id.clone(), config_path.clone()))
+            .entry((
+                selected.id.clone(),
+                config_path.clone(),
+                rust_edition.clone(),
+            ))
             .or_insert_with(|| ActionGroup {
                 adapter_id: selected.id.clone(),
                 config_path,
                 files: Vec::new(),
                 mutation_risk: selected.mutation_risk.clone(),
                 custom: selected.custom,
+                rust_edition,
                 command_template: selected.command_template.clone(),
             });
         group.files.push(display);
@@ -892,7 +903,7 @@ fn select_adapter(
     if let Some((spec, config, _)) = configured.into_iter().next() {
         let source = if matches!(
             config.file_name().and_then(|value| value.to_str()),
-            Some("package.json" | "pyproject.toml")
+            Some("package.json" | "pyproject.toml" | "Cargo.toml" | "go.mod")
         ) {
             "manifest"
         } else {
@@ -1013,6 +1024,83 @@ fn config_supports_adapter(adapter_id: &str, path: &Path) -> bool {
     }
 }
 
+fn cargo_manifest_rust_edition(
+    path: &Path,
+) -> Option<(bool, Option<String>, bool, Option<String>)> {
+    let content = fs::read_to_string(path).ok()?;
+    let value = toml::from_str::<toml::Value>(&content).ok()?;
+    let package = value.get("package").and_then(toml::Value::as_table);
+    let package_present = package.is_some();
+    let package_edition = package
+        .and_then(|table| table.get("edition"))
+        .and_then(toml::Value::as_str)
+        .map(str::to_string);
+    let package_inherits_workspace = package
+        .and_then(|table| table.get("edition"))
+        .and_then(toml::Value::as_table)
+        .and_then(|edition| edition.get("workspace"))
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(false);
+    let workspace_edition = value
+        .get("workspace")
+        .and_then(toml::Value::as_table)
+        .and_then(|workspace| workspace.get("package"))
+        .and_then(toml::Value::as_table)
+        .and_then(|package| package.get("edition"))
+        .and_then(toml::Value::as_str)
+        .map(str::to_string);
+    Some((
+        package_present,
+        package_edition,
+        package_inherits_workspace,
+        workspace_edition,
+    ))
+}
+
+fn rust_edition_for_file(workspace_root: &Path, file: &Path) -> String {
+    let Some(mut current) = file.parent() else {
+        return "2021".into();
+    };
+    let mut inherits_workspace = false;
+    loop {
+        let manifest = current.join("Cargo.toml");
+        if manifest.is_file() {
+            if let Some((package_present, package_edition, package_inherits, workspace_edition)) =
+                cargo_manifest_rust_edition(&manifest)
+            {
+                if inherits_workspace {
+                    if let Some(edition) = workspace_edition {
+                        return edition;
+                    }
+                } else if package_present {
+                    if let Some(edition) = package_edition {
+                        return edition;
+                    }
+                    if package_inherits {
+                        inherits_workspace = true;
+                        if let Some(edition) = workspace_edition {
+                            return edition;
+                        }
+                    } else {
+                        return "2015".into();
+                    }
+                }
+            }
+        }
+        if current == workspace_root {
+            break;
+        }
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        if !parent.starts_with(workspace_root) {
+            break;
+        }
+        current = parent;
+    }
+    "2021".into()
+}
+
 fn adapter(id: &str) -> Option<&'static AdapterSpec> {
     ADAPTERS.iter().find(|spec| spec.id == id)
 }
@@ -1059,8 +1147,16 @@ fn build_adapter_command(request: &RunnerRequest) -> Result<AdapterCommand, Work
     if let Some(command) = request.command_override.as_ref() {
         return Ok(command.clone());
     }
+    if request.adapter_id == "rustfmt" {
+        let edition = request.rust_edition.as_deref().unwrap_or("2021");
+        let mut args = vec!["--edition".to_string(), edition.to_string()];
+        args.extend(request.files.iter().cloned());
+        return Ok(AdapterCommand {
+            executable_candidates: vec!["rustfmt".into()],
+            args,
+        });
+    }
     let (candidates, prefix): (&[&str], &[&str]) = match request.adapter_id.as_str() {
-        "rustfmt" => (&["rustfmt"], &[]),
         "prettier" => (&["prettier"], &["--write"]),
         "biome" => (&["biome"], &["format", "--write"]),
         "dprint" => (&["dprint"], &["fmt"]),
@@ -1128,6 +1224,7 @@ pub struct RunnerRequest {
     pub mirror_root: PathBuf,
     pub files: Vec<String>,
     pub config_path: Option<String>,
+    pub rust_edition: Option<String>,
     pub timeout_ms: u64,
     pub command_override: Option<AdapterCommand>,
 }
@@ -1448,6 +1545,7 @@ pub fn execute_actions_with_runner(
                 mirror_root: mirror.root.clone(),
                 files: group.files.clone(),
                 config_path: group.config_path.clone(),
+                rust_edition: group.rust_edition.clone(),
                 timeout_ms: request.timeout_ms,
                 command_override: group
                     .command_template
@@ -1613,6 +1711,7 @@ fn format_outcome_json(outcome: &ActionOutcome, scope: ActionScope) -> Value {
             "adapter_id": group.adapter_id,
             "config_path": group.config_path,
             "files": group.files,
+            "rust_edition": group.rust_edition,
             "mutation_risk": group.mutation_risk,
             "custom": group.custom
         })).collect::<Vec<_>>(),
@@ -1622,7 +1721,8 @@ fn format_outcome_json(outcome: &ActionOutcome, scope: ActionScope) -> Value {
             "path": file.path,
             "adapter_id": file.adapter_id,
             "config_path": file.config_path,
-            "selection_source": file.selection_source
+            "selection_source": file.selection_source,
+            "rust_edition": file.rust_edition
         })).collect::<Vec<_>>(),
         "unavailable_adapters": outcome.unavailable_adapters,
         "unexpected_changes": outcome.unexpected_changes,
@@ -1659,8 +1759,8 @@ mod tests {
 
     use super::{
         build_adapter_command, execute_actions_with_runner, plan_actions,
-        resolve_formatter_executable, workspace_executable_candidates, ActionRequest, ActionRunner,
-        RunnerOutput, RunnerRequest,
+        resolve_formatter_executable, rust_edition_for_file, workspace_executable_candidates,
+        ActionRequest, ActionRunner, RunnerOutput, RunnerRequest,
     };
     use crate::tools::workspace::Workspace;
 
@@ -1712,6 +1812,76 @@ mod tests {
             Some("apps/web/biome.json")
         );
         assert_eq!(plan.files[0].selection_source, "nearest_config");
+    }
+
+    #[test]
+    fn planner_derives_cargo_editions_and_keeps_rustfmt_groups_edition_safe() {
+        let temp = tempdir().expect("workspace");
+        for (name, edition) in [("crate-2021", "2021"), ("crate-2024", "2024")] {
+            let crate_root = temp.path().join(name);
+            fs::create_dir_all(crate_root.join("src")).expect("crate src");
+            fs::write(
+                crate_root.join("Cargo.toml"),
+                format!(
+                    "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"{edition}\"\n"
+                ),
+            )
+            .expect("manifest");
+            fs::write(crate_root.join("src/lib.rs"), "pub async fn value() {}\n")
+                .expect("rust source");
+        }
+        let ws = Workspace::new(temp.path().to_path_buf()).expect("workspace");
+        let request = ActionRequest::from_format_args(&json!({
+            "paths": ["crate-2021/src/lib.rs", "crate-2024/src/lib.rs"],
+            "mode": "plan",
+            "formatter": "rustfmt"
+        }))
+        .expect("request");
+        let plan = plan_actions(&ws, &request).expect("plan");
+        assert_eq!(plan.groups.len(), 2);
+        let editions = plan
+            .groups
+            .iter()
+            .filter_map(|group| group.rust_edition.as_deref())
+            .collect::<Vec<_>>();
+        assert_eq!(editions, vec!["2021", "2024"]);
+        for group in &plan.groups {
+            let runner_request = RunnerRequest {
+                adapter_id: group.adapter_id.clone(),
+                mirror_root: temp.path().to_path_buf(),
+                files: group.files.clone(),
+                config_path: group.config_path.clone(),
+                rust_edition: group.rust_edition.clone(),
+                timeout_ms: 1_000,
+                command_override: None,
+            };
+            let command = build_adapter_command(&runner_request).expect("rustfmt command");
+            assert_eq!(command.args[0], "--edition");
+            assert_eq!(
+                command.args[1],
+                group.rust_edition.as_deref().unwrap_or("2021")
+            );
+        }
+    }
+
+    #[test]
+    fn rust_edition_inherits_workspace_package_edition() {
+        let temp = tempdir().expect("workspace");
+        let member = temp.path().join("member");
+        fs::create_dir_all(member.join("src")).expect("member src");
+        fs::write(
+            temp.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"member\"]\n[workspace.package]\nedition = \"2024\"\n",
+        )
+        .expect("workspace manifest");
+        fs::write(
+            member.join("Cargo.toml"),
+            "[package]\nname = \"member\"\nversion = \"0.1.0\"\nedition.workspace = true\n",
+        )
+        .expect("member manifest");
+        let source = member.join("src/lib.rs");
+        fs::write(&source, "pub async fn inherited() {}\n").expect("source");
+        assert_eq!(rust_edition_for_file(temp.path(), &source), "2024");
     }
 
     #[test]
@@ -1968,7 +2138,11 @@ mod tests {
     #[test]
     fn adapter_commands_are_structured_and_never_use_shell_syntax() {
         let cases = [
-            ("rustfmt", vec!["main.rs"], vec!["main.rs"]),
+            (
+                "rustfmt",
+                vec!["main.rs"],
+                vec!["--edition", "2021", "main.rs"],
+            ),
             ("prettier", vec!["app.ts"], vec!["--write", "app.ts"]),
             ("biome", vec!["app.ts"], vec!["format", "--write", "app.ts"]),
             ("ruff", vec!["app.py"], vec!["format", "app.py"]),
@@ -1985,6 +2159,7 @@ mod tests {
                 mirror_root: std::path::PathBuf::from("mirror"),
                 files: files.into_iter().map(str::to_string).collect(),
                 config_path: None,
+                rust_edition: None,
                 timeout_ms: 1_000,
                 command_override: None,
             };

@@ -125,9 +125,9 @@ async function authorize(localBase) {
 
 test('generated profile catalogs match Rust counts, membership and revisions', () => {
   const expectedCounts = {
-    advanced: 59,
+    advanced: 62,
     'read-only': 18,
-    'compat-readonly-all': 59,
+    'compat-readonly-all': 62,
     'guarded-core': 38,
     'trusted-core': 37
   };
@@ -150,6 +150,10 @@ test('generated profile catalogs match Rust counts, membership and revisions', (
   assert.ok([...readOnly].every(name => advanced.has(name)));
   assert.deepEqual([...guarded].filter(name => !trusted.has(name)), ['request_permissions']);
   assert.equal(trusted.has('start_task'), false);
+  assert.equal(advanced.has('fail_task'), true);
+  assert.equal(advanced.has('close_failed_task'), true);
+  assert.equal(advanced.has('rollback_task'), true);
+  assert.equal(trusted.has('fail_task'), false);
   assert.equal(readOnly.has('switch_workspace_folder'), false);
   assert.equal(readOnly.has('read_file'), true);
 });

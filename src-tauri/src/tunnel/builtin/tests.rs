@@ -1,6 +1,13 @@
 use super::*;
 
-use coding_tools_tunnel_protocol::{PROTOCOL_VERSION, WS_PATH, WS_SUBPROTOCOL};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
+use coding_tools_tunnel_protocol::{
+    server_ack_signing_payload, server_challenge_signing_payload, ControlMessage, DEVICE_ID_HEADER,
+    PROTOCOL_VERSION, WORKER_ID_HEADER, WS_PATH, WS_SUBPROTOCOL,
+};
+use ed25519_dalek::{Signer, VerifyingKey};
+use std::sync::Mutex as StdMutex;
 use tokio_tungstenite::tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL;
 
 use super::connection::unix_ms;
@@ -17,6 +24,121 @@ fn single_worker_policy() -> WorkerPolicy {
     policy.max_idle_workers = 1;
     policy.max_workers = 1;
     policy
+}
+
+const TEST_SERVER_ID: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+fn test_server_signing_key() -> SigningKey {
+    SigningKey::from_bytes(&[91_u8; 32])
+}
+
+fn test_server_verifying_key() -> Arc<VerifyingKey> {
+    Arc::new(test_server_signing_key().verifying_key())
+}
+
+async fn accept_authenticated_test_worker(
+    stream: tokio::net::TcpStream,
+    nonce: String,
+    policy: WorkerPolicy,
+) -> tokio_tungstenite::WebSocketStream<tokio::net::TcpStream> {
+    let connection_identity = Arc::new(StdMutex::new(None::<(String, String)>));
+    let captured = connection_identity.clone();
+    let mut socket = tokio_tungstenite::accept_hdr_async(
+        stream,
+        move |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+              mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+            let device_id = request
+                .headers()
+                .get(DEVICE_ID_HEADER)
+                .and_then(|value| value.to_str().ok())
+                .expect("device id header")
+                .to_string();
+            let worker_id = request
+                .headers()
+                .get(WORKER_ID_HEADER)
+                .and_then(|value| value.to_str().ok())
+                .expect("worker id header")
+                .to_string();
+            *captured.lock().expect("capture connection identity") = Some((device_id, worker_id));
+            response.headers_mut().insert(
+                SEC_WEBSOCKET_PROTOCOL,
+                WS_SUBPROTOCOL.parse().expect("subprotocol header"),
+            );
+            Ok(response)
+        },
+    )
+    .await
+    .expect("accept websocket");
+    let (device_id, worker_id) = connection_identity
+        .lock()
+        .expect("connection identity")
+        .clone()
+        .expect("captured connection identity");
+    let expires_at_unix_ms = unix_ms().saturating_add(10_000);
+    let server_key = test_server_signing_key();
+    let challenge_signature = URL_SAFE_NO_PAD.encode(
+        server_key
+            .sign(&server_challenge_signing_payload(
+                &nonce,
+                expires_at_unix_ms,
+                TEST_SERVER_ID,
+                &device_id,
+                "pc-a",
+                TunnelService::Mcp,
+                &worker_id,
+            ))
+            .to_bytes(),
+    );
+    socket
+        .send(Message::Text(
+            serde_json::to_string(&ControlMessage::Challenge {
+                nonce: nonce.clone(),
+                expires_at_unix_ms,
+                server_id: TEST_SERVER_ID.into(),
+                server_signature: challenge_signature,
+            })
+            .expect("challenge json")
+            .into(),
+        ))
+        .await
+        .expect("send challenge");
+    let authenticate = socket
+        .next()
+        .await
+        .expect("authenticate frame")
+        .expect("authenticate frame");
+    let Message::Text(authenticate) = authenticate else {
+        panic!("expected authenticate text");
+    };
+    let ControlMessage::Authenticate(proof) =
+        serde_json::from_str::<ControlMessage>(authenticate.as_ref()).expect("authenticate json")
+    else {
+        panic!("expected authenticate control");
+    };
+    let ack_signature = URL_SAFE_NO_PAD.encode(
+        server_key
+            .sign(&server_ack_signing_payload(
+                &nonce,
+                TEST_SERVER_ID,
+                &proof,
+                &policy,
+            ))
+            .to_bytes(),
+    );
+    socket
+        .send(Message::Text(
+            serde_json::to_string(&ControlMessage::HelloAck {
+                protocol_version: PROTOCOL_VERSION,
+                worker_policy: policy,
+                server_id: TEST_SERVER_ID.into(),
+                server_signature: ack_signature,
+            })
+            .expect("hello ack json")
+            .into(),
+        ))
+        .await
+        .expect("send hello ack");
+    socket
 }
 
 #[test]
@@ -74,6 +196,8 @@ fn actions_requests_strip_only_the_registered_prefix() {
         local_base_url: "http://127.0.0.1:7001".into(),
         device_id: "device-1".into(),
         signing_key: Arc::new(SigningKey::from_bytes(&[7_u8; 32])),
+        server_id: TEST_SERVER_ID.into(),
+        server_verifying_key: test_server_verifying_key(),
         log_path: PathBuf::new(),
     };
     assert_eq!(
@@ -406,46 +530,13 @@ async fn worker_pool_bootstraps_grows_and_gracefully_shrinks_from_server_policy(
             let closed_tx = closed_tx.clone();
             let mut updates = policy_rx.clone();
             handlers.spawn(async move {
-                let mut socket = tokio_tungstenite::accept_hdr_async(
-                    stream,
-                    |_request: &tokio_tungstenite::tungstenite::handshake::server::Request,
-                     mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
-                        response.headers_mut().insert(
-                            SEC_WEBSOCKET_PROTOCOL,
-                            WS_SUBPROTOCOL.parse().expect("subprotocol header"),
-                        );
-                        Ok(response)
-                    },
-                )
-                .await
-                .expect("accept websocket");
-                socket
-                    .send(Message::Text(
-                        serde_json::to_string(&ControlMessage::Challenge {
-                            nonce: format!("grow-{connection_index}"),
-                            expires_at_unix_ms: unix_ms().saturating_add(10_000),
-                        })
-                        .expect("challenge json")
-                        .into(),
-                    ))
-                    .await
-                    .expect("send challenge");
-                assert!(matches!(
-                    socket.next().await.expect("authenticate frame"),
-                    Ok(Message::Text(_))
-                ));
                 let initial_policy = updates.borrow().clone();
-                socket
-                    .send(Message::Text(
-                        serde_json::to_string(&ControlMessage::HelloAck {
-                            protocol_version: PROTOCOL_VERSION,
-                            worker_policy: initial_policy,
-                        })
-                        .expect("hello ack json")
-                        .into(),
-                    ))
-                    .await
-                    .expect("send hello ack");
+                let mut socket = accept_authenticated_test_worker(
+                    stream,
+                    format!("grow-{connection_index}"),
+                    initial_policy,
+                )
+                .await;
                 let ready = socket.next().await.expect("ready frame").expect("ready");
                 assert!(matches!(ready, Message::Text(_)));
                 ready_tx.send(()).await.expect("report ready");
@@ -485,6 +576,8 @@ async fn worker_pool_bootstraps_grows_and_gracefully_shrinks_from_server_policy(
         local_base_url: "http://127.0.0.1:1".into(),
         device_id: "device-1".into(),
         signing_key: Arc::new(SigningKey::from_bytes(&[29_u8; 32])),
+        server_id: TEST_SERVER_ID.into(),
+        server_verifying_key: test_server_verifying_key(),
         log_path: log_dir.path().join("builtin-grow-test.log"),
     };
     let metrics = Arc::new(BuiltinTunnelMetrics::new(1));
@@ -574,45 +667,12 @@ async fn worker_recycles_after_request_limit_and_pool_replaces_it() {
     let server = tokio::spawn(async move {
         for connection_index in 0..2 {
             let (stream, _) = listener.accept().await.expect("accept worker");
-            let mut socket = tokio_tungstenite::accept_hdr_async(
+            let mut socket = accept_authenticated_test_worker(
                 stream,
-                |_request: &tokio_tungstenite::tungstenite::handshake::server::Request,
-                 mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
-                    response.headers_mut().insert(
-                        SEC_WEBSOCKET_PROTOCOL,
-                        WS_SUBPROTOCOL.parse().expect("subprotocol header"),
-                    );
-                    Ok(response)
-                },
+                format!("recycle-{connection_index}"),
+                recycle_policy.clone(),
             )
-            .await
-            .expect("accept websocket");
-            socket
-                .send(Message::Text(
-                    serde_json::to_string(&ControlMessage::Challenge {
-                        nonce: format!("recycle-{connection_index}"),
-                        expires_at_unix_ms: unix_ms().saturating_add(10_000),
-                    })
-                    .expect("challenge json")
-                    .into(),
-                ))
-                .await
-                .expect("send challenge");
-            assert!(matches!(
-                socket.next().await.expect("authenticate frame"),
-                Ok(Message::Text(_))
-            ));
-            socket
-                .send(Message::Text(
-                    serde_json::to_string(&ControlMessage::HelloAck {
-                        protocol_version: PROTOCOL_VERSION,
-                        worker_policy: recycle_policy.clone(),
-                    })
-                    .expect("hello ack json")
-                    .into(),
-                ))
-                .await
-                .expect("send hello ack");
+            .await;
             let ready = socket.next().await.expect("ready frame").expect("ready");
             assert_eq!(
                 serde_json::from_str::<ControlMessage>(ready.into_text().unwrap().as_ref())
@@ -677,6 +737,8 @@ async fn worker_recycles_after_request_limit_and_pool_replaces_it() {
         local_base_url: format!("http://{local_address}"),
         device_id: "device-1".into(),
         signing_key: Arc::new(SigningKey::from_bytes(&[31_u8; 32])),
+        server_id: TEST_SERVER_ID.into(),
+        server_verifying_key: test_server_verifying_key(),
         log_path: log_dir.path().join("builtin-recycle-test.log"),
     };
     let metrics = Arc::new(BuiltinTunnelMetrics::new(1));
@@ -720,47 +782,12 @@ async fn worker_pool_reconnects_after_authenticated_socket_closes() {
     let server = tokio::spawn(async move {
         for connection_index in 0..2 {
             let (stream, _) = listener.accept().await.expect("accept worker");
-            let mut socket = tokio_tungstenite::accept_hdr_async(
+            let mut socket = accept_authenticated_test_worker(
                 stream,
-                |_request: &tokio_tungstenite::tungstenite::handshake::server::Request,
-                 mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
-                    response.headers_mut().insert(
-                        SEC_WEBSOCKET_PROTOCOL,
-                        WS_SUBPROTOCOL.parse().expect("subprotocol header"),
-                    );
-                    Ok(response)
-                },
+                format!("nonce-{connection_index}"),
+                single_worker_policy(),
             )
-            .await
-            .expect("accept websocket");
-            socket
-                .send(Message::Text(
-                    serde_json::to_string(&ControlMessage::Challenge {
-                        nonce: format!("nonce-{connection_index}"),
-                        expires_at_unix_ms: unix_ms().saturating_add(10_000),
-                    })
-                    .expect("challenge json")
-                    .into(),
-                ))
-                .await
-                .expect("send challenge");
-            let authenticate = socket
-                .next()
-                .await
-                .expect("authenticate frame")
-                .expect("authenticate frame");
-            assert!(matches!(authenticate, Message::Text(_)));
-            socket
-                .send(Message::Text(
-                    serde_json::to_string(&ControlMessage::HelloAck {
-                        protocol_version: PROTOCOL_VERSION,
-                        worker_policy: single_worker_policy(),
-                    })
-                    .expect("hello ack json")
-                    .into(),
-                ))
-                .await
-                .expect("send hello ack");
+            .await;
             let ready = socket
                 .next()
                 .await
@@ -792,6 +819,8 @@ async fn worker_pool_reconnects_after_authenticated_socket_closes() {
         local_base_url: "http://127.0.0.1:1".into(),
         device_id: "device-1".into(),
         signing_key: Arc::new(SigningKey::from_bytes(&[23_u8; 32])),
+        server_id: TEST_SERVER_ID.into(),
+        server_verifying_key: test_server_verifying_key(),
         log_path: log_dir.path().join("builtin-reconnect-test.log"),
     };
     let metrics = Arc::new(BuiltinTunnelMetrics::new(1));

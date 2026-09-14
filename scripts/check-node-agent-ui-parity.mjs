@@ -322,11 +322,11 @@ export async function validateUiParity(root = workspace) {
   for (const marker of ['pub(super) struct ResolvedExecRequest', "pub(super) struct ExecRuntimeOptions<'a>", 'pub(super) fn resolve_exec_request', 'pub(super) fn resolve_runtime_options', 'fn resolved_command_timeout_ms', 'fn validate_child_process_scope']) {
     requireText(errors, source.rustExecRequest, marker, 'Rust exec request resolution boundary');
   }
-  for (const marker of ['const AUTO_DEDUPE_COMPLETED_GRACE', 'pub(super) enum OperationAdmission', 'pub(super) async fn admit_operation', 'ctx.sessions.get_by_operation(operation_id)', 'session.touch_attachment()', 'OPERATION_ID_CONFLICT']) {
+  for (const marker of ['pub(super) enum OperationAdmission', 'pub(super) async fn admit_operation', 'ctx.sessions.get_by_operation(operation_id)', 'let automatic_operation = operation_id.starts_with("auto:");', 'let reuse_session = !automatic_operation || !session.is_finalized();', 'ctx.sessions.remove(&session.session_id);', 'session.touch_attachment()', 'OPERATION_ID_CONFLICT']) {
     requireText(errors, source.rustExecAdmission, marker, 'Rust exec operation admission boundary');
   }
   requireText(errors, source.rustExecResult, 'pub(super) fn attach_session_capacity', 'Rust exec result capacity boundary');
-  if (/(?:fn resolved_command_timeout_ms|fn validate_child_process_scope|const AUTO_DEDUPE_COMPLETED_GRACE|ctx\.sessions\.get_by_operation|session\.touch_attachment\(\))/.test(source.rustExec)) {
+  if (/(?:fn resolved_command_timeout_ms|fn validate_child_process_scope|let automatic_operation =|let reuse_session =|ctx\.sessions\.get_by_operation|session\.touch_attachment\(\))/.test(source.rustExec)) {
     errors.push('Rust exec request facade embeds request resolution or operation admission implementation');
   }
   if (/(?:ctx\.sessions|resource_lock|OwnedMutexGuard)/.test(source.rustExecRequest)) {

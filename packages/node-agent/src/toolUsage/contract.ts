@@ -24,6 +24,17 @@ export interface ToolUsageInput {
   rpcFastPath?: boolean;
 }
 
+export type DiagnosticEventType = 'tool_call' | 'process_session' | 'service_event' | 'transport_event' | 'lifecycle_event' | 'recovery_event';
+
+export interface DiagnosticEventInput {
+  eventType: DiagnosticEventType;
+  event: string;
+  severity?: 'info' | 'warning' | 'error';
+  failureDomain?: 'none' | 'tool' | 'transport' | 'process';
+  timestampMs?: number;
+  fields?: ToolUsageJsonObject;
+}
+
 export interface AsyncSessionUsageInput {
   sessionId: string;
   commandKind: string;
@@ -46,6 +57,7 @@ export interface ToolUsageStoreContract {
   beginRequest(startedTsMs?: number): ToolRequestTiming;
   recordToolCall(input: ToolUsageInput): ToolUsageJsonObject;
   recordAsyncSession(input: AsyncSessionUsageInput): ToolUsageJsonObject;
+  recordDiagnosticEvent(input: DiagnosticEventInput): ToolUsageJsonObject;
   enqueue(record: ToolUsageJsonObject): void;
   flush(): Promise<void>;
   dashboardSummary(): Promise<ToolUsageJsonObject>;

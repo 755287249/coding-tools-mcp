@@ -77,7 +77,7 @@ export interface CanonicalWorkspace {
   activeFolderId: string;
   bind: { host: string; port: number };
   publicBaseUrl: string;
-  auth: { type: string; oauthClientId: string };
+  auth: { type: string; oauthClientId: string; oauthTokenTtlSeconds: number };
   toolProfile: string;
   permissionMode: string;
   securityPolicy: Record<string, boolean>;
@@ -246,7 +246,8 @@ export function parseCanonicalWorkspace(value: unknown): CanonicalWorkspace {
     publicBaseUrl: text(value.publicBaseUrl),
     auth: {
       type: text(auth.type, 'oauth') || 'oauth',
-      oauthClientId: text(auth.oauthClientId ?? auth.oauth_client_id)
+      oauthClientId: text(auth.oauthClientId ?? auth.oauth_client_id),
+      oauthTokenTtlSeconds: integer(auth.oauthTokenTtlSeconds ?? auth.oauth_token_ttl_seconds, 7 * 24 * 60 * 60)
     },
     toolProfile: text(value.toolProfile, 'core') || 'core',
     permissionMode: text(value.permissionMode, 'trusted') || 'trusted',
@@ -351,7 +352,11 @@ export function migrateNodeV1Document(
     folders,
     bind: { host: text(value.host, '127.0.0.1'), port: integer(value.port, 3789) },
     publicBaseUrl: text(value.publicBaseUrl),
-    auth: { type: 'oauth', oauthClientId: text(oauth.clientId) },
+    auth: {
+      type: 'oauth',
+      oauthClientId: text(oauth.clientId),
+      oauthTokenTtlSeconds: integer(oauth.tokenTtlSeconds, 7 * 24 * 60 * 60)
+    },
     toolProfile: text(value.toolProfile, 'core') || 'core',
     permissionMode: text(value.permissionMode, 'trusted') || 'trusted',
     securityPolicy: value.securityPolicy,
@@ -427,7 +432,10 @@ export function canonicalToAgentConfigDocument(canonical: CanonicalWorkspace): A
       })),
       options: { ...canonical.sandbox.options }
     },
-    oauth: { clientId: canonical.auth.oauthClientId },
+    oauth: {
+      clientId: canonical.auth.oauthClientId,
+      tokenTtlSeconds: canonical.auth.oauthTokenTtlSeconds
+    },
     folders,
     limits: canonical.limits
   };
