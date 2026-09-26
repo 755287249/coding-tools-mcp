@@ -247,6 +247,14 @@ pub fn switch_workspace_folder(
     }
 }
 
+/// Returns the only folder id when the workspace has exactly one folder.
+fn single_folder_id(folders: &[WorkspaceFolder]) -> Option<String> {
+    match folders {
+        [only] => Some(only.id.clone()),
+        _ => None,
+    }
+}
+
 impl HubRouter {
     pub fn new(
         profile_id: String,
@@ -338,12 +346,18 @@ impl HubRouter {
                     })?;
                     (folder_id, selected, "conversation")
                 }
-            } else {
-                let folder_id = selected.clone().ok_or_else(|| {
-                    "WORKSPACE_FOLDER_NOT_SELECTED: 此 session 尚未选取资料夹；请先呼叫 conversation_bootstrap，或为支援的工具提供 workspace_folder_id。"
-                        .to_string()
-                })?;
+            } else if let Some(folder_id) = selected.clone() {
                 (folder_id, selected, "conversation")
+            } else if let Some(folder_id) = single_folder_id(&state.folders) {
+                // A workspace with exactly one folder is unambiguous. Route project
+                // tools to it directly so MCP clients that never call
+                // conversation_bootstrap (Claude, Cursor, custom agents…) still work.
+                (folder_id, selected, "single_folder")
+            } else {
+                return Err(
+                    "WORKSPACE_FOLDER_NOT_SELECTED: 此 session 尚未选取资料夹；请先呼叫 conversation_bootstrap，或为支援的工具提供 workspace_folder_id。"
+                        .to_string(),
+                );
             }
         };
         let context = self.context_for_folder(&folder_id, Some(session_key))?;

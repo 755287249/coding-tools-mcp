@@ -18,7 +18,18 @@ pub const OAUTH_TOKEN_TTL_MAX_SECONDS: i64 = 60 * 60 * 24 * 30;
 #[allow(dead_code)]
 pub const OAUTH_MAX_BODY_BYTES: usize = 8_192;
 
-const OAUTH_REDIRECT_ORIGINS: &[&str] = &["https://chatgpt.com", "https://chat.openai.com"];
+/// HTTPS callback origins of hosted MCP clients (ChatGPT, Claude, VS Code web).
+const OAUTH_REDIRECT_ORIGINS: &[&str] = &[
+    "https://chatgpt.com",
+    "https://chat.openai.com",
+    "https://claude.ai",
+    "https://claude.com",
+    "https://vscode.dev",
+    "https://insiders.vscode.dev",
+];
+
+/// Private-use URI schemes of desktop MCP clients (RFC 8252 §7.1).
+const OAUTH_REDIRECT_APP_SCHEMES: &[&str] = &["cursor", "vscode", "vscode-insiders", "windsurf"];
 
 pub type PasswordPersister = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
 
@@ -145,16 +156,25 @@ pub fn redirect_uri_allowed(redirect_uri: &str) -> bool {
     let Ok(url) = reqwest::Url::parse(redirect_uri) else {
         return false;
     };
-    if url.scheme() != "https"
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.fragment().is_some()
-        || url.port_or_known_default() != Some(443)
-    {
+    if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
         return false;
     }
-    let origin = url.origin().ascii_serialization();
-    OAUTH_REDIRECT_ORIGINS.contains(&origin.as_str())
+    match url.scheme() {
+        "https" => {
+            if url.port_or_known_default() != Some(443) {
+                return false;
+            }
+            let origin = url.origin().ascii_serialization();
+            OAUTH_REDIRECT_ORIGINS.contains(&origin.as_str())
+        }
+        // Native apps receive the code on a loopback listener (RFC 8252 §7.3):
+        // Claude Code, Codex CLI, Cursor, VS Code, MCP Inspector, …
+        "http" => matches!(
+            url.host_str(),
+            Some("127.0.0.1") | Some("localhost") | Some("[::1]")
+        ),
+        scheme => OAUTH_REDIRECT_APP_SCHEMES.contains(&scheme),
+    }
 }
 
 pub fn verify_oauth_bearer_header(
@@ -662,8 +682,27 @@ mod tests {
     }
 
     #[test]
+    fn redirect_allowlist_accepts_common_mcp_clients() {
+        for redirect_uri in [
+            "https://claude.ai/api/mcp/auth_callback",
+            "https://claude.com/api/mcp/auth_callback",
+            "https://vscode.dev/redirect",
+            "http://127.0.0.1:33418/callback",
+            "http://localhost:6274/oauth/callback",
+            "http://[::1]:8080/cb",
+            "cursor://anysphere.cursor-mcp/oauth/callback",
+        ] {
+            assert!(redirect_uri_allowed(redirect_uri), "{redirect_uri}");
+        }
+    }
+
+    #[test]
     fn redirect_allowlist_rejects_untrusted_or_ambiguous_urls() {
         for redirect_uri in [
+            "http://127.0.0.1.attacker.example/callback",
+            "http://attacker.example/callback",
+            "javascript://alert(1)",
+            "http://user@127.0.0.1:8080/cb",
             "http://chatgpt.com/connector/oauth/test",
             "https://attacker.example/callback",
             "https://chatgpt.com.attacker.example/callback",

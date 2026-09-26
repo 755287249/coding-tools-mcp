@@ -38,8 +38,8 @@ const TEXT = {
       "After connecting, list the available tools and read the project root to confirm everything works, then tell me the result.",
     ],
     genericSteps: [
-      "If your platform or client can add a remote MCP server (Streamable HTTP), add it with the details above.",
-      "If I need to do something manually, tell me exactly where to click and what to fill in, one step at a time.",
+      "If your platform or client can add a remote MCP server (Streamable HTTP), add it with the details above. The server supports automatic OAuth client registration, so most clients (Claude, Claude Code, Cursor, VS Code…) only need the URL; if a Client ID is requested, use the one above and leave Client Secret empty. When the authorization page opens, enter the authorization password.",
+      "If I need to do something manually, tell me exactly where to click and what to fill in, one step at a time. For example, in Claude: Settings → Connectors → Add custom connector → paste the MCP server URL (optionally enter the Client ID under Advanced settings) → Connect → enter the authorization password.",
       "After connecting, list the available tools and read the project root to confirm everything works, then tell me the result.",
     ],
     oneTime:
@@ -65,8 +65,8 @@ const TEXT = {
       "连接成功后，先列出可用工具，再读取项目根目录确认连接正常，然后告诉我结果。",
     ],
     genericSteps: [
-      "如果你的平台或客户端支持添加远程 MCP 服务器（Streamable HTTP），请直接用上面的信息完成添加。",
-      "如果需要我手动操作，请一步一步告诉我在哪里点、填什么。",
+      "如果你的平台或客户端支持添加远程 MCP 服务器（Streamable HTTP），请直接用上面的信息完成添加。服务器支持 OAuth 客户端自动注册，大多数客户端（Claude、Claude Code、Cursor、VS Code 等）只需填写服务地址；如果要求填写 Client ID，就用上面的 Client ID，Client Secret 留空。弹出授权页面时输入授权密码。",
+      "如果需要我手动操作，请一步一步告诉我在哪里点、填什么。例如在 Claude 中：设置 → 连接器 → 添加自定义连接器 → 填入 MCP 服务地址（可在高级设置里填入 Client ID）→ 连接 → 输入授权密码。",
       "连接成功后，先列出可用工具，再读取项目根目录确认连接正常，然后告诉我结果。",
     ],
     oneTime:
@@ -92,8 +92,8 @@ const TEXT = {
       "連線成功後，先列出可用工具，再讀取專案根目錄確認連線正常，然後告訴我結果。",
     ],
     genericSteps: [
-      "如果你的平台或用戶端支援新增遠端 MCP 伺服器（Streamable HTTP），請直接用上面的資訊完成新增。",
-      "如果需要我手動操作，請一步一步告訴我在哪裡點、填什麼。",
+      "如果你的平台或用戶端支援新增遠端 MCP 伺服器（Streamable HTTP），請直接用上面的資訊完成新增。伺服器支援 OAuth 用戶端自動註冊，大多數用戶端（Claude、Claude Code、Cursor、VS Code 等）只需填寫服務位址；如果要求填寫 Client ID，就用上面的 Client ID，Client Secret 留空。彈出授權頁面時輸入授權密碼。",
+      "如果需要我手動操作，請一步一步告訴我在哪裡點、填什麼。例如在 Claude 中：設定 → 連接器 → 新增自訂連接器 → 填入 MCP 服務位址（可在進階設定裡填入 Client ID）→ 連接 → 輸入授權密碼。",
       "連線成功後，先列出可用工具，再讀取專案根目錄確認連線正常，然後告訴我結果。",
     ],
     oneTime:

@@ -53,6 +53,11 @@ pub struct ProxyConfig {
     /// Proxy URL used when `mode == "manual"` (e.g. http://127.0.0.1:7890).
     #[serde(default)]
     pub url: String,
+    /// cloudflared edge transport. "http2" (TCP, default) survives TUN-mode
+    /// proxy software (Clash / FlClash / Mihomo / v2rayN) and UDP-hostile
+    /// networks; "quic" forces UDP; "auto" lets cloudflared decide.
+    #[serde(default = "default_tunnel_protocol")]
+    pub tunnel_protocol: String,
 }
 
 impl Default for ProxyConfig {
@@ -60,8 +65,13 @@ impl Default for ProxyConfig {
         Self {
             mode: default_proxy_mode(),
             url: String::new(),
+            tunnel_protocol: default_tunnel_protocol(),
         }
     }
+}
+
+pub(crate) fn default_tunnel_protocol() -> String {
+    "http2".into()
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -22,6 +22,16 @@ fn http_client() -> reqwest::Client {
         .expect("failed to build HTTP client")
 }
 
+/// Loopback checks must never go through HTTP(S)_PROXY / ALL_PROXY: proxy
+/// software (Clash, FlClash, v2rayN…) cannot reach this machine's 127.0.0.1.
+fn local_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(TIMEOUT)
+        .no_proxy()
+        .build()
+        .expect("failed to build local HTTP client")
+}
+
 fn format_single_value(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::String(s) => s.clone(),
@@ -126,6 +136,7 @@ fn well_known_url(base: &str, path: &str) -> String {
 
 pub async fn run_health_checks(profile: &WorkspaceProfile) -> Vec<HealthItem> {
     let client = http_client();
+    let local = local_http_client();
     let mcp_public = profile.effective_public_url();
     let actions_local = profile.actions_local_base_url();
     let actions_public = profile.actions_effective_public_url();
@@ -136,7 +147,7 @@ pub async fn run_health_checks(profile: &WorkspaceProfile) -> Vec<HealthItem> {
     };
 
     let (mcp_local_ok, mcp_local_detail) =
-        check_mcp_endpoint(&client, &profile.local_endpoint()).await;
+        check_mcp_endpoint(&local, &profile.local_endpoint()).await;
     let (mcp_public_ok, mcp_public_detail) =
         check_mcp_endpoint(&client, &profile.public_endpoint()).await;
     let (mcp_oauth_ok, mcp_oauth_detail) = check_json_field(
@@ -157,13 +168,13 @@ pub async fn run_health_checks(profile: &WorkspaceProfile) -> Vec<HealthItem> {
     let actions_openapi_public = profile.actions_openapi_url();
 
     let (actions_local_ok, actions_local_detail) =
-        check_url(&client, &actions_health_url).await;
+        check_url(&local, &actions_health_url).await;
     let (actions_openapi_local_ok, actions_openapi_local_detail) =
-        check_url(&client, &actions_openapi_local).await;
+        check_url(&local, &actions_openapi_local).await;
     let (actions_openapi_public_ok, actions_openapi_public_detail) =
         check_url(&client, &actions_openapi_public).await;
     let (actions_oauth_ok, actions_oauth_detail) = check_json_field(
-        &client,
+        if actions_public.is_empty() { &local } else { &client },
         &well_known_url(&actions_oauth_base, ".well-known/oauth-authorization-server"),
         "token_endpoint_auth_methods_supported",
     )

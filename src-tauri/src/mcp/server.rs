@@ -1885,17 +1885,26 @@ mod tests {
     }
 
     #[test]
-    fn mcp_session_cannot_access_project_before_explicit_folder_selection() {
+    fn multi_folder_session_cannot_access_project_before_explicit_folder_selection() {
         let workspace = tempfile::tempdir().expect("workspace tempdir");
+        let other = tempfile::tempdir().expect("other tempdir");
         fs::write(workspace.path().join("README.md"), "explicit routing").expect("write readme");
         let profile_id = format!("explicit-routing-{}", uuid::Uuid::new_v4());
         let state = new_state(
-            vec![crate::workspace::WorkspaceFolder {
-                id: "folder-a".into(),
-                name: "Folder A".into(),
-                path: workspace.path().display().to_string(),
-                execution: Default::default(),
-            }],
+            vec![
+                crate::workspace::WorkspaceFolder {
+                    id: "folder-a".into(),
+                    name: "Folder A".into(),
+                    path: workspace.path().display().to_string(),
+                    execution: Default::default(),
+                },
+                crate::workspace::WorkspaceFolder {
+                    id: "folder-b".into(),
+                    name: "Folder B".into(),
+                    path: other.path().display().to_string(),
+                    execution: Default::default(),
+                },
+            ],
             "folder-a".into(),
             profile_id.clone(),
             crate::workspace::AuthConfig::default(),
@@ -1926,11 +1935,18 @@ mod tests {
         );
         assert_eq!(
             unselected["error"]["data"]["available_folders"],
-            json!([{
-                "id": "folder-a",
-                "name": "Folder A",
-                "path": workspace.path().display().to_string()
-            }])
+            json!([
+                {
+                    "id": "folder-a",
+                    "name": "Folder A",
+                    "path": workspace.path().display().to_string()
+                },
+                {
+                    "id": "folder-b",
+                    "name": "Folder B",
+                    "path": other.path().display().to_string()
+                }
+            ])
         );
         assert!(unselected["error"]["data"]["selected_folder_id"].is_null());
         assert!(unselected["error"]["data"]["next_action"]
@@ -2007,6 +2023,51 @@ mod tests {
             }),
         );
         assert_eq!(selected["result"]["structuredContent"]["ok"], true);
+
+        crate::tools::hub::remove_live_hub(&profile_id);
+    }
+
+    #[test]
+    fn single_folder_workspace_routes_without_explicit_selection() {
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        fs::write(workspace.path().join("README.md"), "single folder").expect("write readme");
+        let profile_id = format!("single-routing-{}", uuid::Uuid::new_v4());
+        let state = new_state(
+            vec![crate::workspace::WorkspaceFolder {
+                id: "only".into(),
+                name: "Only".into(),
+                path: workspace.path().display().to_string(),
+                execution: Default::default(),
+            }],
+            "only".into(),
+            profile_id.clone(),
+            crate::workspace::AuthConfig::default(),
+            crate::tools::policy::PolicySettings::default(),
+            "full".into(),
+            "trusted".into(),
+            crate::workspace::SandboxConfig::default(),
+            crate::tools::ExecutionLimits::default(),
+        )
+        .expect("mcp state");
+
+        let read = handle_request(
+            &state,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "read_file",
+                    "arguments": {"path": "README.md"},
+                    "_meta": {"openai/session": "generic-client"}
+                }
+            }),
+        );
+        let routed = &read["result"]["structuredContent"];
+        assert_eq!(routed["ok"], true);
+        assert_eq!(routed["content"], "single folder");
+        assert_eq!(routed["resolved_workspace_id"], "only");
+        assert_eq!(routed["workspace_route_source"], "single_folder");
 
         crate::tools::hub::remove_live_hub(&profile_id);
     }

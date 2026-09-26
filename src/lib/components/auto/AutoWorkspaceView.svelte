@@ -221,14 +221,23 @@
       if (hasTunnel(prepared.tunnel.type)) {
         const connected = await runStep("tunnel", async () => {
           let latest = await waitForPublicEndpoint(started.publicEndpoint ? 0 : 6000);
+          let tunnelError = "";
           if (!latest.publicEndpoint) {
-            await startTunnel(profile.id, "mcp").catch(() => undefined);
-            latest = await waitForPublicEndpoint(20000);
+            await startTunnel(profile.id, "mcp").catch((error: unknown) => {
+              tunnelError =
+                error instanceof Error
+                  ? error.message
+                  : typeof error === "object" && error && "message" in error
+                    ? String((error as { message: unknown }).message)
+                    : String(error ?? "");
+            });
+            latest = await waitForPublicEndpoint(tunnelError ? 3000 : 30000);
           }
           if (!latest.publicEndpoint) {
-            throw new Error(
-              $t("The MCP service is running, but the public tunnel did not connect. Check your network or proxy, then try again."),
+            const base = $t(
+              "The MCP service is running, but the public tunnel did not connect. Check your network or proxy, then try again.",
             );
+            throw new Error(tunnelError ? `${base}\n\n${tunnelError}` : base);
           }
           return latest;
         });
@@ -516,7 +525,7 @@
           {/if}
         </div>
 
-        {#if authType !== "oauth"}
+        {#if endpoint}
           <button type="button" class="ax-link" onclick={() => void copy("json", clientConfig)}>
             {copiedKey === "json" ? $t("Copied!") : $t("Copy JSON config for MCP clients")}
           </button>

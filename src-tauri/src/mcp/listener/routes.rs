@@ -3,8 +3,8 @@ use axum::Router;
 
 use super::{
     mcp_delete, mcp_get, mcp_info, mcp_post, oauth_authorization_server_metadata,
-    oauth_authorize_get, oauth_authorize_post, oauth_protected_resource_metadata, oauth_token_post,
-    ListenerState,
+    oauth_authorize_get, oauth_authorize_post, oauth_protected_resource_metadata,
+    oauth_register_post, oauth_token_post, ListenerState,
 };
 
 pub(super) fn build_router(state: ListenerState) -> Router {
@@ -41,6 +41,7 @@ fn service_routes_for_prefix(prefix: &str) -> Router<ListenerState> {
     let mcp_info_path = prefixed_route(prefix, "/mcp/info");
     let authorize = prefixed_route(prefix, "/oauth/authorize");
     let token = prefixed_route(prefix, "/oauth/token");
+    let register = prefixed_route(prefix, "/oauth/register");
 
     Router::new()
         .route(&mcp, get(mcp_get).post(mcp_post).delete(mcp_delete))
@@ -50,6 +51,7 @@ fn service_routes_for_prefix(prefix: &str) -> Router<ListenerState> {
             get(oauth_authorize_get).post(oauth_authorize_post),
         )
         .route(&token, post(oauth_token_post))
+        .route(&register, post(oauth_register_post))
 }
 
 pub(super) fn authorization_metadata_path(prefix: &str) -> String {

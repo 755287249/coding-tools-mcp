@@ -41,6 +41,8 @@ export async function deleteFrpProfile(id: string): Promise<void> {
 export interface ProxyConfigDto {
   mode: string;
   url: string;
+  /** cloudflared transport: "http2" (default, TUN/VPN friendly) | "auto" | "quic". */
+  tunnelProtocol?: string;
 }
 
 export async function getProxy(): Promise<ProxyConfigDto> {

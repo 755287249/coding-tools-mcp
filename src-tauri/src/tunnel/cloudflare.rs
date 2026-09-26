@@ -1,4 +1,6 @@
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
@@ -12,7 +14,54 @@ use crate::error::{AppError, AppResult};
 use crate::platform::platform;
 use crate::settings::ProxyConfig;
 
-const READY_TIMEOUT: Duration = Duration::from_secs(30);
+const READY_TIMEOUT: Duration = Duration::from_secs(45);
+const EDGE_PROBE_HOST: &str = "region1.v2.argotunnel.com";
+
+/// True for addresses handed out by TUN-mode proxy software in Fake-IP mode
+/// (Clash / FlClash / Mihomo / sing-box): 198.18.0.0/15 (RFC 2544 benchmark
+/// range, never a real public address) and Mihomo's default fdfe:dcba:9876::/48.
+pub(crate) fn is_fake_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            octets[0] == 198 && (octets[1] == 18 || octets[1] == 19)
+        }
+        IpAddr::V6(v6) => {
+            let segments = v6.segments();
+            segments[0] == 0xfdfe && segments[1] == 0xdcba && segments[2] == 0x9876
+        }
+    }
+}
+
+/// Resolve the Cloudflare edge host and report whether DNS is being answered
+/// by a TUN/Fake-IP proxy. Failures are treated as "not detected".
+async fn fake_ip_dns_detected() -> bool {
+    match time::timeout(
+        Duration::from_secs(3),
+        tokio::net::lookup_host((EDGE_PROBE_HOST, 7844u16)),
+    )
+    .await
+    {
+        Ok(Ok(addrs)) => addrs.into_iter().any(|addr| is_fake_ip(addr.ip())),
+        _ => false,
+    }
+}
+
+/// Map the configured transport to a cloudflared `--protocol` value.
+/// HTTP/2 over TCP is the default: QUIC (UDP 7844) is frequently dropped or
+/// mangled by TUN-mode proxies and restrictive networks, which makes
+/// cloudflared spend ~100 s timing out before it falls back.
+pub(crate) fn resolve_tunnel_protocol(configured: &str, fake_ip: bool) -> Option<&'static str> {
+    match configured.trim().to_ascii_lowercase().as_str() {
+        "quic" => Some("quic"),
+        "auto" if !fake_ip => None,
+        _ => Some("http2"),
+    }
+}
+
+const TUN_HINT: &str = "检测到 Clash / FlClash / Mihomo 等代理软件的 TUN（虚拟网卡）+ Fake-IP 模式，已自动改用 HTTP/2 连接。\n\
+若仍无法连接：在代理软件中将 argotunnel.com、trycloudflare.com、cloudflare.com 设为直连（DIRECT），\n\
+并把 +.argotunnel.com、+.trycloudflare.com 加入 fake-ip-filter（或 DNS 改用 redir-host），然后重新开始。";
 
 /// Handle to a supervised `cloudflared` child process.
 pub struct CloudflareTunnelHandle {
@@ -308,14 +357,38 @@ pub async fn spawn_cloudflare_tunnel(
         apply_proxy_env(&mut cmd, &settings.proxy);
     }
 
+    let fake_ip = fake_ip_dns_detected().await;
+    let protocol = resolve_tunnel_protocol(&settings.proxy.tunnel_protocol, fake_ip);
+    if let Some(parent) = log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    {
+        use std::io::Write;
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path)
+        {
+            let _ = writeln!(
+                file,
+                "[coding-tools] cloudflared protocol={} fake_ip_dns={fake_ip}",
+                protocol.unwrap_or("auto")
+            );
+        }
+    }
+
+    cmd.args(["tunnel", "--no-autoupdate"]);
+    if let Some(protocol) = protocol {
+        cmd.args(["--protocol", protocol]);
+    }
     if quick {
         let local_url = format!(
             "http://{}:{port}",
             crate::workspace::url_host_for_bind(bind_address)
         );
-        cmd.args(["tunnel", "--url", &local_url]);
+        cmd.args(["--url", &local_url]);
     } else {
-        cmd.args(["tunnel", "run", "--token", cloudflare_token.trim()]);
+        cmd.args(["run", "--token", cloudflare_token.trim()]);
     }
 
     let mut child = cmd
@@ -331,11 +404,22 @@ pub async fn spawn_cloudflare_tunnel(
     let log_path = log_path.to_path_buf();
     let named_url = named_public_url.trim_end_matches('/').to_string();
     let log_path_for_error = log_path.clone();
+    let seen_url: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let seen_url_for_stream = seen_url.clone();
 
     if let Some(stdout) = child.stdout.take() {
         let stderr = child.stderr.take();
         tokio::spawn(async move {
-            stream_cloudflare_output(stdout, stderr, &log_path, quick, named_url, ready_tx).await;
+            stream_cloudflare_output(
+                stdout,
+                stderr,
+                &log_path,
+                quick,
+                named_url,
+                seen_url_for_stream,
+                ready_tx,
+            )
+            .await;
         });
     } else {
         let _ = ready_tx.send(QuickTunnelReady {
@@ -348,18 +432,45 @@ pub async fn spawn_cloudflare_tunnel(
         });
     }
 
-    let ready = time::timeout(READY_TIMEOUT, ready_rx)
-        .await
-        .map_err(|_| {
-            AppError::Message(format!(
-                "cloudflared 已启动，但在 {} 秒内没有返回 trycloudflare.com 公网地址。\n\
-                 请检查：1) MCP 服务是否已在本机端口 {port} 运行；2) 设置 → 通用 → 网络代理 是否配置为手动代理（如 http://127.0.0.1:7890）；\
-                 3) 查看日志 {log_hint}",
-                READY_TIMEOUT.as_secs(),
-                log_hint = log_path_for_error.display()
-            ))
-        })?
-        .map_err(|_| AppError::Message("cloudflared 输出流意外结束。".into()))?;
+    let tun_hint = if fake_ip {
+        format!("\n{TUN_HINT}")
+    } else {
+        String::new()
+    };
+    let ready = match time::timeout(READY_TIMEOUT, ready_rx).await {
+        Ok(Ok(ready)) => ready,
+        Ok(Err(_)) => {
+            return Err(AppError::Message(format!(
+                "cloudflared 输出流意外结束。请查看日志：{}{tun_hint}",
+                log_path_for_error.display()
+            )))
+        }
+        Err(_) => {
+            // The quick-tunnel URL is allocated before the edge connection is
+            // registered. If we have a URL, hand it out: cloudflared keeps
+            // retrying in the background and the supervisor reports health.
+            let fallback = if quick {
+                seen_url.lock().ok().and_then(|guard| guard.clone())
+            } else {
+                None
+            };
+            match fallback {
+                Some(url) => QuickTunnelReady {
+                    public_url: Some(url),
+                    named_ready: false,
+                },
+                None => {
+                    return Err(AppError::Message(format!(
+                        "cloudflared 已启动，但在 {} 秒内没有连上 Cloudflare。\n\
+                         请检查：1) MCP 服务是否已在本机端口 {port} 运行；2) 设置 → 通用 → 网络代理 是否配置正确（如 http://127.0.0.1:7890）；\
+                         3) 查看日志 {log_hint}{tun_hint}",
+                        READY_TIMEOUT.as_secs(),
+                        log_hint = log_path_for_error.display()
+                    )))
+                }
+            }
+        }
+    };
 
     let public_url = if quick {
         ready.public_url.ok_or_else(|| {
@@ -391,6 +502,7 @@ async fn stream_cloudflare_output<R, E>(
     log_path: &Path,
     quick: bool,
     named_url: String,
+    seen_url: Arc<Mutex<Option<String>>>,
     ready_tx: oneshot::Sender<QuickTunnelReady>,
 ) where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
@@ -436,8 +548,19 @@ async fn stream_cloudflare_output<R, E>(
                 if public_url.is_none() {
                     if let Some(url) = extract_trycloudflare_url(line) {
                         *public_url = Some(url.clone());
-                        send_ready(ready_tx, Some(url), false);
+                        if let Ok(mut guard) = seen_url.lock() {
+                            *guard = Some(url);
+                        }
                     }
+                }
+                // Only report ready once the edge connection is registered;
+                // otherwise the URL answers with Cloudflare error 1033.
+                if public_url.is_some()
+                    && line
+                        .to_ascii_lowercase()
+                        .contains("registered tunnel connection")
+                {
+                    send_ready(ready_tx, public_url.clone(), true);
                 }
             } else {
                 let lowered = line.to_ascii_lowercase();
@@ -495,7 +618,25 @@ pub async fn stop_child(mut child: Child, pid: Option<u32>) -> AppResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::extract_trycloudflare_url;
+    use super::{extract_trycloudflare_url, is_fake_ip, resolve_tunnel_protocol};
+
+    #[test]
+    fn detects_tun_fake_ip_ranges() {
+        assert!(is_fake_ip("198.18.0.12".parse().unwrap()));
+        assert!(is_fake_ip("198.19.255.1".parse().unwrap()));
+        assert!(is_fake_ip("fdfe:dcba:9876::7e".parse().unwrap()));
+        assert!(!is_fake_ip("198.41.192.7".parse().unwrap()));
+        assert!(!is_fake_ip("2606:4700::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn defaults_to_http2_and_overrides_auto_under_fake_ip() {
+        assert_eq!(resolve_tunnel_protocol("", false), Some("http2"));
+        assert_eq!(resolve_tunnel_protocol("http2", false), Some("http2"));
+        assert_eq!(resolve_tunnel_protocol("auto", false), None);
+        assert_eq!(resolve_tunnel_protocol("auto", true), Some("http2"));
+        assert_eq!(resolve_tunnel_protocol("QUIC", true), Some("quic"));
+    }
 
     #[test]
     fn extracts_trycloudflare_url_from_log_line() {

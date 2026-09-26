@@ -1668,6 +1668,36 @@ export const MESSAGES = {
     "粘贴到 ChatGPT、Claude 或任何 AI",
     "ChatGPT、Claude などの AI に貼り付け",
   ],
+  "Cloudflare tunnel protocol": [
+    "Cloudflare tunnel protocol",
+    "Cloudflare 通道協定",
+    "Cloudflare 隧道协议",
+    "Cloudflare トンネルのプロトコル",
+  ],
+  "HTTP/2 over TCP (recommended, works with VPN / TUN mode)": [
+    "HTTP/2 over TCP (recommended, works with VPN / TUN mode)",
+    "HTTP/2（TCP，推薦，相容 VPN / TUN 模式）",
+    "HTTP/2（TCP，推荐，兼容 VPN / TUN 模式）",
+    "HTTP/2（TCP・推奨、VPN / TUN モード対応）",
+  ],
+  "Automatic (QUIC first, then HTTP/2)": [
+    "Automatic (QUIC first, then HTTP/2)",
+    "自動（先 QUIC，失敗再 HTTP/2）",
+    "自动（先 QUIC，失败再 HTTP/2）",
+    "自動（QUIC を優先し、失敗時は HTTP/2）",
+  ],
+  "QUIC over UDP only": [
+    "QUIC over UDP only",
+    "僅 QUIC（UDP）",
+    "仅 QUIC（UDP）",
+    "QUIC（UDP）のみ",
+  ],
+  "Clash, FlClash and similar tools in TUN (virtual adapter) mode often break QUIC. HTTP/2 keeps the tunnel working with them turned on.": [
+    "Clash, FlClash and similar tools in TUN (virtual adapter) mode often break QUIC. HTTP/2 keeps the tunnel working with them turned on.",
+    "Clash、FlClash 等工具開啟 TUN（虛擬網卡）模式時常會中斷 QUIC。使用 HTTP/2 可在開啟它們時保持通道正常。",
+    "Clash、FlClash 等工具开启 TUN（虚拟网卡）模式时常会中断 QUIC。使用 HTTP/2 可在开启它们时保持隧道正常。",
+    "Clash や FlClash などを TUN（仮想アダプター）モードで使うと QUIC が切れやすくなります。HTTP/2 ならオンのままでもトンネルが動作します。",
+  ],
 } as const;
 
 export type MessageKey = keyof typeof MESSAGES;

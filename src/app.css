@@ -1497,6 +1497,10 @@ button {
   margin-top: 16px;
 }
 
+.ax-error p {
+  white-space: pre-line;
+}
+
 .ax-connect {
   display: grid;
   gap: 14px;

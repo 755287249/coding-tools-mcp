@@ -158,6 +158,86 @@ fn mcp_discovery_payload() -> Value {
     })
 }
 
+/// Metadata key the tool router uses as the per-conversation identity.
+const HOST_SESSION_META_KEY: &str = "openai/session";
+
+/// ChatGPT sends `_meta["openai/session"]` with every tool call, but standard
+/// MCP clients (Claude, Cursor, VS Code, custom agents…) do not. Without an
+/// identity the router refuses to bind a folder, so derive a stable
+/// per-client key and inject it when the client did not provide one.
+fn ensure_host_session_identity(headers: &HeaderMap, body: &mut Value) {
+    let method = body.get("method").and_then(Value::as_str).unwrap_or("");
+    if !(method.starts_with("tools/")
+        || method.starts_with("prompts/")
+        || method.starts_with("resources/"))
+    {
+        return;
+    }
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    let params = object
+        .entry("params")
+        .or_insert_with(|| Value::Object(Default::default()));
+    let Some(params) = params.as_object_mut() else {
+        return;
+    };
+    let meta = params
+        .entry("_meta")
+        .or_insert_with(|| Value::Object(Default::default()));
+    let Some(meta) = meta.as_object_mut() else {
+        return;
+    };
+    let present = meta
+        .get(HOST_SESSION_META_KEY)
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    if !present {
+        meta.insert(
+            HOST_SESSION_META_KEY.into(),
+            Value::String(derive_client_session_key(headers)),
+        );
+    }
+}
+
+/// Stable identity for clients without a platform conversation id:
+/// 1. an explicit `x-openai-session` header,
+/// 2. the transport `Mcp-Session-Id` header,
+/// 3. a hash of the Authorization header (one identity per OAuth grant / key),
+/// 4. a hash of the User-Agent for unauthenticated local clients.
+fn derive_client_session_key(headers: &HeaderMap) -> String {
+    use sha2::{Digest, Sha256};
+    fn header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+    if let Some(value) = header(headers, "x-openai-session") {
+        return value.chars().take(200).collect();
+    }
+    if let Some(value) = header(headers, "mcp-session-id") {
+        return format!(
+            "mcp-session:{}",
+            value.chars().take(200).collect::<String>()
+        );
+    }
+    let (kind, seed) = match header(headers, "authorization") {
+        Some(value) => ("client", value),
+        None => (
+            "anonymous",
+            header(headers, "user-agent").unwrap_or("unknown"),
+        ),
+    };
+    let digest = Sha256::digest(seed.as_bytes());
+    let short: String = digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("mcp-{kind}:{short}")
+}
+
 fn resolve_oauth_base(state: &ListenerState, headers: &HeaderMap) -> String {
     external_base_url(headers, state.bind_port, &state.configured_public_url)
 }
@@ -231,6 +311,9 @@ async fn mcp_post(
     } else if let Some(response) = require_mcp_auth(&state, &headers) {
         return response;
     }
+
+    let mut body = body;
+    ensure_host_session_identity(&headers, &mut body);
 
     let method = body
         .get("method")
@@ -1279,11 +1362,89 @@ async fn oauth_authorization_server_metadata(
         return oauth_not_configured();
     }
     let base = resolve_oauth_base(&state, &headers);
-    Json(authorization_server_metadata(
-        &base,
-        state.oauth_client_secret.as_deref(),
-    ))
-    .into_response()
+    let mut metadata = authorization_server_metadata(&base, state.oauth_client_secret.as_deref());
+    if state.oauth_client_secret.is_none() {
+        if let Some(object) = metadata.as_object_mut() {
+            object.insert(
+                "registration_endpoint".into(),
+                Value::String(format!("{}/oauth/register", base.trim_end_matches('/'))),
+            );
+        }
+    }
+    Json(metadata).into_response()
+}
+
+/// Minimal RFC 7591 Dynamic Client Registration for public clients.
+///
+/// Claude, Claude Code, Cursor, VS Code and most MCP clients register
+/// themselves automatically instead of asking the user for a Client ID. This
+/// server has a single public client per workspace, so registration simply
+/// hands out that client id after validating the redirect URIs. Access is
+/// still gated by the one-time authorization password and PKCE.
+async fn oauth_register_post(
+    State(state): State<ListenerState>,
+    Json(body): Json<Value>,
+) -> Response {
+    let Some(oauth) = state.oauth.as_ref() else {
+        return oauth_not_configured();
+    };
+    if state.oauth_client_secret.is_some() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "invalid_client_metadata",
+                "error_description": "This server uses a confidential client; configure the Client ID and secret manually."
+            })),
+        )
+            .into_response();
+    }
+    let redirect_uris: Vec<String> = body
+        .get("redirect_uris")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if redirect_uris.is_empty()
+        || !redirect_uris
+            .iter()
+            .all(|uri| crate::auth::redirect_uri_allowed(uri))
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "invalid_redirect_uri",
+                "error_description": "redirect_uris must use an allowed MCP client callback (ChatGPT, Claude, VS Code, Cursor, or a loopback address)."
+            })),
+        )
+            .into_response();
+    }
+    let client_id = if oauth.client_id.trim().is_empty() {
+        format!("mcp-client-{}", uuid::Uuid::new_v4().simple())
+    } else {
+        oauth.client_id.clone()
+    };
+    let issued_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_secs())
+        .unwrap_or_default();
+    let mut response = json!({
+        "client_id": client_id,
+        "client_id_issued_at": issued_at,
+        "redirect_uris": redirect_uris,
+        "token_endpoint_auth_method": "none",
+        "grant_types": ["authorization_code"],
+        "response_types": ["code"],
+        "scope": "mcp",
+    });
+    if let Some(name) = body.get("client_name").and_then(Value::as_str) {
+        response["client_name"] = Value::String(name.chars().take(200).collect());
+    }
+    (StatusCode::CREATED, Json(response)).into_response()
 }
 
 async fn oauth_protected_resource_metadata(
@@ -1345,6 +1506,45 @@ fn oauth_not_configured() -> Response {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn injects_stable_session_identity_for_generic_clients() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            axum::http::HeaderValue::from_static("Bearer abc"),
+        );
+        let mut body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "read_file", "arguments": {}}
+        });
+        super::ensure_host_session_identity(&headers, &mut body);
+        let first = body["params"]["_meta"]["openai/session"]
+            .as_str()
+            .expect("injected")
+            .to_string();
+        assert!(first.starts_with("mcp-client:"));
+
+        let mut again =
+            json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "x"}});
+        super::ensure_host_session_identity(&headers, &mut again);
+        assert_eq!(again["params"]["_meta"]["openai/session"], first);
+
+        let mut chatgpt = json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": "x", "_meta": {"openai/session": "conv-1"}}
+        });
+        super::ensure_host_session_identity(&headers, &mut chatgpt);
+        assert_eq!(chatgpt["params"]["_meta"]["openai/session"], "conv-1");
+
+        let mut init = json!({"jsonrpc": "2.0", "id": 4, "method": "initialize", "params": {}});
+        super::ensure_host_session_identity(&headers, &mut init);
+        assert!(init["params"].get("_meta").is_none());
+    }
+
     use std::sync::Arc;
     use std::time::Duration;
 
