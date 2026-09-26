@@ -23,6 +23,9 @@ impl AuthConfig {
 pub fn external_base_url(headers: &HeaderMap, bind_port: u16, configured_url: &str) -> String {
     let configured = configured_url.trim().trim_end_matches('/');
     if !configured.is_empty() {
+        if let Some(live) = rotated_quick_tunnel_base(headers, configured) {
+            return live;
+        }
         return configured.to_string();
     }
 
@@ -62,6 +65,68 @@ pub fn external_base_url(headers: &HeaderMap, bind_port: u16, configured_url: &s
         &host,
     );
     format!("{proto}://{host}")
+}
+
+const QUICK_TUNNEL_SUFFIX: &str = ".trycloudflare.com";
+
+/// Cloudflare Quick Tunnels receive a new random `*.trycloudflare.com` host
+/// every time cloudflared starts, but a listener captures the previously
+/// persisted public URL when it is spawned (before the tunnel reports its new
+/// URL). When the configured URL and the incoming request are both Quick
+/// Tunnel hosts and they differ, advertise the live request host so OAuth
+/// metadata never points at an expired tunnel.
+fn rotated_quick_tunnel_base(headers: &HeaderMap, configured: &str) -> Option<String> {
+    let rest = configured
+        .strip_prefix("https://")
+        .or_else(|| configured.strip_prefix("http://"))?;
+    let (configured_authority, configured_path) = match rest.find('/') {
+        Some(index) => (&rest[..index], &rest[index..]),
+        None => (rest, ""),
+    };
+    let configured_host = strip_port(configured_authority).to_ascii_lowercase();
+    if !is_quick_tunnel_host(&configured_host) {
+        return None;
+    }
+
+    let request_authority = {
+        let value = safe_external_host(&first_header_value(headers, "x-forwarded-host"));
+        if !value.is_empty() {
+            value
+        } else {
+            let value = safe_external_host(&forwarded_header_param(headers, "host"));
+            if !value.is_empty() {
+                value
+            } else {
+                safe_external_host(&first_header_value(headers, "host"))
+            }
+        }
+    };
+    let request_host = strip_port(&request_authority).to_ascii_lowercase();
+    if !is_quick_tunnel_host(&request_host) || request_host == configured_host {
+        return None;
+    }
+
+    Some(format!(
+        "https://{request_host}{}",
+        configured_path.trim_end_matches('/')
+    ))
+}
+
+fn strip_port(authority: &str) -> &str {
+    match authority.rsplit_once(':') {
+        Some((host, port)) if !host.contains(']') && port.chars().all(|ch| ch.is_ascii_digit()) => {
+            host
+        }
+        _ => authority,
+    }
+}
+
+fn is_quick_tunnel_host(host: &str) -> bool {
+    host.len() > QUICK_TUNNEL_SUFFIX.len()
+        && host.ends_with(QUICK_TUNNEL_SUFFIX)
+        && host
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '.')
 }
 
 fn first_header_value(headers: &HeaderMap, name: &str) -> String {
@@ -240,6 +305,47 @@ mod tests {
     #[test]
     fn external_base_url_prefers_configured_url() {
         let headers = HeaderMap::new();
+        assert_eq!(
+            external_base_url(&headers, 28767, "https://lb.frp-tx1.evwali.com"),
+            "https://lb.frp-tx1.evwali.com"
+        );
+    }
+
+    #[test]
+    fn external_base_url_follows_rotated_quick_tunnel_host() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "host",
+            "layer-personalized-coleman-frame.trycloudflare.com"
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(
+            external_base_url(
+                &headers,
+                28766,
+                "https://minneapolis-keep-fresh-three.trycloudflare.com"
+            ),
+            "https://layer-personalized-coleman-frame.trycloudflare.com"
+        );
+    }
+
+    #[test]
+    fn external_base_url_keeps_configured_quick_tunnel_for_other_hosts() {
+        let configured = "https://minneapolis-keep-fresh-three.trycloudflare.com";
+        let mut local = HeaderMap::new();
+        local.insert("host", "127.0.0.1:28766".parse().unwrap());
+        assert_eq!(external_base_url(&local, 28766, configured), configured);
+
+        let mut foreign = HeaderMap::new();
+        foreign.insert("host", "evil.example.com".parse().unwrap());
+        assert_eq!(external_base_url(&foreign, 28766, configured), configured);
+    }
+
+    #[test]
+    fn external_base_url_does_not_rewrite_non_quick_tunnel_config() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "abc.trycloudflare.com".parse().unwrap());
         assert_eq!(
             external_base_url(&headers, 28767, "https://lb.frp-tx1.evwali.com"),
             "https://lb.frp-tx1.evwali.com"
