@@ -18,6 +18,7 @@
   import { addWorkspaceFolder, listWorkspaces, removeWorkspaceFolder, updateWorkspace } from "$lib/api/workspaces";
   import { getBackend, loadMcpAuthSecrets } from "$lib/backend";
   import { cloudflareTokenTunnelId, normalizeCloudflareToken } from "$lib/connect/cloudflare-token";
+  import CloudflareRouteGuide from "$lib/components/CloudflareRouteGuide.svelte";
   import { buildConnectionPrompt, isTemporaryEndpoint } from "$lib/connect/prompt";
   import { locale, t } from "$lib/i18n";
   import { workspaces } from "$lib/stores/app";
@@ -89,6 +90,7 @@
   const switchOn = $derived(working ? session.phase !== "Stopping…" : running);
   const busy = $derived(working || saving);
   const tokenTunnelId = $derived(namedToken.trim() ? cloudflareTokenTunnelId(namedToken) : null);
+  const localPort = $derived(profile.runtime?.local_port ?? 0);
 
   /** Strip a pasted `cloudflared service install …` / `--token …` command down to the token. */
   function onTokenInput(event: Event) {
@@ -410,11 +412,22 @@
           {#if saving}<LoaderCircle size={13} class="animate-spin" />{/if}
           {$t("Save")}
         </button>
+        {#if localPort}
+          <CloudflareRouteGuide hostname={namedDomain} port={localPort} bindAddress={profile.runtime?.bind_address} />
+        {/if}
       </form>
     {:else if kind === "named"}
       <button type="button" class="sx-hint sx-hint-btn" onclick={chooseNamed}>
         {profile.tunnel.public_url} · {$t("Edit")}
       </button>
+      {#if localPort}
+        <CloudflareRouteGuide
+          hostname={profile.tunnel.public_url}
+          port={localPort}
+          bindAddress={profile.runtime?.bind_address}
+          collapsed={hasPublic}
+        />
+      {/if}
     {/if}
 
     <!-- Copy prompt -->

@@ -4,6 +4,9 @@
   import { getBackend } from "$lib/backend";
   import { testTunnel as invokeTunnelTest } from "$lib/api/tunnel";
   import SecretTokenField from "$lib/components/SecretTokenField.svelte";
+  import CloudflareRouteGuide from "$lib/components/CloudflareRouteGuide.svelte";
+  import { workspaces } from "$lib/stores/app";
+  import { actionsConfig } from "$lib/types";
   import { showToast } from "$lib/stores/toast";
   import { t } from "$lib/i18n";
 
@@ -85,6 +88,17 @@
   const showBuiltin = $derived(draft.type === "builtin");
   const showCloudflare = $derived(draft.type === "cloudflare");
   const showCloudflareToken = $derived(showCloudflare && draft.cloudflare_mode === "named");
+  const workspaceProfile = $derived($workspaces.find((item) => item.id === workspaceId) ?? null);
+  /** Local listener the named tunnel's dashboard route must point at. */
+  const routeTarget = $derived.by(() => {
+    if (!workspaceProfile) return null;
+    if (service === "actions") {
+      const actions = actionsConfig(workspaceProfile);
+      return { port: actions.local_port, bindAddress: actions.bind_address };
+    }
+    const runtime = workspaceProfile.runtime;
+    return runtime ? { port: runtime.local_port, bindAddress: runtime.bind_address } : null;
+  });
   const mcpUrlScoped = $derived(showBuiltin || (showFrp && service === "mcp"));
   const showLegacyFrpToken = $derived(showFrp && service === "actions" && !useGlobalProfile);
   const canTest = $derived(showBuiltin || draft.type === "frp" || draft.type === "cloudflare");
@@ -531,6 +545,10 @@
         bind:value={draft.public_url}
       />
     </label>
+  {/if}
+
+  {#if showCloudflareToken && routeTarget}
+    <CloudflareRouteGuide hostname={draft.public_url} port={routeTarget.port} bindAddress={routeTarget.bindAddress} />
   {/if}
 
   <div class="flex justify-end gap-2 pt-1">
