@@ -147,6 +147,7 @@ pub(super) fn run_file(ctx: &ToolContext, args: &Value) -> Result<Value, Workspa
     let newline_after = newline_style(&updated);
     let after_sha256 = sha256_hex(updated.as_bytes());
     let diff = unified_diff(&resolved.display, &original, &updated, false, false);
+    let (bytes_before, bytes_after) = (original.len(), updated.len());
     let change_id = if dry_run {
         Value::Null
     } else {
@@ -234,7 +235,12 @@ pub(super) fn run_file(ctx: &ToolContext, args: &Value) -> Result<Value, Workspa
         "blast_radius": blast_radius,
         "diff": diff,
         "phase_durations_ms": phase_durations_ms,
-        "affected_files": [{ "path": resolved.display, "operation": "update" }],
+        "affected_files": [{
+            "path": resolved.display,
+            "operation": "update",
+            "bytes_before": bytes_before,
+            "bytes_after": bytes_after
+        }],
         "files_created": Vec::<String>::new(),
         "files_modified": [resolved.display],
         "files_deleted": Vec::<String>::new(),
@@ -420,6 +426,7 @@ pub(super) fn run_many(ctx: &ToolContext, args: &Value) -> Result<Value, Workspa
             false,
         ));
         versions.insert(resolved.display.clone(), Some(before_sha256.clone()));
+        let (bytes_before, bytes_after) = (original.len(), updated.len());
         staged.insert(resolved.display.clone(), Some(updated));
         file_versions.push(json!({
             "path": resolved.display,
@@ -431,7 +438,12 @@ pub(super) fn run_many(ctx: &ToolContext, args: &Value) -> Result<Value, Workspa
             "blast_radius_guard": "passed",
             "blast_radius": blast_radius
         }));
-        affected.push(json!({"path": resolved.display, "operation": "update"}));
+        affected.push(json!({
+            "path": resolved.display,
+            "operation": "update",
+            "bytes_before": bytes_before,
+            "bytes_after": bytes_after
+        }));
     }
 
     let preflight_finished = Instant::now();

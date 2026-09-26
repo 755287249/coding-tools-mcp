@@ -135,7 +135,12 @@ pub(super) fn run_patch(ctx: &ToolContext, args: &Value) -> Result<Value, Worksp
         if fp.is_deleted {
             diff.push_str(&unified_diff(&resolved.display, &original, "", false, true));
             staged.insert(resolved.display.clone(), None);
-            affected.push(json!({ "path": resolved.display, "operation": "delete" }));
+            affected.push(json!({
+                "path": resolved.display,
+                "operation": "delete",
+                "bytes_before": original.len(),
+                "bytes_after": 0
+            }));
             summaries.push(format!("D {}", resolved.display));
             file_versions.push(json!({
                 "path": resolved.display,
@@ -165,8 +170,14 @@ pub(super) fn run_patch(ctx: &ToolContext, args: &Value) -> Result<Value, Worksp
             fp.is_new_file,
             false,
         ));
+        let (bytes_before, bytes_after) = (original.len(), updated.len());
         staged.insert(resolved.display.clone(), Some(updated));
-        affected.push(json!({ "path": resolved.display, "operation": op }));
+        affected.push(json!({
+            "path": resolved.display,
+            "operation": op,
+            "bytes_before": bytes_before,
+            "bytes_after": bytes_after
+        }));
         summaries.push(format!(
             "{} {}",
             if op == "add" { "A" } else { "M" },

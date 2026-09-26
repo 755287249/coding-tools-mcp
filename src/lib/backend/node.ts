@@ -1,3 +1,4 @@
+import type { ActivitySnapshot } from "../api/activity";
 import type { WorkspaceProfile } from "../types";
 import { NODE_CAPABILITIES } from "./capabilities";
 import { CapabilityError, UnimplementedError } from "./errors";
@@ -403,6 +404,44 @@ export function createNodeBackend(deps: NodeBackendDeps = {}): FrontendBackend {
         );
         return mapTelemetry(workspaceId, payload);
       },
+    },
+
+    // The Node agent has no in-process live activity feed yet.
+    activity: {
+      async read(): Promise<ActivitySnapshot> {
+        return {
+          events: [],
+          rev: 0,
+          reset: true,
+          stats: {
+            total: 0,
+            success: 0,
+            errors: 0,
+            running: 0,
+            totalDurationMs: 0,
+            avgDurationMs: 0,
+            p95DurationMs: 0,
+            bytesIn: 0,
+            bytesOut: 0,
+            reads: 0,
+            edits: 0,
+            execs: 0,
+            searches: 0,
+            filesChanged: 0,
+            filesViewed: 0,
+            bytesAdded: 0,
+            bytesRemoved: 0,
+            linesAdded: 0,
+            linesRemoved: 0,
+            firstMs: 0,
+            lastMs: 0,
+          },
+        };
+      },
+      async detail() {
+        return null;
+      },
+      async clear() {},
     },
 
     history: {

@@ -7,10 +7,12 @@
   import Folder from "@lucide/svelte/icons/folder";
   import FolderPlus from "@lucide/svelte/icons/folder-plus";
   import LoaderCircle from "@lucide/svelte/icons/loader-circle";
+  import PanelRightOpen from "@lucide/svelte/icons/panel-right-open";
   import RefreshCw from "@lucide/svelte/icons/refresh-cw";
   import Settings2 from "@lucide/svelte/icons/settings-2";
   import Sparkles from "@lucide/svelte/icons/sparkles";
   import X from "@lucide/svelte/icons/x";
+  import ActivityDrawer from "$lib/components/activity/ActivityDrawer.svelte";
   import { pickDirectory } from "$lib/api/native";
   import { getWorkspaceSecret, setWorkspaceSecret } from "$lib/api/secrets";
   import { addWorkspaceFolder, listWorkspaces, removeWorkspaceFolder, updateWorkspace } from "$lib/api/workspaces";
@@ -30,6 +32,7 @@
     turnOff,
     turnOn,
   } from "$lib/stores/sessions";
+  import { activityPanelExpanded, activityPanelOpen } from "$lib/stores/activity-panel";
   import { showToast } from "$lib/stores/toast";
   import { uiMode } from "$lib/stores/ui-mode";
   import { workspaceFolders, type WorkspaceProfile } from "$lib/types";
@@ -279,10 +282,22 @@
   });
 </script>
 
+<div class="ad-host" class:has-drawer={$activityPanelOpen} class:is-wide={$activityPanelOpen && $activityPanelExpanded}>
 <section class="page-scroll sx-page">
   <div class="sx-card ax-glass">
     <header class="sx-head">
       <h2 class="sx-title">{profile.name}</h2>
+      {#if !$activityPanelOpen}
+        <button
+          type="button"
+          class="ad-open-btn"
+          title={$t("Task panel")}
+          aria-label={$t("Task panel")}
+          onclick={() => activityPanelOpen.set(true)}
+        >
+          <PanelRightOpen size={15} />
+        </button>
+      {/if}
     </header>
 
     <!-- Folders served by this MCP -->
@@ -411,3 +426,13 @@
     </button>
   </div>
 </section>
+{#if $activityPanelOpen}
+  <ActivityDrawer
+    workspaceId={id}
+    live={running}
+    expanded={$activityPanelExpanded}
+    onToggleExpanded={() => activityPanelExpanded.update((value) => !value)}
+    onClose={() => activityPanelOpen.set(false)}
+  />
+{/if}
+</div>

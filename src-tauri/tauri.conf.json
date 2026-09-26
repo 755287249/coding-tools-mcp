@@ -20,12 +20,7 @@
         "minHeight": 520,
         "decorations": false,
         "transparent": true,
-        "shadow": false,
-        "windowEffects": {
-          "effects": [
-            "acrylic"
-          ]
-        }
+        "shadow": false
       }
     ],
     "security": {

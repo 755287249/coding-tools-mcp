@@ -1,3 +1,4 @@
+pub(crate) mod activity;
 mod listener;
 mod server;
 mod session_activity;

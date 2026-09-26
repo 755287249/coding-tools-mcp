@@ -9,6 +9,7 @@ import type { SharedSecretKey, WorkspaceSecretKey } from "../api/secrets";
 import type { FrpProfileDto, FrpProfileInput, ProxyConfigDto } from "../api/settings";
 import type { DownloadConfig, SoftwareStatus } from "../api/software";
 import type { TelemetryResult } from "../api/telemetry";
+import type { ActivityEvent, ActivitySnapshot } from "../api/activity";
 import type { TunnelService, TunnelStatus, TunnelTestResult } from "../api/tunnel";
 import type { FrontendCapabilities } from "./capabilities";
 
@@ -113,6 +114,12 @@ export interface TelemetryBackend {
     options?: TelemetryQueryOptions,
     signal?: AbortSignal,
   ): Promise<TelemetryResult>;
+}
+
+export interface ActivityBackend {
+  read(workspaceId: string, sinceRev?: number): Promise<ActivitySnapshot>;
+  detail(workspaceId: string, seq: number): Promise<ActivityEvent | null>;
+  clear(workspaceId: string): Promise<void>;
 }
 
 export interface HistoryBackend {
@@ -389,6 +396,7 @@ export interface FrontendBackend {
   readonly workspaces: WorkspaceBackend;
   readonly settings: SettingsBackend;
   readonly telemetry: TelemetryBackend;
+  readonly activity: ActivityBackend;
   readonly history: HistoryBackend;
   readonly health: HealthBackend;
   readonly logs: LogsBackend;

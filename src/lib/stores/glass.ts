@@ -1,5 +1,5 @@
 import { browser } from "$app/environment";
-import { writable } from "svelte/store";
+import { derived, writable } from "svelte/store";
 
 /**
  * Translucent "glass" window support. The desktop window is frameless and
@@ -60,30 +60,74 @@ function initialBlur(): boolean {
   }
 }
 
+export type GlassEffectKind = "acrylic" | "blur";
+
 /**
- * Native acrylic blur behind the window. Acrylic can stutter while dragging on
- * some Windows 10 / early Windows 11 builds, so the user can switch it off.
+ * Which native backdrop is in use. window-vibrancy's acrylic goes through the
+ * legacy SetWindowCompositionAttribute API on Windows 10 and Windows 11 21H2
+ * (build < 22523), which makes window dragging stutter badly. On those builds we
+ * use the classic blur instead (smooth there); newer builds get the DWM system
+ * backdrop acrylic, which drags smoothly.
+ */
+export const glassEffect = writable<GlassEffectKind | null>(null);
+
+/** First Windows build where acrylic uses the smooth DWM system backdrop. */
+const DWM_ACRYLIC_BUILD = 22523;
+
+export function effectForBuild(build: number | null | undefined): GlassEffectKind {
+  if (typeof build !== "number" || !Number.isFinite(build) || build <= 0) return "acrylic";
+  return build >= DWM_ACRYLIC_BUILD ? "acrylic" : "blur";
+}
+
+let effectKind: Promise<GlassEffectKind> | null = null;
+
+function resolveEffectKind(): Promise<GlassEffectKind> {
+  effectKind ??= import("@tauri-apps/api/core")
+    .then(({ invoke }) => invoke<number | null>("get_windows_build"))
+    .then(effectForBuild)
+    .catch(() => "acrylic" as const)
+    .then((kind) => {
+      glassEffect.set(kind);
+      return kind;
+    });
+  return effectKind;
+}
+
+/**
+ * Native backdrop blur behind the window. It can be switched off entirely for
+ * the smoothest possible dragging on slow machines.
  */
 export const glassBlur = writable<boolean>(initialBlur());
 
-if (browser && isDesktopWindow()) {
-  let first = true;
+if (browser) {
   glassBlur.subscribe((enabled) => {
     try {
       localStorage.setItem(BLUR_KEY, enabled ? "1" : "0");
     } catch {
       // Ignore storage failures.
     }
-    // The window starts with acrylic from tauri.conf.json; skip the redundant first apply.
-    if (first && enabled) {
-      first = false;
-      return;
-    }
-    first = false;
-    void import("@tauri-apps/api/window")
-      .then(({ getCurrentWindow, Effect }) =>
-        enabled ? getCurrentWindow().setEffects({ effects: [Effect.Acrylic] }) : getCurrentWindow().clearEffects(),
-      )
+  });
+}
+
+/** The backdrop is only worth its cost when enabled and the tint is see-through. */
+const backdropWanted = derived(
+  [glassBlur, glassOpacity],
+  ([enabled, opacity]) => enabled && clamp(opacity) < GLASS_MAX,
+);
+
+if (browser && isDesktopWindow()) {
+  let applied: boolean | null = null;
+  backdropWanted.subscribe((wanted) => {
+    if (wanted === applied) return;
+    applied = wanted;
+    void Promise.all([import("@tauri-apps/api/window"), resolveEffectKind()])
+      .then(([{ getCurrentWindow, Effect }, kind]) => {
+        // A newer toggle may have landed while the build lookup was pending.
+        if (applied !== wanted) return;
+        return wanted
+          ? getCurrentWindow().setEffects({ effects: [kind === "acrylic" ? Effect.Acrylic : Effect.Blur] })
+          : getCurrentWindow().clearEffects();
+      })
       .catch(() => undefined);
   });
 }

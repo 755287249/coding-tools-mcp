@@ -118,8 +118,15 @@ pub(super) fn run(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceErr
                         false,
                     ));
                 }
+                let (bytes_before, bytes_after) =
+                    (before.as_ref().map_or(0, Vec::len), content.len());
                 staged.insert(resolved.display.clone(), Some(content));
-                affected.push(json!({"path": resolved.display, "operation": if resolved.existed {"update"} else {"add"}}));
+                affected.push(json!({
+                    "path": resolved.display,
+                    "operation": if resolved.existed { "update" } else { "add" },
+                    "bytes_before": bytes_before,
+                    "bytes_after": bytes_after
+                }));
             }
             "delete" => {
                 if is_critical_file(path) && security.require_write_confirmation && !confirm {
@@ -152,8 +159,14 @@ pub(super) fn run(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceErr
                         true,
                     ));
                 }
+                let bytes_before = before.len();
                 staged.insert(resolved.display.clone(), None);
-                affected.push(json!({"path": resolved.display, "operation": "delete"}));
+                affected.push(json!({
+                    "path": resolved.display,
+                    "operation": "delete",
+                    "bytes_before": bytes_before,
+                    "bytes_after": 0
+                }));
             }
             "copy" | "move" => {
                 let source = ws.resolve_existing(path)?;

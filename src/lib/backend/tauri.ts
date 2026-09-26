@@ -100,6 +100,14 @@ export function createTauriBackend(deps: TauriBackendDeps): FrontendBackend {
         }),
     },
 
+    activity: {
+      read: (workspaceId, sinceRev = 0) =>
+        invoke("read_workspace_activity", { id: workspaceId, sinceRev }),
+      detail: (workspaceId, seq) =>
+        invoke("read_workspace_activity_detail", { id: workspaceId, seq }),
+      clear: (workspaceId) => invoke("clear_workspace_activity", { id: workspaceId }),
+    },
+
     history: {
       list: (workspaceId, folderId) =>
         invoke("list_history_sessions", { id: workspaceId, folderId }),

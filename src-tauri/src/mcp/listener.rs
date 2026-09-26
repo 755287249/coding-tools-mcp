@@ -25,6 +25,7 @@ use crate::auth::{
     verify_bearer_header, verify_oauth_bearer_header, AuthorizeForm, AuthorizeParams, OAuthRuntime,
     TokenForm,
 };
+use crate::mcp::activity;
 use crate::mcp::server::{
     handle_request, handle_request_async, is_supported_protocol_version, permission_input_required,
     SharedState, LATEST_LEGACY_PROTOCOL_VERSION, LATEST_PROTOCOL_VERSION, MODERN_PROTOCOL_VERSION,
@@ -514,6 +515,14 @@ async fn mcp_post(
 
 async fn execute_rpc(mut context: RpcExecutionContext, body: Value, fast_path: bool) -> Value {
     let profile_id = context.state.workspace_id.clone();
+    let activity_seq = (!context.tool_name.is_empty()).then(|| {
+        activity::begin(
+            &profile_id,
+            &context.tool_name,
+            &context.argument_value,
+            context.request_json_bytes,
+        )
+    });
     let mcp = context.state.mcp.clone();
     let era_method_mismatch = (context.protocol_version == MODERN_PROTOCOL_VERSION
         && matches!(context.method.as_str(), "initialize" | "ping"))
@@ -570,6 +579,16 @@ async fn execute_rpc(mut context: RpcExecutionContext, body: Value, fast_path: b
                 };
                 if let Some(activity) = context.session_activity.as_mut() {
                     activity.complete(outcome, context.started_ts_ms.saturating_add(duration_ms));
+                }
+                if let Some(seq) = activity_seq {
+                    activity::finish(
+                        &profile_id,
+                        seq,
+                        outcome,
+                        duration_ms,
+                        Some(&response),
+                        None,
+                    );
                 }
                 record_tool_usage(ToolUsageInput {
                     profile_id: &profile_id,
@@ -643,6 +662,16 @@ async fn execute_rpc(mut context: RpcExecutionContext, body: Value, fast_path: b
             );
             if !context.tool_name.is_empty() {
                 let worker_error = error.to_string();
+                if let Some(seq) = activity_seq {
+                    activity::finish(
+                        &profile_id,
+                        seq,
+                        "worker_failed",
+                        duration_ms,
+                        None,
+                        Some(&worker_error),
+                    );
+                }
                 if let Some(activity) = context.session_activity.as_mut() {
                     activity.complete(
                         "worker_failed",
