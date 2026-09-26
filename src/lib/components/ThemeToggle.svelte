@@ -4,23 +4,30 @@
   import { onMount } from "svelte";
   import { t } from "$lib/i18n";
 
+  // The modern dark theme is the default; light is opt-in and remembered.
   let dark = $state(true);
 
   onMount(() => {
-    const stored = localStorage.getItem("theme");
-    if (stored === "light" || stored === "dark") {
-      dark = stored === "dark";
-    } else {
-      dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+    let stored: string | null = null;
+    try {
+      stored = localStorage.getItem("theme");
+    } catch {
+      stored = null;
     }
-    apply();
+    dark = stored !== "light";
+    apply(false);
   });
 
-  function apply() {
+  function apply(persist = true) {
     const theme = dark ? "dark" : "light";
     document.documentElement.setAttribute("data-theme", theme);
     document.documentElement.classList.toggle("dark", dark);
-    localStorage.setItem("theme", theme);
+    if (!persist) return;
+    try {
+      localStorage.setItem("theme", theme);
+    } catch {
+      // Ignore storage failures; the theme still applies for this session.
+    }
   }
 
   function toggle() {
@@ -31,13 +38,14 @@
 
 <button
   type="button"
-  class="inline-flex h-9 w-9 items-center justify-center rounded-[10px] border border-white/10 bg-white/5 text-[#c5d0ea] transition-colors hover:bg-white/10"
+  class="tx-icon-btn tx-icon-btn--bordered"
   onclick={toggle}
   aria-label={$t("Switch theme")}
+  title={$t(dark ? "Light theme" : "Dark theme")}
 >
   {#if dark}
-    <Sun size={16} />
+    <Sun size={15} />
   {:else}
-    <Moon size={16} />
+    <Moon size={15} />
   {/if}
 </button>

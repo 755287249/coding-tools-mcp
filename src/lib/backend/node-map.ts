@@ -72,6 +72,7 @@ export interface NodeSafeConfig {
     passwordConfigured: boolean;
     clientSecretConfigured: boolean;
     tokenSecretSource: string;
+    tokenTtlSeconds?: number;
   };
   policy: {
     allowedCommands: string[];
@@ -112,6 +113,7 @@ export interface NodeConfigUpdatePayload {
   sandbox: NodeSafeConfig["sandbox"];
   oauth: {
     clientId: string;
+    tokenTtlSeconds?: number;
     password: string;
     clientSecret: string;
     clearClientSecret: boolean;

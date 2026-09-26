@@ -19,15 +19,21 @@
 </script>
 
 <div class="tx-nav-item" class:active>
-  <button type="button" class="tx-nav-button" onclick={onClick}>
+  <button
+    type="button"
+    class="tx-nav-button"
+    onclick={onClick}
+    title={workspace.name}
+    aria-current={active ? "page" : undefined}
+  >
     {#if capabilities.actions}
       <ServiceStatusPair mcp={mcpState} actions={actionsState} />
     {:else}
       <StatusOrb state={mcpState} />
     {/if}
-    <span class="min-w-0 flex-1">
-      <span class="block truncate text-sm font-medium">{workspace.name}</span>
-      <span class="block truncate text-[11px] text-[var(--color-text-muted)]">
+    <span class="tx-sidebar-text min-w-0 flex-1">
+      <span class="block truncate text-[13px] font-medium leading-5">{workspace.name}</span>
+      <span class="tx-nav-meta block truncate text-[11px] leading-4">
         {$t("{count} folders", { count: folderCount })}
       </span>
     </span>

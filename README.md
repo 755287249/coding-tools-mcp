@@ -348,6 +348,16 @@ MCP 與 Actions 可以在同一工作區同時執行，也可以分別使用不�
 
 > 命令沙盒是 workspace 設定，預設關閉。關閉時執行邊界仍是 `policy_only`，`sandbox_enforced: false`。開啟後必須走選定的 OS 沙盒，不會偷偷退回政策層：Windows 主機資料夾可用 AppContainer（預設拒絕網路，可用 `appcontainer.network=internet` 放行）；WSL 資料夾請改用 Docker、Podman、Docker Sandboxes（sbx）或 WSL Containers。原生 Docker / Podman 用 ephemeral Linux 容器，網路預設 `none`，拒絕 `host`。可在「軟體管理」安裝或辨識 `docker`、`podman`、`sbx` 與 `wslc`；引擎啟動與 `podman machine` 需自行完成。檔案工具的 workspace 唯讀邊界與沙盒是分開的。
 
+## 自動編譯（最新 EXE 下載）
+
+每次推送到 `main`，GitHub Actions（`.github/workflows/auto-build.yml`）都會自動編譯 Windows 版本，並更新固定的預發佈版本 **`latest`**：
+
+- 發佈頁：<https://github.com/755287249/coding-tools-mcp/releases/tag/latest>
+- 安裝程式：<https://github.com/755287249/coding-tools-mcp/releases/download/latest/CodingToolsMCP-latest-setup.exe>
+- 便攜版：<https://github.com/755287249/coding-tools-mcp/releases/download/latest/CodingToolsMCP-latest-portable.exe>
+
+只修改 `docs/` 或 Markdown 文件不會觸發編譯；也可以在 Actions 頁面手動執行 “Auto Build (Windows EXE)”。
+
 ## 本機開發
 
 環境需求：Node.js 20+、Rust stable，以及目前系統的 [Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/)。

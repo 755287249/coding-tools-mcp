@@ -1,0 +1,151 @@
+name: Auto Build (Windows EXE)
+
+# 每次推送到 main 都会自动编译 Windows 安装包 + 便携版 EXE，
+# 并更新固定的预发布版本 `latest`，可直接在 Releases 页面下载：
+#   https://github.com/<owner>/<repo>/releases/tag/latest
+# 固定下载链接：
+#   .../releases/download/latest/CodingToolsMCP-latest-setup.exe
+#   .../releases/download/latest/CodingToolsMCP-latest-portable.exe
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - ".github/ISSUE_TEMPLATE/**"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: auto-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RELEASE_TAG: latest
+  SETUP_ASSET: CodingToolsMCP-latest-setup.exe
+  PORTABLE_ASSET: CodingToolsMCP-latest-portable.exe
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/setup@v2
+        with:
+          version: 12.0.0
+          install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: auto-build-windows
+
+      - name: 安装前端依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 检查版本同步
+        run: pnpm run version:check
+
+      - name: 检查前端
+        run: pnpm run check
+
+      - name: 构建 Windows NSIS 安装程序 + 可执行文件
+        run: pnpm run desktop:build:nsis
+
+      - name: 收集 EXE
+        id: collect
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./package.json').version")"
+          SHORT_SHA="${GITHUB_SHA::7}"
+          mkdir -p out
+
+          SETUP_EXE="$(ls src-tauri/target/release/bundle/nsis/*-setup.exe 2>/dev/null | head -n 1 || true)"
+          if [ -z "$SETUP_EXE" ]; then
+            SETUP_EXE="$(ls src-tauri/target/release/bundle/nsis/*.exe | head -n 1)"
+          fi
+          PORTABLE_EXE="src-tauri/target/release/coding-tools-mcp-desktop.exe"
+          test -f "$SETUP_EXE"
+          test -f "$PORTABLE_EXE"
+
+          cp "$SETUP_EXE" "out/${SETUP_ASSET}"
+          cp "$PORTABLE_EXE" "out/${PORTABLE_ASSET}"
+          (cd out && sha256sum *.exe > SHA256SUMS.txt)
+          cat out/SHA256SUMS.txt
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: 上传构建产物（Actions Artifact）
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-exe-${{ steps.collect.outputs.version }}-${{ steps.collect.outputs.short_sha }}
+          path: out/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: 更新预发布版本 latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ steps.collect.outputs.version }}
+          SHORT_SHA: ${{ steps.collect.outputs.short_sha }}
+        run: |
+          set -euo pipefail
+          BUILT_AT="$(date -u '+%Y-%m-%d %H:%M UTC')"
+          COMMIT_MSG="$(git log -1 --pretty=%s)"
+          cat > notes.md <<EOF
+          自动构建（每次推送到 \`main\` 都会更新此预发布版本）
+
+          - 版本：\`${VERSION}\`
+          - 提交：[\`${SHORT_SHA}\`](https://github.com/${GH_REPO}/commit/${GITHUB_SHA}) ${COMMIT_MSG}
+          - 构建时间：${BUILT_AT}
+          - 构建日志：https://github.com/${GH_REPO}/actions/runs/${GITHUB_RUN_ID}
+
+          | 文件 | 说明 |
+          | --- | --- |
+          | \`${SETUP_ASSET}\` | NSIS 安装程序（推荐） |
+          | \`${PORTABLE_ASSET}\` | 便携版单文件 EXE，无需安装（需要系统已安装 WebView2，Win10/11 通常自带） |
+          | \`SHA256SUMS.txt\` | 校验和 |
+          EOF
+
+          # 将 latest 标签移动到当前提交
+          git tag -f "$RELEASE_TAG" "$GITHUB_SHA"
+          git push -f origin "refs/tags/${RELEASE_TAG}"
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            # 删除旧附件后上传新附件
+            gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | while read -r asset; do
+              [ -n "$asset" ] && gh release delete-asset "$RELEASE_TAG" "$asset" --yes || true
+            done
+            gh release edit "$RELEASE_TAG" \
+              --title "Latest build ${VERSION} (${SHORT_SHA})" \
+              --notes-file notes.md \
+              --prerelease
+            gh release upload "$RELEASE_TAG" out/* --clobber
+          else
+            gh release create "$RELEASE_TAG" out/* \
+              --title "Latest build ${VERSION} (${SHORT_SHA})" \
+              --notes-file notes.md \
+              --prerelease \
+              --target "$GITHUB_SHA"
+          fi
+
+          echo "### ✅ 已更新预发布版本 \`${RELEASE_TAG}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "https://github.com/${GH_REPO}/releases/tag/${RELEASE_TAG}" >> "$GITHUB_STEP_SUMMARY"
