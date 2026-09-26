@@ -47,6 +47,8 @@
     workspaceFolders,
   } from "$lib/types";
   import { t } from "$lib/i18n";
+  import AutoWorkspaceView from "$lib/components/auto/AutoWorkspaceView.svelte";
+  import { uiMode } from "$lib/stores/ui-mode";
 
   type WorkspaceTab = "overview" | "history" | "telemetry" | "logs" | "health" | "features" | "mcp" | "actions" | "settings";
   type ServiceSection = "service" | "tunnel" | "auth" | "policy" | "logs" | "health";
@@ -747,7 +749,11 @@
   });
 </script>
 
-{#if profile && actions}
+{#if profile && $uiMode === "auto"}
+  {#key profile.id}
+    <AutoWorkspaceView {profile} onProfileChange={applyWorkspaceProfile} />
+  {/key}
+{:else if profile && actions}
   <section class="page-scroll">
     <header class="page-header">
       <div class="flex items-start justify-between gap-4">

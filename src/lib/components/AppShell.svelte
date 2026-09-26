@@ -3,11 +3,13 @@
   import PanelLeftClose from "@lucide/svelte/icons/panel-left-close";
   import PanelLeftOpen from "@lucide/svelte/icons/panel-left-open";
   import Sparkles from "@lucide/svelte/icons/sparkles";
+  import Plus from "@lucide/svelte/icons/plus";
   import SquareTerminal from "@lucide/svelte/icons/square-terminal";
   import LanguageSelect from "$lib/components/LanguageSelect.svelte";
   import ThemeToggle from "$lib/components/ThemeToggle.svelte";
   import { APP_VERSION } from "$lib/app-version";
   import { t } from "$lib/i18n";
+  import { uiMode } from "$lib/stores/ui-mode";
   import { onMount, type Snippet } from "svelte";
 
   interface Props {
@@ -77,22 +79,58 @@
           {/if}
         </button>
       </div>
-      {#if onQuickSetup}
+      <div class="tx-mode-switch" role="tablist" aria-label={$t("Interface mode")}>
         <button
           type="button"
-          class="tx-sidebar-action tx-sidebar-action--primary"
-          onclick={onQuickSetup}
-          title={$t("Quick setup")}
+          role="tab"
+          aria-selected={$uiMode === "auto"}
+          class:active={$uiMode === "auto"}
+          onclick={() => uiMode.set("auto")}
+          title={$t("Auto: one click, minimal settings")}
         >
-          <Sparkles size={15} aria-hidden="true" />
-          <span class="tx-sidebar-text">{$t("Quick setup")}</span>
+          {$t("Auto")}
         </button>
-      {/if}
-      {#if onAddWorkspace}
-        <button type="button" class="tx-sidebar-action" onclick={onAddWorkspace} title={$t("Add workspace")}>
-          <FolderPlus size={15} aria-hidden="true" />
-          <span class="tx-sidebar-text">{$t("Add workspace")}</span>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={$uiMode === "advanced"}
+          class:active={$uiMode === "advanced"}
+          onclick={() => uiMode.set("advanced")}
+          title={$t("Advanced: every tunnel, auth and policy option")}
+        >
+          {$t("Advanced")}
         </button>
+      </div>
+      {#if $uiMode === "auto"}
+        {#if onAddWorkspace}
+          <button
+            type="button"
+            class="tx-sidebar-action tx-sidebar-action--primary"
+            onclick={onAddWorkspace}
+            title={$t("New connection")}
+          >
+            <Plus size={15} aria-hidden="true" />
+            <span class="tx-sidebar-text">{$t("New connection")}</span>
+          </button>
+        {/if}
+      {:else}
+        {#if onQuickSetup}
+          <button
+            type="button"
+            class="tx-sidebar-action tx-sidebar-action--primary"
+            onclick={onQuickSetup}
+            title={$t("Quick setup")}
+          >
+            <Sparkles size={15} aria-hidden="true" />
+            <span class="tx-sidebar-text">{$t("Quick setup")}</span>
+          </button>
+        {/if}
+        {#if onAddWorkspace}
+          <button type="button" class="tx-sidebar-action" onclick={onAddWorkspace} title={$t("Add workspace")}>
+            <FolderPlus size={15} aria-hidden="true" />
+            <span class="tx-sidebar-text">{$t("Add workspace")}</span>
+          </button>
+        {/if}
       {/if}
     </div>
 
@@ -109,7 +147,7 @@
     </div>
 
     <div class="tx-sidebar-footer">
-      {#if settingsNav}
+      {#if settingsNav && $uiMode === "advanced"}
         <p class="tx-sidebar-section-label"><span>{$t("Settings")}</span></p>
         {@render settingsNav()}
       {/if}

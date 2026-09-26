@@ -147,7 +147,7 @@
         <div class="flex justify-end pt-1">
           <button
             type="submit"
-            class="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
+            class="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-medium text-[var(--primary-contrast)] disabled:opacity-50"
             disabled={!configChanged}
           >
             {$t("Save settings")}

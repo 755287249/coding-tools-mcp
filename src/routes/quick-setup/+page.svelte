@@ -322,7 +322,7 @@
             <span
               class="flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold"
               class:bg-[var(--primary)]={index <= currentStepIndex}
-              class:text-white={index <= currentStepIndex}
+              class:text-[var(--primary-contrast)]={index <= currentStepIndex}
               class:bg-[var(--color-surface-hover)]={index > currentStepIndex}
             >
               {#if index < currentStepIndex}<Check size={12} />{:else}{index + 1}{/if}

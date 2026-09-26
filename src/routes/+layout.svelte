@@ -21,6 +21,7 @@
   import { actionsRuntimeStates, mcpRuntimeStates, workspaces } from "$lib/stores/app";
   import { showToast } from "$lib/stores/toast";
   import { t } from "$lib/i18n";
+  import { connectionActions, uiMode } from "$lib/stores/ui-mode";
   import KeyRound from "@lucide/svelte/icons/key-round";
   import Network from "@lucide/svelte/icons/network";
   import Package from "@lucide/svelte/icons/package";
@@ -81,7 +82,8 @@
       return;
     }
     await refreshWorkspaces();
-    goto(appUrl(`/workspace/${profile.id}`));
+    const autostart = $uiMode === "auto" && capabilities.runtimeSupervisor ? "?autostart=1" : "";
+    goto(appUrl(`/workspace/${profile.id}${autostart}`));
   }
 
   async function addWorkspace() {
@@ -144,6 +146,8 @@
       showToast(String(error), { title: $t("Agent restart failed"), kind: "error", duration: 8000 });
     }
   }
+
+  connectionActions.newConnection = () => void addWorkspace();
 
   onMount(async () => {
     await refreshWorkspaces();

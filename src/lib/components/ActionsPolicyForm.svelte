@@ -98,7 +98,7 @@
   <div class="flex justify-end pt-1">
     <button
       type="submit"
-      class="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+      class="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-medium text-[var(--primary-contrast)] transition-opacity hover:opacity-90 disabled:opacity-50"
       disabled={saving || !dirty}
     >
       {saving ? $t("Saving…") : $t("Save policy")}
