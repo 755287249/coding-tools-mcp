@@ -319,8 +319,69 @@ pub(super) fn decode_process_output_with_encoding(
             .collect::<Vec<_>>();
         String::from_utf16_lossy(&units)
     } else {
-        String::from_utf8_lossy(bytes).into_owned()
+        decode_narrow_output(bytes)
     }
+}
+
+/// UTF-8 first; otherwise the console's legacy code page. Windows tools such
+/// as `cmd /c dir`, `ipconfig` or a piped Python write OEM/ANSI bytes (GBK on
+/// Chinese systems), which would otherwise come back as mojibake.
+fn decode_narrow_output(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => text.to_owned(),
+        Err(_) => decode_legacy_code_page(bytes)
+            .unwrap_or_else(|| String::from_utf8_lossy(bytes).into_owned()),
+    }
+}
+
+#[cfg(windows)]
+fn decode_legacy_code_page(bytes: &[u8]) -> Option<String> {
+    use windows::Win32::Globalization::{GetOEMCP, MultiByteToWideChar, MB_ERR_INVALID_CHARS};
+
+    fn strict(code_page: u32, bytes: &[u8]) -> Option<String> {
+        if bytes.is_empty() {
+            return Some(String::new());
+        }
+        if i32::try_from(bytes.len()).is_err() {
+            return None;
+        }
+        // SAFETY: both buffers are valid slices; the call only reads `bytes`
+        // and writes at most `wide.len()` UTF-16 units.
+        let needed = unsafe { MultiByteToWideChar(code_page, MB_ERR_INVALID_CHARS, bytes, None) };
+        if needed <= 0 {
+            return None;
+        }
+        let mut wide = vec![0u16; needed as usize];
+        let written =
+            unsafe { MultiByteToWideChar(code_page, MB_ERR_INVALID_CHARS, bytes, Some(&mut wide)) };
+        if written <= 0 {
+            return None;
+        }
+        wide.truncate(written as usize);
+        Some(String::from_utf16_lossy(&wide))
+    }
+
+    // SAFETY: GetOEMCP has no preconditions.
+    let code_page = unsafe { GetOEMCP() };
+    if code_page == 65001 {
+        return None;
+    }
+    strict(code_page, bytes).or_else(|| {
+        // A chunk may end in the middle of a double-byte character.
+        let (&last, rest) = bytes.split_last()?;
+        (last >= 0x80)
+            .then(|| strict(code_page, rest))
+            .flatten()
+            .map(|mut text| {
+                text.push('\u{FFFD}');
+                text
+            })
+    })
+}
+
+#[cfg(not(windows))]
+fn decode_legacy_code_page(_bytes: &[u8]) -> Option<String> {
+    None
 }
 
 pub(super) fn complete_output_boundary(bytes: &[u8], encoding: ProcessOutputEncoding) -> usize {

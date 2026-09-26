@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { JsonObject, ToolContext } from './types.js';
 import {
@@ -72,6 +72,32 @@ async function resolveWritable(root: string, relative: string): Promise<string> 
       throw new FileOpsError(error.code, error.message, error.category, error.retryable, error.details);
     }
     throw error;
+  }
+}
+
+/** Counts entries below a directory without following symlinks; refuses nested `.git` when protected. */
+async function countDirectoryEntries(full: string, relative: string, protectMetadata: boolean): Promise<number> {
+  let entries = 0;
+  const stack: Array<[string, string]> = [[full, relative.replace(/\/+$/, '')]];
+  while (stack.length) {
+    const [directory, rel] = stack.pop()!;
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      entries += 1;
+      const child = `${rel}/${entry.name}`;
+      if (protectMetadata && entry.name === '.git') {
+        throw new FileOpsError('PROTECTED_PATH', `Directory contains repository metadata and cannot be deleted with file_ops: ${child}`, 'security', false);
+      }
+      if (entry.isDirectory()) stack.push([path.join(directory, entry.name), child]);
+    }
+  }
+  return entries;
+}
+
+async function isDirectory(full: string): Promise<boolean> {
+  try {
+    return (await stat(full)).isDirectory();
+  } catch {
+    return false;
   }
 }
 
@@ -257,6 +283,8 @@ export async function fileOpsTool(ctx: ToolContext, key: string, args: JsonObjec
     const directories: PlannedDirectory[] = [];
     const affected: JsonObject[] = [];
     const touched = new Set<string>();
+    const deletedDirectories: Array<{ relative: string; full: string }> = [];
+    const warnings: string[] = [];
     let diff = '';
 
     for (let index = 0; index < operations.length; index += 1) {
@@ -289,6 +317,20 @@ export async function fileOpsTool(ctx: ToolContext, key: string, args: JsonObjec
         staged.set(relative, content);
         diff += simpleUnifiedDiff(relative, before, content);
         affected.push({ path: relative, operation: before ? 'update' : 'add' });
+        continue;
+      }
+
+      if (kind === 'delete' && await isDirectory(full)) {
+        if (!relative || relative === '.' || path.resolve(full) === path.resolve(root)) {
+          throw new FileOpsError('INVALID_ARGUMENT', 'Refusing to delete the workspace root', 'validation', false, { operation_index: index });
+        }
+        const entries = await countDirectoryEntries(full, relative, ctx.config.securityPolicy.protectRepositoryMetadata);
+        if (entries > 0 && args.confirm !== true) {
+          throw new FileOpsError('DANGEROUS_OPERATION_REQUIRES_CONFIRMATION', `Deleting a non-empty directory (${entries} entries) requires confirm=true: ${relative}`, 'permission', false, { path: relative, operation_index: index });
+        }
+        if (!touched.add(relative)) throw new FileOpsError('INVALID_ARGUMENT', `duplicate file_ops target: ${relative}`);
+        deletedDirectories.push({ relative, full });
+        affected.push({ path: relative, operation: 'delete_directory', entries });
         continue;
       }
 
@@ -325,6 +367,15 @@ export async function fileOpsTool(ctx: ToolContext, key: string, args: JsonObjec
       affected.push({ path: relative, destination, operation: kind });
     }
 
+    for (const directory of deletedDirectories) {
+      const prefix = `${directory.relative.replace(/\/+$/, '')}/`;
+      const inside = [...touched].some(item => item.startsWith(prefix))
+        || directories.some(item => item.relative === directory.relative || item.relative.startsWith(prefix));
+      if (inside) {
+        throw new FileOpsError('INVALID_ARGUMENT', `file_ops cannot touch paths inside a directory deleted in the same transaction: ${directory.relative}`);
+      }
+    }
+
     if (!dryRun) {
       if (ctx.config.securityPolicy.verifyWriteConflicts) await verifyVersions(root, versions);
       const committed = await commitStaged(root, staged, versions);
@@ -347,6 +398,30 @@ export async function fileOpsTool(ctx: ToolContext, key: string, args: JsonObjec
           rollback_failures: rollbackFailures
         });
       }
+      // Rename directories aside first (atomic; fails fast when a file inside is
+      // locked) so the whole transaction can still be rolled back.
+      const parked: Array<{ full: string; trash: string }> = [];
+      for (const directory of deletedDirectories) {
+        const trash = path.join(path.dirname(directory.full), `.${path.basename(directory.full)}.ctm-delete-${randomUUID().replaceAll('-', '')}`);
+        try {
+          await rename(directory.full, trash);
+          parked.push({ full: directory.full, trash });
+        } catch (error) {
+          for (const item of parked.reverse()) await rename(item.trash, item.full).catch(() => undefined);
+          for (const created of directories) if (!created.existed) await rmdir(created.full).catch(() => undefined);
+          const rollbackFailures = await restoreBackups(root, committed.backups);
+          throw new FileOpsError('FILE_OPS_APPLY_FAILED', `Failed to delete directory ${directory.relative} (a file inside may be in use); the transaction was rolled back`, 'runtime', true, {
+            error: error instanceof Error ? error.message : String(error),
+            rolled_back: [...committed.backups.keys()].filter(file => !rollbackFailures.includes(file)),
+            rollback_failures: rollbackFailures
+          });
+        }
+      }
+      for (const item of parked) {
+        await rm(item.trash, { recursive: true, force: true }).catch(error => {
+          warnings.push(`Directory ${item.full} was removed from the workspace, but cleaning up ${item.trash} failed: ${error instanceof Error ? error.message : String(error)}`);
+        });
+      }
     }
 
     const created = affected.filter(item => item.operation === 'add').map(item => String(item.path));
@@ -363,7 +438,8 @@ export async function fileOpsTool(ctx: ToolContext, key: string, args: JsonObjec
       files_created: created,
       files_modified: modified,
       files_deleted: deleted,
-      warnings: []
+      directories_deleted: deletedDirectories.map(item => item.relative),
+      warnings
     });
   } catch (error) {
     if (error instanceof FileOpsError) return fail(error);

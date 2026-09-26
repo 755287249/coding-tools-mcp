@@ -864,6 +864,48 @@ test('file_ops rolls back staged files when a later directory operation fails', 
   assert.equal(await pathExists(path.join(root, 'nested')), false);
 });
 
+test('file_ops deletes directories and requires confirm=true for non-empty trees', async () => {
+  const { root, ctx, meta } = await context();
+  await mkdir(path.join(root, 'empty'), { recursive: true });
+  await mkdir(path.join(root, 'tree', 'nested'), { recursive: true });
+  await writeFile(path.join(root, 'tree', 'a.txt'), 'a');
+  await writeFile(path.join(root, 'tree', 'nested', 'b.txt'), 'b');
+  await mkdir(path.join(root, 'vendor', 'lib', '.git'), { recursive: true });
+  await select(ctx, meta);
+
+  const empty = await callTool(ctx, 'file_ops', { operations: [{ type: 'delete', path: 'empty' }] }, meta);
+  assert.equal(empty.ok, true);
+  assert.deepEqual(empty.directories_deleted, ['empty']);
+  assert.equal(await pathExists(path.join(root, 'empty')), false);
+
+  const refused = await callTool(ctx, 'file_ops', { operations: [{ type: 'delete', path: 'tree' }] }, meta);
+  assert.equal(refused.ok, false);
+  assert.equal(refused.error.code, 'DANGEROUS_OPERATION_REQUIRES_CONFIRMATION');
+  assert.equal(await pathExists(path.join(root, 'tree', 'nested', 'b.txt')), true);
+
+  const overlap = await callTool(ctx, 'file_ops', {
+    confirm: true,
+    operations: [
+      { type: 'delete', path: 'tree' },
+      { type: 'create', path: 'tree/new.txt', content: 'x' }
+    ]
+  }, meta);
+  assert.equal(overlap.ok, false);
+  assert.equal(overlap.error.code, 'INVALID_ARGUMENT');
+
+  const protectedTree = await callTool(ctx, 'file_ops', { confirm: true, operations: [{ type: 'delete', path: 'vendor' }] }, meta);
+  assert.equal(protectedTree.ok, false);
+  assert.equal(protectedTree.error.code, 'PROTECTED_PATH');
+  assert.equal(await pathExists(path.join(root, 'vendor', 'lib', '.git')), true);
+
+  const deleted = await callTool(ctx, 'file_ops', { confirm: true, operations: [{ type: 'delete', path: 'tree' }] }, meta);
+  assert.equal(deleted.ok, true);
+  assert.equal(deleted.affected_files[0].operation, 'delete_directory');
+  assert.equal(deleted.affected_files[0].entries, 3);
+  assert.deepEqual(deleted.directories_deleted, ['tree']);
+  assert.equal(await pathExists(path.join(root, 'tree')), false);
+});
+
 test('file_ops enforces hashes, overwrite confirmation and protected paths', async () => {
   const { root, ctx, meta } = await context();
   await writeFile(path.join(root, 'package.json'), '{}\n');

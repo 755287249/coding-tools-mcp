@@ -2264,7 +2264,7 @@ export const rustCatalog: readonly ToolDefinition[] = [
       "readOnlyHint": false,
       "title": "File operations"
     },
-    "description": "Create, delete, copy, move, or create directories with transactional preflight.",
+    "description": "Create, delete (files or directories; non-empty directories need confirm=true), copy, move, or create directories with transactional preflight.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -5437,11 +5437,11 @@ export const rustToolAnnotationOverridesByProfile: Readonly<Record<ToolProfile, 
   "trusted-core": {}
 };
 export const rustToolsetRevisionByProfile: Readonly<Record<ToolProfile, string>> = {
-  "advanced": "a63a3dcecad4c58e",
+  "advanced": "3d6d7072c4a65e48",
   "read-only": "0a428588c2f8c57f",
-  "compat-readonly-all": "546245bb66231e38",
-  "guarded-core": "7f436310989a1db0",
-  "trusted-core": "1f8403a4182bf946"
+  "compat-readonly-all": "b9793cf3441d4719",
+  "guarded-core": "575f3062fee37b39",
+  "trusted-core": "a46b556387626b2d"
 };
 export const rustBehavioralParityFixtures: Readonly<Record<string, unknown>> = {
   "execution_limits": {

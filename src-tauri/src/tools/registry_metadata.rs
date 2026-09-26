@@ -250,7 +250,7 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
         "file_ops",
         "File operations",
-        "Create, delete, copy, move, or create directories with transactional preflight.",
+        "Create, delete (files or directories; non-empty directories need confirm=true), copy, move, or create directories with transactional preflight.",
         false,
         true,
         false,

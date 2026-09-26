@@ -1,7 +1,7 @@
 use super::hunk::apply_hunks;
 use super::parser::{Hunk, HunkLine};
 use super::support::sha256_hex;
-use super::{apply_patch, edit, edit_file, edit_many, patch_check};
+use super::{apply_patch, edit, edit_file, edit_many, file_ops, patch_check};
 use crate::tools::context::ToolContext;
 use serde_json::{json, Value};
 use tempfile::tempdir;
@@ -614,4 +614,101 @@ fn apply_patch_checks_expected_hash_and_returns_versions() {
             .len(),
         64
     );
+}
+
+#[test]
+fn file_ops_deletes_directories_with_confirmation_for_non_empty_trees() {
+    let (_workspace, _harness, context) = context_with_file();
+    let root = context.workspace.root().to_path_buf();
+    std::fs::create_dir_all(root.join("empty")).unwrap();
+    std::fs::create_dir_all(root.join("tree/nested")).unwrap();
+    std::fs::write(root.join("tree/a.txt"), "a").unwrap();
+    std::fs::write(root.join("tree/nested/b.txt"), "b").unwrap();
+
+    // An empty directory needs no confirmation.
+    let empty = file_ops(
+        &context,
+        &json!({"operations": [{"type": "delete", "path": "empty"}]}),
+    )
+    .expect("delete empty directory");
+    assert_eq!(empty["directories_deleted"], json!(["empty"]));
+    assert!(!root.join("empty").exists());
+
+    // A non-empty tree is refused without confirm=true and left untouched.
+    let refused = file_ops(
+        &context,
+        &json!({"operations": [{"type": "delete", "path": "tree"}]}),
+    )
+    .expect_err("non-empty directory needs confirm");
+    assert_eq!(
+        refused.to_error_value()["code"],
+        "DANGEROUS_OPERATION_REQUIRES_CONFIRMATION"
+    );
+    assert!(root.join("tree/nested/b.txt").is_file());
+
+    // Dry run reports the plan without deleting.
+    let planned = file_ops(
+        &context,
+        &json!({"operations": [{"type": "delete", "path": "tree"}], "confirm": true, "dry_run": true}),
+    )
+    .expect("dry run");
+    assert_eq!(
+        planned["affected_files"][0]["operation"],
+        "delete_directory"
+    );
+    assert_eq!(planned["affected_files"][0]["entries"], 3);
+    assert!(root.join("tree").is_dir());
+
+    let deleted = file_ops(
+        &context,
+        &json!({"operations": [{"type": "delete", "path": "tree"}], "confirm": true}),
+    )
+    .expect("delete tree");
+    assert_eq!(deleted["directories_deleted"], json!(["tree"]));
+    assert!(!root.join("tree").exists());
+    let leftovers = std::fs::read_dir(&root)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().contains("ctm-delete"))
+        .count();
+    assert_eq!(leftovers, 0);
+}
+
+#[test]
+fn file_ops_directory_delete_refuses_root_git_and_overlapping_operations() {
+    let (_workspace, _harness, context) = context_with_file();
+    let root = context.workspace.root().to_path_buf();
+    std::fs::create_dir_all(root.join("vendor/lib/.git")).unwrap();
+    std::fs::create_dir_all(root.join("build")).unwrap();
+    std::fs::write(root.join("build/out.txt"), "x").unwrap();
+
+    let root_error = file_ops(
+        &context,
+        &json!({"operations": [{"type": "delete", "path": "."}], "confirm": true}),
+    )
+    .expect_err("workspace root");
+    assert_eq!(root_error.to_error_value()["code"], "INVALID_ARGUMENT");
+
+    let git_error = file_ops(
+        &context,
+        &json!({"operations": [{"type": "delete", "path": "vendor"}], "confirm": true}),
+    )
+    .expect_err("nested repository metadata");
+    assert_eq!(git_error.to_error_value()["code"], "PROTECTED_PATH");
+    assert!(root.join("vendor/lib/.git").is_dir());
+
+    let overlap = file_ops(
+        &context,
+        &json!({
+            "operations": [
+                {"type": "delete", "path": "build"},
+                {"type": "create", "path": "build/new.txt", "content": "y"}
+            ],
+            "confirm": true
+        }),
+    )
+    .expect_err("overlapping paths");
+    assert_eq!(overlap.to_error_value()["code"], "INVALID_ARGUMENT");
+    assert!(root.join("build/out.txt").is_file());
+    assert!(!root.join("build/new.txt").exists());
 }

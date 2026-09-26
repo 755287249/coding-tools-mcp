@@ -26,7 +26,7 @@ const TEXT = {
     password: "Authorization password: ",
     bearer: "Auth header: ",
     multi: "Several project folders: call conversation_bootstrap first to pick one.",
-    fallback: "If your platform lacks MCP support, connect manually over HTTP.",
+    fallback: "If your platform lacks MCP support, connect manually over HTTP and send a User-Agent header (Cloudflare may block default script clients).",
   },
   "zh-CN": {
     intro: "连接 MCP 服务器并读取项目根目录：",
@@ -35,7 +35,7 @@ const TEXT = {
     password: "授权密码：",
     bearer: "认证头：",
     multi: "有多个项目目录：先调用 conversation_bootstrap 选择目录。",
-    fallback: "平台不支持 MCP 就用 HTTP 手动连接。",
+    fallback: "平台不支持 MCP 就用 HTTP 手动连接，请求需带 User-Agent 头（否则可能被 Cloudflare 拦截）。",
   },
   "zh-TW": {
     intro: "連接 MCP 伺服器並讀取專案根目錄：",
@@ -44,7 +44,7 @@ const TEXT = {
     password: "授權密碼：",
     bearer: "認證標頭：",
     multi: "有多個專案目錄：先呼叫 conversation_bootstrap 選擇目錄。",
-    fallback: "平台不支援 MCP 就用 HTTP 手動連接。",
+    fallback: "平台不支援 MCP 就用 HTTP 手動連接，請求需帶 User-Agent 標頭（否則可能被 Cloudflare 攔截）。",
   },
 } as const;
 

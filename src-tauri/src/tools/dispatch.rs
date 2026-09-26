@@ -108,7 +108,7 @@ fn policy_tool_err(
         ),
         "SHELL_MODE_REQUIRED" => (
             "shell_mode_required",
-            "Use an explicit shell mode for chaining, redirection, or expansion.",
+            "For &&, pipes, redirection or expansion set shell to \"cmd\" or \"powershell\" (Windows) or \"sh\"; otherwise run each command as a separate call.",
         ),
         _ => ("policy_rejected", "Correct the rejected arguments and retry."),
     };

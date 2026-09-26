@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -39,6 +40,7 @@ pub(super) fn run(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceErr
     let mut affected = Vec::new();
     let mut diffs = String::new();
     let mut touched = HashSet::new();
+    let mut deleted_dirs: Vec<(String, PathBuf)> = Vec::new();
 
     for (index, operation) in operations.iter().enumerate() {
         let kind = operation
@@ -135,9 +137,41 @@ pub(super) fn run(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceErr
                     )));
                 }
                 let resolved = ws.resolve_existing(path)?;
+                if resolved.path.is_dir() {
+                    if resolved.display.is_empty()
+                        || resolved.display == "."
+                        || resolved.path == ws.root()
+                    {
+                        return Err(WorkspaceError::invalid_argument(
+                            "Refusing to delete the workspace root",
+                        ));
+                    }
+                    let entries = count_directory_entries(
+                        &resolved.path,
+                        &resolved.display,
+                        security.protect_repository_metadata,
+                    )?;
+                    if entries > 0 && !confirm {
+                        return Err(dangerous_operation(format!(
+                            "Deleting a non-empty directory ({entries} entries) requires confirm=true: {path}"
+                        )));
+                    }
+                    if !touched.insert(resolved.display.clone()) {
+                        return Err(WorkspaceError::invalid_argument(format!(
+                            "duplicate file_ops target: {path}"
+                        )));
+                    }
+                    affected.push(json!({
+                        "path": resolved.display.clone(),
+                        "operation": "delete_directory",
+                        "entries": entries
+                    }));
+                    deleted_dirs.push((resolved.display, resolved.path));
+                    continue;
+                }
                 if !resolved.path.is_file() {
                     return Err(WorkspaceError::invalid_argument(format!(
-                        "delete target must be a file: {path}"
+                        "delete target must be a file or directory: {path}"
                     )));
                 }
                 if !touched.insert(resolved.display.clone()) {
@@ -264,6 +298,20 @@ pub(super) fn run(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceErr
         }
     }
 
+    for (display, _) in &deleted_dirs {
+        let prefix = format!("{}/", display.trim_end_matches('/'));
+        let inside = touched.iter().any(|path| path.starts_with(&prefix))
+            || directories
+                .iter()
+                .any(|(path, _, _)| path == display || path.starts_with(&prefix));
+        if inside {
+            return Err(WorkspaceError::invalid_argument(format!(
+                "file_ops cannot touch paths inside a directory deleted in the same transaction: {display}"
+            )));
+        }
+    }
+
+    let mut warnings = Vec::new();
     if !dry_run && security.verify_write_conflicts {
         for (path, expected) in &versions {
             verify_file_version(ws, path, expected.as_deref())?;
@@ -280,6 +328,35 @@ pub(super) fn run(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceErr
                     return Err(patch_failed(format!("Failed to create directory: {error}")));
                 }
                 created_dirs.push(path.clone());
+            }
+        }
+        // Directories are renamed aside first (atomic, fails fast when a file
+        // inside is locked), so everything can still be rolled back; the
+        // renamed trees are removed only after every rename succeeded.
+        let mut parked: Vec<(PathBuf, PathBuf)> = Vec::new();
+        for (display, path) in &deleted_dirs {
+            let trash = trash_path_for(path);
+            if let Err(error) = fs::rename(path, &trash) {
+                for (original, moved) in parked.iter().rev() {
+                    let _ = fs::rename(moved, original);
+                }
+                for created in created_dirs.iter().rev() {
+                    let _ = fs::remove_dir(created);
+                }
+                restore_backups(&backups);
+                return Err(patch_failed(format!(
+                    "Failed to delete directory {display} (a file inside may be in use): {error}"
+                )));
+            }
+            parked.push((path.clone(), trash));
+        }
+        for (original, trash) in &parked {
+            if let Err(error) = fs::remove_dir_all(trash) {
+                warnings.push(format!(
+                    "Directory {} was removed from the workspace, but cleaning up {} failed: {error}",
+                    original.display(),
+                    trash.display()
+                ));
             }
         }
     }
@@ -299,6 +376,10 @@ pub(super) fn run(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceErr
         .filter(|v| v["operation"] == "delete")
         .filter_map(|v| v["path"].as_str().map(str::to_string))
         .collect::<Vec<_>>();
+    let directories_deleted = deleted_dirs
+        .iter()
+        .map(|(display, _)| display.clone())
+        .collect::<Vec<_>>();
     Ok(tool_ok(json!({
         "dry_run": dry_run,
         "preflight": true,
@@ -310,8 +391,55 @@ pub(super) fn run(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceErr
         "files_created": created,
         "files_modified": modified,
         "files_deleted": deleted,
-        "warnings": []
+        "directories_deleted": directories_deleted,
+        "warnings": warnings
     })))
+}
+
+/// Counts everything below `root` (symlinks are not followed). Refuses when
+/// repository metadata (`.git`) is nested anywhere inside and protected.
+fn count_directory_entries(
+    root: &Path,
+    display: &str,
+    protect_repository_metadata: bool,
+) -> Result<usize, WorkspaceError> {
+    let mut entries = 0usize;
+    let mut stack = vec![(
+        root.to_path_buf(),
+        display.trim_end_matches('/').to_string(),
+    )];
+    while let Some((dir, rel)) = stack.pop() {
+        let listing = fs::read_dir(&dir).map_err(|e| patch_failed(e.to_string()))?;
+        for entry in listing {
+            let entry = entry.map_err(|e| patch_failed(e.to_string()))?;
+            entries += 1;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let child = format!("{rel}/{name}");
+            if protect_repository_metadata && name == ".git" {
+                return Err(WorkspaceError::Tool {
+                    code: "PROTECTED_PATH",
+                    message: format!(
+                        "Directory contains repository metadata and cannot be deleted with file_ops: {child}"
+                    ),
+                    category: "security",
+                    retryable: false,
+                });
+            }
+            let file_type = entry.file_type().map_err(|e| patch_failed(e.to_string()))?;
+            if file_type.is_dir() {
+                stack.push((entry.path(), child));
+            }
+        }
+    }
+    Ok(entries)
+}
+
+fn trash_path_for(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    path.with_file_name(format!(".{name}.ctm-delete-{}", Uuid::new_v4().simple()))
 }
 
 fn check_operation_hash(
