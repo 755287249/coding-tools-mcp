@@ -61,6 +61,15 @@ pub fn set_workspace_secret(
 ) -> AppResult<()> {
     validate_key(&key)?;
     ensure_workspace_exists(&state, &id)?;
+    // Accept the full `cloudflared service install <token>` command from the dashboard.
+    let value = if matches!(
+        key.as_str(),
+        "cloudflare_token" | "actions_cloudflare_token"
+    ) {
+        crate::tunnel::normalize_cloudflare_token(&value)
+    } else {
+        value
+    };
     state.with_data(|store| store.set_workspace_secret(&id, &key, &value))
 }
 

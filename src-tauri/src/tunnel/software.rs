@@ -27,7 +27,9 @@ use crate::tools::sandbox::{
     discovered_wslc_program,
 };
 use crate::tunnel::cloudflare::resolve_cloudflared;
-use crate::tunnel::cloudflare::{cached_cloudflared_path, download_cloudflared_to_cache};
+use crate::tunnel::cloudflare::{
+    cached_cloudflared_path, cached_cloudflared_state, download_cloudflared_to_cache,
+};
 use crate::tunnel::frp::{cached_frpc_path, download_frpc_to_cache, resolve_frpc};
 
 #[cfg(windows)]
@@ -67,6 +69,11 @@ pub struct SoftwareStatus {
     pub hint: String,
     /// User-run follow-up steps after a successful install. Never executed by the app.
     pub next_steps: String,
+    /// Known version of the resolved binary (empty when unknown).
+    pub version: String,
+    /// True when the app-managed copy is older than the pinned release and
+    /// should be updated before use (Cloudflare rejects year-old connectors).
+    pub outdated: bool,
 }
 
 fn frpc_status() -> SoftwareStatus {
@@ -87,6 +94,8 @@ fn frpc_status() -> SoftwareStatus {
         group: "tunnel".into(),
         installable: !installed || managed,
         hint: "Built-in WSS 以外的 FRP 通道需要此用戶端。".into(),
+        version: String::new(),
+        outdated: false,
         next_steps: String::new(),
     }
 }
@@ -99,6 +108,11 @@ fn cloudflared_status() -> SoftwareStatus {
         (None, Some(found)) => (found.clone(), false, true),
         (None, None) => (PathBuf::new(), false, false),
     };
+    let (version, outdated) = if managed {
+        cached_cloudflared_state(&path)
+    } else {
+        (String::new(), false)
+    };
     SoftwareStatus {
         kind: "cloudflared".into(),
         name: "Cloudflare Tunnel (cloudflared)".into(),
@@ -108,6 +122,8 @@ fn cloudflared_status() -> SoftwareStatus {
         group: "tunnel".into(),
         installable: !installed || managed,
         hint: "Cloudflare Quick / Named Tunnel 需要此用戶端。".into(),
+        version,
+        outdated,
         next_steps: String::new(),
     }
 }
@@ -134,6 +150,8 @@ fn sbx_status() -> SoftwareStatus {
         } else {
             "Linux 請用官方套件管理員安裝 docker-sbx。登入請之後自行執行 sbx login。".into()
         },
+        version: String::new(),
+        outdated: false,
         next_steps: if installed {
             SBX_LOGIN_GUIDANCE.into()
         } else {
@@ -168,6 +186,8 @@ fn docker_status() -> SoftwareStatus {
         } else {
             "Linux 請用發行版套件管理員安裝 Docker Engine。".into()
         },
+        version: String::new(),
+        outdated: false,
         next_steps: if installed {
             DOCKER_START_GUIDANCE.into()
         } else {
@@ -198,6 +218,8 @@ fn podman_status() -> SoftwareStatus {
         } else {
             "Linux 請用發行版套件管理員安裝 Podman。".into()
         },
+        version: String::new(),
+        outdated: false,
         next_steps: if installed {
             PODMAN_MACHINE_GUIDANCE.into()
         } else {
@@ -224,6 +246,8 @@ fn wslc_status() -> SoftwareStatus {
         } else {
             "WSL Containers 只在 Windows 上提供。".into()
         },
+        version: String::new(),
+        outdated: false,
         next_steps: String::new(),
     }
 }

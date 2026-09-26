@@ -85,7 +85,10 @@ export async function refreshSession(id: string): Promise<void> {
   }
 }
 
-async function ensureTunnelReady(current: WorkspaceProfile): Promise<WorkspaceProfile> {
+async function ensureTunnelReady(
+  current: WorkspaceProfile,
+  onPhase: (phase: MessageKey) => void = () => {},
+): Promise<WorkspaceProfile> {
   const canInstall = getBackend().capabilities.softwareManagement;
   let next = current;
   if (!tunnelUsable(next)) {
@@ -106,7 +109,15 @@ async function ensureTunnelReady(current: WorkspaceProfile): Promise<WorkspacePr
   if (next.tunnel.type === "cloudflare" && canInstall) {
     const software = await listSoftware();
     const cloudflared = software.find((item) => item.kind === "cloudflared");
-    if (!cloudflared?.installed) await installSoftware("cloudflared");
+    if (!cloudflared?.installed) {
+      await installSoftware("cloudflared");
+    } else if (cloudflared.outdated) {
+      // Cloudflare rejects connectors older than about a year, so refresh the
+      // app-managed copy first. A failed update is not fatal: the backend
+      // keeps using the old binary and notes it in the tunnel log.
+      onPhase("Updating cloudflared…");
+      await installSoftware("cloudflared").catch(() => undefined);
+    }
   }
   if (next.tunnel.type === "cloudflare" && next.tunnel.cloudflare_mode === "named") {
     const token = (await getWorkspaceSecret(next.id, "cloudflare_token").catch(() => null))?.trim();
@@ -150,7 +161,7 @@ export async function turnOn(id: string): Promise<void> {
   try {
     const profile = get(workspaces).find((item) => item.id === id) ?? (await refreshWorkspaceList(id));
     if (!profile) throw new Error("workspace not found");
-    const prepared = await ensureTunnelReady(profile);
+    const prepared = await ensureTunnelReady(profile, (phase) => patch(id, { phase }));
 
     patch(id, { phase: "Starting the service…" });
     const started = await startService(id);

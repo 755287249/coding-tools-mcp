@@ -10,6 +10,10 @@ export interface SoftwareStatus {
   installable?: boolean;
   hint?: string;
   nextSteps?: string;
+  /** Known version of the resolved binary (empty when unknown). */
+  version?: string;
+  /** App-managed copy is older than the pinned release; update before use. */
+  outdated?: boolean;
 }
 
 export interface DownloadConfig {

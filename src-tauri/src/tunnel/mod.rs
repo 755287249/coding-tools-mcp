@@ -16,7 +16,8 @@ pub use access::{
 
 #[allow(unused_imports)]
 pub use cloudflare::{
-    extract_trycloudflare_url, resolve_cloudflared, spawn_cloudflare_tunnel, stop_child,
+    cloudflare_token_tunnel_id, extract_trycloudflare_url, normalize_cloudflare_token,
+    resolve_cloudflared, spawn_cloudflare_tunnel, stop_child,
 };
 #[allow(unused_imports)]
 pub use frp::{actions_frp_snippet, mcp_frp_snippet};

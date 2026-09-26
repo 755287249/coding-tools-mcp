@@ -1709,6 +1709,14 @@ export const MESSAGES = {
   "Temporary tunnel": ["Temporary tunnel", "臨時通道", "临时隧道", "一時トンネル"],
   "Fixed domain": ["Fixed domain", "固定網域", "固定域名", "固定ドメイン"],
   "Preparing the tunnel…": ["Preparing the tunnel…", "正在準備通道…", "正在准备隧道…", "トンネルを準備中…"],
+  "Updating cloudflared…": ["Updating cloudflared…", "正在更新 cloudflared…", "正在更新 cloudflared…", "cloudflared を更新中…"],
+  "Updating…": ["Updating…", "更新中…", "更新中…", "更新中…"],
+  "This version is outdated. Update it before starting a tunnel.": [
+    "This version is outdated. Update it before starting a tunnel.",
+    "此版本已過舊，啟動通道前請先更新。",
+    "此版本已过旧，启动隧道前请先更新。",
+    "このバージョンは古くなっています。トンネルを開始する前に更新してください。",
+  ],
   "Starting the service…": ["Starting the service…", "正在啟動服務…", "正在启动服务…", "サービスを起動中…"],
   "Connecting the public tunnel…": ["Connecting the public tunnel…", "正在連接公網通道…", "正在连接公网隧道…", "公開トンネルに接続中…"],
   "Enter the Tunnel Token and the domain first.": ["Enter the Tunnel Token and the domain first.", "請先填寫 Tunnel Token 和網域。", "请先填写 Tunnel Token 和域名。", "先に Tunnel Token とドメインを入力してください。"],
@@ -1776,6 +1784,10 @@ export const MESSAGES = {
   "View image": ["View image", "查看圖片", "查看图片", "画像を表示"],
   "Wait": ["Wait", "等待", "等待", "待機"],
   "Waiting for AI activity…": ["Waiting for AI activity…", "等待 AI 活動…", "等待 AI 操作…", "AI の操作を待っています…"],
+  "This is not a Cloudflare Tunnel token. Paste the token or the whole install command from the dashboard.": ["This is not a Cloudflare Tunnel token. Paste the token or the whole install command from the dashboard.", "這不是 Cloudflare Tunnel Token。請貼上 Token，或控制台中的整行安裝命令。", "这不是 Cloudflare Tunnel Token。请粘贴 Token，或控制台中的整行安装命令。", "Cloudflare Tunnel トークンではありません。トークンまたはダッシュボードのインストールコマンド全体を貼り付けてください。"],
+  "Tunnel Token, or the whole install command": ["Tunnel Token, or the whole install command", "Tunnel Token，或整行安裝命令", "Tunnel Token，或整行安装命令", "Tunnel トークン、またはインストールコマンド全体"],
+  "Tunnel token recognized": ["Tunnel token recognized", "已識別 Tunnel Token", "已识别 Tunnel Token", "Tunnel トークンを認識しました"],
+  "This does not look like a Cloudflare Tunnel token.": ["This does not look like a Cloudflare Tunnel token.", "這看起來不像 Cloudflare Tunnel Token。", "这看起来不像 Cloudflare Tunnel Token。", "Cloudflare Tunnel トークンではないようです。"],
 } as const;
 
 export type MessageKey = keyof typeof MESSAGES;

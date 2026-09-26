@@ -170,7 +170,11 @@
               <p class="font-mono text-xs text-[var(--color-text-muted)]">
                 {s.installed ? s.path : $t("Not installed")}
                 · {s.managed ? $t("Managed") : $t("System installation")}
+                {#if s.version}{` · v${s.version}`}{/if}
               </p>
+              {#if s.installed && s.outdated}
+                <p class="mt-1 text-xs leading-5 text-amber-400">{$t("This version is outdated. Update it before starting a tunnel.")}</p>
+              {/if}
               {#if s.hint}
                 <p class="mt-1 text-xs leading-5 text-[var(--color-text-muted)]">{s.hint}</p>
               {/if}
@@ -180,6 +184,16 @@
             </div>
             <div class="flex shrink-0 gap-2">
               {#if s.installed}
+                {#if s.managed && s.outdated}
+                  <button
+                    type="button"
+                    class="text-xs text-[var(--color-accent)] hover:underline disabled:opacity-50"
+                    disabled={installing === s.kind}
+                    onclick={() => install(s.kind)}
+                  >
+                    {installing === s.kind ? $t("Updating…") : $t("Update")}
+                  </button>
+                {/if}
                 {#if s.managed}
                   <button
                     type="button"

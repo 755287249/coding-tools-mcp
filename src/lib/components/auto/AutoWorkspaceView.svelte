@@ -17,6 +17,7 @@
   import { getWorkspaceSecret, setWorkspaceSecret } from "$lib/api/secrets";
   import { addWorkspaceFolder, listWorkspaces, removeWorkspaceFolder, updateWorkspace } from "$lib/api/workspaces";
   import { getBackend, loadMcpAuthSecrets } from "$lib/backend";
+  import { cloudflareTokenTunnelId, normalizeCloudflareToken } from "$lib/connect/cloudflare-token";
   import { buildConnectionPrompt, isTemporaryEndpoint } from "$lib/connect/prompt";
   import { locale, t } from "$lib/i18n";
   import { workspaces } from "$lib/stores/app";
@@ -87,6 +88,18 @@
   const kind = $derived<TunnelKind>(modeView ?? configuredKind);
   const switchOn = $derived(working ? session.phase !== "Stopping…" : running);
   const busy = $derived(working || saving);
+  const tokenTunnelId = $derived(namedToken.trim() ? cloudflareTokenTunnelId(namedToken) : null);
+
+  /** Strip a pasted `cloudflared service install …` / `--token …` command down to the token. */
+  function onTokenInput(event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    const cleaned = normalizeCloudflareToken(input.value);
+    // Only rewrite once a real token is recognized, so typing is never disturbed.
+    if (cleaned !== input.value && cloudflareTokenTunnelId(cleaned)) {
+      input.value = cleaned;
+    }
+    namedToken = input.value;
+  }
 
   function applyProfiles(items: WorkspaceProfile[]) {
     workspaces.set(items);
@@ -158,14 +171,19 @@
       localError = $t("Enter a domain such as mcp.example.com.");
       return;
     }
-    if (!namedToken.trim() && !namedTokenSaved) {
+    const token = normalizeCloudflareToken(namedToken);
+    if (token && !cloudflareTokenTunnelId(token)) {
+      localError = $t("This is not a Cloudflare Tunnel token. Paste the token or the whole install command from the dashboard.");
+      return;
+    }
+    if (!token && !namedTokenSaved) {
       localError = $t("Enter the Tunnel Token and the domain first.");
       return;
     }
     saving = true;
     try {
-      if (namedToken.trim()) {
-        await setWorkspaceSecret(id, "cloudflare_token", namedToken.trim());
+      if (token) {
+        await setWorkspaceSecret(id, "cloudflare_token", token);
         namedTokenSaved = true;
         namedToken = "";
       }
@@ -385,9 +403,19 @@
           class="tx-input"
           type="password"
           autocomplete="off"
-          placeholder={namedTokenSaved ? $t("Token saved — leave empty to keep it") : $t("Cloudflare Tunnel Token")}
-          bind:value={namedToken}
+          placeholder={namedTokenSaved ? $t("Token saved — leave empty to keep it") : $t("Tunnel Token, or the whole install command")}
+          value={namedToken}
+          oninput={onTokenInput}
         />
+        {#if namedToken.trim()}
+          <p class="sx-token-check" class:is-ok={Boolean(tokenTunnelId)}>
+            {#if tokenTunnelId}
+              <Check size={12} /> {$t("Tunnel token recognized")} · <span class="tx-mono">{tokenTunnelId.slice(0, 8)}…</span>
+            {:else}
+              {$t("This does not look like a Cloudflare Tunnel token.")}
+            {/if}
+          </p>
+        {/if}
         <input class="tx-input" type="text" autocomplete="off" placeholder="mcp.example.com" bind:value={namedDomain} />
         <button type="submit" class="tx-btn-ghost" disabled={saving}>
           {#if saving}<LoaderCircle size={13} class="animate-spin" />{/if}

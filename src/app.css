@@ -3360,3 +3360,16 @@ html:has(.ad-drawer) .gc-pill {
   right: auto;
   left: 234px;
 }
+
+.sx-token-check {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: -2px 2px 0;
+  font-size: 11.5px;
+  color: var(--warning);
+}
+
+.sx-token-check.is-ok {
+  color: var(--success);
+}

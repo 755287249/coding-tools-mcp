@@ -113,7 +113,8 @@ fn cloudflared_release_asset() -> AppResult<&'static str> {
     #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
     {
         Err(AppError::Message(
-            "cloudflared 2025.6.1 未发布可校验的 Windows ARM64 自动下载资产，请使用系统安装的 cloudflared。".into(),
+            "cloudflared 未发布可校验的 Windows ARM64 自动下载资产，请使用系统安装的 cloudflared。"
+                .into(),
         ))
     }
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -147,25 +148,27 @@ fn cloudflared_release_asset() -> AppResult<&'static str> {
     }
 }
 
-/// Latest cloudflared release. Pinned for reproducibility; bump as needed.
-const CLOUDFLARED_VERSION: &str = "2025.6.1";
+/// Pinned cloudflared release (with fixed SHA-256 below). Cloudflare stops
+/// supporting connectors more than a year behind the latest release, so keep
+/// this current; cached copies older than this are replaced automatically.
+pub(crate) const CLOUDFLARED_VERSION: &str = "2026.9.3";
 
 fn expected_cloudflared_sha256(asset: &str) -> AppResult<&'static str> {
     match asset {
         "cloudflared-windows-amd64.exe" => {
-            Ok("a4af4d26a86ed48f43647d151be37b0907f15c3ac230f0ab95aa226b3e0b8803")
+            Ok("f096265ec2fcbe9bb6e2d64268db167ced3fcbb83d894bdb9e2fcdb26f2ea7e2")
         }
         "cloudflared-linux-amd64" => {
-            Ok("103ff020ffcc4ad6b542948b95ecff417150c70a17bff3a39ac2670b4159c9bb")
+            Ok("77e26d8d900e0b8469f416239d14b5f296525fdf79fee6f511ef55609e3fbac2")
         }
         "cloudflared-linux-arm64" => {
-            Ok("87a38f8b0c371b926224a1346443096a8b9f38138561e0b314efa4c9fc1f51f7")
+            Ok("aaeb2d7d0da3614634c7e03ab13487a1522c2e79165ed2929cfe23d5e95b326d")
         }
         "cloudflared-darwin-amd64.tgz" => {
-            Ok("b81b684ff28bd614d048559ba5e45892fb9cdb69347ca83c418dd4386b6e4735")
+            Ok("d1155d0837487f261183b15c1eab6c4ebcad9dc49b94675f1524c3564cea3977")
         }
         "cloudflared-darwin-arm64.tgz" => {
-            Ok("9cc4c04b3cec473c3bf4342a7b5b6628358953e568fd4682aadb390bac85a23a")
+            Ok("587c2cfb1c230fe36c7fa7727da78be459dae028cabe8c001291999350f07095")
         }
         _ => Err(AppError::Message(format!(
             "cloudflared {CLOUDFLARED_VERSION} 资产缺少固定 SHA-256：{asset}"
@@ -188,6 +191,27 @@ fn verify_cloudflared_download(asset: &str, bytes: &[u8]) -> AppResult<()> {
 /// configured mirror + proxy. Windows/Linux assets are raw binaries; macOS
 /// assets are `.tgz` archives that need extraction.
 pub(crate) async fn download_cloudflared_to_cache() -> AppResult<PathBuf> {
+    let result = download_cloudflared_inner().await;
+    if let Ok(mut last) = LAST_DOWNLOAD_FAILURE.lock() {
+        *last = result.is_err().then(std::time::Instant::now);
+    }
+    result
+}
+
+/// When the last download failed; automatic updates back off for a while so a
+/// blocked network does not delay every tunnel start by the download timeout.
+static LAST_DOWNLOAD_FAILURE: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+const DOWNLOAD_RETRY_BACKOFF: Duration = Duration::from_secs(600);
+
+fn download_recently_failed() -> bool {
+    LAST_DOWNLOAD_FAILURE
+        .lock()
+        .ok()
+        .and_then(|last| *last)
+        .is_some_and(|at| at.elapsed() < DOWNLOAD_RETRY_BACKOFF)
+}
+
+async fn download_cloudflared_inner() -> AppResult<PathBuf> {
     let settings = crate::settings::AppSettings::load_or_default();
     let asset = cloudflared_release_asset()?;
     let url = format!(
@@ -203,26 +227,223 @@ pub(crate) async fn download_cloudflared_to_cache() -> AppResult<PathBuf> {
         crate::tunnel::download::download_release_asset(&settings, &url, "cloudflared").await?;
     verify_cloudflared_download(asset, &bytes)?;
 
+    // Write next to the target first, then swap it in. On Windows a running
+    // cloudflared.exe (e.g. another workspace's tunnel) cannot be overwritten
+    // but can be renamed, so the old binary is moved aside instead.
+    let staging = dest.with_file_name(format!("{}.download", cloudflared_binary_name()));
+    let _ = std::fs::remove_file(&staging);
     if asset.ends_with(".tgz") {
-        extract_cloudflared_from_tar_gz(&bytes, &dest)?;
+        extract_cloudflared_from_tar_gz(&bytes, &staging)?;
     } else {
-        std::fs::write(&dest, &bytes)?;
+        std::fs::write(&staging, &bytes)?;
     }
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if let Ok(meta) = std::fs::metadata(&dest) {
+        if let Ok(meta) = std::fs::metadata(&staging) {
             let mut perms = meta.permissions();
             perms.set_mode(0o755);
-            let _ = std::fs::set_permissions(&dest, perms);
+            let _ = std::fs::set_permissions(&staging, perms);
         }
     }
+
+    swap_in_cloudflared(&staging, &dest)?;
+    let _ = std::fs::write(cloudflared_version_marker(&dest), CLOUDFLARED_VERSION);
 
     if dest.is_file() {
         Ok(dest)
     } else {
         Err(AppError::Message("cloudflared 自动安装失败。".into()))
+    }
+}
+
+fn cloudflared_version_marker(binary: &Path) -> PathBuf {
+    binary.with_file_name("cloudflared.version")
+}
+
+/// Replace `dest` with `staging`, moving a busy old binary out of the way.
+fn swap_in_cloudflared(staging: &Path, dest: &Path) -> AppResult<()> {
+    let dir = dest.parent().map(Path::to_path_buf).unwrap_or_default();
+    // Best-effort cleanup of binaries retired by earlier updates.
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("cloudflared") && name.contains(".old") {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    if dest.exists() && std::fs::remove_file(dest).is_err() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let retired = dir.join(format!("{}.old-{stamp}", cloudflared_binary_name()));
+        std::fs::rename(dest, &retired).map_err(|err| {
+            AppError::Message(format!(
+                "无法替换旧版 cloudflared（{}）：{err}",
+                dest.display()
+            ))
+        })?;
+    }
+    std::fs::rename(staging, dest).map_err(|err| {
+        AppError::Message(format!(
+            "无法安装新版 cloudflared（{}）：{err}",
+            dest.display()
+        ))
+    })
+}
+
+/// Parses `cloudflared version 2026.9.3 (built ...)` into (2026, 9, 3).
+pub(crate) fn parse_cloudflared_version(text: &str) -> Option<(u32, u32, u32)> {
+    let start = text
+        .find("version ")
+        .map(|i| i + "version ".len())
+        .unwrap_or(0);
+    let token = text[start..]
+        .split_whitespace()
+        .next()?
+        .trim_start_matches('v');
+    let mut parts = token.split('.').map(|part| {
+        part.chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>()
+            .parse::<u32>()
+            .ok()
+    });
+    let year = parts.next()??;
+    let month = parts.next()??;
+    let patch = parts.next().flatten().unwrap_or(0);
+    (year >= 2017).then_some((year, month, patch))
+}
+
+fn pinned_cloudflared_version() -> (u32, u32, u32) {
+    parse_cloudflared_version(CLOUDFLARED_VERSION).unwrap_or((0, 0, 0))
+}
+
+/// Runs `<binary> --version` (bounded, no console window).
+async fn probe_cloudflared_version(binary: &Path) -> Option<(u32, u32, u32)> {
+    let mut cmd = Command::new(binary);
+    cmd.arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let output = time::timeout(Duration::from_secs(8), cmd.output())
+        .await
+        .ok()?
+        .ok()?;
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    parse_cloudflared_version(&text)
+}
+
+fn cached_cloudflared_version(binary: &Path) -> Option<(u32, u32, u32)> {
+    std::fs::read_to_string(cloudflared_version_marker(binary))
+        .ok()
+        .and_then(|text| parse_cloudflared_version(text.trim()))
+}
+
+/// Version recorded for the app-managed copy and whether it predates the
+/// pinned release. A copy without a marker was installed by an older app
+/// version (<= 2025.6.1) and counts as outdated.
+pub(crate) fn cached_cloudflared_state(binary: &Path) -> (String, bool) {
+    match cached_cloudflared_version(binary) {
+        Some(version) => (
+            format_version(version),
+            version < pinned_cloudflared_version(),
+        ),
+        None => (String::new(), true),
+    }
+}
+
+fn format_version(version: (u32, u32, u32)) -> String {
+    format!("{}.{}.{}", version.0, version.1, version.2)
+}
+
+/// Picks a cloudflared that Cloudflare still supports, updating the app-managed
+/// copy when it (or the system copy) is older than the pinned release.
+/// Never blocks on a failed update: the previous binary is used instead and a
+/// note is returned for the tunnel log.
+pub(crate) async fn ensure_cloudflared_current() -> AppResult<(PathBuf, Option<String>)> {
+    static UPDATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _guard = UPDATE_LOCK.lock().await;
+    let pinned = pinned_cloudflared_version();
+
+    let system = platform()
+        .cloudflared_candidates()
+        .into_iter()
+        .find(|path| path.is_file());
+    let mut system_version = None;
+    if let Some(path) = &system {
+        system_version = probe_cloudflared_version(path).await;
+        if system_version.is_some_and(|version| version >= pinned) {
+            return Ok((path.clone(), None));
+        }
+    }
+
+    let cache = cached_cloudflared_path();
+    if let Some(cache_path) = cache.as_ref().filter(|path| path.is_file()) {
+        let version = match cached_cloudflared_version(cache_path) {
+            Some(version) => Some(version),
+            None => probe_cloudflared_version(cache_path).await,
+        };
+        if version.is_some_and(|version| version >= pinned) {
+            return Ok((cache_path.clone(), None));
+        }
+    }
+
+    let old = system
+        .as_ref()
+        .map(|path| (path.clone(), system_version))
+        .or_else(|| {
+            cache
+                .as_ref()
+                .filter(|path| path.is_file())
+                .map(|path| (path.clone(), cached_cloudflared_version(path)))
+        });
+    let old_label = old
+        .as_ref()
+        .and_then(|(_, version)| *version)
+        .map(format_version)
+        .unwrap_or_else(|| "未知".into());
+
+    if download_recently_failed() {
+        if let Some((path, _)) = old.as_ref() {
+            return Ok((
+                path.clone(),
+                Some(format!(
+                    "cloudflared {old_label} 已过旧（最新 {CLOUDFLARED_VERSION}），最近一次自动更新失败，稍后会重试；暂时继续使用旧版本"
+                )),
+            ));
+        }
+    }
+
+    match download_cloudflared_to_cache().await {
+        Ok(path) => Ok((
+            path,
+            old.map(|_| {
+                format!("cloudflared 已从 {old_label} 自动更新到 {CLOUDFLARED_VERSION}")
+            }),
+        )),
+        Err(error) => match old {
+            Some((path, _)) => Ok((
+                path,
+                Some(format!(
+                    "cloudflared {old_label} 已过旧，自动更新到 {CLOUDFLARED_VERSION} 失败：{error}；暂时继续使用旧版本"
+                )),
+            )),
+            None => Err(error),
+        },
     }
 }
 
@@ -319,8 +540,10 @@ pub async fn spawn_cloudflare_tunnel(
     named_public_url: &str,
     use_proxy: bool,
 ) -> AppResult<CloudflareTunnelHandle> {
-    let cloudflared = resolve_cloudflared()?;
+    let (cloudflared, update_note) = ensure_cloudflared_current().await?;
     let quick = cloudflare_mode != "named";
+    let normalized_token = normalize_cloudflare_token(cloudflare_token);
+    let cloudflare_token = normalized_token.as_str();
 
     if !quick {
         if cloudflare_token.trim().is_empty() {
@@ -337,6 +560,10 @@ pub async fn spawn_cloudflare_tunnel(
 
     if let Some(parent) = log_path.parent() {
         std::fs::create_dir_all(parent)?;
+    }
+
+    if let Some(note) = &update_note {
+        append_log_line(log_path, &format!("[coding-tools] {note}"));
     }
 
     let settings = crate::settings::AppSettings::load_or_default();
@@ -999,5 +1226,121 @@ Persistent Routes:
     fn ignores_invalid_hosts() {
         let line = "https://bad_host.trycloudflare.com";
         assert!(extract_trycloudflare_url(line).is_none());
+    }
+}
+
+/// Accepts whatever the user copied from the Cloudflare dashboard and returns
+/// just the tunnel token. Handles e.g.
+/// `cloudflared.exe service install eyJ...`, `sudo cloudflared service install eyJ...`,
+/// `cloudflared tunnel run --token eyJ...` and `--token=eyJ...`, with or without quotes.
+pub fn normalize_cloudflare_token(raw: &str) -> String {
+    fn unquote(word: &str) -> &str {
+        word.trim_matches(|c| c == '"' || c == '\'' || c == '`')
+    }
+    let trimmed = raw.trim();
+    let words: Vec<&str> = trimmed
+        .split_whitespace()
+        .map(unquote)
+        .filter(|word| !word.is_empty())
+        .collect();
+    if words.len() <= 1 {
+        return words
+            .first()
+            .map(|word| {
+                word.strip_prefix("--token=")
+                    .map_or(*word, unquote)
+                    .to_string()
+            })
+            .unwrap_or_default();
+    }
+    for (index, word) in words.iter().enumerate() {
+        if let Some(value) = word.strip_prefix("--token=") {
+            return unquote(value).to_string();
+        }
+        if *word == "--token" {
+            if let Some(next) = words.get(index + 1) {
+                return next.to_string();
+            }
+        }
+    }
+    if let Some(token) = words
+        .iter()
+        .rev()
+        .find(|word| looks_like_tunnel_token(word))
+    {
+        return token.to_string();
+    }
+    trimmed.to_string()
+}
+
+fn looks_like_tunnel_token(word: &str) -> bool {
+    word.len() >= 40
+        && word.starts_with("eyJ")
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '-' | '_'))
+}
+
+/// Decodes a tunnel token (base64 JSON `{"a": account, "t": tunnel id, "s": secret}`)
+/// and returns the tunnel id, or `None` when it is not a valid tunnel token.
+pub fn cloudflare_token_tunnel_id(token: &str) -> Option<String> {
+    use base64::Engine;
+    let token = normalize_cloudflare_token(token);
+    let trimmed = token.trim_end_matches('=');
+    let bytes = base64::engine::general_purpose::STANDARD_NO_PAD
+        .decode(trimmed)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(trimmed))
+        .ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let tunnel = value.get("t")?.as_str()?;
+    (value.get("a").is_some() && value.get("s").is_some() && !tunnel.is_empty())
+        .then(|| tunnel.to_string())
+}
+
+#[cfg(test)]
+mod token_and_version_tests {
+    use super::*;
+
+    const TOKEN: &str = "eyJhIjoiMTIzNDU2Nzg5MGFiY2RlZiIsInQiOiI1ZjNlYjZlOC0xMjM0LTQ1NjctODlhYi1jZGVmMDEyMzQ1NjciLCJzIjoiYzJWamNtVjAifQ==";
+
+    #[test]
+    fn strips_dashboard_install_commands() {
+        for raw in [
+            TOKEN.to_string(),
+            format!("  {TOKEN}\n"),
+            format!("cloudflared.exe service install {TOKEN}"),
+            format!("sudo cloudflared service install {TOKEN}"),
+            format!("cloudflared tunnel run --token {TOKEN}"),
+            format!("cloudflared tunnel --no-autoupdate run --token=\"{TOKEN}\""),
+            format!("--token={TOKEN}"),
+            format!(
+                "& 'C:\\Program Files\\cloudflared\\cloudflared.exe' service install '{TOKEN}'"
+            ),
+        ] {
+            assert_eq!(normalize_cloudflare_token(&raw), TOKEN, "input: {raw}");
+        }
+        assert_eq!(normalize_cloudflare_token(""), "");
+    }
+
+    #[test]
+    fn decodes_tunnel_id() {
+        assert_eq!(
+            cloudflare_token_tunnel_id(&format!("cloudflared.exe service install {TOKEN}"))
+                .as_deref(),
+            Some("5f3eb6e8-1234-4567-89ab-cdef01234567")
+        );
+        assert_eq!(cloudflare_token_tunnel_id("not-a-token"), None);
+    }
+
+    #[test]
+    fn parses_versions() {
+        assert_eq!(
+            parse_cloudflared_version("cloudflared version 2025.6.1 (built 2025-06-16-1234 UTC)"),
+            Some((2025, 6, 1))
+        );
+        assert_eq!(parse_cloudflared_version("2026.9.3"), Some((2026, 9, 3)));
+        assert_eq!(parse_cloudflared_version("garbage"), None);
+        assert!(parse_cloudflared_version("2025.6.1").unwrap() < pinned_cloudflared_version());
+        assert!((2026, 10, 0) > pinned_cloudflared_version());
     }
 }

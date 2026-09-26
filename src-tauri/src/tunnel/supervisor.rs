@@ -921,16 +921,14 @@ fn validate_tunnel_requirements(
     let (mode, token, named_url) = match kind {
         TunnelServiceKind::Mcp => (
             profile.tunnel.cloudflare_mode.as_str(),
-            SecretStore::get(&profile.id, "cloudflare_token")?.unwrap_or_default(),
+            cloudflare::normalize_cloudflare_token(
+                &SecretStore::get(&profile.id, "cloudflare_token")?.unwrap_or_default(),
+            ),
             profile.tunnel.public_url.clone(),
         ),
         TunnelServiceKind::Actions => (
             profile.actions.cloudflare_mode.as_str(),
-            if profile.actions.cloudflare_token.trim().is_empty() {
-                SecretStore::get(&profile.id, "actions_cloudflare_token")?.unwrap_or_default()
-            } else {
-                profile.actions.cloudflare_token.clone()
-            },
+            actions_cloudflare_token(profile)?,
             profile.actions.public_url.clone(),
         ),
     };
@@ -951,6 +949,17 @@ fn validate_tunnel_requirements(
     Ok(())
 }
 
+/// Actions tunnel token (inline value first, then the secret store), with any
+/// pasted `cloudflared service install` prefix removed.
+fn actions_cloudflare_token(profile: &WorkspaceProfile) -> AppResult<String> {
+    let raw = if profile.actions.cloudflare_token.trim().is_empty() {
+        SecretStore::get(&profile.id, "actions_cloudflare_token")?.unwrap_or_default()
+    } else {
+        profile.actions.cloudflare_token.clone()
+    };
+    Ok(cloudflare::normalize_cloudflare_token(&raw))
+}
+
 fn resolve_frp_server(profile_id: &str, inline_server: &str, settings: &AppSettings) -> String {
     if let Some(profile) = settings.find_frp_profile(profile_id) {
         return profile.server.clone();
@@ -964,7 +973,9 @@ fn cloudflare_config(
 ) -> AppResult<(u16, &str, &str, String, String, &'static str)> {
     match kind {
         TunnelServiceKind::Mcp => {
-            let token = SecretStore::get(&profile.id, "cloudflare_token")?.unwrap_or_default();
+            let token = cloudflare::normalize_cloudflare_token(
+                &SecretStore::get(&profile.id, "cloudflare_token")?.unwrap_or_default(),
+            );
             Ok((
                 profile.runtime.local_port,
                 profile.runtime.bind_address.as_str(),
@@ -975,11 +986,7 @@ fn cloudflare_config(
             ))
         }
         TunnelServiceKind::Actions => {
-            let token = if profile.actions.cloudflare_token.trim().is_empty() {
-                SecretStore::get(&profile.id, "actions_cloudflare_token")?.unwrap_or_default()
-            } else {
-                profile.actions.cloudflare_token.clone()
-            };
+            let token = actions_cloudflare_token(profile)?;
             Ok((
                 profile.actions.local_port,
                 profile.actions.bind_address.as_str(),
