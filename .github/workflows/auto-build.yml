@@ -84,6 +84,15 @@ jobs:
           test -f "$SETUP_EXE"
           test -f "$PORTABLE_EXE"
 
+          # 防止打包出只含辅助程序、不含主程序的空壳安装包
+          SETUP_SIZE=$(stat -c %s "$SETUP_EXE")
+          PORTABLE_SIZE=$(stat -c %s "$PORTABLE_EXE")
+          echo "setup: ${SETUP_SIZE} bytes, portable: ${PORTABLE_SIZE} bytes"
+          if [ "$SETUP_SIZE" -lt 2000000 ]; then
+            echo "::error::NSIS 安装包只有 ${SETUP_SIZE} 字节，未包含主程序（检查 tauri build 的 --features 是否包含 desktop）"
+            exit 1
+          fi
+
           cp "$SETUP_EXE" "out/${SETUP_ASSET}"
           cp "$PORTABLE_EXE" "out/${PORTABLE_ASSET}"
           (cd out && sha256sum *.exe > SHA256SUMS.txt)
