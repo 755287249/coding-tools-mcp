@@ -1,7 +1,5 @@
 <script lang="ts">
   import FolderOpen from "@lucide/svelte/icons/folder-open";
-  import Globe from "@lucide/svelte/icons/globe";
-  import Sparkles from "@lucide/svelte/icons/sparkles";
   import EmptyState from "$lib/components/EmptyState.svelte";
   import { getBackend } from "$lib/backend";
   import { t } from "$lib/i18n";
@@ -13,40 +11,15 @@
 </script>
 
 {#if $uiMode === "auto"}
-  <section class="page-scroll ax-page">
-    <div class="ax-container ax-welcome">
-      <p class="page-kicker">Coding Tools MCP</p>
-      <h2 class="ax-welcome-title">{$t("Let any AI work on your project")}</h2>
-      <p class="ax-hero-desc ax-welcome-desc">
-        {$t("Pick a project folder. Everything else is automatic: the service starts, a secure public address is created, and you get a prompt to paste into your AI assistant.")}
-      </p>
-
+  <section class="page-scroll sx-page">
+    <div class="sx-card ax-glass sx-welcome">
+      <h2 class="sx-title">{$t("Let any AI work on your project")}</h2>
+      <p class="sx-hint">{$t("Add a folder, flip the switch, copy the prompt.")}</p>
       {#if canCreate}
-        <button type="button" class="tx-btn-primary ax-btn-lg ax-welcome-cta" onclick={() => connectionActions.newConnection?.()}>
-          <FolderOpen size={16} /> {$t("Choose a project folder")}
+        <button type="button" class="sx-copy" onclick={() => connectionActions.newConnection?.()}>
+          <FolderOpen size={17} /> <span>{$t("Choose a project folder")}</span>
         </button>
       {/if}
-
-      <ol class="ax-welcome-steps">
-        <li class="ax-glass">
-          <span class="ax-welcome-num">1</span>
-          <FolderOpen size={18} class="ax-welcome-icon" />
-          <p class="font-medium">{$t("Choose a folder")}</p>
-          <p class="ax-welcome-sub">{$t("The project the AI can read and edit")}</p>
-        </li>
-        <li class="ax-glass">
-          <span class="ax-welcome-num">2</span>
-          <Globe size={18} class="ax-welcome-icon" />
-          <p class="font-medium">{$t("Goes online automatically")}</p>
-          <p class="ax-welcome-sub">{$t("MCP service and secure tunnel start for you")}</p>
-        </li>
-        <li class="ax-glass">
-          <span class="ax-welcome-num">3</span>
-          <Sparkles size={18} class="ax-welcome-icon" />
-          <p class="font-medium">{$t("Copy the prompt")}</p>
-          <p class="ax-welcome-sub">{$t("Paste into ChatGPT, Claude or any AI")}</p>
-        </li>
-      </ol>
     </div>
   </section>
 {:else}

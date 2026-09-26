@@ -1786,3 +1786,462 @@ button {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ─── Frameless translucent window ───
+ * The desktop window is transparent with a native acrylic backdrop.
+ * --glass-alpha (0.15–1, user slider) sets how much tint covers it.
+ */
+:root {
+  --glass-alpha: 0.55;
+  --glass-base: 14 14 16;
+}
+
+[data-theme="light"] {
+  --glass-base: 243 243 246;
+}
+
+.win-root {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+}
+
+.win-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.win-body > .app-layout,
+.win-body > .sx-layout {
+  height: 100%;
+  width: 100%;
+}
+
+html.is-glass,
+html.is-glass body {
+  background: transparent;
+}
+
+html.is-glass {
+  --page-bg: transparent;
+  --main-content-bg: transparent;
+  --ambient: none;
+  --sidebar-bg: rgb(var(--glass-base) / calc(var(--glass-alpha) * 0.45));
+  --card-bg: rgb(var(--glass-base) / calc(0.2 + var(--glass-alpha) * 0.55));
+  --surface-1: rgb(var(--glass-base) / calc(0.55 + var(--glass-alpha) * 0.4));
+  --input-bg: rgb(var(--glass-base) / calc(0.25 + var(--glass-alpha) * 0.5));
+}
+
+html.is-glass .win-root {
+  background: rgb(var(--glass-base) / var(--glass-alpha));
+}
+
+html.is-glass .tx-main,
+html.is-glass .tx-sidebar,
+html.is-glass .page-header {
+  backdrop-filter: none;
+}
+
+/* Title bar */
+.wt-bar {
+  height: 34px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-left: 12px;
+  border-bottom: 1px solid var(--border-light);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.wt-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.wt-controls {
+  display: flex;
+  height: 100%;
+}
+
+.wt-btn {
+  width: 46px;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  transition: background var(--duration-fast), color var(--duration-fast);
+}
+
+.wt-btn:hover {
+  background: var(--surface-active);
+  color: var(--text-main);
+}
+
+.wt-btn--close:hover {
+  background: #e81123;
+  color: #fff;
+}
+
+/* Opacity slider (bottom-right) */
+.gc-pill {
+  position: fixed;
+  right: 14px;
+  bottom: 12px;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 11px;
+  border: 1px solid var(--glass-border);
+  border-radius: 999px;
+  background: rgb(var(--glass-base) / 0.6);
+  color: var(--text-secondary);
+  font-size: 11px;
+  opacity: 0.5;
+  transition: opacity var(--duration-fast);
+}
+
+.gc-pill:hover,
+.gc-pill:focus-within {
+  opacity: 1;
+}
+
+.gc-pill input[type="range"] {
+  width: 96px;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+
+.gc-value {
+  min-width: 32px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ─── Simple mode ─── */
+.sx-layout {
+  display: flex;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+.sx-side {
+  width: 220px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 10px 12px;
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--sidebar-border);
+  color: var(--sidebar-text);
+}
+
+.sx-side-label {
+  margin: 0;
+  padding: 0 6px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  opacity: 0.8;
+}
+
+.sx-side-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.sx-add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.sx-add:hover {
+  background: var(--surface-hover);
+  color: var(--text-main);
+}
+
+.sx-side-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-light);
+}
+
+.sx-version {
+  margin-left: auto;
+  font-size: 10.5px;
+  color: var(--text-muted);
+}
+
+.sx-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.sx-page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 24px 56px;
+}
+
+.sx-card {
+  width: 100%;
+  max-width: 420px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 26px 24px 18px;
+}
+
+.sx-head {
+  text-align: center;
+  min-width: 0;
+}
+
+.sx-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.sx-folder {
+  margin: 4px 0 0;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sx-power {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--glass-border);
+  border-radius: 14px;
+  background: var(--glass-bg);
+}
+
+.sx-switch {
+  position: relative;
+  width: 64px;
+  height: 36px;
+  flex-shrink: 0;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--surface-active);
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s;
+}
+
+.sx-switch:disabled {
+  cursor: default;
+}
+
+.sx-switch-knob {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--text-secondary);
+  color: #1a1a1c;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+  transition: transform 0.22s var(--ease-out), background 0.2s;
+}
+
+.sx-switch.is-on {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--success) 75%, transparent);
+}
+
+.sx-switch.is-on .sx-switch-knob {
+  transform: translateX(28px);
+  background: #fff;
+}
+
+.sx-power-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.sx-state {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.sx-state.is-on {
+  color: var(--success);
+}
+
+.sx-state.is-local {
+  color: var(--warning);
+}
+
+.sx-endpoint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  margin-top: 3px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.sx-endpoint:hover {
+  color: var(--text-main);
+}
+
+.sx-modes {
+  display: flex;
+}
+
+.sx-modes button {
+  flex: 1;
+}
+
+.sx-modes button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.sx-named {
+  display: grid;
+  gap: 8px;
+}
+
+.sx-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.sx-hint-btn {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sx-hint-btn:hover {
+  color: var(--text-main);
+}
+
+.sx-copy {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  height: 48px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--accent-gradient);
+  color: var(--primary-contrast);
+  font-size: 14.5px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.22);
+  transition: background var(--duration-fast), opacity var(--duration-fast);
+}
+
+.sx-copy:hover:not(:disabled) {
+  background: var(--accent-gradient-hover);
+}
+
+.sx-copy:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.sx-note {
+  margin: -8px 0 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.sx-error {
+  display: grid;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.sx-error p {
+  margin: 0;
+  max-height: 160px;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+.sx-advanced {
+  align-self: center;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.sx-advanced:hover {
+  background: var(--surface-hover);
+  color: var(--text-main);
+}
+
+.sx-welcome {
+  align-items: stretch;
+  text-align: center;
+}

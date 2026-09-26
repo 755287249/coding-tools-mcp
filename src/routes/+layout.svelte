@@ -8,6 +8,10 @@
   import { installHostBackend } from "$lib/backend/host";
   import { getBackend } from "$lib/backend";
   import AppShell from "$lib/components/AppShell.svelte";
+  import GlassControl from "$lib/components/GlassControl.svelte";
+  import SimpleShell from "$lib/components/SimpleShell.svelte";
+  import WindowTitlebar from "$lib/components/WindowTitlebar.svelte";
+  import { isDesktopWindow } from "$lib/stores/glass";
   import DirectoryPicker from "$lib/components/DirectoryPicker.svelte";
   import ToastHost from "$lib/components/ToastHost.svelte";
   import WorkspaceNavItem from "$lib/components/WorkspaceNavItem.svelte";
@@ -34,6 +38,7 @@
 
   let { children } = $props();
   const capabilities = getBackend().capabilities;
+  const desktopWindow = isDesktopWindow();
   let addWorkspacePickerOpen = $state(false);
   let workspaceFilter = $state("");
   const WORKSPACE_FILTER_THRESHOLD = 6;
@@ -163,96 +168,123 @@
   });
 </script>
 
-<AppShell
-  onAddWorkspace={capabilities.workspaceLifecycle ? addWorkspace : undefined}
-  onQuickSetup={capabilities.guidedSetup ? openQuickSetup : undefined}
-  workspaceCount={capabilities.workspaceLifecycle ? $workspaces.length : undefined}
->
-  {#snippet settingsNav()}
-    {#if capabilities.host === "desktop"}
-      <button
-        type="button"
-        class="tx-settings-link {routePath($page.url.pathname) === '/settings/general' ? 'active' : ''}"
-        onclick={openGeneralSettings}
-        title={$t("General")}
+<div class="win-root" class:is-desktop={desktopWindow}>
+  {#if desktopWindow}
+    <WindowTitlebar />
+  {/if}
+  <div class="win-body">
+    {#if $uiMode === "auto"}
+      <SimpleShell onAddWorkspace={capabilities.workspaceLifecycle ? addWorkspace : undefined}>
+        {#snippet workspaceList()}
+          {#each $workspaces as workspace (workspace.id)}
+            <WorkspaceNavItem
+              workspace={workspace}
+              active={routePath($page.url.pathname) === `/workspace/${workspace.id}`}
+              mcpState={$mcpRuntimeStates[workspace.id] ?? "stopped"}
+              actionsState={$actionsRuntimeStates[workspace.id] ?? "stopped"}
+              onClick={() => openWorkspace(workspace.id)}
+            />
+          {/each}
+        {/snippet}
+        {@render children()}
+      </SimpleShell>
+    {:else}
+      <AppShell
+        onAddWorkspace={capabilities.workspaceLifecycle ? addWorkspace : undefined}
+        onQuickSetup={capabilities.guidedSetup ? openQuickSetup : undefined}
+        workspaceCount={capabilities.workspaceLifecycle ? $workspaces.length : undefined}
       >
-        <SlidersHorizontal size={15} aria-hidden="true" />
-        <span class="tx-sidebar-text">{$t("General")}</span>
-      </button>
-    {/if}
-    {#if capabilities.sharedSecretStore}
-      <button
-        type="button"
-        class="tx-settings-link {routePath($page.url.pathname) === '/settings/keys' ? 'active' : ''}"
-        onclick={openKeysSettings}
-        title={$t("Shared secrets")}
-      >
-        <KeyRound size={15} aria-hidden="true" />
-        <span class="tx-sidebar-text">{$t("Shared secrets")}</span>
-      </button>
-    {/if}
-    {#if capabilities.frpManagement}
-      <button
-        type="button"
-        class="tx-settings-link {routePath($page.url.pathname) === '/settings/frp' ? 'active' : ''}"
-        onclick={openFrpSettings}
-        title={$t("FRP configuration")}
-      >
-        <Network size={15} aria-hidden="true" />
-        <span class="tx-sidebar-text">{$t("FRP configuration")}</span>
-      </button>
-    {/if}
-    {#if capabilities.softwareManagement}
-      <button
-        type="button"
-        class="tx-settings-link {routePath($page.url.pathname) === '/settings/software' ? 'active' : ''}"
-        onclick={openSoftwareSettings}
-        title={$t("Software management")}
-      >
-        <Package size={15} aria-hidden="true" />
-        <span class="tx-sidebar-text">{$t("Software management")}</span>
-      </button>
-    {/if}
-    {#if capabilities.agentRestart}
-      <button
-        type="button"
-        class="tx-settings-link"
-        onclick={() => void restartAgent()}
-        title={$t("Restart Agent")}
-      >
-        <RotateCw size={15} aria-hidden="true" />
-        <span class="tx-sidebar-text">{$t("Restart Agent")}</span>
-      </button>
-    {/if}
-  {/snippet}
-  {#snippet sidebar()}
-    {#if $workspaces.length >= WORKSPACE_FILTER_THRESHOLD}
-      <label class="tx-sidebar-filter">
-        <Search size={13} aria-hidden="true" />
-        <span class="sr-only">{$t("Filter workspaces")}</span>
-        <input type="search" placeholder={$t("Filter workspaces")} bind:value={workspaceFilter} />
-      </label>
-    {/if}
-    <div>
-      {#each filteredWorkspaces as workspace (workspace.id)}
-        <WorkspaceNavItem
-          workspace={workspace}
-          active={routePath($page.url.pathname) === `/workspace/${workspace.id}`}
-          mcpState={$mcpRuntimeStates[workspace.id] ?? "stopped"}
-          actionsState={$actionsRuntimeStates[workspace.id] ?? "stopped"}
-          onClick={() => openWorkspace(workspace.id)}
-        />
-      {/each}
-      {#if workspaceFilter.trim() && filteredWorkspaces.length === 0}
-        <p class="tx-sidebar-empty">{$t("No matching workspaces")}</p>
-      {/if}
-    </div>
-  {/snippet}
+        {#snippet settingsNav()}
+          {#if capabilities.host === "desktop"}
+            <button
+              type="button"
+              class="tx-settings-link {routePath($page.url.pathname) === '/settings/general' ? 'active' : ''}"
+              onclick={openGeneralSettings}
+              title={$t("General")}
+            >
+              <SlidersHorizontal size={15} aria-hidden="true" />
+              <span class="tx-sidebar-text">{$t("General")}</span>
+            </button>
+          {/if}
+          {#if capabilities.sharedSecretStore}
+            <button
+              type="button"
+              class="tx-settings-link {routePath($page.url.pathname) === '/settings/keys' ? 'active' : ''}"
+              onclick={openKeysSettings}
+              title={$t("Shared secrets")}
+            >
+              <KeyRound size={15} aria-hidden="true" />
+              <span class="tx-sidebar-text">{$t("Shared secrets")}</span>
+            </button>
+          {/if}
+          {#if capabilities.frpManagement}
+            <button
+              type="button"
+              class="tx-settings-link {routePath($page.url.pathname) === '/settings/frp' ? 'active' : ''}"
+              onclick={openFrpSettings}
+              title={$t("FRP configuration")}
+            >
+              <Network size={15} aria-hidden="true" />
+              <span class="tx-sidebar-text">{$t("FRP configuration")}</span>
+            </button>
+          {/if}
+          {#if capabilities.softwareManagement}
+            <button
+              type="button"
+              class="tx-settings-link {routePath($page.url.pathname) === '/settings/software' ? 'active' : ''}"
+              onclick={openSoftwareSettings}
+              title={$t("Software management")}
+            >
+              <Package size={15} aria-hidden="true" />
+              <span class="tx-sidebar-text">{$t("Software management")}</span>
+            </button>
+          {/if}
+          {#if capabilities.agentRestart}
+            <button
+              type="button"
+              class="tx-settings-link"
+              onclick={() => void restartAgent()}
+              title={$t("Restart Agent")}
+            >
+              <RotateCw size={15} aria-hidden="true" />
+              <span class="tx-sidebar-text">{$t("Restart Agent")}</span>
+            </button>
+          {/if}
+        {/snippet}
+        {#snippet sidebar()}
+          {#if $workspaces.length >= WORKSPACE_FILTER_THRESHOLD}
+            <label class="tx-sidebar-filter">
+              <Search size={13} aria-hidden="true" />
+              <span class="sr-only">{$t("Filter workspaces")}</span>
+              <input type="search" placeholder={$t("Filter workspaces")} bind:value={workspaceFilter} />
+            </label>
+          {/if}
+          <div>
+            {#each filteredWorkspaces as workspace (workspace.id)}
+              <WorkspaceNavItem
+                workspace={workspace}
+                active={routePath($page.url.pathname) === `/workspace/${workspace.id}`}
+                mcpState={$mcpRuntimeStates[workspace.id] ?? "stopped"}
+                actionsState={$actionsRuntimeStates[workspace.id] ?? "stopped"}
+                onClick={() => openWorkspace(workspace.id)}
+              />
+            {/each}
+            {#if workspaceFilter.trim() && filteredWorkspaces.length === 0}
+              <p class="tx-sidebar-empty">{$t("No matching workspaces")}</p>
+            {/if}
+          </div>
+        {/snippet}
 
-  {#snippet children()}
-    {@render children()}
-  {/snippet}
-</AppShell>
+        {#snippet children()}
+          {@render children()}
+        {/snippet}
+      </AppShell>
+    {/if}
+  </div>
+  {#if desktopWindow}
+    <GlassControl />
+  {/if}
+</div>
 
 <DirectoryPicker
   open={addWorkspacePickerOpen}
