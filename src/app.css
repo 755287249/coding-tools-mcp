@@ -1839,10 +1839,13 @@ html.is-glass .win-root {
   background: rgb(var(--glass-base) / var(--glass-alpha));
 }
 
-html.is-glass .tx-main,
-html.is-glass .tx-sidebar,
-html.is-glass .page-header {
-  backdrop-filter: none;
+/* The native acrylic already blurs the desktop; CSS blur layers on a
+ * transparent WebView are expensive and make the UI sluggish. */
+html.is-glass *,
+html.is-glass *::before,
+html.is-glass *::after {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
 }
 
 /* Title bar */
@@ -1915,6 +1918,33 @@ html.is-glass .page-header {
 .gc-pill:hover,
 .gc-pill:focus-within {
   opacity: 1;
+}
+
+.gc-toggle {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-main);
+  cursor: pointer;
+}
+
+.gc-toggle.is-off {
+  color: var(--text-muted);
+}
+
+.gc-toggle:hover {
+  background: var(--surface-active);
+}
+
+.gc-range {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .gc-pill input[type="range"] {
@@ -2119,6 +2149,10 @@ html.is-glass .page-header {
   color: var(--warning);
 }
 
+.sx-state.is-error {
+  color: var(--danger);
+}
+
 .sx-endpoint {
   display: flex;
   align-items: center;
@@ -2244,4 +2278,67 @@ html.is-glass .page-header {
 .sx-welcome {
   align-items: stretch;
   text-align: center;
+}
+
+.sx-folders {
+  display: grid;
+  gap: 4px;
+  margin: -6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sx-folder-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: var(--surface-hover);
+  color: var(--text-secondary);
+  font-size: 11.5px;
+}
+
+.sx-folder-row > span {
+  flex: 1;
+  min-width: 0;
+}
+
+.sx-folder-x {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.sx-folder-x:hover {
+  background: color-mix(in srgb, var(--danger) 18%, transparent);
+  color: var(--danger);
+}
+
+.sx-folder-add {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 8px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.sx-folder-add:hover {
+  border-color: var(--border-strong);
+  color: var(--text-main);
 }

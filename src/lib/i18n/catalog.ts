@@ -1719,6 +1719,9 @@ export const MESSAGES = {
   "The password is one-time; copy again for each new connection.": ["The password is one-time; copy again for each new connection.", "密碼一次性，每次新連接請重新複製。", "密码一次性，每次新连接请重新复制。", "パスワードは使い捨てです。新しく接続するたびにコピーし直してください。"],
   "Temporary address changes on restart.": ["Temporary address changes on restart.", "臨時位址重啟後會變。", "临时地址重启后会变。", "一時アドレスは再起動で変わります。"],
   "Add a folder, flip the switch, copy the prompt.": ["Add a folder, flip the switch, copy the prompt.", "選資料夾，打開開關，複製提示詞。", "选文件夹，打开开关，复制提示词。", "フォルダーを追加し、スイッチを入れ、プロンプトをコピー。"],
+  "Add a directory to this MCP": ["Add a directory to this MCP", "在此 MCP 中新增目錄", "给这个 MCP 添加目录", "この MCP にディレクトリを追加"],
+  "Frosted glass": ["Frosted glass (turn off if dragging stutters)", "毛玻璃（拖動卡頓可關閉）", "毛玻璃（拖动卡顿可关闭）", "すりガラス（ドラッグが重い場合はオフ）"],
+  "New workspace (separate MCP)": ["New workspace (separate MCP)", "新增工作區（獨立 MCP）", "新建工作区（独立 MCP）", "新しいワークスペース（別の MCP）"],
 } as const;
 
 export type MessageKey = keyof typeof MESSAGES;

@@ -1,281 +1,116 @@
 <script lang="ts">
-  import { onDestroy, onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import { page } from "$app/stores";
   import { replaceState } from "$app/navigation";
   import Check from "@lucide/svelte/icons/check";
   import Copy from "@lucide/svelte/icons/copy";
   import Folder from "@lucide/svelte/icons/folder";
+  import FolderPlus from "@lucide/svelte/icons/folder-plus";
   import LoaderCircle from "@lucide/svelte/icons/loader-circle";
   import RefreshCw from "@lucide/svelte/icons/refresh-cw";
   import Settings2 from "@lucide/svelte/icons/settings-2";
   import Sparkles from "@lucide/svelte/icons/sparkles";
+  import X from "@lucide/svelte/icons/x";
+  import { pickDirectory } from "$lib/api/native";
   import { getWorkspaceSecret, setWorkspaceSecret } from "$lib/api/secrets";
-  import { installSoftware, listSoftware } from "$lib/api/software";
-  import { startTunnel } from "$lib/api/tunnel";
-  import {
-    getRuntimeStatus,
-    listWorkspaces,
-    startRuntime,
-    stopRuntime,
-    updateWorkspace,
-  } from "$lib/api/workspaces";
+  import { addWorkspaceFolder, listWorkspaces, removeWorkspaceFolder, updateWorkspace } from "$lib/api/workspaces";
   import { getBackend, loadMcpAuthSecrets } from "$lib/backend";
-  import { buildConnectionPrompt, isTemporaryEndpoint, type ConnectionInfo } from "$lib/connect/prompt";
-  import { locale, t, type MessageKey } from "$lib/i18n";
-  import { isPortConflictError, serviceErrorMessage } from "$lib/runtime/service";
-  import { mcpRuntimeStates, workspaces } from "$lib/stores/app";
+  import { buildConnectionPrompt, isTemporaryEndpoint } from "$lib/connect/prompt";
+  import { locale, t } from "$lib/i18n";
+  import { workspaces } from "$lib/stores/app";
+  import {
+    clearError,
+    isReachablePublic,
+    messageOf,
+    refreshSession,
+    restartIfRunning,
+    sessionOf,
+    sessions,
+    tunnelUsable,
+    turnOff,
+    turnOn,
+  } from "$lib/stores/sessions";
   import { showToast } from "$lib/stores/toast";
   import { uiMode } from "$lib/stores/ui-mode";
-  import { workspaceFolders, type RuntimeStatus, type WorkspaceProfile } from "$lib/types";
+  import { workspaceFolders, type WorkspaceProfile } from "$lib/types";
 
   interface Props {
     profile: WorkspaceProfile;
     onProfileChange?: (profile: WorkspaceProfile) => void;
   }
 
-  let { profile, onProfileChange }: Props = $props();
+  let { profile: initialProfile, onProfileChange }: Props = $props();
 
   type TunnelKind = "quick" | "named" | "other";
 
   const capabilities = getBackend().capabilities;
   const canControl = capabilities.runtimeSupervisor;
-  const canInstallTunnel = capabilities.softwareManagement;
+  const canPickFolder = capabilities.nativeDirectoryPicker && capabilities.workspaceLifecycle;
+  // The page re-creates this view per workspace ({#key profile.id}).
+  const id = untrack(() => initialProfile.id);
 
-  let status = $state<RuntimeStatus | null>(null);
-  let working = $state(false);
-  let phase = $state<MessageKey | null>(null);
-  let errorMessage = $state("");
-  let secrets = $state({ oauth_client_id: "", oauth_password: "", bearer_token: "" });
   let copiedKey = $state<string | null>(null);
+  let copying = $state(false);
   let modeView = $state<TunnelKind | null>(null);
   let namedToken = $state("");
   let namedDomain = $state("");
   let namedTokenSaved = $state(false);
-  let savingNamed = $state(false);
-  let pollTimer: ReturnType<typeof setInterval> | undefined;
+  let saving = $state(false);
+  let localError = $state("");
   let copiedTimer: ReturnType<typeof setTimeout> | undefined;
-  let destroyed = false;
 
+  // Always render the freshest profile from the shared store.
+  const profile = $derived($workspaces.find((item) => item.id === id) ?? initialProfile);
+  const session = $derived(sessionOf($sessions, id));
+  const status = $derived(session.status);
+  const working = $derived(session.working);
+  const errorMessage = $derived(localError || session.error);
   const running = $derived(status?.state === "running");
-  const publicEndpoint = $derived(running ? (status?.publicEndpoint ?? "") : "");
+  const publicEndpoint = $derived(running && isReachablePublic(status?.publicEndpoint) ? status!.publicEndpoint : "");
   const localEndpoint = $derived(status?.localEndpoint || `http://127.0.0.1:${profile.runtime?.local_port ?? ""}/mcp`);
   const endpoint = $derived(publicEndpoint || (running ? localEndpoint : ""));
   const hasPublic = $derived(Boolean(publicEndpoint));
-  const folders = $derived(workspaceFolders(profile).map((folder) => folder.path));
+  const folders = $derived(workspaceFolders(profile));
   const authType = $derived(profile.auth.type);
   const configuredKind = $derived<TunnelKind>(
     profile.tunnel.type === "cloudflare"
       ? profile.tunnel.cloudflare_mode === "named"
         ? "named"
         : "quick"
-      : hasTunnel(profile.tunnel.type)
+      : tunnelUsable(profile)
         ? "other"
         : "quick",
   );
   const kind = $derived<TunnelKind>(modeView ?? configuredKind);
-  const info = $derived<ConnectionInfo>({
-    workspaceName: profile.name,
-    endpoint,
-    authType,
-    clientId: secrets.oauth_client_id || profile.auth.oauth_client_id,
-    password: secrets.oauth_password,
-    bearerToken: secrets.bearer_token,
-    folders,
-  });
-  const prompt = $derived(endpoint ? buildConnectionPrompt(info, $locale) : "");
-  const switchOn = $derived(working ? phase !== "Stopping…" : running);
+  const switchOn = $derived(working ? session.phase !== "Stopping…" : running);
+  const busy = $derived(working || saving);
 
-  function hasTunnel(type: string | undefined): boolean {
-    return type === "cloudflare" || type === "frp" || type === "builtin";
-  }
-
-  function sleep(ms: number) {
-    return new Promise<void>((resolve) => setTimeout(resolve, ms));
-  }
-
-  function messageOf(error: unknown): string {
-    if (error instanceof Error) return error.message;
-    if (typeof error === "object" && error && "message" in error) {
-      return String((error as { message: unknown }).message);
-    }
-    return String(error ?? "");
-  }
-
-  function setMcpState(next: RuntimeStatus) {
-    status = next;
-    mcpRuntimeStates.update((current) => ({ ...current, [profile.id]: next.state }));
-  }
-
-  async function refreshStatus() {
-    try {
-      setMcpState(await getRuntimeStatus(profile.id));
-    } catch {
-      // Keep the last known status; the next poll will retry.
-    }
-  }
-
-  async function refreshSecrets() {
-    try {
-      const loaded = await loadMcpAuthSecrets(getBackend(), profile.id, profile.auth);
-      secrets = {
-        oauth_client_id: loaded.oauth_client_id ?? "",
-        oauth_password: loaded.oauth_password ?? "",
-        bearer_token: loaded.bearer_token ?? "",
-      };
-    } catch {
-      // Secrets are optional for display; the advanced view shows detailed errors.
-    }
-  }
-
-  async function refreshNamedState() {
-    namedDomain = profile.tunnel.cloudflare_mode === "named" ? profile.tunnel.public_url : namedDomain;
-    try {
-      namedTokenSaved = Boolean((await getWorkspaceSecret(profile.id, "cloudflare_token"))?.trim());
-    } catch {
-      namedTokenSaved = false;
-    }
-  }
-
-  async function refreshProfile(): Promise<WorkspaceProfile> {
-    const items = await listWorkspaces();
+  function applyProfiles(items: WorkspaceProfile[]) {
     workspaces.set(items);
-    const next = items.find((item) => item.id === profile.id) ?? profile;
-    onProfileChange?.(next);
-    return next;
-  }
-
-  async function refreshAll() {
-    await Promise.all([refreshStatus(), refreshSecrets()]);
-  }
-
-  async function ensureTunnelReady(current: WorkspaceProfile): Promise<WorkspaceProfile> {
-    let next = current;
-    if (!hasTunnel(next.tunnel.type)) {
-      if (!canInstallTunnel) return next;
-      next = {
-        ...next,
-        tunnel: {
-          ...next.tunnel,
-          type: "cloudflare",
-          cloudflare_mode: "quick",
-          public_url: "",
-          use_proxy: next.tunnel.use_proxy ?? true,
-        },
-      };
-      await updateWorkspace(next);
-      next = await refreshProfile();
-    }
-    if (next.tunnel.type === "cloudflare" && canInstallTunnel) {
-      const software = await listSoftware();
-      const cloudflared = software.find((item) => item.kind === "cloudflared");
-      if (!cloudflared?.installed) await installSoftware("cloudflared");
-    }
-    return next;
-  }
-
-  async function startService(): Promise<RuntimeStatus> {
-    const current = await getRuntimeStatus(profile.id);
-    if (current.state === "running") return current;
-    try {
-      return await startRuntime(profile.id);
-    } catch (error) {
-      if (!isPortConflictError(error)) throw error;
-      // The previous listener of this app may still be draining; give it a moment.
-      await sleep(3000);
-      const retry = await getRuntimeStatus(profile.id);
-      if (retry.state === "running") return retry;
-      return await startRuntime(profile.id);
-    }
-  }
-
-  async function waitForPublicEndpoint(timeoutMs: number): Promise<RuntimeStatus> {
-    const deadline = Date.now() + timeoutMs;
-    let latest = await getRuntimeStatus(profile.id);
-    while (!latest.publicEndpoint && Date.now() < deadline && !destroyed) {
-      await sleep(1500);
-      latest = await getRuntimeStatus(profile.id);
-    }
-    return latest;
-  }
-
-  async function turnOn() {
-    if (!canControl || working) return;
-    working = true;
-    errorMessage = "";
-    try {
-      phase = "Preparing the tunnel…";
-      const prepared = await ensureTunnelReady(profile);
-      if (prepared.tunnel.type === "cloudflare" && prepared.tunnel.cloudflare_mode === "named") {
-        if (!prepared.tunnel.public_url || !namedTokenSaved) {
-          throw new Error($t("Enter the Tunnel Token and the domain first."));
-        }
-      }
-
-      phase = "Starting the service…";
-      const started = await startService();
-      setMcpState(started);
-      if (started.state !== "running") throw new Error(serviceErrorMessage(started));
-
-      if (hasTunnel(prepared.tunnel.type)) {
-        phase = "Connecting the public tunnel…";
-        let latest = await waitForPublicEndpoint(started.publicEndpoint ? 0 : 6000);
-        let tunnelError = "";
-        if (!latest.publicEndpoint) {
-          await startTunnel(profile.id, "mcp").catch((error: unknown) => {
-            tunnelError = messageOf(error);
-          });
-          latest = await waitForPublicEndpoint(tunnelError ? 3000 : 30000);
-        }
-        if (!latest.publicEndpoint) {
-          const base = $t(
-            "The MCP service is running, but the public tunnel did not connect. Check your network or proxy, then try again.",
-          );
-          throw new Error(tunnelError ? `${base}\n\n${tunnelError}` : base);
-        }
-        setMcpState(latest);
-      }
-
-      await refreshProfile();
-      await refreshSecrets();
-    } catch (error) {
-      errorMessage = messageOf(error);
-    } finally {
-      working = false;
-      phase = null;
-      await refreshStatus();
-    }
-  }
-
-  async function turnOff() {
-    if (!canControl || working) return;
-    working = true;
-    phase = "Stopping…";
-    errorMessage = "";
-    try {
-      setMcpState(await stopRuntime(profile.id));
-    } catch (error) {
-      errorMessage = messageOf(error);
-    } finally {
-      working = false;
-      phase = null;
-    }
+    const next = items.find((item) => item.id === id);
+    if (next) onProfileChange?.(next);
   }
 
   function toggle() {
-    if (running) void turnOff();
-    else void turnOn();
+    localError = "";
+    if (running) void turnOff(id);
+    else void turnOn(id);
   }
 
-  async function restartIfRunning() {
-    if (!running) return;
-    await turnOff();
-    await turnOn();
+  async function retry() {
+    localError = "";
+    clearError(id);
+    await turnOn(id);
   }
 
   async function chooseQuick() {
     modeView = "quick";
-    errorMessage = "";
-    if (configuredKind === "quick" && hasTunnel(profile.tunnel.type)) return;
+    localError = "";
+    if (profile.tunnel.type === "cloudflare" && profile.tunnel.cloudflare_mode !== "named") {
+      modeView = null;
+      return;
+    }
+    saving = true;
     try {
       await updateWorkspace({
         ...profile,
@@ -287,17 +122,20 @@
           use_proxy: profile.tunnel.use_proxy ?? true,
         },
       });
-      await refreshProfile();
+      applyProfiles(await listWorkspaces());
       modeView = null;
-      await restartIfRunning();
+      void restartIfRunning(id);
     } catch (error) {
-      errorMessage = messageOf(error);
+      localError = messageOf(error);
+    } finally {
+      saving = false;
     }
   }
 
   function chooseNamed() {
     modeView = "named";
-    errorMessage = "";
+    localError = "";
+    if (!namedDomain && profile.tunnel.cloudflare_mode === "named") namedDomain = profile.tunnel.public_url;
   }
 
   function normalizedDomain(value: string): string {
@@ -308,23 +146,23 @@
   }
 
   async function saveNamed() {
-    if (savingNamed) return;
-    errorMessage = "";
+    if (saving) return;
+    localError = "";
     let domain = "";
     try {
       domain = normalizedDomain(namedDomain);
     } catch {
-      errorMessage = $t("Enter a domain such as mcp.example.com.");
+      localError = $t("Enter a domain such as mcp.example.com.");
       return;
     }
     if (!namedToken.trim() && !namedTokenSaved) {
-      errorMessage = $t("Enter the Tunnel Token and the domain first.");
+      localError = $t("Enter the Tunnel Token and the domain first.");
       return;
     }
-    savingNamed = true;
+    saving = true;
     try {
       if (namedToken.trim()) {
-        await setWorkspaceSecret(profile.id, "cloudflare_token", namedToken.trim());
+        await setWorkspaceSecret(id, "cloudflare_token", namedToken.trim());
         namedTokenSaved = true;
         namedToken = "";
       }
@@ -338,15 +176,37 @@
           use_proxy: profile.tunnel.use_proxy ?? true,
         },
       });
-      await refreshProfile();
+      applyProfiles(await listWorkspaces());
       namedDomain = domain;
       modeView = null;
       showToast($t("Saved"), { kind: "success" });
-      await restartIfRunning();
+      void restartIfRunning(id);
     } catch (error) {
-      errorMessage = messageOf(error);
+      localError = messageOf(error);
     } finally {
-      savingNamed = false;
+      saving = false;
+    }
+  }
+
+  async function addFolder() {
+    localError = "";
+    try {
+      const selected = await pickDirectory({ multiple: false });
+      if (!selected || Array.isArray(selected)) return;
+      await addWorkspaceFolder(id, selected);
+      applyProfiles(await listWorkspaces());
+    } catch (error) {
+      localError = messageOf(error);
+    }
+  }
+
+  async function removeFolder(folderId: string) {
+    localError = "";
+    try {
+      await removeWorkspaceFolder(id, folderId);
+      applyProfiles(await listWorkspaces());
+    } catch (error) {
+      localError = messageOf(error);
     }
   }
 
@@ -365,41 +225,57 @@
     }
   }
 
-  async function copy(key: string, value: string) {
-    if (!value) return;
-    await writeClipboard(value);
+  function flash(key: string) {
     copiedKey = key;
     clearTimeout(copiedTimer);
     copiedTimer = setTimeout(() => (copiedKey = null), 1600);
   }
 
+  async function copyEndpoint() {
+    if (!endpoint) return;
+    await writeClipboard(endpoint);
+    flash("endpoint");
+  }
+
   async function copyPrompt() {
-    // Always copy with the freshest one-time password.
-    await refreshSecrets();
-    await copy("prompt", prompt);
+    if (!endpoint || copying) return;
+    copying = true;
+    try {
+      // Secrets are only read here, so the one-time password is always fresh.
+      const loaded = await loadMcpAuthSecrets(getBackend(), id, profile.auth);
+      const text = buildConnectionPrompt(
+        {
+          workspaceName: profile.name,
+          endpoint,
+          authType,
+          clientId: loaded.oauth_client_id || profile.auth.oauth_client_id,
+          password: loaded.oauth_password ?? "",
+          bearerToken: loaded.bearer_token ?? "",
+          folders: folders.map((folder) => folder.path),
+        },
+        $locale,
+      );
+      await writeClipboard(text);
+      flash("prompt");
+    } catch (error) {
+      localError = messageOf(error);
+    } finally {
+      copying = false;
+    }
   }
 
   onMount(() => {
-    const shouldAutostart = $page.url.searchParams.get("autostart") === "1";
-    void refreshNamedState();
-    void (async () => {
-      await refreshAll();
-      if (shouldAutostart) {
-        const url = new URL($page.url);
-        url.searchParams.delete("autostart");
-        replaceState(url, $page.state);
-        if (status?.state !== "running" || !status?.publicEndpoint) await turnOn();
-      }
-    })();
-    pollTimer = setInterval(() => {
-      if (!working) void refreshAll();
-    }, 8000);
-  });
-
-  onDestroy(() => {
-    destroyed = true;
-    clearInterval(pollTimer);
-    clearTimeout(copiedTimer);
+    void refreshSession(id);
+    void getWorkspaceSecret(id, "cloudflare_token")
+      .then((value) => (namedTokenSaved = Boolean(value?.trim())))
+      .catch(() => undefined);
+    if ($page.url.searchParams.get("autostart") === "1") {
+      const url = new URL($page.url);
+      url.searchParams.delete("autostart");
+      replaceState(url, $page.state);
+      void turnOn(id);
+    }
+    return () => clearTimeout(copiedTimer);
   });
 </script>
 
@@ -407,10 +283,29 @@
   <div class="sx-card ax-glass">
     <header class="sx-head">
       <h2 class="sx-title">{profile.name}</h2>
-      {#each folders as folder (folder)}
-        <p class="sx-folder" title={folder}><Folder size={12} aria-hidden="true" />{folder}</p>
-      {/each}
     </header>
+
+    <!-- Folders served by this MCP -->
+    <ul class="sx-folders">
+      {#each folders as folder (folder.id)}
+        <li class="sx-folder-row" title={folder.path}>
+          <Folder size={12} aria-hidden="true" />
+          <span class="truncate">{folder.path}</span>
+          {#if folders.length > 1}
+            <button type="button" class="sx-folder-x" title={$t("Remove")} aria-label={$t("Remove")} onclick={() => void removeFolder(folder.id)}>
+              <X size={12} />
+            </button>
+          {/if}
+        </li>
+      {/each}
+      {#if canPickFolder}
+        <li>
+          <button type="button" class="sx-folder-add" onclick={() => void addFolder()}>
+            <FolderPlus size={12} aria-hidden="true" /> {$t("Add a directory to this MCP")}
+          </button>
+        </li>
+      {/if}
+    </ul>
 
     <!-- The one switch -->
     <div class="sx-power">
@@ -419,10 +314,9 @@
         role="switch"
         class="sx-switch"
         class:is-on={switchOn}
-        class:is-busy={working}
         aria-checked={switchOn}
         aria-label={$t("Online")}
-        disabled={!canControl || working}
+        disabled={!canControl || working || status === null}
         onclick={toggle}
       >
         <span class="sx-switch-knob">
@@ -430,46 +324,40 @@
         </span>
       </button>
       <div class="sx-power-text">
-        <p class="sx-state" class:is-on={running && hasPublic} class:is-local={running && !hasPublic}>
-          {#if working && phase}
-            {$t(phase)}
+        <p class="sx-state" class:is-on={running && hasPublic} class:is-local={running && !hasPublic} class:is-error={status?.state === "error"}>
+          {#if working && session.phase}
+            {$t(session.phase)}
+          {:else if status === null}
+            …
           {:else if running && hasPublic}
             {$t("Online")}
           {:else if running}
             {$t("Local only")}
+          {:else if status.state === "starting"}
+            {$t("Starting…")}
+          {:else if status.state === "error"}
+            {$t("Error")}
           {:else}
             {$t("Stopped")}
           {/if}
         </p>
         {#if endpoint}
-          <button type="button" class="sx-endpoint tx-mono" title={$t("Copy")} onclick={() => void copy("endpoint", endpoint)}>
+          <button type="button" class="sx-endpoint tx-mono" title={$t("Copy")} onclick={() => void copyEndpoint()}>
             <span class="truncate">{endpoint}</span>
             {#if copiedKey === "endpoint"}<Check size={12} />{:else}<Copy size={12} />{/if}
           </button>
+        {:else if status?.state === "error" && status.localMessage}
+          <p class="sx-endpoint">{status.localMessage}</p>
         {/if}
       </div>
     </div>
 
     <!-- Tunnel mode -->
     <div class="sx-modes ax-segment" role="radiogroup" aria-label={$t("Tunnel")}>
-      <button
-        type="button"
-        role="radio"
-        aria-checked={kind === "quick"}
-        class:active={kind === "quick"}
-        disabled={working || savingNamed}
-        onclick={() => void chooseQuick()}
-      >
+      <button type="button" role="radio" aria-checked={kind === "quick"} class:active={kind === "quick"} disabled={busy} onclick={() => void chooseQuick()}>
         {$t("Temporary tunnel")}
       </button>
-      <button
-        type="button"
-        role="radio"
-        aria-checked={kind === "named"}
-        class:active={kind === "named"}
-        disabled={working || savingNamed}
-        onclick={chooseNamed}
-      >
+      <button type="button" role="radio" aria-checked={kind === "named"} class:active={kind === "named"} disabled={busy} onclick={chooseNamed}>
         {$t("Fixed domain")}
       </button>
     </div>
@@ -486,8 +374,8 @@
           bind:value={namedToken}
         />
         <input class="tx-input" type="text" autocomplete="off" placeholder="mcp.example.com" bind:value={namedDomain} />
-        <button type="submit" class="tx-btn-ghost" disabled={savingNamed}>
-          {#if savingNamed}<LoaderCircle size={13} class="animate-spin" />{/if}
+        <button type="submit" class="tx-btn-ghost" disabled={saving}>
+          {#if saving}<LoaderCircle size={13} class="animate-spin" />{/if}
           {$t("Save")}
         </button>
       </form>
@@ -498,8 +386,8 @@
     {/if}
 
     <!-- Copy prompt -->
-    <button type="button" class="sx-copy" disabled={!endpoint} onclick={() => void copyPrompt()}>
-      {#if copiedKey === "prompt"}<Check size={17} />{:else}<Sparkles size={17} />{/if}
+    <button type="button" class="sx-copy" disabled={!endpoint || copying} onclick={() => void copyPrompt()}>
+      {#if copiedKey === "prompt"}<Check size={17} />{:else if copying}<LoaderCircle size={17} class="animate-spin" />{:else}<Sparkles size={17} />{/if}
       <span>{copiedKey === "prompt" ? $t("Copied!") : $t("Copy prompt")}</span>
     </button>
     {#if endpoint && (authType === "oauth" || isTemporaryEndpoint(endpoint))}
@@ -512,7 +400,7 @@
     {#if errorMessage}
       <div class="tx-alert tx-alert--error sx-error" role="alert">
         <p>{errorMessage}</p>
-        <button type="button" class="tx-btn-ghost" onclick={() => void turnOn()}>
+        <button type="button" class="tx-btn-ghost" disabled={working} onclick={() => void retry()}>
           <RefreshCw size={13} /> {$t("Try again")}
         </button>
       </div>

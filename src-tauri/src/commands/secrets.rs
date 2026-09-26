@@ -41,7 +41,7 @@ fn validate_key(key: &str) -> AppResult<()> {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_workspace_secret(
     state: State<'_, AppState>,
     id: String,
@@ -52,7 +52,7 @@ pub fn get_workspace_secret(
     state.with_data(|store| store.get_workspace_secret(&id, &key))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_workspace_secret(
     state: State<'_, AppState>,
     id: String,
@@ -64,7 +64,7 @@ pub fn set_workspace_secret(
     state.with_data(|store| store.set_workspace_secret(&id, &key, &value))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn regenerate_workspace_secret(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
@@ -112,7 +112,7 @@ const ACTIONS_SHARED_KEYS: &[&str] = &[
     "actions_oauth_token_secret",
 ];
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_shared_secret(state: State<'_, AppState>, key: String) -> AppResult<Option<String>> {
     if !SHARED_KEYS.contains(&key.as_str()) {
         return Err(AppError::Message(format!("invalid shared key: {key}")));
@@ -120,7 +120,7 @@ pub fn get_shared_secret(state: State<'_, AppState>, key: String) -> AppResult<O
     state.with_data(|store| Ok(store.get_shared_secret(&key)))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_shared_secret(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
@@ -147,7 +147,7 @@ pub fn set_shared_secret(
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn regenerate_shared_secret(
     app: tauri::AppHandle,
     state: State<'_, AppState>,

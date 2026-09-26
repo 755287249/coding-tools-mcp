@@ -12,6 +12,7 @@
   import SimpleShell from "$lib/components/SimpleShell.svelte";
   import WindowTitlebar from "$lib/components/WindowTitlebar.svelte";
   import { isDesktopWindow } from "$lib/stores/glass";
+  import { startSessionPolling } from "$lib/stores/sessions";
   import DirectoryPicker from "$lib/components/DirectoryPicker.svelte";
   import ToastHost from "$lib/components/ToastHost.svelte";
   import WorkspaceNavItem from "$lib/components/WorkspaceNavItem.svelte";
@@ -156,6 +157,7 @@
 
   onMount(async () => {
     await refreshWorkspaces();
+    if (capabilities.runtimeSupervisor) startSessionPolling();
     const path = routePath($page.url.pathname);
     if (path === "/") {
       const lastId = await getLastWorkspaceId();

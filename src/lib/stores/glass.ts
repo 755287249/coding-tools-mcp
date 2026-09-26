@@ -48,3 +48,42 @@ if (browser) {
   });
   if (isDesktopWindow()) document.documentElement.classList.add("is-glass");
 }
+
+const BLUR_KEY = "coding-tools.glass-blur";
+
+function initialBlur(): boolean {
+  if (!browser) return true;
+  try {
+    return localStorage.getItem(BLUR_KEY) !== "0";
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Native acrylic blur behind the window. Acrylic can stutter while dragging on
+ * some Windows 10 / early Windows 11 builds, so the user can switch it off.
+ */
+export const glassBlur = writable<boolean>(initialBlur());
+
+if (browser && isDesktopWindow()) {
+  let first = true;
+  glassBlur.subscribe((enabled) => {
+    try {
+      localStorage.setItem(BLUR_KEY, enabled ? "1" : "0");
+    } catch {
+      // Ignore storage failures.
+    }
+    // The window starts with acrylic from tauri.conf.json; skip the redundant first apply.
+    if (first && enabled) {
+      first = false;
+      return;
+    }
+    first = false;
+    void import("@tauri-apps/api/window")
+      .then(({ getCurrentWindow, Effect }) =>
+        enabled ? getCurrentWindow().setEffects({ effects: [Effect.Acrylic] }) : getCurrentWindow().clearEffects(),
+      )
+      .catch(() => undefined);
+  });
+}

@@ -15,7 +15,7 @@ pub async fn stop_runtime(state: State<'_, AppState>, id: String) -> AppResult<R
     core_runtime::stop_mcp_runtime(&state, &id).await
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_runtime_status(state: State<'_, AppState>, id: String) -> AppResult<RuntimeStatusDto> {
     core_runtime::mcp_runtime_status(&state, &id)
 }
@@ -36,7 +36,7 @@ pub async fn stop_actions_runtime(
     core_runtime::stop_actions_runtime(&state, &id).await
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_actions_runtime_status(
     state: State<'_, AppState>,
     id: String,
@@ -44,12 +44,12 @@ pub fn get_actions_runtime_status(
     core_runtime::actions_runtime_status(&state, &id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn restart_runtime(state: State<'_, AppState>, id: String) -> AppResult<RuntimeStatusDto> {
     core_runtime::restart_mcp_runtime(&state, &id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn restart_actions_runtime(
     state: State<'_, AppState>,
     id: String,

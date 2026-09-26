@@ -16,12 +16,12 @@ use crate::workspace::resources::{
 use crate::workspace::{compare_wsl_paths, wsl_unc_path, WorkspaceFolder, WorkspaceProfile};
 use serde_json::Value;
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_workspaces(state: State<'_, AppState>) -> AppResult<Vec<WorkspaceProfile>> {
     state.with_workspaces(|store| Ok(store.list().to_vec()))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_workspace(
     state: State<'_, AppState>,
     path: String,
@@ -31,12 +31,12 @@ pub fn create_workspace(
     create_workspace_inner(&state, path, name)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn export_workspace_pack(state: State<'_, AppState>, id: String) -> AppResult<Value> {
     state.with_data(|store| store.export_workspace_pack(&id))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn export_shared_workspace(
     state: State<'_, AppState>,
     id: String,
@@ -44,7 +44,7 @@ pub fn export_shared_workspace(
     state.with_data(|store| store.export_shared_workspace(&id))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_shared_workspace(
     state: State<'_, AppState>,
     id: String,
@@ -52,7 +52,7 @@ pub fn open_shared_workspace(
     state.with_workspaces(|store| store.open_shared_workspace(&id))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn import_workspace_pack(
     state: State<'_, AppState>,
     pack: Value,
@@ -76,7 +76,7 @@ fn create_workspace_inner(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_wsl_distributions() -> AppResult<Vec<String>> {
     #[cfg(not(windows))]
     {
@@ -205,7 +205,7 @@ pub async fn update_workspace(
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn add_workspace_folder(
     state: State<'_, AppState>,
     id: String,
@@ -216,7 +216,7 @@ pub fn add_workspace_folder(
     add_workspace_folder_inner(&state, id, path, name)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn add_wsl_workspace_folder(
     state: State<'_, AppState>,
     id: String,
@@ -259,7 +259,7 @@ fn add_workspace_folder_inner(
     Ok(updated)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn remove_workspace_folder(
     state: State<'_, AppState>,
     id: String,
@@ -327,13 +327,13 @@ fn same_folder_path(left: &str, right: &str) -> bool {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_workspace_directory(path: String) -> AppResult<()> {
     let path = PathBuf::from(path.trim());
     open_path_in_file_manager(&path)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_workspace(state: State<'_, AppState>, id: String) -> AppResult<()> {
     let profile = state.with_workspaces(|store| {
         store

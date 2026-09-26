@@ -28,7 +28,7 @@ fn feature_config(state: &AppState, workspace_id: &str) -> AppResult<FeatureConf
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_workspace_skills(
     state: State<'_, AppState>,
     workspace_id: String,
@@ -47,7 +47,7 @@ pub fn get_workspace_skills(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_workspace_skills_active(
     state: State<'_, AppState>,
     workspace_id: String,
@@ -70,7 +70,7 @@ pub fn set_workspace_skills_active(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_workspace_skill_enabled(
     state: State<'_, AppState>,
     workspace_id: String,
@@ -136,7 +136,7 @@ fn extension_toggle_mut<'a>(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_workspace_extension_active(
     state: State<'_, AppState>,
     workspace_id: String,
@@ -165,7 +165,7 @@ pub fn set_workspace_extension_active(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_workspace_extension_enabled(
     state: State<'_, AppState>,
     workspace_id: String,

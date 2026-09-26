@@ -36,7 +36,7 @@ fn workspace_profile(state: &AppState, id: &str) -> AppResult<WorkspaceProfile> 
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_history_sessions(
     state: State<'_, AppState>,
     id: String,
@@ -48,7 +48,7 @@ pub fn list_history_sessions(
         .map_err(|error| AppError::Message(error.message()))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn read_history_session(
     state: State<'_, AppState>,
     id: String,

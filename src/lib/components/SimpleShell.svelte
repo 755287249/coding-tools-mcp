@@ -24,7 +24,7 @@
     {#if onAddWorkspace}
       <button type="button" class="sx-add" onclick={onAddWorkspace}>
         <FolderPlus size={15} aria-hidden="true" />
-        <span>{$t("Add folder")}</span>
+        <span>{$t("New workspace (separate MCP)")}</span>
       </button>
     {/if}
     <div class="sx-side-foot">

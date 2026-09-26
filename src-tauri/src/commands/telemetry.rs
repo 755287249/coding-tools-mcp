@@ -16,7 +16,7 @@ fn profile_id(state: &AppState, id: &str) -> AppResult<String> {
 /// Return redacted, aggregated MCP operation telemetry for the desktop UI.
 /// Payloads remain omitted; the shared query implementation only exposes the
 /// sanitized previews and metrics already used by the MCP query tool.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn read_workspace_telemetry(
     state: State<'_, AppState>,
     id: String,

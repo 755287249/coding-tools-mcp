@@ -130,7 +130,7 @@ fn tunnel_type_for(profile: &crate::workspace::WorkspaceProfile, kind: TunnelSer
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_frp_snippet(
     state: State<'_, AppState>,
     id: String,

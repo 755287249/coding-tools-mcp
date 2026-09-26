@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { get as getStore } from "svelte/store";
   import { goto } from "$app/navigation";
   import { page } from "$app/stores";
   import { appUrl } from "$lib/app-path";
@@ -740,7 +741,8 @@
   $effect(() => {
     const id = workspaceId;
     if (!id) return;
-    profile = null;
+    // Show the cached profile instantly; load() refreshes it in the background.
+    profile = getStore(workspaces).find((item) => item.id === id) ?? null;
     void load(id);
 
     return () => {
