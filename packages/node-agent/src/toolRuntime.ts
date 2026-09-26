@@ -81,6 +81,9 @@ const TOOL_RUNTIME_MODULES: readonly ToolRuntimeModule[] = [
       switch_workspace_folder: { coalescing: 'never' },
       query_tool_usage: { usageFamily: 'runtime' },
       set_default_cwd: { usageFamily: 'runtime', lockGroups: ['cwd'] },
+      set_todos: { usageFamily: 'runtime', lane: 'control', coalescing: 'never' },
+      update_plan: { usageFamily: 'runtime', lane: 'control', coalescing: 'never' },
+      report_progress: { usageFamily: 'runtime', lane: 'control', coalescing: 'never' },
       request_permissions: { usageFamily: 'runtime', lane: 'control', coalescing: 'never' }
     }
   },

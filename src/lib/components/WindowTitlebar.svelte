@@ -16,6 +16,8 @@
     } catch {
       maximized = false;
     }
+    // Rounded window corners are dropped while maximized (see app.css).
+    document.documentElement.classList.toggle("is-maximized", maximized);
   }
 
   onMount(() => {

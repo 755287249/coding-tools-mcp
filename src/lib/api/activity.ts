@@ -43,6 +43,24 @@ export interface ActivityEvent {
   responseBytes: number;
 }
 
+export type ActivityTodoStatus = "pending" | "in_progress" | "completed";
+
+export interface ActivityTodo {
+  id: string;
+  title: string;
+  status: ActivityTodoStatus;
+}
+
+/** Latest agent progress report (report_progress / update_plan explanation). */
+export interface ActivityProgress {
+  message: string;
+  phase?: string;
+  /** Agent estimate 0–100; never derived automatically. */
+  percent?: number;
+  todoId?: string;
+  updatedMs: number;
+}
+
 export interface ActivityPlan {
   taskId: string;
   objective: string;
@@ -50,6 +68,12 @@ export interface ActivityPlan {
   completedSteps: string[];
   pendingSteps: string[];
   updatedMs: number;
+  /** `task` = harness task tools, `agent` = set_todos / update_plan / report_progress. */
+  source?: "task" | "agent" | string;
+  externalTaskId?: string;
+  /** Unified checklist. Older desktop builds omit it; derive from the step lists then. */
+  todos?: ActivityTodo[];
+  progress?: ActivityProgress;
 }
 
 export interface ActivityStats {

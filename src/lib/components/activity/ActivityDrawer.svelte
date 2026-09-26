@@ -1,9 +1,9 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
   import ArrowLeft from "@lucide/svelte/icons/arrow-left";
-  import ArrowRight from "@lucide/svelte/icons/arrow-right";
   import CheckCheck from "@lucide/svelte/icons/check-check";
-  import Circle from "@lucide/svelte/icons/circle";
+  import ChevronDown from "@lucide/svelte/icons/chevron-down";
+  import ChevronsRight from "@lucide/svelte/icons/chevrons-right";
   import CircleAlert from "@lucide/svelte/icons/circle-alert";
   import CircleCheck from "@lucide/svelte/icons/circle-check";
   import FilePenLine from "@lucide/svelte/icons/file-pen-line";
@@ -16,9 +16,9 @@
   import Maximize2 from "@lucide/svelte/icons/maximize-2";
   import Minimize2 from "@lucide/svelte/icons/minimize-2";
   import MousePointerClick from "@lucide/svelte/icons/mouse-pointer-click";
-  import PanelRightClose from "@lucide/svelte/icons/panel-right-close";
   import Search from "@lucide/svelte/icons/search";
   import SquareTerminal from "@lucide/svelte/icons/square-terminal";
+  import Target from "@lucide/svelte/icons/target";
   import Trash2 from "@lucide/svelte/icons/trash-2";
   import Wrench from "@lucide/svelte/icons/wrench";
   import {
@@ -44,6 +44,8 @@
   } from "$lib/activity/diff";
   import { t, type MessageKey } from "$lib/i18n";
   import DiffView from "./DiffView.svelte";
+  import PlanCard from "./PlanCard.svelte";
+  import { CATEGORY_META, changedFiles, groupEvents, type ActivityCategory } from "./plan";
 
   interface Props {
     workspaceId: string;
@@ -58,12 +60,15 @@
 
   const MAX_EVENTS = 240;
   type Filter = "all" | "read" | "edit" | "exec" | "error";
+  type View = "timeline" | "groups" | "files";
 
   let events = $state<ActivityEvent[]>([]);
   let stats = $state<ActivityStats>(emptyActivityStats());
   let plan = $state<ActivityPlan | undefined>(undefined);
   let loadError = $state("");
   let filter = $state<Filter>("all");
+  let view = $state<View>("timeline");
+  let collapsedGroups = $state<ActivityCategory[]>([]);
   let selectedSeq = $state<number | null>(null);
   let detail = $state<ActivityEvent | null>(null);
   let detailLoading = $state(false);
@@ -109,6 +114,9 @@
     start_task: "Start task",
     update_task: "Update plan",
     finish_task: "Finish task",
+    set_todos: "Set checklist",
+    update_plan: "Update plan",
+    report_progress: "Report progress",
   };
 
   function verbOf(event: ActivityEvent): string {
@@ -260,6 +268,12 @@
     void poll();
   }
 
+  function toggleGroup(category: ActivityCategory) {
+    collapsedGroups = collapsedGroups.includes(category)
+      ? collapsedGroups.filter((item) => item !== category)
+      : [...collapsedGroups, category];
+  }
+
   function onVisibility() {
     if (!document.hidden) void poll();
   }
@@ -288,11 +302,9 @@
   const successRate = $derived(finished > 0 ? Math.round((stats.success / finished) * 1000) / 10 : null);
   const spanMinutes = $derived(stats.firstMs > 0 ? Math.max(1, (Math.max(stats.lastMs, now) - stats.firstMs) / 60_000) : 1);
   const callsPerMinute = $derived(stats.total > 0 ? stats.total / spanMinutes : 0);
-  const planDone = $derived(plan?.completedSteps.length ?? 0);
-  const planTotal = $derived(planDone + (plan?.pendingSteps.length ?? 0));
-  const planFinished = $derived(plan?.status === "completed");
-  const planPct = $derived(planFinished ? 100 : planTotal > 0 ? Math.round((planDone / planTotal) * 100) : 0);
   const running = $derived(events.filter((event) => event.status === "running"));
+  const groups = $derived(groupEvents(events));
+  const files = $derived(changedFiles(events));
   const diffFiles = $derived<DiffFile[]>(detail?.diff ? parseUnifiedDiff(detail.diff) : []);
   const activeDiff = $derived(diffFiles[Math.min(diffFileIndex, Math.max(0, diffFiles.length - 1))]);
   const ringDash = $derived(successRate === null ? 0 : (successRate / 100) * 94.25);
@@ -329,8 +341,8 @@
       >
         {#if expanded}<Minimize2 size={14} />{:else}<Maximize2 size={14} />{/if}
       </button>
-      <button type="button" class="ad-icon-btn" onclick={onClose} title={$t("Close")} aria-label={$t("Close")}>
-        <PanelRightClose size={15} />
+      <button type="button" class="ad-icon-btn" onclick={onClose} title={$t("Collapse panel")} aria-label={$t("Collapse panel")}>
+        <ChevronsRight size={16} />
       </button>
     </div>
   </header>
@@ -468,54 +480,39 @@
   {:else}
     <!-- ───────────── Overview ───────────── -->
     <div class="ad-body">
-      <!-- Plan / progress -->
-      <section class="ad-section ad-plan">
-        {#if plan}
-          <div class="ad-plan-head">
-            <ListChecks size={14} />
-            <p class="ad-plan-obj" title={plan.objective}>{plan.objective}</p>
-            <span class="ad-plan-count">{planFinished ? "✓" : `${planDone}/${planTotal}`}</span>
-          </div>
-          <svg class="ad-progress" viewBox="0 0 100 4" preserveAspectRatio="none" aria-hidden="true">
-            <rect class="ad-progress-track" x="0" y="0" width="100" height="4" rx="2" />
-            <rect class="ad-progress-fill" x="0" y="0" width={planPct} height="4" rx="2" />
-          </svg>
-          {#if planTotal > 0}
-            <ol class="ad-steps">
-              {#each plan.completedSteps as step, index (index)}
-                <li class="ad-step is-done"><CircleCheck size={13} /><span>{step}</span></li>
-              {/each}
-              {#each plan.pendingSteps as step, index (index)}
-                <li class="ad-step" class:is-current={index === 0 && !planFinished}>
-                  {#if index === 0 && !planFinished && stats.running > 0}
-                    <LoaderCircle size={13} class="animate-spin" />
-                  {:else if index === 0 && !planFinished}
-                    <ArrowRight size={13} />
-                  {:else}
-                    <Circle size={13} />
-                  {/if}
-                  <span>{step}</span>
-                </li>
-              {/each}
-            </ol>
-          {/if}
-        {:else}
-          <div class="ad-plan-head">
-            <ListChecks size={14} />
-            <p class="ad-plan-obj">{$t("Task progress")}</p>
-            <span class="ad-plan-count">{stats.total}</span>
-          </div>
-          {#if running.length > 0}
-            <p class="ad-now">
-              <LoaderCircle size={13} class="animate-spin" />
-              <span>{verbOf(running[0])}</span>
-              <span class="tx-mono truncate">{primaryText(running[0])}</span>
-            </p>
-          {:else}
-            <p class="ad-muted">{$t("No plan reported yet. Steps appear here when the AI uses start_task / update_task.")}</p>
-          {/if}
-        {/if}
-      </section>
+      <!-- Goal · overall progress · current step · checklist · agent report -->
+      {#if plan}
+        <PlanCard {plan} busy={stats.running > 0} {now} />
+      {:else}
+        <section class="ad-goal is-empty">
+          <header class="ad-goal-head">
+            <span class="ad-goal-label"><Target size={13} /> {$t("Task progress")}</span>
+            <span class="ad-chip">{stats.total}</span>
+          </header>
+          <p class="ad-muted">{$t("No plan reported yet. The AI's goal, steps and progress appear here when it calls set_todos / update_plan / report_progress.")}</p>
+        </section>
+      {/if}
+
+      <!-- Work in flight -->
+      {#if running.length > 0}
+        <section class="ad-working" aria-live="polite">
+          <h4 class="ad-section-title"><span class="ad-live"></span>{$t("Working now")}</h4>
+          <ul class="ad-working-list">
+            {#each running.slice(0, 3) as event (event.seq)}
+              {@const RunIcon = KIND_ICON[event.kind]}
+              <li>
+                <button type="button" class="ad-working-row" onclick={() => select(event.seq)}>
+                  <span class="ad-ico ad-k-{event.kind}"><RunIcon size={12} /></span>
+                  <span class="ad-verb">{verbOf(event)}</span>
+                  <span class="tx-mono ad-target" title={event.title}>{primaryText(event)}</span>
+                  <span class="ad-working-time"><LoaderCircle size={11} class="animate-spin" /> {formatDuration(now - event.startedMs)}</span>
+                </button>
+              </li>
+            {/each}
+          </ul>
+          {#if running.length > 3}<p class="ad-muted">{`+${running.length - 3}`}</p>{/if}
+        </section>
+      {/if}
 
       <!-- Stats -->
       <section class="ad-stats">
@@ -561,20 +558,36 @@
         <span class="ad-minus">−{stats.linesRemoved}</span>
       </p>
 
+      <!-- Views -->
+      <div class="ad-viewbar" role="tablist" aria-label={$t("Task panel")}>
+        <button type="button" role="tab" aria-selected={view === "timeline"} class:active={view === "timeline"} onclick={() => (view = "timeline")}>
+          {$t("Timeline")}
+        </button>
+        <button type="button" role="tab" aria-selected={view === "groups"} class:active={view === "groups"} onclick={() => (view = "groups")}>
+          {$t("By category")}
+        </button>
+        <button type="button" role="tab" aria-selected={view === "files"} class:active={view === "files"} onclick={() => (view = "files")}>
+          {$t("Files changed")}
+          {#if files.length > 0}<span class="ad-viewbar-count">{files.length}</span>{/if}
+        </button>
+      </div>
+
+      {#if loadError}
+        <p class="ad-error">{loadError}</p>
+      {/if}
+
+      {#if view === "timeline"}
       <!-- Filters -->
-      <div class="ad-filters" role="tablist">
-        {#each [["all", "All"], ["read", "Reads"], ["edit", "Edits"], ["exec", "Commands"], ["error", "Errors"]] as [value, label] (value)}
+        <div class="ad-filters" role="tablist">
+          {#each [["all", "All"], ["read", "Reads"], ["edit", "Edits"], ["exec", "Commands"], ["error", "Errors"]] as [value, label] (value)}
           <button type="button" role="tab" aria-selected={filter === value} class:active={filter === value} onclick={() => (filter = value as Filter)}>
             {$t(label as MessageKey)}
             {#if value === "error" && stats.errors > 0}<span class="ad-badge">{stats.errors}</span>{/if}
           </button>
         {/each}
-      </div>
+        </div>
 
       <!-- Timeline -->
-      {#if loadError}
-        <p class="ad-error">{loadError}</p>
-      {/if}
       {#if filtered.length === 0}
         <div class="ad-empty">
           <ListChecks size={22} />
@@ -630,6 +643,86 @@
             </li>
           {/each}
         </ul>
+      {/if}
+      {:else if view === "groups"}
+        <!-- Tool activity grouped by category -->
+        {#if groups.length === 0}
+          <div class="ad-empty">
+            <ListChecks size={22} />
+            <p>{$t("Waiting for AI activity…")}</p>
+          </div>
+        {:else}
+          <div class="ad-groups">
+            {#each groups as group (group.category)}
+              {@const meta = CATEGORY_META[group.category]}
+              {@const open = !collapsedGroups.includes(group.category)}
+              <section class="ad-group" class:is-open={open}>
+                <button type="button" class="ad-group-head" aria-expanded={open} onclick={() => toggleGroup(group.category)}>
+                  <span class="ad-group-emoji" aria-hidden="true">{meta.emoji}</span>
+                  <span class="ad-group-name">{$t(meta.label)}</span>
+                  <span class="ad-group-count">{group.total}</span>
+                  {#if group.running > 0}<span class="ad-live" title={$t("Running")}></span>{/if}
+                  {#if group.errors > 0}<span class="ad-badge" title={$t("Errors")}>{group.errors}</span>{/if}
+                  <span class="ad-group-time">{formatDuration(group.durationMs)}</span>
+                  <ChevronDown size={14} class="ad-group-chevron" />
+                </button>
+                {#if open}
+                  <ul class="ad-group-list">
+                    {#each group.events as event (event.seq)}
+                      <li>
+                        <button
+                          type="button"
+                          class="ad-mini-row"
+                          class:is-error={event.status === "error"}
+                          class:is-running={event.status === "running"}
+                          onclick={() => select(event.seq)}
+                        >
+                          <span class="ad-state ad-state--{event.status}" title={event.status === "running" ? $t("Running") : event.status === "success" ? $t("Succeeded") : $t("Failed")}></span>
+                          <span class="ad-verb">{verbOf(event)}</span>
+                          <span class="tx-mono ad-target" title={event.title}>{primaryText(event)}</span>
+                          <span class="ad-mini-meta">{event.status === "running" ? formatDuration(now - event.startedMs) : formatDuration(event.durationMs)}</span>
+                        </button>
+                      </li>
+                    {/each}
+                  </ul>
+                {/if}
+              </section>
+            {/each}
+          </div>
+        {/if}
+      {:else}
+        <!-- Files changed in this session -->
+        {#if files.length === 0}
+          <div class="ad-empty">
+            <FilePenLine size={22} />
+            <p>{$t("No files changed yet.")}</p>
+          </div>
+        {:else}
+          <p class="ad-files-sum">
+            <span>{$t("Files changed")} {files.length}</span>
+            <span class="ad-plus">+{stats.linesAdded}</span>
+            <span class="ad-minus">−{stats.linesRemoved}</span>
+          </p>
+          <ul class="ad-files">
+            {#each files as file (file.path)}
+              <li>
+                <button type="button" class="ad-file-row" title={file.path} onclick={() => select(file.lastSeq)}>
+                  <span class="ad-op ad-op--{file.operation}">{opLetter(file.operation)}</span>
+                  <span class="ad-file-main">
+                    <span class="tx-mono ad-file-name">{baseName(file.path)}</span>
+                    <span class="ad-file-dir">{dirName(file.path)}</span>
+                  </span>
+                  {#if file.edits > 1}<span class="ad-tag">{`×${file.edits}`}</span>{/if}
+                  <span class="ad-lines">
+                    <span class="ad-plus">+{file.added}</span>
+                    <span class="ad-minus">−{file.removed}</span>
+                  </span>
+                  <span class="ad-mini-meta">{formatClock(file.lastMs)}</span>
+                </button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
       {/if}
     </div>
   {/if}

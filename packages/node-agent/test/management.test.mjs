@@ -259,7 +259,7 @@ test('management UI is loopback-only, token protected and never returns configur
   const status = await statusResponse.json();
   assert.equal(status.configuredToolProfile, 'core');
   assert.equal(status.toolProfile, 'trusted-core');
-  assert.equal(status.tools, 37);
+  assert.equal(status.tools, 40);
   assert.match(status.toolsetRevision, /^[0-9a-f]{16}$/);
 });
 

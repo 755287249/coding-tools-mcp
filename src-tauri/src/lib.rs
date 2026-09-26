@@ -19,6 +19,8 @@ mod settings;
 mod task_runtime;
 pub mod tools;
 mod tunnel;
+#[cfg(feature = "desktop")]
+mod window_corners;
 mod workspace;
 mod workspace_features;
 
@@ -191,6 +193,10 @@ pub fn run() {
             }
             tray_builder.build(app)?;
 
+            if let Some(window) = app.get_webview_window("main") {
+                window_corners::init(window);
+            }
+
             let state = AppState::new().expect("failed to load app state");
             if let Err(error) =
                 state.with_workspaces(|store| store.consume_runtime_handoff_state().map(|_| ()))
@@ -232,6 +238,12 @@ pub fn run() {
         .on_window_event(|window, event| {
             if window.label() != "main" {
                 return;
+            }
+            if matches!(
+                event,
+                tauri::WindowEvent::Resized(_) | tauri::WindowEvent::ScaleFactorChanged { .. }
+            ) {
+                window_corners::refresh(window);
             }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if window.hide().is_ok() {

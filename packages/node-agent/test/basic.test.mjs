@@ -102,6 +102,46 @@ test('catalog exactly matches the Rust P0 tool names', async () => {
   assert.deepEqual(toolNames, rustNames);
 });
 
+test('agent plan tools track todos, progress and stable ids', async t => {
+  const { root, ctx, meta } = await context();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await select(ctx, meta);
+
+  let result = await callTool(ctx, 'set_todos', { todos: [
+    { id: 'a', title: 'A', status: 'in_progress' },
+    { id: 'b', title: 'B', status: 'in_progress' }
+  ] }, meta);
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, 'INVALID_ARGUMENT');
+
+  result = await callTool(ctx, 'set_todos', { goal: 'Ship', todos: [
+    { id: 'read', title: 'Read code', status: 'completed' },
+    { id: 'build', title: 'Build UI', status: 'in_progress' }
+  ] }, meta);
+  assert.equal(result.ok, true);
+  assert.equal(result.plan.completed, 1);
+  assert.equal(result.plan.current.id, 'build');
+
+  result = await callTool(ctx, 'report_progress', { message: 'Styling', percent: 40 }, meta);
+  assert.equal(result.ok, true);
+  assert.equal(result.progress.todo_id, 'build');
+  result = await callTool(ctx, 'report_progress', { message: 'x', todo_id: 'missing' }, meta);
+  assert.equal(result.ok, false);
+
+  result = await callTool(ctx, 'update_plan', { explanation: 'UI done', plan: [
+    { step: 'Read code', status: 'completed' },
+    { step: 'Build UI', status: 'completed' },
+    { step: 'Docs', status: 'in_progress' }
+  ] }, meta);
+  assert.equal(result.ok, true);
+  assert.equal(result.plan.goal, 'Ship');
+  assert.deepEqual(result.plan.todos.map(todo => todo.id), ['read', 'build', 'todo-1']);
+  assert.equal(result.plan.progress.phase, '计划更新');
+
+  result = await callTool(ctx, 'set_todos', { todos: [] }, meta);
+  assert.equal(result.plan.cleared, true);
+});
+
 test('command execution schemas expose the timeout ceilings and deprecate application heartbeats', () => {
   const exec = tools.find(tool => tool.name === 'exec_command');
   const execMany = tools.find(tool => tool.name === 'exec_many');

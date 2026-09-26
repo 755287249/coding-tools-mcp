@@ -59,6 +59,29 @@ pub struct ActivityEvent {
     pub response_bytes: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivityTodo {
+    pub id: String,
+    pub title: String,
+    /// `pending`, `in_progress` or `completed`.
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivityProgress {
+    pub message: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub phase: String,
+    /// Agent estimate (0–100). Never derived automatically.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub percent: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub todo_id: Option<String>,
+    pub updated_ms: u64,
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ActivityPlan {
@@ -68,6 +91,15 @@ pub struct ActivityPlan {
     pub completed_steps: Vec<String>,
     pub pending_steps: Vec<String>,
     pub updated_ms: u64,
+    /// `task` (harness task tools) or `agent` (set_todos / update_plan /
+    /// report_progress).
+    pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_task_id: Option<String>,
+    /// Ordered checklist; harness plans are converted into the same shape.
+    pub todos: Vec<ActivityTodo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<ActivityProgress>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -179,7 +211,10 @@ pub fn tool_kind(tool: &str) -> &'static str {
         | "project_state"
         | "history_session_bootstrap"
         | "history_session_checkpoint"
-        | "history_session_validate" => "plan",
+        | "history_session_validate"
+        | "set_todos"
+        | "update_plan"
+        | "report_progress" => "plan",
         _ if tool.starts_with("git_") => "git",
         _ if tool.starts_with("desktop_") => "desktop",
         _ => "other",
@@ -314,6 +349,21 @@ fn describe_request(tool: &str, args: &Value, paths: &[String]) -> String {
         }
         "start_task" => str_arg(args, "objective").unwrap_or("").to_string(),
         "finish_task" => str_arg(args, "summary").unwrap_or("").to_string(),
+        "set_todos" | "update_plan" => {
+            let count = args
+                .get(if tool == "set_todos" { "todos" } else { "plan" })
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
+            match str_arg(args, "goal").filter(|goal| !goal.trim().is_empty()) {
+                Some(goal) => format!("{goal} · {count}"),
+                None => format!("{count}"),
+            }
+        }
+        "report_progress" => match str_arg(args, "phase").filter(|p| !p.trim().is_empty()) {
+            Some(phase) => format!("{phase} · {}", str_arg(args, "message").unwrap_or("")),
+            None => str_arg(args, "message").unwrap_or("").to_string(),
+        },
         "switch_workspace_folder" | "conversation_bootstrap" => str_arg(args, "folder")
             .or_else(|| str_arg(args, "folder_id"))
             .unwrap_or("")
@@ -480,6 +530,34 @@ fn extract_plan(structured: &Value, now: u64) -> Option<ActivityPlan> {
             })
             .unwrap_or_default()
     };
+    let status = task
+        .get("status")
+        .and_then(|s| s.as_str().map(str::to_string))
+        .unwrap_or_default();
+    let completed_steps = strings("completed_steps");
+    let pending_steps = strings("pending_steps");
+    let finished = status == "completed";
+    let mut todos: Vec<ActivityTodo> = completed_steps
+        .iter()
+        .enumerate()
+        .map(|(index, title)| ActivityTodo {
+            id: format!("done-{}", index + 1),
+            title: title.clone(),
+            status: "completed".to_string(),
+        })
+        .collect();
+    todos.extend(pending_steps.iter().enumerate().map(|(index, title)| {
+        ActivityTodo {
+            id: format!("step-{}", index + 1),
+            title: title.clone(),
+            status: if index == 0 && !finished {
+                "in_progress"
+            } else {
+                "pending"
+            }
+            .to_string(),
+        }
+    }));
     Some(ActivityPlan {
         task_id: task
             .get("id")
@@ -487,13 +565,14 @@ fn extract_plan(structured: &Value, now: u64) -> Option<ActivityPlan> {
             .unwrap_or("")
             .to_string(),
         objective: truncate_chars(objective, 400),
-        status: task
-            .get("status")
-            .and_then(|s| s.as_str().map(str::to_string))
-            .unwrap_or_default(),
-        completed_steps: strings("completed_steps"),
-        pending_steps: strings("pending_steps"),
+        status,
+        completed_steps,
+        pending_steps,
         updated_ms: now,
+        source: "task".to_string(),
+        external_task_id: None,
+        todos,
+        progress: None,
     })
 }
 
@@ -686,10 +765,247 @@ pub(crate) fn finish(
     }
     feed.stats.p95_duration_ms = percentile_95(&feed.durations);
     if success {
-        if let Some(plan) = plan {
+        if let Some(mut plan) = plan {
+            // Keep the latest agent progress line when a harness task updates.
+            plan.progress = feed.plan.as_ref().and_then(|old| old.progress.clone());
             feed.plan = Some(plan);
         }
     }
+}
+
+// ───────────── Agent-reported plan (set_todos / update_plan / report_progress) ─────────────
+
+pub(crate) const MAX_TODOS: usize = 24;
+pub(crate) const MAX_TODO_ID_CHARS: usize = 80;
+pub(crate) const MAX_TODO_TITLE_CHARS: usize = 400;
+pub(crate) const MAX_GOAL_CHARS: usize = 400;
+pub(crate) const MAX_PROGRESS_CHARS: usize = 2000;
+pub(crate) const MAX_PHASE_CHARS: usize = 160;
+pub(crate) const MAX_EXTERNAL_ID_CHARS: usize = 100;
+
+pub(crate) const TODO_STATUSES: [&str; 3] = ["pending", "in_progress", "completed"];
+
+/// Checks the checklist invariants shared by `set_todos` and `update_plan`.
+pub(crate) fn validate_todos(todos: &[ActivityTodo]) -> Result<(), String> {
+    if todos.len() > MAX_TODOS {
+        return Err(format!("todos must contain at most {MAX_TODOS} items"));
+    }
+    let mut ids = HashSet::new();
+    let mut running = 0;
+    for todo in todos {
+        if todo.id.trim().is_empty() || todo.id.chars().count() > MAX_TODO_ID_CHARS {
+            return Err(format!("todo id must be 1-{MAX_TODO_ID_CHARS} characters"));
+        }
+        if todo.title.trim().is_empty() || todo.title.chars().count() > MAX_TODO_TITLE_CHARS {
+            return Err(format!(
+                "todo title must be 1-{MAX_TODO_TITLE_CHARS} characters"
+            ));
+        }
+        if !ids.insert(todo.id.as_str()) {
+            return Err(format!("Duplicate todo id: {}", todo.id));
+        }
+        if !TODO_STATUSES.contains(&todo.status.as_str()) {
+            return Err(format!(
+                "Invalid todo status {:?}; use pending, in_progress or completed",
+                todo.status
+            ));
+        }
+        if todo.status == "in_progress" {
+            running += 1;
+        }
+    }
+    if running > 1 {
+        return Err("At most one todo may be in_progress".to_string());
+    }
+    Ok(())
+}
+
+fn agent_plan(
+    goal: String,
+    external_task_id: Option<String>,
+    todos: Vec<ActivityTodo>,
+    progress: Option<ActivityProgress>,
+    now: u64,
+) -> ActivityPlan {
+    let completed_steps: Vec<String> = todos
+        .iter()
+        .filter(|todo| todo.status == "completed")
+        .map(|todo| todo.title.clone())
+        .collect();
+    let pending_steps: Vec<String> = todos
+        .iter()
+        .filter(|todo| todo.status != "completed")
+        .map(|todo| todo.title.clone())
+        .collect();
+    let status = if !todos.is_empty() && pending_steps.is_empty() {
+        "completed"
+    } else if todos.iter().any(|todo| todo.status == "in_progress") {
+        "in_progress"
+    } else {
+        "pending"
+    };
+    ActivityPlan {
+        task_id: external_task_id.clone().unwrap_or_default(),
+        objective: goal,
+        status: status.to_string(),
+        completed_steps,
+        pending_steps,
+        updated_ms: now,
+        source: "agent".to_string(),
+        external_task_id,
+        todos,
+        progress,
+    }
+}
+
+/// Replaces the agent checklist. An empty `todos` clears the plan. Progress is
+/// reset because it referred to the previous checklist.
+pub(crate) fn set_agent_todos(
+    profile_id: &str,
+    goal: Option<String>,
+    external_task_id: Option<String>,
+    todos: Vec<ActivityTodo>,
+) -> Result<Option<ActivityPlan>, String> {
+    validate_todos(&todos)?;
+    let now = now_ms();
+    let mut guard = feeds()
+        .lock()
+        .map_err(|_| "activity feed unavailable".to_string())?;
+    let feed = guard.entry(profile_id.to_string()).or_default();
+    feed.rev += 1;
+    if todos.is_empty() {
+        feed.plan = None;
+        return Ok(None);
+    }
+    let previous = feed.plan.as_ref();
+    let goal = goal.unwrap_or_else(|| previous.map(|p| p.objective.clone()).unwrap_or_default());
+    let external_task_id =
+        external_task_id.or_else(|| previous.and_then(|p| p.external_task_id.clone()));
+    let plan = agent_plan(goal, external_task_id, todos, None, now);
+    feed.plan = Some(plan.clone());
+    Ok(Some(plan))
+}
+
+/// Codex-style `update_plan`: steps are matched to existing todos by title so
+/// ids stay stable; new steps get fresh ids. `explanation` becomes the latest
+/// progress line.
+pub(crate) fn update_agent_plan(
+    profile_id: &str,
+    goal: Option<String>,
+    steps: Vec<(String, String)>,
+    explanation: Option<String>,
+) -> Result<Option<ActivityPlan>, String> {
+    let now = now_ms();
+    let mut guard = feeds()
+        .lock()
+        .map_err(|_| "activity feed unavailable".to_string())?;
+    let feed = guard.entry(profile_id.to_string()).or_default();
+    let mut remaining: Vec<ActivityTodo> = feed
+        .plan
+        .as_ref()
+        .map(|plan| plan.todos.clone())
+        .unwrap_or_default();
+    let mut used: HashSet<String> = HashSet::new();
+    let mut next_id = 1usize;
+    let todos: Vec<ActivityTodo> = steps
+        .into_iter()
+        .map(|(title, status)| {
+            let id = match remaining.iter().position(|todo| todo.title == title) {
+                Some(index) => remaining.remove(index).id,
+                None => loop {
+                    let candidate = format!("todo-{next_id}");
+                    next_id += 1;
+                    let taken = remaining.iter().any(|todo| todo.id == candidate)
+                        || used.contains(&candidate);
+                    if !taken {
+                        break candidate;
+                    }
+                },
+            };
+            used.insert(id.clone());
+            ActivityTodo { id, title, status }
+        })
+        .collect();
+    validate_todos(&todos)?;
+    feed.rev += 1;
+    if todos.is_empty() {
+        feed.plan = None;
+        return Ok(None);
+    }
+    let previous = feed.plan.as_ref();
+    let goal = goal.unwrap_or_else(|| previous.map(|p| p.objective.clone()).unwrap_or_default());
+    let external_task_id = previous.and_then(|p| p.external_task_id.clone());
+    let progress = explanation
+        .filter(|text| !text.trim().is_empty())
+        .map(|message| ActivityProgress {
+            message,
+            phase: "计划更新".to_string(),
+            percent: None,
+            todo_id: None,
+            updated_ms: now,
+        });
+    let plan = agent_plan(goal, external_task_id, todos, progress, now);
+    feed.plan = Some(plan.clone());
+    Ok(Some(plan))
+}
+
+/// Records a free-form progress report. `todo_id` defaults to the step that
+/// is in progress; an unknown id is rejected.
+pub(crate) fn report_agent_progress(
+    profile_id: &str,
+    message: String,
+    phase: String,
+    percent: Option<u8>,
+    todo_id: Option<String>,
+) -> Result<ActivityProgress, String> {
+    let now = now_ms();
+    let mut guard = feeds()
+        .lock()
+        .map_err(|_| "activity feed unavailable".to_string())?;
+    let feed = guard.entry(profile_id.to_string()).or_default();
+    let todos = feed
+        .plan
+        .as_ref()
+        .map(|plan| plan.todos.as_slice())
+        .unwrap_or(&[]);
+    let todo_id = match todo_id {
+        Some(id) => {
+            if !todos.iter().any(|todo| todo.id == id) {
+                return Err(format!(
+                    "Unknown todo_id: {id}. Call set_todos first or omit todo_id."
+                ));
+            }
+            Some(id)
+        }
+        None => todos
+            .iter()
+            .find(|todo| todo.status == "in_progress")
+            .map(|todo| todo.id.clone()),
+    };
+    let progress = ActivityProgress {
+        message,
+        phase,
+        percent,
+        todo_id,
+        updated_ms: now,
+    };
+    feed.rev += 1;
+    match feed.plan.as_mut() {
+        Some(plan) => {
+            plan.progress = Some(progress.clone());
+            plan.updated_ms = now;
+        }
+        None => {
+            feed.plan = Some(agent_plan(
+                String::new(),
+                None,
+                Vec::new(),
+                Some(progress.clone()),
+                now,
+            ));
+        }
+    }
+    Ok(progress)
 }
 
 /// Returns events whose revision is newer than `since_rev` (diffs stripped).
@@ -850,5 +1166,112 @@ mod tests {
         assert_eq!(tool_kind("git_status"), "git");
         assert_eq!(tool_kind("exec_command"), "exec");
         assert_eq!(tool_kind("desktop_click"), "desktop");
+        assert_eq!(tool_kind("set_todos"), "plan");
+        assert_eq!(tool_kind("report_progress"), "plan");
+    }
+
+    fn todo(id: &str, title: &str, status: &str) -> ActivityTodo {
+        ActivityTodo {
+            id: id.to_string(),
+            title: title.to_string(),
+            status: status.to_string(),
+        }
+    }
+
+    #[test]
+    fn agent_plan_tracks_todos_progress_and_ids() {
+        let profile = "activity-test-agent-plan";
+        clear(profile);
+
+        // Invariants are enforced.
+        let two_running = vec![todo("a", "A", "in_progress"), todo("b", "B", "in_progress")];
+        assert!(set_agent_todos(profile, None, None, two_running).is_err());
+        let duplicate = vec![todo("a", "A", "pending"), todo("a", "B", "pending")];
+        assert!(set_agent_todos(profile, None, None, duplicate).is_err());
+        assert!(set_agent_todos(profile, None, None, vec![todo("a", "A", "done")]).is_err());
+
+        let plan = set_agent_todos(
+            profile,
+            Some("Ship the panel".into()),
+            None,
+            vec![
+                todo("read", "Read code", "completed"),
+                todo("build", "Build UI", "in_progress"),
+                todo("test", "Test", "pending"),
+            ],
+        )
+        .expect("valid")
+        .expect("plan");
+        assert_eq!(plan.source, "agent");
+        assert_eq!(plan.status, "in_progress");
+        assert_eq!(plan.completed_steps, vec!["Read code".to_string()]);
+        assert_eq!(plan.pending_steps.len(), 2);
+
+        // Progress defaults to the in-progress step; unknown ids are rejected.
+        let progress =
+            report_agent_progress(profile, "Styling cards".into(), "UI".into(), Some(40), None)
+                .expect("progress");
+        assert_eq!(progress.todo_id.as_deref(), Some("build"));
+        assert!(report_agent_progress(
+            profile,
+            "x".into(),
+            String::new(),
+            None,
+            Some("nope".into())
+        )
+        .is_err());
+        let snap = snapshot(profile, 0);
+        let plan = snap.plan.expect("plan");
+        assert_eq!(plan.progress.expect("progress").percent, Some(40));
+
+        // update_plan keeps ids for matching titles, keeps the goal and records
+        // the explanation as progress.
+        let plan = update_agent_plan(
+            profile,
+            None,
+            vec![
+                ("Read code".into(), "completed".into()),
+                ("Build UI".into(), "completed".into()),
+                ("Write docs".into(), "in_progress".into()),
+            ],
+            Some("UI done".into()),
+        )
+        .expect("valid")
+        .expect("plan");
+        assert_eq!(plan.objective, "Ship the panel");
+        assert_eq!(plan.todos[0].id, "read");
+        assert_eq!(plan.todos[1].id, "build");
+        assert_eq!(plan.todos[2].id, "todo-1");
+        let progress = plan.progress.expect("explanation progress");
+        assert_eq!(progress.message, "UI done");
+        assert_eq!(progress.phase, "计划更新");
+
+        // Completing everything marks the plan completed; empty clears it.
+        let plan = update_agent_plan(
+            profile,
+            None,
+            vec![("Read code".into(), "completed".into())],
+            None,
+        )
+        .expect("valid")
+        .expect("plan");
+        assert_eq!(plan.status, "completed");
+        assert!(set_agent_todos(profile, None, None, Vec::new())
+            .expect("clear")
+            .is_none());
+        assert!(snapshot(profile, 0).plan.is_none());
+    }
+
+    #[test]
+    fn harness_plan_converts_steps_to_todos() {
+        let plan = extract_plan(
+            &json!({"task": {"id": "t1", "objective": "Obj", "status": "active",
+                "completed_steps": ["one"], "pending_steps": ["two", "three"]}}),
+            1,
+        )
+        .expect("plan");
+        let statuses: Vec<_> = plan.todos.iter().map(|t| t.status.as_str()).collect();
+        assert_eq!(statuses, vec!["completed", "in_progress", "pending"]);
+        assert_eq!(plan.source, "task");
     }
 }

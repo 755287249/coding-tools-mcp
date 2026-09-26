@@ -16,7 +16,7 @@ use crate::tools::redaction::{redact_tool_output_with_policy, OutputRedactionCon
 use crate::tools::tool_runtime::{descriptor as tool_runtime, MutationLockGroup};
 use crate::tools::workspace::{relative_display, tool_err, tool_err_code, tool_ok, WorkspaceError};
 use crate::tools::{
-    desktop, exec, file, file_action, git, history, image_tool, patch, project, session,
+    agent_plan, desktop, exec, file, file_action, git, history, image_tool, patch, project, session,
 };
 use serde_json::{json, Value};
 
@@ -785,6 +785,9 @@ fn call_tool_inner(
         "query_tool_usage" => crate::tools::tool_usage::query_tool_usage(ctx, &effective_args),
         "exec_health_check" => exec::exec_health_check(ctx),
         "set_default_cwd" => set_default_cwd(ctx, &effective_args),
+        "set_todos" => agent_plan::set_todos(ctx, &effective_args),
+        "update_plan" => agent_plan::update_plan(ctx, &effective_args),
+        "report_progress" => agent_plan::report_progress(ctx, &effective_args),
         "read_file" => file::read_file(ws, &effective_args),
         "read_many" => file::read_many(ws, &effective_args),
         "project_map" => project::project_map(ws, &effective_args),

@@ -60,6 +60,63 @@ pub(super) fn input_schema(name: &str) -> Option<Value> {
             },
             "additionalProperties": false
         }),
+        "set_todos" => json!({
+            "type": "object",
+            "properties": {
+                "goal": { "type": "string", "maxLength": 400, "description": "What is being built, in one sentence. Kept from the previous plan when omitted." },
+                "todos": {
+                    "type": "array",
+                    "maxItems": 24,
+                    "description": "Full ordered checklist. Empty array clears the plan.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string", "minLength": 1, "maxLength": 80 },
+                            "title": { "type": "string", "minLength": 1, "maxLength": 400 },
+                            "status": { "type": "string", "enum": ["pending", "in_progress", "completed"] }
+                        },
+                        "required": ["id", "title", "status"],
+                        "additionalProperties": false
+                    }
+                },
+                "external_task_id": { "type": "string", "maxLength": 100 }
+            },
+            "required": ["todos"],
+            "additionalProperties": false
+        }),
+        "update_plan" => json!({
+            "type": "object",
+            "properties": {
+                "goal": { "type": "string", "maxLength": 400 },
+                "explanation": { "type": "string", "maxLength": 2000 },
+                "plan": {
+                    "type": "array",
+                    "maxItems": 24,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "step": { "type": "string", "minLength": 1, "maxLength": 400 },
+                            "status": { "type": "string", "enum": ["pending", "in_progress", "completed"] }
+                        },
+                        "required": ["step", "status"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["plan"],
+            "additionalProperties": false
+        }),
+        "report_progress" => json!({
+            "type": "object",
+            "properties": {
+                "message": { "type": "string", "minLength": 1, "maxLength": 2000 },
+                "phase": { "type": "string", "maxLength": 160 },
+                "percent": { "type": "integer", "minimum": 0, "maximum": 100, "description": "Your own estimate; the panel never auto-completes." },
+                "todo_id": { "type": "string", "maxLength": 80 }
+            },
+            "required": ["message"],
+            "additionalProperties": false
+        }),
         _ => return None,
     };
     Some(schema)

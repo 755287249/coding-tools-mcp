@@ -1286,6 +1286,217 @@ export const rustCatalog: readonly ToolDefinition[] = [
   {
     "annotations": {
       "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false,
+      "title": "Set task checklist"
+    },
+    "description": "Publish the goal and step checklist for the current multi-step job so the user can follow it live in the desktop task panel. Call it once you know the steps (3+ steps or any non-trivial change), then keep it current: mark a step in_progress before working on it and completed right after. Replaces the whole list; at most 24 todos, unique ids, at most one in_progress. An empty todos array clears the plan. Does not touch workspace files.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "external_task_id": {
+          "maxLength": 100,
+          "type": "string"
+        },
+        "goal": {
+          "description": "What is being built, in one sentence. Kept from the previous plan when omitted.",
+          "maxLength": 400,
+          "type": "string"
+        },
+        "recovery_action_id": {
+          "description": "Optional stable recovery action identifier selected from a previous error response. Removed before tool execution.",
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "recovery_of_operation_id": {
+          "description": "Optional recovery-chain correlation to a prior operation_id. The runtime hashes this identifier in telemetry and removes it before tool execution.",
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "retry_of_call_sequence": {
+          "description": "Optional telemetry correlation to the failed tool call_sequence being retried. Removed before tool execution and does not change tool semantics or dedupe identity.",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "todos": {
+          "description": "Full ordered checklist. Empty array clears the plan.",
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "maxLength": 80,
+                "minLength": 1,
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "pending",
+                  "in_progress",
+                  "completed"
+                ],
+                "type": "string"
+              },
+              "title": {
+                "maxLength": 400,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "status"
+            ],
+            "type": "object"
+          },
+          "maxItems": 24,
+          "type": "array"
+        }
+      },
+      "required": [
+        "todos"
+      ],
+      "type": "object"
+    },
+    "name": "set_todos",
+    "title": "Set task checklist"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false,
+      "title": "Update plan"
+    },
+    "description": "Codex-style plan update: send the full ordered list of steps with status pending, in_progress or completed. Steps keep their ids when the title is unchanged; the optional explanation is shown as the latest progress note. Same limits as set_todos. Does not touch workspace files.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "explanation": {
+          "maxLength": 2000,
+          "type": "string"
+        },
+        "goal": {
+          "maxLength": 400,
+          "type": "string"
+        },
+        "plan": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "status": {
+                "enum": [
+                  "pending",
+                  "in_progress",
+                  "completed"
+                ],
+                "type": "string"
+              },
+              "step": {
+                "maxLength": 400,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "step",
+              "status"
+            ],
+            "type": "object"
+          },
+          "maxItems": 24,
+          "type": "array"
+        },
+        "recovery_action_id": {
+          "description": "Optional stable recovery action identifier selected from a previous error response. Removed before tool execution.",
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "recovery_of_operation_id": {
+          "description": "Optional recovery-chain correlation to a prior operation_id. The runtime hashes this identifier in telemetry and removes it before tool execution.",
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "retry_of_call_sequence": {
+          "description": "Optional telemetry correlation to the failed tool call_sequence being retried. Removed before tool execution and does not change tool semantics or dedupe identity.",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "plan"
+      ],
+      "type": "object"
+    },
+    "name": "update_plan",
+    "title": "Update plan"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false,
+      "title": "Report progress"
+    },
+    "description": "Report what you are doing right now (message, optional phase and a 0-100 percent estimate) in the desktop task panel. todo_id defaults to the step that is in_progress. Use it at meaningful milestones, not after every tool call. Does not touch workspace files.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "message": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "percent": {
+          "description": "Your own estimate; the panel never auto-completes.",
+          "maximum": 100,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "phase": {
+          "maxLength": 160,
+          "type": "string"
+        },
+        "recovery_action_id": {
+          "description": "Optional stable recovery action identifier selected from a previous error response. Removed before tool execution.",
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "recovery_of_operation_id": {
+          "description": "Optional recovery-chain correlation to a prior operation_id. The runtime hashes this identifier in telemetry and removes it before tool execution.",
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "retry_of_call_sequence": {
+          "description": "Optional telemetry correlation to the failed tool call_sequence being retried. Removed before tool execution and does not change tool semantics or dedupe identity.",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "todo_id": {
+          "maxLength": 80,
+          "type": "string"
+        }
+      },
+      "required": [
+        "message"
+      ],
+      "type": "object"
+    },
+    "name": "report_progress",
+    "title": "Report progress"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": false,
       "readOnlyHint": true,
@@ -4973,6 +5184,9 @@ export const rustToolNamesByProfile: Readonly<Record<ToolProfile, readonly strin
     "change_summary",
     "exec_health_check",
     "set_default_cwd",
+    "set_todos",
+    "update_plan",
+    "report_progress",
     "read_file",
     "read_many",
     "project_map",
@@ -5057,6 +5271,9 @@ export const rustToolNamesByProfile: Readonly<Record<ToolProfile, readonly strin
     "change_summary",
     "exec_health_check",
     "set_default_cwd",
+    "set_todos",
+    "update_plan",
+    "report_progress",
     "read_file",
     "read_many",
     "project_map",
@@ -5105,6 +5322,9 @@ export const rustToolNamesByProfile: Readonly<Record<ToolProfile, readonly strin
     "history_session_bootstrap",
     "history_session_checkpoint",
     "set_default_cwd",
+    "set_todos",
+    "update_plan",
+    "report_progress",
     "read_file",
     "read_many",
     "project_map",
@@ -5145,6 +5365,9 @@ export const rustToolNamesByProfile: Readonly<Record<ToolProfile, readonly strin
     "history_session_bootstrap",
     "history_session_checkpoint",
     "set_default_cwd",
+    "set_todos",
+    "update_plan",
+    "report_progress",
     "read_file",
     "read_many",
     "project_map",
@@ -5277,6 +5500,27 @@ export const rustToolAnnotationOverridesByProfile: Readonly<Record<ToolProfile, 
       "openWorldHint": false,
       "readOnlyHint": true,
       "title": "Set default cwd"
+    },
+    "set_todos": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": "Set task checklist"
+    },
+    "update_plan": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": "Update plan"
+    },
+    "report_progress": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": "Report progress"
     },
     "apply_patch": {
       "destructiveHint": false,
@@ -5437,11 +5681,11 @@ export const rustToolAnnotationOverridesByProfile: Readonly<Record<ToolProfile, 
   "trusted-core": {}
 };
 export const rustToolsetRevisionByProfile: Readonly<Record<ToolProfile, string>> = {
-  "advanced": "3d6d7072c4a65e48",
+  "advanced": "ff4e16fa122a62c7",
   "read-only": "0a428588c2f8c57f",
-  "compat-readonly-all": "b9793cf3441d4719",
-  "guarded-core": "575f3062fee37b39",
-  "trusted-core": "a46b556387626b2d"
+  "compat-readonly-all": "94543e8af430df45",
+  "guarded-core": "a976bac95532f6dd",
+  "trusted-core": "29b7a7e94428de72"
 };
 export const rustBehavioralParityFixtures: Readonly<Record<string, unknown>> = {
   "execution_limits": {

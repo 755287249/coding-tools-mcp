@@ -125,11 +125,11 @@ async function authorize(localBase) {
 
 test('generated profile catalogs match Rust counts, membership and revisions', () => {
   const expectedCounts = {
-    advanced: 62,
+    advanced: 65,
     'read-only': 18,
-    'compat-readonly-all': 62,
-    'guarded-core': 38,
-    'trusted-core': 37
+    'compat-readonly-all': 65,
+    'guarded-core': 41,
+    'trusted-core': 40
   };
   for (const [profile, count] of Object.entries(expectedCounts)) {
     const tools = toolsForProfile(profile);

@@ -127,6 +127,7 @@ pub(crate) fn descriptor(name: &str) -> ToolRuntimeDescriptor {
             "server_info" | "query_tool_usage" | "set_default_cwd" | "request_permissions" => {
                 ToolUsageFamily::Runtime
             }
+            "set_todos" | "update_plan" | "report_progress" => ToolUsageFamily::Runtime,
             "desktop_displays" | "desktop_screenshot" | "desktop_click" | "desktop_drag"
             | "desktop_scroll" | "desktop_type" | "desktop_key" => ToolUsageFamily::Runtime,
             _ => ToolUsageFamily::Other,
@@ -134,7 +135,7 @@ pub(crate) fn descriptor(name: &str) -> ToolRuntimeDescriptor {
     };
 
     runtime.lane = match canonical {
-        "server_info" => ToolExecutionLane::Fast,
+        "server_info" | "set_todos" | "update_plan" | "report_progress" => ToolExecutionLane::Fast,
         "wait_command" | "resolve_operation" | "list_sessions" | "send_input" | "kill_session"
         | "read_output" => ToolExecutionLane::Control,
         "exec_command" | "exec_many" | "exec_health_check" | "request_permissions" => {

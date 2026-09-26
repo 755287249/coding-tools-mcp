@@ -15,6 +15,7 @@ import { resolveExistingDirectory, resolveInside, rootAndCwd, selectedFolderSafe
 import { normalizedSandboxConfig, sandboxAvailable, sandboxBackend, sandboxBackends } from '../sandbox.js';
 import { LATEST_MCP_PROTOCOL_VERSION, SUPPORTED_MCP_PROTOCOL_VERSIONS } from '../mcpTransport.js';
 import { validateWslWorkspacePath } from '../wsl.js';
+import { agentPlanToolHandlers } from './agentPlan.js';
 
 function ok(value: JsonObject = {}): JsonObject {
   return { ok: true, ...value };
@@ -294,5 +295,6 @@ export const runtimeToolHandlers = {
   switch_workspace_folder: switchWorkspaceFolder,
   conversation_bootstrap: conversationBootstrap,
   query_tool_usage: ({ ctx, args }) => ctx.usageStore.query(args),
-  set_default_cwd: setDefaultCwd
+  set_default_cwd: setDefaultCwd,
+  ...agentPlanToolHandlers
 } satisfies ToolHandlerMap;
