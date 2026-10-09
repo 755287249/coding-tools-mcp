@@ -131,6 +131,12 @@ function createBrowserNative(): NativeUi {
       }
       throw new Error("No alert dialog available");
     },
+    async openExternal(url) {
+      const target = new URL(url);
+      if (target.protocol !== "http:" && target.protocol !== "https:") throw new Error("Only http/https links can be opened");
+      const opened = globalThis.open?.(target.href, "_blank", "noopener,noreferrer");
+      if (opened === undefined) throw new Error("No browser window available");
+    },
   };
 }
 

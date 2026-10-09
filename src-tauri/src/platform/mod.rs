@@ -42,7 +42,7 @@ pub(crate) mod reveal;
 mod paths;
 pub(crate) mod wsl;
 
-pub use open::open_path_in_file_manager;
+pub use open::{open_path_in_file_manager, open_url_in_browser};
 
 #[cfg(target_os = "linux")]
 pub use linux::LinuxPlatform;

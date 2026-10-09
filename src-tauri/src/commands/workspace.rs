@@ -8,7 +8,7 @@ use tauri::State;
 
 use crate::app_state::{bootstrap_workspace, teardown_workspace, AppState};
 use crate::error::{AppError, AppResult};
-use crate::platform::open_path_in_file_manager;
+use crate::platform::{open_path_in_file_manager, open_url_in_browser};
 use crate::tunnel::drop_workspace as drop_tunnel_workspace;
 use crate::workspace::resources::{
     assign_free_workspace_ports, validate_workspace_resources_update,
@@ -331,6 +331,13 @@ fn same_folder_path(left: &str, right: &str) -> bool {
 pub fn open_workspace_directory(path: String) -> AppResult<()> {
     let path = PathBuf::from(path.trim());
     open_path_in_file_manager(&path)
+}
+
+/// Opens an http(s) link from chat replies in the system browser. The webview
+/// itself never navigates away from the app.
+#[tauri::command(async)]
+pub fn open_external_url(url: String) -> AppResult<()> {
+    open_url_in_browser(&url)
 }
 
 #[tauri::command(async)]
