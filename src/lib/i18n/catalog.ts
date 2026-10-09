@@ -1,4 +1,11 @@
 export const MESSAGES = {
+  "OAuth / PKCE": ["OAuth / PKCE", "OAuth / PKCE", "OAuth / PKCE", "OAuth / PKCE"],
+  "Fixed token / HTTP": ["Fixed token / HTTP", "固定 Token / HTTP", "固定 Token / HTTP", "固定トークン / HTTP"],
+  "Changing authentication reconnects the service. Copy the new prompt for your AI.": ["Changing authentication reconnects the service. Copy the new prompt for your AI.", "變更認證會重新連線服務，請複製新指令給 AI。", "更改认证会重新连接服务，请复制新指令给 AI。", "認証を変更するとサービスが再接続します。新しい指示を AI にコピーしてください。"],
+  "Fixed token survives restarts until regenerated. Use a fixed domain for automatic reconnect.": ["Fixed token survives restarts until regenerated. Use a fixed domain for automatic reconnect.", "固定 Token 重啟後仍有效，重新產生才會更換。搭配固定網域以便自動重連。", "固定 Token 重启后仍有效，重新生成才会更换。搭配固定域名以便自动重连。", "固定トークンは再生成するまで再起動後も有効です。自動再接続には固定ドメインを使用してください。"],
+  "The password authorizes once; reuse the access token after reconnect until it expires.": ["The password authorizes once; reuse the access token after reconnect until it expires.", "密碼用於一次授權；重新連線時沿用尚未過期的存取權杖。", "密码用于一次授权；重新连接时沿用尚未过期的访问令牌。", "パスワードは一度の認証に使用します。再接続時は期限内のアクセストークンを再利用してください。"],
+  "Generate a Bearer token in Advanced settings before selecting fixed-token access.": ["Generate a Bearer token in Advanced settings before selecting fixed-token access.", "請先在進階設定產生 Bearer Token，再選擇固定 Token 連線。", "请先在高级设置生成 Bearer Token，再选择固定 Token 连接。", "固定トークン接続を選択する前に詳細設定で Bearer トークンを生成してください。"],
+
   "chat.0": ["Local conversations", "本機對話", "本地对话", "ローカルの会話"],
   "chat.1": ["New conversation", "新增對話", "新建对话", "新しい会話"],
   "chat.2": ["Working folder", "工作目錄", "工作目录", "作業フォルダー"],

@@ -315,3 +315,102 @@ test('closing an Agent runtime clears its pending authorization codes', async t 
     error_description: 'Unknown or already-used authorization code'
   });
 });
+
+
+test('manual loopback PKCE validates callback and reuses access tokens after restart', async () => {
+  const callback = 'http://127.0.0.1:8765/callback';
+  const base = 'https://mcp.example';
+  for (const value of [callback, 'http://localhost:8765/callback', 'http://[::1]:8765/callback']) assert.equal(redirectUriAllowed(value), true, value);
+  for (const value of ['http://127.0.0.1.attacker.example/callback', 'http://attacker.example/callback', 'http://user@127.0.0.1/callback', callback + '#secret']) assert.equal(redirectUriAllowed(value), false, value);
+  const runtime = new OAuthRuntime(oauthConfig());
+  const form = authorizationForm('manual-state');
+  form.set('redirect_uri', callback);
+  const authorized = await runtime.authorizeSubmitOneTime(form, base);
+  assert.equal(authorized.status, 303);
+  const location = new URL(authorized.location);
+  assert.equal(location.origin + location.pathname, callback);
+  assert.equal(location.searchParams.get('state'), 'manual-state');
+  const exchange = tokenForm(location.searchParams.get('code'));
+  exchange.set('redirect_uri', callback);
+  const token = runtime.exchangeToken(exchange, {}, base);
+  assert.equal(token.status, 200);
+  const headers = { authorization: `Bearer ${token.body.access_token}` };
+  runtime.dispose();
+  const restarted = new OAuthRuntime(oauthConfig({ password: runtime.password }));
+  assert.equal(restarted.verifyBearer(headers, base), true);
+  assert.equal(restarted.verifyBearer(headers, 'https://changed.example'), false);
+  assert.equal(new OAuthRuntime(oauthConfig({ tokenSecret: 'different-signing-secret' })).verifyBearer(headers, base), false);
+  const renewedForm = authorizationForm('wrong-callback');
+  renewedForm.set('password', runtime.password);
+  renewedForm.set('redirect_uri', callback);
+  const next = await restarted.authorizeSubmitOneTime(renewedForm, base);
+  const mismatch = tokenForm(new URL(next.location).searchParams.get('code'));
+  mismatch.set('redirect_uri', 'http://127.0.0.1:8766/callback');
+  assert.equal(restarted.exchangeToken(mismatch, {}, base).body.error_description, 'redirect_uri mismatch');
+});
+
+test('HTTP reconnect resumes the same chat after service restart without reauthorization', async t => {
+  const { chatUi } = await import('../dist/chat/store.js');
+  const root = await mkdtemp(path.join(tmpdir(), 'ctmcp-resume-root-'));
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'ctmcp-resume-state-'));
+  const config = agentConfig(root, dataDir, 'https://mcp.example');
+  let runtime;
+  t.after(async () => {
+    await runtime?.close();
+    await rm(root, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true });
+  });
+  async function start() {
+    runtime = await createAgentRuntime(config, { persistOAuthPassword: async password => { config.oauth.password = password; } });
+    await new Promise(resolve => runtime.server.listen(0, '127.0.0.1', resolve));
+    return `http://127.0.0.1:${runtime.server.address().port}`;
+  }
+  let local = await start();
+  const form = authorizationForm('restart-chat');
+  form.set('redirect_uri', 'http://127.0.0.1:8765/callback');
+  const authorized = await fetch(local + '/oauth/authorize', {
+    method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', 'User-Agent': 'MCP-Reconnect-Test/1.0' }, body: form, redirect: 'manual'
+  });
+  assert.equal(authorized.status, 303);
+  const location = new URL(authorized.headers.get('location'));
+  assert.equal(location.searchParams.get('state'), 'restart-chat');
+  const exchange = tokenForm(location.searchParams.get('code'));
+  exchange.set('redirect_uri', form.get('redirect_uri'));
+  const tokenResponse = await fetch(local + '/oauth/token', { method: 'POST', body: exchange, headers: { 'User-Agent': 'MCP-Reconnect-Test/1.0' } });
+  assert.equal(tokenResponse.status, 200);
+  const { access_token } = await tokenResponse.json();
+  let rpcId = 0;
+  async function rpc(method, params) {
+    const response = await fetch(local + '/mcp', {
+      method: 'POST', headers: { 'content-type': 'application/json', 'User-Agent': 'MCP-Reconnect-Test/1.0', authorization: `Bearer ${access_token}` },
+      body: JSON.stringify({ jsonrpc: '2.0', id: ++rpcId, method, params })
+    });
+    assert.equal(response.status, 200);
+    const result = await response.json();
+    assert.equal(result.error, undefined);
+    assert.notEqual(result.result?.isError, true, JSON.stringify(result.result));
+    return result.result;
+  }
+  async function initialize() {
+    await rpc('initialize', { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'resume-test', version: '1' } });
+    assert.ok((await rpc('tools/list', {})).tools.some(tool => tool.name === 'chat_open'));
+  }
+  const call = async (name, args = {}) => (await rpc('tools/call', { name, arguments: { workspace_folder_id: 'repo', ...args } })).structuredContent;
+  await initialize();
+  await rpc('tools/call', { name: 'list_workspace_folders', arguments: {} });
+  const session = chatUi(root, { action: 'create' }).session;
+  const opened = await call('chat_open', { chat_id: session.id });
+  const args = { chat_id: session.id, attachment_id: opened.attachment_id };
+  chatUi(root, { action: 'send', chat_id: session.id, message_id: 'before-restart', text: 'Resume me' });
+  assert.equal((await call('chat_wait', { ...args, timeout_ms: 0 })).message.id, 'before-restart');
+  await runtime.close();
+  runtime = undefined;
+  local = await start();
+  await initialize();
+  await rpc('tools/call', { name: 'list_workspace_folders', arguments: {} });
+  assert.equal((await call('chat_open', args)).attachment_id, args.attachment_id);
+  assert.equal((await call('chat_wait', { ...args, timeout_ms: 0 })).message.id, 'before-restart');
+  assert.equal((await call('chat_reply', { ...args, message_id: 'after-restart', reply_to: 'before-restart', text: 'Resumed', final: true })).persisted, true);
+  assert.equal((await call('chat_wait', { ...args, timeout_ms: 0 })).status, 'idle');
+  assert.equal(chatUi(root, { action: 'read', chat_id: session.id }).session.messages.length, 2);
+});

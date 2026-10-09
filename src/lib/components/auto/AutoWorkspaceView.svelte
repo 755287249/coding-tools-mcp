@@ -260,6 +260,29 @@
     flash("endpoint");
   }
 
+  async function changeAuthentication(event: Event) {
+    const input = event.currentTarget as HTMLSelectElement;
+    const nextType = input.value;
+    if (!capabilities.staticBearerAuth || busy || copying || !["oauth", "bearer"].includes(nextType) || nextType === authType) return;
+    saving = true;
+    localError = "";
+    try {
+      const auth = { ...profile.auth, type: nextType };
+      if (nextType === "bearer") {
+        const loaded = await loadMcpAuthSecrets(getBackend(), id, auth);
+        if (!loaded.bearer_token.trim()) throw new Error($t("Generate a Bearer token in Advanced settings before selecting fixed-token access."));
+      }
+      await updateWorkspace({ ...profile, auth });
+      applyProfiles(await listWorkspaces());
+      await restartIfRunning(id);
+    } catch (error) {
+      localError = messageOf(error);
+    } finally {
+      input.value = profile.auth.type;
+      saving = false;
+    }
+  }
+
   async function copyPrompt() {
     if (!endpoint || copying) return;
     copying = true;
@@ -430,14 +453,28 @@
       {/if}
     {/if}
 
+    {#if capabilities.staticBearerAuth}
+      <label class="sx-hint grid gap-1">
+        <span>{$t("Authentication type")}</span>
+        <select class="tx-input" value={authType} disabled={busy || copying} onchange={(event) => void changeAuthentication(event)}>
+          <option value="oauth">{$t("OAuth / PKCE")}</option>
+          <option value="bearer">{$t("Fixed token / HTTP")}</option>
+          {#if authType !== "oauth" && authType !== "bearer"}<option value={authType} disabled>{$t("No authentication")}</option>{/if}
+        </select>
+      </label>
+      <p class="sx-note">{$t("Changing authentication reconnects the service. Copy the new prompt for your AI.")}</p>
+    {/if}
+    <p class="sx-note">
+      {authType === "bearer" ? $t("Fixed token survives restarts until regenerated. Use a fixed domain for automatic reconnect.") : authType === "oauth" ? $t("The password authorizes once; reuse the access token after reconnect until it expires.") : ""}
+    </p>
+
     <!-- Copy prompt -->
-    <button type="button" class="sx-copy" disabled={!endpoint || copying} onclick={() => void copyPrompt()}>
+    <button type="button" class="sx-copy" disabled={!endpoint || copying || busy} onclick={() => void copyPrompt()}>
       {#if copiedKey === "prompt"}<Check size={17} />{:else if copying}<LoaderCircle size={17} class="animate-spin" />{:else}<Sparkles size={17} />{/if}
       <span>{copiedKey === "prompt" ? $t("Copied!") : $t("Copy prompt")}</span>
     </button>
-    {#if endpoint && (authType === "oauth" || isTemporaryEndpoint(endpoint))}
+    {#if endpoint && isTemporaryEndpoint(endpoint)}
       <p class="sx-note">
-        {authType === "oauth" ? $t("The password is one-time; copy again for each new connection.") : ""}
         {isTemporaryEndpoint(endpoint) ? $t("Temporary address changes on restart.") : ""}
       </p>
     {/if}

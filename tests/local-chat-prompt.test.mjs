@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { buildChatPrompt } from '../src/lib/connect/chat-prompt.ts';
-import { buildConnectionPrompt } from '../src/lib/connect/prompt.ts';
+import { buildConnectionPrompt, buildClientConfigJson, MANUAL_OAUTH_REDIRECT_URI } from '../src/lib/connect/prompt.ts';
 
 test('session target round-trips quotes and newlines as one JSON line', () => {
   const chat = 'session-"\n1', folder = 'folder-\\"\n2';
@@ -42,4 +42,25 @@ test('one copied prompt combines authentication, verified setup and the session 
     assert.match(connection, /HTTP/);
     assert.match(connection, /PKCE/);
   }
+});
+
+
+test('manual OAuth includes an explicit callback while fixed-token config bypasses OAuth', () => {
+  const info = { workspaceName: 'test', endpoint: 'https://example.test/mcp', authType: 'oauth', clientId: 'existing-client', password: 'synthetic-password', bearerToken: 'synthetic-token', folders: ['/test'] };
+  for (const locale of ['en', 'zh-CN', 'zh-TW', 'ja']) {
+    const oauth = buildConnectionPrompt(info, locale);
+    assert.ok(oauth.includes(`redirect_uri=${MANUAL_OAUTH_REDIRECT_URI}`));
+    for (const field of ['response_type=code', 'code_challenge_method=S256', 'Location', 'state', 'verifier']) assert.ok(oauth.includes(field));
+    const fixed = buildConnectionPrompt({ ...info, authType: 'bearer' }, locale);
+    assert.ok(fixed.includes('Authorization: Bearer synthetic-token'));
+    assert.ok(!fixed.includes('synthetic-password'));
+    assert.ok(!fixed.includes('redirect_uri='));
+  }
+  const fixedConfig = JSON.parse(buildClientConfigJson({ ...info, authType: 'bearer' })).mcpServers['coding-tools'];
+  assert.ok(fixedConfig.headers['User-Agent']);
+  assert.equal(fixedConfig.headers.Authorization, 'Bearer synthetic-token');
+  const oauthConfig = JSON.parse(buildClientConfigJson(info)).mcpServers['coding-tools'];
+  assert.ok(oauthConfig.headers['User-Agent']);
+  assert.equal(oauthConfig.headers.Authorization, undefined);
+  assert.ok(!JSON.stringify(oauthConfig).includes('synthetic-password'));
 });

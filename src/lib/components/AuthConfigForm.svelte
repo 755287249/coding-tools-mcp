@@ -284,6 +284,7 @@
   {/if}
 
   {#if showBearer}
+    <p class="text-xs text-[var(--color-text-muted)]">{$t("Fixed token survives restarts until regenerated. Use a fixed domain for automatic reconnect.")}</p>
     <div class="grid gap-1">
       <span class="text-xs text-[var(--color-text-muted)]">Bearer Token</span>
       <SecretInput

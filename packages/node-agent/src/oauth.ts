@@ -134,8 +134,12 @@ export function redirectUriAllowed(value: string): boolean {
   if (!value || value.trim() !== value) return false;
   try {
     const url = new URL(value);
+    if (url.username || url.password || url.hash) return false;
+    // Match Desktop's RFC 8252 loopback callbacks, including manual HTTP PKCE.
+    if (url.protocol === 'http:') {
+      return ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname);
+    }
     return url.protocol === 'https:'
-      && !url.username && !url.password && !url.hash
       && (url.port === '' || url.port === '443')
       && allowedOrigins.has(url.origin);
   } catch { return false; }
