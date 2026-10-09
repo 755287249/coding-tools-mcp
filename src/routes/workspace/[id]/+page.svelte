@@ -48,6 +48,12 @@
     workspaceFolders,
   } from "$lib/types";
   import { t } from "$lib/i18n";
+  import { chatLocation } from '$lib/chat/location';
+  import Settings from '@lucide/svelte/icons/settings';
+  import MessageSquare from '@lucide/svelte/icons/message-square';
+  import ListChecks from '@lucide/svelte/icons/list-checks';
+  import ActivityDrawer from '$lib/components/activity/ActivityDrawer.svelte';
+  import { activityPanelExpanded, activityPanelOpen } from '$lib/stores/activity-panel';
   import ChatPanel from "$lib/components/chat/ChatPanel.svelte";
   import AutoWorkspaceView from "$lib/components/auto/AutoWorkspaceView.svelte";
   import { uiMode } from "$lib/stores/ui-mode";
@@ -89,7 +95,7 @@
   let actionsLocal = $state("");
   let actionsPublic = $state("");
   let frpProfiles = $state<FrpProfileDto[]>([]);
-  let activeWorkspaceTab = $state<WorkspaceTab>("overview");
+  let activeWorkspaceTab = $state<WorkspaceTab>("chat");
   let mcpSection = $state<ServiceSection>("service");
   let actionsSection = $state<ServiceSection>("service");
   let loadGeneration = 0;
@@ -195,7 +201,7 @@
   }
 
   function validWorkspaceTab(value: string | null): WorkspaceTab {
-    const tab = workspaceTabValues.includes(value as WorkspaceTab) ? (value as WorkspaceTab) : "overview";
+    const tab = workspaceTabValues.includes(value as WorkspaceTab) ? (value as WorkspaceTab) : "chat";
     if (tab === "actions" && !capabilities.actions) return "overview";
     if (tab === "logs" && !capabilities.operationLogs) return "overview";
     if (tab === "features" && !capabilities.workspaceFeatureControls) return "overview";
@@ -209,7 +215,7 @@
   }
 
   function syncNavigationFromUrl(url: URL) {
-    const tab = validWorkspaceTab(url.searchParams.get("tab"));
+    const tab = url.searchParams.get("autostart") === "1" ? "overview" : validWorkspaceTab(url.searchParams.get("tab"));
     const section = validServiceSection(url.searchParams.get("section"));
     activeWorkspaceTab = tab;
     if (tab === "mcp") mcpSection = section;
@@ -754,16 +760,23 @@
   });
 </script>
 
-{#if profile && $uiMode === "auto"}
-  <div class="flex shrink-0 gap-2 border-b border-[var(--color-border)] px-6 py-3">
-    <button class="tx-btn-ghost" class:font-semibold={activeWorkspaceTab !== "chat"} onclick={() => navigateWorkspace("overview")}>{$t("chat.43")}</button>
-    <button class="tx-btn-ghost" class:font-semibold={activeWorkspaceTab === "chat"} onclick={() => navigateWorkspace("chat")}>{$t("chat.44")} <span class="text-xs opacity-60">{$t("chat.49")}</span></button>
+{#if profile && ($uiMode === "auto" || activeWorkspaceTab === "chat")}
+  <div class="workspace-chat-bar">
+    <button class="workspace-chat-tab" class:active={activeWorkspaceTab === "chat"} onclick={() => navigateWorkspace("chat")}><MessageSquare size={15}/>{$t("chat.44")}</button>
+    <div class="workspace-chat-actions">
+      {#if activeWorkspaceTab === "chat" && capabilities.liveHistoryActivity}<button class="workspace-icon" class:active={$activityPanelOpen} title={$t('Task panel')} aria-label={$t('Task panel')} aria-expanded={$activityPanelOpen} onclick={() => activityPanelOpen.update(value => !value)}><ListChecks size={17}/></button>{/if}
+      <button class="workspace-icon" class:active={activeWorkspaceTab !== "chat"} title={$t("chat.43")} aria-label={$t("chat.43")} onclick={() => navigateWorkspace("overview")}><Settings size={17}/></button>
+    </div>
   </div>
 {/if}
 {#if profile && activeWorkspaceTab === "chat"}
-  <div class="min-h-0 flex-1 overflow-auto p-3 md:p-6">
-    <ChatPanel workspaceId={profile.id} folders={workspaceFolders(profile)} activeFolderId={profile.active_folder_id} endpoint={mcpPublic || mcpLocal} auth={profile.auth} />
-    {#if $uiMode !== "auto"}<button class="tx-btn-ghost mt-2" onclick={() => navigateWorkspace("overview")}>{$t("chat.45")}</button>{/if}
+  <div class="ad-host chat-workspace">
+    <div class="chat-workspace-main">
+      <ChatPanel externalNavigation connectRequested={$page.url.searchParams.get('connect') === '1'} requestedChatId={$page.url.searchParams.get('chat') ?? ''} requestedFolderId={$page.url.searchParams.get('folder') ?? ''} startNew={$page.url.searchParams.get('new') === '1'} onNavigate={(folder, chat) => void goto(appUrl(chatLocation(profile!.id, folder, chat)), {noScroll:true})} workspaceId={profile.id} folders={workspaceFolders(profile)} activeFolderId={profile.active_folder_id} endpoint={mcpPublic || mcpLocal} auth={profile.auth} />
+    </div>
+    {#if capabilities.liveHistoryActivity && $activityPanelOpen}
+      {#key profile.id}<ActivityDrawer workspaceId={profile.id} live={mcpStatus === 'running'} expanded={$activityPanelExpanded} onToggleExpanded={() => activityPanelExpanded.update(value => !value)} onClose={() => activityPanelOpen.set(false)}/>{/key}
+    {/if}
   </div>
 {:else if profile && $uiMode === "auto"}
   {#key profile.id}
@@ -947,3 +960,7 @@
     </footer>
   </section>
 {/if}
+
+<style>
+.workspace-chat-bar{display:flex;align-items:center;justify-content:space-between;flex:none;gap:12px;border-bottom:1px solid var(--color-border);padding:8px 18px}.workspace-chat-tab{display:flex;gap:7px;align-items:center;padding:6px 9px;border-radius:7px;font-size:12px;color:var(--color-text-muted);cursor:pointer}.workspace-chat-tab.active{color:var(--color-text);background:var(--surface-hover)}.workspace-chat-actions{display:flex;gap:6px}.workspace-icon{display:grid;place-items:center;width:30px;height:30px;border-radius:7px;color:var(--color-text-muted);cursor:pointer}.workspace-icon:hover,.workspace-icon.active{background:var(--surface-hover);color:var(--color-text)}button:focus-visible{outline:2px solid var(--primary);outline-offset:2px}.chat-workspace-main{flex:1;min-width:0;min-height:0;padding:0}.chat-workspace :global(.ad-drawer){max-width:calc(100% - 20px)}@media(max-width:560px){.workspace-chat-bar{padding:6px 10px}.chat-workspace-main{padding:5px}}
+</style>

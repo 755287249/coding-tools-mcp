@@ -18,7 +18,7 @@ test("quick setup is an independent five-step route reachable from the app shell
   const [wizard, layout, shell] = await Promise.all([
     readFile(wizardPath, "utf8"),
     readFile(path.join(root, "src", "routes", "+layout.svelte"), "utf8"),
-    readFile(path.join(root, "src", "lib", "components", "AppShell.svelte"), "utf8"),
+    readFile(path.join(root, "src", "lib", "components", "SimpleShell.svelte"), "utf8"),
   ]);
 
   assert.match(
@@ -29,7 +29,7 @@ test("quick setup is an independent five-step route reachable from the app shell
   assert.match(layout, /workspaceMatch/);
   assert.match(layout, /onQuickSetup=\{capabilities\.guidedSetup \? openQuickSetup : undefined\}/);
   assert.match(shell, /\$t\("Quick setup"\)/);
-  assert.match(shell, /\$t\("Add workspace"\)/, "the original add-workspace entry remains available");
+  assert.match(shell, /\$t\('New workspace \(separate MCP\)'\)/, "the original add-workspace entry remains available");
 });
 
 test("the first step keeps all providers for desktop and gates unsupported Node providers", async () => {

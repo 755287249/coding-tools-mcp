@@ -24,6 +24,7 @@
     class="tx-nav-button"
     onclick={onClick}
     title={workspace.name}
+    aria-label={workspace.name}
     aria-current={active ? "page" : undefined}
   >
     {#if capabilities.actions}

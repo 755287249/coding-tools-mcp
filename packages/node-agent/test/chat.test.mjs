@@ -312,3 +312,21 @@ test('AI upload requires ownership and reply references are immutable and conver
   chatUi(root, { action: 'detach', chat_id: args.chat_id });
   assert.throws(() => chatTool(root, 'chat_upload', { ...upload, upload_id: 'after-detach' }), /expired/);
 });
+
+
+test('summary work state tracks pickup, progress, final and close without message bodies', async t => {
+  const { root, args } = fixture(t);
+  const state = () => chatUi(root, { action: 'list' }).sessions[0].work_state;
+  assert.equal(state(), null);
+  chatUi(root, { action: 'send', chat_id: args.chat_id, message_id: 'u1', text: 'hello' });
+  assert.equal(state(), 'queued');
+  await chatWait(root, { ...args, timeout_ms: 0 });
+  assert.equal(state(), 'processing');
+  chatTool(root, 'chat_reply', { ...args, message_id: 'a1', reply_to: 'u1', text: 'done', final: true });
+  assert.equal(state(), null);
+  chatUi(root, { action: 'send', chat_id: args.chat_id, message_id: 'u2', text: 'next' });
+  chatTool(root, 'chat_reply', { ...args, message_id: 'a2', reply_to: 'u2', text: 'working', final: false });
+  assert.equal(state(), 'processing');
+  chatUi(root, { action: 'close', chat_id: args.chat_id });
+  assert.equal(state(), null);
+});

@@ -265,6 +265,14 @@ fn view(root: &Path, s: &Value) -> Result<Value> {
     o.remove("lease_until");
     o.remove("version");
     o.insert("status".into(), json!(status));
+    let work_state = if s["closed"] == true { None } else {
+        pending(s).map(|message| {
+            let accepted = message["received_at"].as_u64().is_some_and(|n| n > 0)
+                || s["messages"].as_array().is_some_and(|messages| messages.iter().any(|reply| reply["role"] == "assistant" && reply["reply_to"] == message["id"]));
+            if accepted { "processing" } else { "queued" }
+        })
+    };
+    o.insert("work_state".into(), json!(work_state));
     o.insert("assistant_message_count".into(), json!(s["messages"].as_array().map_or(0, |messages| messages.iter().filter(|m| m["role"] == "assistant").count())));
     o.insert(
         "archive_path".into(),
@@ -877,6 +885,26 @@ mod tests {
         assert!(fs::read_to_string(file(root, cid.as_str().unwrap()).unwrap().with_extension("md")).unwrap().contains("Attachment: result.txt"));
         ui(root, &json!({"action":"detach","chat_id":cid})).unwrap();
         assert!(tool(root, "chat_upload", &args).is_err());
+    }
+    #[tokio::test]
+    async fn summary_work_state_tracks_pickup_final_and_close() {
+        let dir = tempfile::tempdir().unwrap(); let root = dir.path();
+        let cid = ui(root, &json!({"action":"create"})).unwrap()["session"]["id"].clone();
+        let opened = tool(root, "chat_open", &json!({"chat_id":cid})).unwrap();
+        let args = json!({"chat_id":cid,"attachment_id":opened["attachment_id"],"timeout_ms":0});
+        let state = || ui(root, &json!({"action":"list"})).unwrap()["sessions"][0]["work_state"].clone();
+        assert_eq!(state(), Value::Null);
+        ui(root, &json!({"action":"send","chat_id":cid,"message_id":"u1","text":"hello"})).unwrap();
+        assert_eq!(state(), "queued");
+        wait(root, &args).await.unwrap();
+        assert_eq!(state(), "processing");
+        tool(root, "chat_reply", &json!({"chat_id":cid,"attachment_id":opened["attachment_id"],"message_id":"a1","reply_to":"u1","text":"done","final":true})).unwrap();
+        assert_eq!(state(), Value::Null);
+        ui(root, &json!({"action":"send","chat_id":cid,"message_id":"u2","text":"next"})).unwrap();
+        tool(root, "chat_reply", &json!({"chat_id":cid,"attachment_id":opened["attachment_id"],"message_id":"a2","reply_to":"u2","text":"working","final":false})).unwrap();
+        assert_eq!(state(), "processing");
+        ui(root, &json!({"action":"close","chat_id":cid})).unwrap();
+        assert_eq!(state(), Value::Null);
     }
     #[test]
     fn summary_reply_count_deduplicates_and_excludes_user_messages() {

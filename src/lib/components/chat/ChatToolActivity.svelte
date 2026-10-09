@@ -5,10 +5,10 @@
   import ChatMarkdown from './ChatMarkdown.svelte';
   import ChatStatusIcon from './ChatStatusIcon.svelte';
   import ChatAttachment from './ChatAttachment.svelte';
-  let { messages, workspaceId, folderId, chatId }: { messages: ChatMessage[]; workspaceId: string; folderId: string; chatId: string } = $props();
-  const summary = $derived(summarizeToolActivity(messages));
+  let { messages, settled, workspaceId, folderId, chatId }: { messages: ChatMessage[]; settled: boolean; workspaceId: string; folderId: string; chatId: string } = $props();
+  const summary = $derived(summarizeToolActivity(messages, settled));
   const running = $derived(summary.running > 0);
-  const state = $derived(running ? 'running' : summary.failed ? 'failed' : 'completed');
+  const state = $derived(running ? 'running' : summary.failed ? 'failed' : summary.unresolved ? 'interrupted' : 'completed');
   let expanded = $state(false);
   let previousRunning: boolean | null = null;
   $effect(() => {
@@ -17,11 +17,12 @@
 </script>
 <details class="tool-activity" bind:open={expanded} data-running={running}>
   <summary>
-    <ChatStatusIcon {state} label={running ? $t('chat.55') : summary.failed ? $t('chat.58') : $t('chat.56')}/>
+    <ChatStatusIcon {state} label={running ? $t('chat.55') : summary.failed ? $t('chat.58') : summary.unresolved ? $t('chat.95') : $t('chat.56')}/>
     <span>{$t('chat.92')} {summary.calls}</span>
     {#if running}<span class="working">{$t('chat.55')} {summary.running}</span>{/if}
     {#if summary.failed}<span class="failed">{$t('chat.58')} {summary.failed}</span>{/if}
-    {#if !running && !summary.failed}<span class="done">{$t('chat.56')}</span>{/if}
+    {#if summary.unresolved}<span class="working">{$t('chat.95')} {summary.unresolved}</span>{/if}
+    {#if !running && !summary.failed && !summary.unresolved}<span class="done">{$t('chat.56')}</span>{/if}
   </summary>
   <div class="tool-reports">
     {#each messages as message (message.id)}

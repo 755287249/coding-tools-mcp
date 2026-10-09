@@ -158,15 +158,7 @@
   onMount(async () => {
     await refreshWorkspaces();
     if (capabilities.runtimeSupervisor) startSessionPolling();
-    const path = routePath($page.url.pathname);
-    if (path === "/") {
-      const lastId = await getLastWorkspaceId();
-      if (lastId && $workspaces.some((item) => item.id === lastId)) {
-        goto(appUrl(`/workspace/${lastId}`));
-      } else if ($workspaces.length > 0) {
-        goto(appUrl(`/workspace/${$workspaces[0].id}`));
-      }
-    }
+
   });
 </script>
 
@@ -175,27 +167,7 @@
     <WindowTitlebar />
   {/if}
   <div class="win-body">
-    {#if $uiMode === "auto"}
-      <SimpleShell onAddWorkspace={capabilities.workspaceLifecycle ? addWorkspace : undefined}>
-        {#snippet workspaceList()}
-          {#each $workspaces as workspace (workspace.id)}
-            <WorkspaceNavItem
-              workspace={workspace}
-              active={routePath($page.url.pathname) === `/workspace/${workspace.id}`}
-              mcpState={$mcpRuntimeStates[workspace.id] ?? "stopped"}
-              actionsState={$actionsRuntimeStates[workspace.id] ?? "stopped"}
-              onClick={() => openWorkspace(workspace.id)}
-            />
-          {/each}
-        {/snippet}
-        {@render children()}
-      </SimpleShell>
-    {:else}
-      <AppShell
-        onAddWorkspace={capabilities.workspaceLifecycle ? addWorkspace : undefined}
-        onQuickSetup={capabilities.guidedSetup ? openQuickSetup : undefined}
-        workspaceCount={capabilities.workspaceLifecycle ? $workspaces.length : undefined}
-      >
+    <SimpleShell onQuickSetup={capabilities.guidedSetup ? openQuickSetup : undefined} onAddWorkspace={capabilities.workspaceLifecycle ? addWorkspace : undefined}>
         {#snippet settingsNav()}
           {#if capabilities.host === "desktop"}
             <button
@@ -253,35 +225,8 @@
             </button>
           {/if}
         {/snippet}
-        {#snippet sidebar()}
-          {#if $workspaces.length >= WORKSPACE_FILTER_THRESHOLD}
-            <label class="tx-sidebar-filter">
-              <Search size={13} aria-hidden="true" />
-              <span class="sr-only">{$t("Filter workspaces")}</span>
-              <input type="search" placeholder={$t("Filter workspaces")} bind:value={workspaceFilter} />
-            </label>
-          {/if}
-          <div>
-            {#each filteredWorkspaces as workspace (workspace.id)}
-              <WorkspaceNavItem
-                workspace={workspace}
-                active={routePath($page.url.pathname) === `/workspace/${workspace.id}`}
-                mcpState={$mcpRuntimeStates[workspace.id] ?? "stopped"}
-                actionsState={$actionsRuntimeStates[workspace.id] ?? "stopped"}
-                onClick={() => openWorkspace(workspace.id)}
-              />
-            {/each}
-            {#if workspaceFilter.trim() && filteredWorkspaces.length === 0}
-              <p class="tx-sidebar-empty">{$t("No matching workspaces")}</p>
-            {/if}
-          </div>
-        {/snippet}
-
-        {#snippet children()}
-          {@render children()}
-        {/snippet}
-      </AppShell>
-    {/if}
+      {@render children()}
+    </SimpleShell>
   </div>
   {#if desktopWindow}
     <GlassControl />
