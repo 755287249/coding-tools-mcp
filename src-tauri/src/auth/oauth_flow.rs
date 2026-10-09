@@ -800,7 +800,7 @@ mod tests {
         let base = "https://lb.example.com";
         let oauth = OAuthRuntime::try_new(
             base.into(),
-            String::new(),
+            "client-b".into(),
             None,
             Some("test-password".into()),
             Some("token-signing-secret".into()),
