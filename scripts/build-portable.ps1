@@ -76,6 +76,7 @@ try {
     New-Item -ItemType Directory -Path $distRoot -Force | Out-Null
     $expandedDir = Join-Path $distRoot $expandedName
     $zipPath = Join-Path $distRoot "$packageName.zip"
+    $standaloneExe = Join-Path $distRoot "$packageName.exe"
     $stagingRoot = Join-Path ([System.IO.Path]::GetTempPath()) "ctmcp-$([guid]::NewGuid().ToString('N'))"
     $stagingPackageDir = Join-Path $stagingRoot $packageName
     $stagingExe = Join-Path $stagingPackageDir 'ctmcp.exe'
@@ -90,6 +91,7 @@ try {
             -DestinationPath $stagingZip `
             -CompressionLevel Optimal
         Move-Item -LiteralPath $stagingZip -Destination $zipPath -Force
+        Copy-Item -LiteralPath $stagingExe -Destination $standaloneExe -Force
 
         Copy-Item -LiteralPath $stagingPackageDir -Destination $expandedStagingDir -Recurse
         try {
@@ -128,6 +130,8 @@ try {
     Write-Host "ZIP bytes: $($zipInfo.Length)"
     Write-Host "ZIP SHA-256: $zipHash"
     Write-Host "Expanded portable: $expandedDir"
+    Write-Host "Standalone EXE: $standaloneExe"
+    Write-Host "Standalone SHA-256: $(Get-Sha256 $standaloneExe)"
     Write-Host ('Packaging seconds: {0:N1}; total seconds: {1:N1}' -f $phaseTimer.Elapsed.TotalSeconds, $totalTimer.Elapsed.TotalSeconds)
 } finally {
     Pop-Location

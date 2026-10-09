@@ -70,3 +70,26 @@ test('per-message receipts distinguish the active message from unread queued mes
   assert.deepEqual(chatUserState(session,'u1'),{read:true,status:'replied'});
   assert.equal(chatUserState(session,'p1'),null);
 });
+
+test('one group final does not acknowledge the whole request',()=>{
+ const session={closed:false,status:'connected',messages:[{id:'u',role:'user',text:'@Builder build',received_at:1,recipient_ids:['chief','builder']},{id:'done',role:'assistant',agent_id:'builder',reply_to:'u',final:true}]};
+ assert.equal(pendingChatState(session),'processing');
+ session.messages.push({id:'summary',role:'assistant',agent_id:'chief',reply_to:'u',final:true});
+ assert.equal(pendingChatState(session),null);
+});
+
+
+test('group coordinator confirmation follows helper completion and survives later tool events', async () => {
+  const {chatUserState} = await import('../src/lib/chat/status.ts');
+  const session = {status:'connected', messages:[
+    {id:'u',role:'user',recipient_ids:['chief','helper']},
+    {id:'h',role:'assistant',reply_to:'u',agent_id:'helper',final:true},
+    {id:'q',role:'assistant',reply_to:'u',agent_id:'chief',final:true,awaiting_user:true},
+    {id:'log',role:'assistant',reply_to:'u',agent_id:'chief',tool_event:{name:'check'},final:false}
+  ]};
+  assert.equal(chatUserState(session,'u').status,'awaiting_user');
+  assert.equal(pendingChatState(session),'awaiting_user');
+  session.messages.push({id:'next',role:'user'});
+  assert.equal(chatUserState(session,'u').status,'replied');
+  assert.equal(pendingChatState(session),'queued');
+});

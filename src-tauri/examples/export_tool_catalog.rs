@@ -20,6 +20,7 @@ fn main() {
         .collect::<serde_json::Map<String, serde_json::Value>>();
     let output = serde_json::json!({
         "profiles": catalogs,
+        "local_chat_skill": coding_tools_mcp_desktop_lib::tools::chat::local_chat_skill(),
         "behavioral_parity": coding_tools_mcp_desktop_lib::export_behavioral_parity_fixtures()
     });
     println!(

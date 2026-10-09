@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 
 pub(super) fn input_schema(name: &str) -> Option<Value> {
-    let schema = match name {
+    let mut schema = match name {
         "list_workspace_folders" => json!({
             "type": "object",
             "properties": {},
@@ -119,5 +119,9 @@ pub(super) fn input_schema(name: &str) -> Option<Value> {
         }),
         _ => return None,
     };
+    if matches!(name,"set_todos"|"update_plan"|"report_progress") {
+        let properties=schema["properties"].as_object_mut().unwrap();
+        for key in ["chat_id","attachment_id","reply_to"] { properties.insert(key.into(),json!({"type":"string","minLength":1,"maxLength":80,"description":"For local chat, provide chat_id, attachment_id and the current user message ID as reply_to together. Plans are isolated and persisted per message."})); }
+    }
     Some(schema)
 }

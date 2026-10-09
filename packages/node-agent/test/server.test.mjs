@@ -131,7 +131,7 @@ test('scoped OAuth PKCE and MCP workspace flow', async t => {
   assert.match(initialized.result.instructions, /exec_many\(mode=auto\)/);
   assert.equal(initialized.result.capabilities.prompts.listChanged, false);
   assert.equal(initialized.result.capabilities.resources.subscribe, false);
-  assert.match(initialized.result.instructions, /Workspace and enabled Codex\/Claude user-level Skills/);
+  assert.match(initialized.result.instructions, /Skills via prompts\/get or resources\/read/);
   const promptList = await rpc(endpoint, token, { jsonrpc: '2.0', id: 30, method: 'prompts/list', params: {} });
   const releasePrompt = promptList.result.prompts.find(prompt => prompt.name === 'project-skill/repo/release-helper');
   assert.ok(releasePrompt);

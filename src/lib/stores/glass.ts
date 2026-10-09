@@ -1,3 +1,4 @@
+import { desktopWindowApi } from "$lib/backend/host";
 import { browser } from "$app/environment";
 import { derived, writable } from "svelte/store";
 
@@ -14,7 +15,7 @@ const GLASS_DEFAULT = 55;
 
 /** True inside the Tauri desktop window (not the Node Agent web UI). */
 export function isDesktopWindow(): boolean {
-  return browser && typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+  return browser && !!desktopWindowApi?.available();
 }
 
 function clamp(value: number): number {
@@ -77,8 +78,8 @@ export function effectForBuild(build: number | null | undefined): GlassEffectKin
 let effectKind: Promise<GlassEffectKind> | null = null;
 
 function resolveEffectKind(): Promise<GlassEffectKind> {
-  effectKind ??= import("@tauri-apps/api/core")
-    .then(({ invoke }) => invoke<number | null>("get_windows_build"))
+  effectKind ??= Promise.resolve()
+    .then(() => desktopWindowApi.invoke<number | null>("get_windows_build"))
     .then(effectForBuild)
     .catch(() => "solid" as const)
     .then((kind) => {
@@ -117,7 +118,7 @@ if (browser && isDesktopWindow()) {
     document.documentElement.classList.toggle("backdrop-off", !wanted);
     if (wanted === applied) return;
     applied = wanted;
-    void Promise.all([import("@tauri-apps/api/window"), resolveEffectKind()])
+    void Promise.all([Promise.resolve(desktopWindowApi), resolveEffectKind()])
       .then(([{ getCurrentWindow, Effect }, kind]) => {
         // A newer toggle may have landed while the build lookup was pending.
         if (applied !== wanted) return;

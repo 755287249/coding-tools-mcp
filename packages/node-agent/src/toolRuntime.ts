@@ -53,7 +53,7 @@ const TASK_LOCK = ['task'] as const;
 
 function workspaceSelectorFor(name: string): boolean {
   return name.startsWith('chat_') || name.startsWith('git_') || [
-    'set_default_cwd',
+    'set_default_cwd', 'set_todos', 'update_plan', 'report_progress',
     'read_file', 'read_many', 'list_files', 'project_map', 'search_text',
     'apply_patch', 'edit', 'file_ops', 'patch_check', 'format_files', 'view_image',
     'exec_health_check', 'exec_command', 'exec_many', 'wait_command', 'resolve_operation',

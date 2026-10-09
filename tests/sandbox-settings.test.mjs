@@ -64,7 +64,7 @@ test("sandbox settings stay backend-neutral and fail closed", async () => {
   assert.match(sandbox, /"fallback_allowed": false/);
   assert.match(exec, /CommandExecutionBoundary::from_config\(&runtime_config\.sandbox, &ctx\.workspace\)/);
   assert.match(exec, /boundary\.prepare_backend\(&runtime_config\.sandbox, ctx\)/);
-  assert.match(exec, /request\.legacy_native && boundary\.allows_native_diagnostic\(\)/);
+  assert.match(exec, /request\.legacy_native\s*&& request\.timeout_contract\.execution_mode != "job"\s*&& boundary\.allows_native_diagnostic\(\)/);
   assert.match(exec, /pub fn exec_health_check[\s\S]*CommandExecutionBoundary::from_config/);
   assert.match(exec, /pub fn exec_health_check[\s\S]*boundary\.prepare_backend/);
   assert.doesNotMatch(exec, /pub fn exec_health_check[\s\S]*CommandExecutionBackend::Native/);

@@ -31,4 +31,8 @@ Assert-Equal $snapshot.endpoints[1].url 'http://127.0.0.1:3001/mcp/info' 'Legacy
 Assert-Equal $snapshot.endpoints[2].url 'http://127.0.0.1:3002/openapi.json' 'Actions endpoint was lost'
 $empty = Get-UpgradeSnapshot ([pscustomobject]@{profiles=@();mcp_enabled_workspace_ids=@();actions_enabled_workspace_ids=@()})
 Assert-Equal @($empty.endpoints).Count 0 'Empty workspace state must stay empty'
-Write-Output 'PASS: version/product/session/PID/path selection and canonical/legacy runtime snapshots (10 assertions). No processes were started or stopped.'
+Assert-Equal (Test-DesktopName 'ctmcp-0.1.67-win64.exe') $true 'Versioned download name must be recognized'
+Assert-Equal (Test-DesktopName 'ctmcp (2).exe') $true 'Browser numbered download must be recognized'
+Assert-Equal (Test-DesktopName 'ctmcp-random.exe') $false 'Unrelated filename must not be accepted'
+Assert-Equal @(Select-UpgradeTargets @((Candidate 10 3 'ctmcp-0.1.66-win64.exe' 'Coding Tools MCP' '0.1.66' 'C:\old\ctmcp-0.1.66-win64.exe')) 'C:\new\ctmcp-0.1.67-win64.exe' ([version]'0.1.67') 3 9).Count 1 'Versioned old build must be selectable'
+Write-Output 'PASS: version/product/session/PID/path selection and canonical/legacy runtime snapshots (14 assertions). No processes were started or stopped.'

@@ -1,4 +1,7 @@
 import test from 'node:test';
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+import { EventEmitter } from 'node:events';
 import assert from 'node:assert/strict';
 import { access, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -302,6 +305,21 @@ test('management folder picker lists directories without exposing files', async 
   assert.equal(missingResponse.status, 404);
   assert.equal((await missingResponse.json()).error.code, 'DIRECTORY_BROWSE_FAILED');
 
+  // Exercise the HTTP boundary without opening the test machine's file manager.
+  const originalSpawn = childProcess.spawn;
+  let launchError = false, unrefCount = 0;
+  const launches = [];
+  childProcess.spawn = (command, args, options) => {
+    launches.push({command, args, options});
+    const child = new EventEmitter();
+    child.unref = () => { unrefCount++; };
+    queueMicrotask(() => launchError
+      ? child.emit('error', Object.assign(new Error('file manager is unavailable'), {code:'ENOENT'}))
+      : child.emit('spawn'));
+    return child;
+  };
+  syncBuiltinESMExports();
+  t.after(() => { childProcess.spawn = originalSpawn; syncBuiltinESMExports(); });
   const opened = await fetch(`${runtime.base}/admin/api/directories/open`, {
     method: 'POST',
     headers: { ...headers, 'content-type': 'application/json' },
@@ -309,6 +327,19 @@ test('management folder picker lists directories without exposing files', async 
   });
   assert.equal(opened.status, 200);
   assert.equal((await opened.json()).path, path.normalize(runtime.root));
+  assert.deepEqual(launches[0].args, [path.normalize(runtime.root)]);
+  assert.equal(launches[0].options.shell, false);
+  assert.equal(unrefCount, 1);
+  launchError = true;
+  const failed = await fetch(`${runtime.base}/admin/api/directories/open`, {
+    method: 'POST', headers: { ...headers, 'content-type': 'application/json' },
+    body: JSON.stringify({path: runtime.root})
+  });
+  assert.equal(failed.status, 404);
+  assert.equal((await failed.json()).error.code, 'DIRECTORY_BROWSE_FAILED');
+  assert.equal(unrefCount, 1, 'failed launch is not detached or reported as success');
+  assert.equal((await fetch(`${runtime.base}/admin/api/status`, {headers})).status, 200, 'server survives spawn failure');
+
 });
 
 test('management can start and stop built-in WSS for a workspace', async t => {

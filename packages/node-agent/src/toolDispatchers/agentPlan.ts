@@ -1,3 +1,5 @@
+import {chatPlan} from '../chat/store.js';
+import {selectedFolder} from '../workspace.js';
 import type { ToolDispatchRequest, ToolHandlerMap } from '../toolDispatch/contract.js';
 import type { JsonObject } from '../types.js';
 
@@ -126,7 +128,8 @@ function summary(plan: PlanState | undefined): JsonObject {
   };
 }
 
-function setTodos({ key, args }: ToolDispatchRequest): JsonObject {
+function setTodos({ ctx, key, args }: ToolDispatchRequest): JsonObject {
+  if (['chat_id','attachment_id','reply_to'].some(k=>Object.hasOwn(args,k))) return chatPlan(selectedFolder(ctx,key).path,'set_todos',args);
   const goal = optionalText(args, 'goal', MAX_GOAL);
   const externalTaskId = optionalText(args, 'external_task_id', MAX_EXTERNAL_ID) || undefined;
   const todos = list(args, 'todos').map((item, index) => ({
@@ -149,7 +152,8 @@ function setTodos({ key, args }: ToolDispatchRequest): JsonObject {
   return { ok: true, plan: summary(next) };
 }
 
-function updatePlan({ key, args }: ToolDispatchRequest): JsonObject {
+function updatePlan({ ctx, key, args }: ToolDispatchRequest): JsonObject {
+  if (['chat_id','attachment_id','reply_to'].some(k=>Object.hasOwn(args,k))) return chatPlan(selectedFolder(ctx,key).path,'update_plan',args);
   const goal = optionalText(args, 'goal', MAX_GOAL);
   const explanation = optionalText(args, 'explanation', MAX_PROGRESS);
   const previous = plans.get(key);
@@ -188,7 +192,8 @@ function updatePlan({ key, args }: ToolDispatchRequest): JsonObject {
   return { ok: true, plan: summary(next) };
 }
 
-function reportProgress({ key, args }: ToolDispatchRequest): JsonObject {
+function reportProgress({ ctx, key, args }: ToolDispatchRequest): JsonObject {
+  if (['chat_id','attachment_id','reply_to'].some(k=>Object.hasOwn(args,k))) return chatPlan(selectedFolder(ctx,key).path,'report_progress',args);
   const message = optionalText(args, 'message', MAX_PROGRESS);
   if (!message) throw new AgentPlanError('message is required');
   const phase = optionalText(args, 'phase', MAX_PHASE) ?? '';

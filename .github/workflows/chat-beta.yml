@@ -23,8 +23,14 @@ jobs:
         with:
           workspaces: src-tauri
           save-if: false
+      - name: Test personal release publishing guards
+        run: python tests/publish-chat-release.test.py
       - name: Test chat storage on Windows
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib tools::chat::tests
+      - name: Test group chat dispatch and member isolation
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --test chat_group_contract --test chat_contract
+      - name: Test local file manager paths
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib platform::reveal::tests
       - name: Test desktop upgrade selection and runtime snapshot
         shell: powershell
         run: ./tests/desktop-startup-handoff.Tests.ps1
@@ -35,6 +41,8 @@ jobs:
   windows-portable:
     runs-on: windows-latest
     timeout-minutes: 90
+    outputs:
+      version: ${{ steps.package.outputs.version }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/setup@v2
@@ -53,10 +61,11 @@ jobs:
       - run: pnpm run version:check
       - run: pnpm run check
       - name: Test chat prompts
-        run: node --test tests/local-chat-prompt.test.mjs tests/chat-preview.test.mjs tests/chat-status.test.mjs tests/chat-tool-activity.test.mjs tests/chat-drafts.test.mjs tests/chat-navigation.test.mjs tests/chat-schedules.test.mjs tests/chat-artifact-links.test.mjs tests/portable-output-layout.test.mjs
+        run: node --test tests/local-chat-prompt.test.mjs tests/chat-preview.test.mjs tests/chat-preview-window.test.mjs tests/chat-task-state.test.mjs tests/chat-status.test.mjs tests/chat-tool-activity.test.mjs tests/chat-drafts.test.mjs tests/chat-session-cache.test.mjs tests/chat-connection.test.mjs tests/chat-mentions.test.mjs tests/chat-navigation.test.mjs tests/chat-schedules.test.mjs tests/chat-artifact-links.test.mjs tests/chat-local-links.test.mjs tests/portable-output-layout.test.mjs
       - name: Build production portable ZIP
         run: pnpm run desktop:portable
       - name: Verify ZIP and write checksum
+        id: package
         shell: pwsh
         run: |
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
@@ -71,12 +80,18 @@ jobs:
           $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  ctmcp-$version-win64.zip" | Set-Content dist-portable/SHA256SUMS.txt
           "Version: $version; commit: $env:GITHUB_SHA; bytes: $((Get-Item $zip).Length)" >> $env:GITHUB_STEP_SUMMARY
+          $exe = "dist-portable/ctmcp-$version-win64.exe"
+          if (!(Test-Path $exe) -or (Get-Item $exe).Length -lt 2000000) { throw "Missing standalone EXE" }
+          $exeHash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$exeHash  ctmcp-$version-win64.exe" | Add-Content dist-portable/SHA256SUMS.txt
+          "version=$version" >> $env:GITHUB_OUTPUT
           Get-Content dist-portable/SHA256SUMS.txt >> $env:GITHUB_STEP_SUMMARY
       - uses: actions/upload-artifact@v4
         with:
           name: local-chat-windows-${{ github.sha }}
           path: |
             dist-portable/*.zip
+            dist-portable/*.exe
             dist-portable/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 14
@@ -89,3 +104,37 @@ jobs:
           path: src-tauri/target/cargo-timings/*.html
           if-no-files-found: ignore
           retention-days: 14
+
+  publish-personal-release:
+    needs: [windows-chat-tests, windows-portable]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check personal release authorization
+        id: authorization
+        env:
+          PERSONAL_RELEASE_TOKEN: ${{ secrets.PERSONAL_RELEASE_TOKEN }}
+        run: |
+          if [ -z "$PERSONAL_RELEASE_TOKEN" ]; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Standalone EXE was built. Configure PERSONAL_RELEASE_TOKEN to publish Releases as the repository owner. No bot-token fallback is used."
+          else
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v4
+        if: steps.authorization.outputs.available == 'true'
+      - uses: actions/download-artifact@v4
+        if: steps.authorization.outputs.available == 'true'
+        with:
+          name: local-chat-windows-${{ github.sha }}
+          path: release-files
+      - name: Publish one directly downloadable EXE as the owner
+        if: steps.authorization.outputs.available == 'true'
+        env:
+          PERSONAL_RELEASE_TOKEN: ${{ secrets.PERSONAL_RELEASE_TOKEN }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_OWNER: ${{ github.repository_owner }}
+          RELEASE_COMMIT: ${{ github.sha }}
+          RELEASE_VERSION: ${{ needs.windows-portable.outputs.version }}
+        run: python3 scripts/publish-chat-release.py release-files

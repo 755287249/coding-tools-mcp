@@ -38,6 +38,7 @@ mod macos;
 mod windows;
 
 mod open;
+pub(crate) mod reveal;
 mod paths;
 pub(crate) mod wsl;
 

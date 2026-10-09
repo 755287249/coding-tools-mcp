@@ -14,6 +14,7 @@ pub(super) fn input_schema(name: &str) -> Option<Value> {
     if name != "chat_open" {
         required.push("attachment_id");
     }
+    if name == "chat_open" {properties["agent_name"]=json!({"type":"string","minLength":1,"maxLength":80,"description":"Unique agent remark, without spaces or @. Required when joining a group for the first time; resume with saved attachment_id."});}
     if name == "chat_wait" {
         properties["timeout_ms"] =
             json!({"type":"integer","minimum":0,"maximum":180000,"default":120000});
@@ -26,7 +27,8 @@ pub(super) fn input_schema(name: &str) -> Option<Value> {
         required.extend(["upload_id", "name"]);
     }
     if name == "chat_reply" {
-        properties["attachment_ids"] = json!({"type":"array","maxItems":5,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":80},"description":"IDs returned by chat_upload in this conversation; include with a text caption."});
+        properties["recipient_ids"]=json!({"type":"array","minItems":1,"maxItems":15,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":80},"description":"Group coordinator only: assign this task to these member IDs with final=false. Members receive this message through chat_wait; their reply_to is this assignment message_id."});
+        properties["attachment_ids"] = json!({"type":"array","uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":80},"description":"IDs returned by chat_upload in this conversation; include with a text caption."});
         properties["message_id"] = json!({"type":"string","minLength":1,"maxLength":80});
         properties["reply_to"] = json!({"type":"string","minLength":1,"maxLength":80});
         properties["text"] = json!({"type":"string","minLength":1,"maxLength":32000});

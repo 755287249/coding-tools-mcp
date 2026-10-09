@@ -75,6 +75,10 @@ export async function openManagementDirectory(requestedPath: string): Promise<{ 
   const metadata = await stat(selected);
   if (!metadata.isDirectory()) throw new Error('Selected path is not a directory.');
   const command = process.platform === 'win32' ? 'explorer' : process.platform === 'darwin' ? 'open' : 'xdg-open';
-  spawn(command, [selected], { detached: true, stdio: 'ignore' }).unref();
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(command, [selected], { detached: true, stdio: 'ignore', shell: false });
+    child.once('error', reject);
+    child.once('spawn', () => { child.unref(); resolve(); });
+  });
   return { ok: true, path: selected };
 }

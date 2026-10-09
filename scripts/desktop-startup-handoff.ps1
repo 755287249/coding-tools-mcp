@@ -16,7 +16,7 @@ function Select-UpgradeTargets {
     param([array]$Candidates, [string]$TargetPath, [version]$TargetVersion, [int]$SessionId, [int]$ExcludePid)
     foreach ($candidate in $Candidates) {
         if ($candidate.ProcessId -eq $ExcludePid -or $candidate.SessionId -ne $SessionId) { continue }
-        if ($candidate.Name -notin @('ctmcp.exe', 'Coding Tools MCP.exe', 'coding-tools-mcp-desktop.exe')) { continue }
+        if (-not (Test-DesktopName $candidate.Name)) { continue }
         if ($candidate.ProductName -ne 'Coding Tools MCP' -or [string]::IsNullOrWhiteSpace($candidate.ExecutablePath)) { continue }
         if ([string]::Equals($candidate.ExecutablePath, $TargetPath, [StringComparison]::OrdinalIgnoreCase)) { continue }
         $version = $null
@@ -25,12 +25,17 @@ function Select-UpgradeTargets {
     }
 }
 
+function Test-DesktopName([string]$Name) {
+    return $Name -match '^(ctmcp(?:-\d+\.\d+\.\d+-win64)?(?: \(\d+\))?|Coding Tools MCP|coding-tools-mcp-desktop)\.exe$'
+}
+
 function Get-DesktopCandidates {
-    foreach ($process in @(Get-CimInstance Win32_Process -Filter "Name='ctmcp.exe' OR Name='Coding Tools MCP.exe' OR Name='coding-tools-mcp-desktop.exe'")) {
+    foreach ($process in @(Get-CimInstance Win32_Process -Filter "Name LIKE 'ctmcp%.exe' OR Name='Coding Tools MCP.exe' OR Name='coding-tools-mcp-desktop.exe'")) {
+        if (-not (Test-DesktopName $process.Name)) { continue }
         if (-not $process.ExecutablePath) { continue }
         try {
             $info = [Diagnostics.FileVersionInfo]::GetVersionInfo([string]$process.ExecutablePath)
-            [pscustomobject]@{ ProcessId=[int]$process.ProcessId; SessionId=[int]$process.SessionId; Name=[string]$process.Name; ExecutablePath=[IO.Path]::GetFullPath([string]$process.ExecutablePath); ProductName=$info.ProductName; Version=$info.ProductVersion }
+            [pscustomobject]@{ ProcessId=[int]$process.ProcessId; SessionId=[int]$process.SessionId; Name=[string]$process.Name; ExecutablePath=[IO.Path]::GetFullPath([string]$process.ExecutablePath); ProductName=$info.ProductName; Version=$info.ProductVersion; CreatedAt=$process.CreationDate.ToUniversalTime().Ticks }
         } catch { continue }
     }
 }
@@ -58,24 +63,127 @@ function Get-UpgradeSnapshot {
     [pscustomobject]@{mcpWorkspaceIds=$mcp;actionsWorkspaceIds=$actions;endpoints=$endpoints}
 }
 
+function Write-UpgradeLog([string]$Message) {
+    if ($script:log) { Add-Content -LiteralPath $script:log -Value "[$([DateTime]::UtcNow.ToString('o'))] $Message" }
+}
+
+function Get-EndpointHealth($Endpoint) {
+    $response = $null
+    try {
+        # Local readiness must not depend on a user's HTTP proxy settings.
+        $request = [Net.HttpWebRequest]::Create($Endpoint.url)
+        $request.Proxy = $null
+        $request.Timeout = 2000
+        $request.ReadWriteTimeout = 2000
+        $response = $request.GetResponse()
+        $reader = [IO.StreamReader]::new($response.GetResponseStream())
+        try { $reply = $reader.ReadToEnd() | ConvertFrom-Json } finally { $reader.Dispose() }
+        $version = if ($Endpoint.kind -eq 'mcp' -and $reply.name -eq 'coding-tools-mcp') { [string]$reply.version } elseif ($Endpoint.kind -eq 'actions') { [string]$reply.info.version } else { '' }
+        $valid = $version -match '^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$'
+        return [pscustomobject]@{healthy=$valid;version=$(if($valid){$version}else{''});detail=$(if($valid){'ready'}else{'unexpected response'})}
+    } catch {
+        return [pscustomobject]@{healthy=$false;version='';detail=$_.Exception.GetType().Name}
+    } finally { if ($response) { $response.Dispose() } }
+}
+
 function Test-UpgradeHealth {
     param($Process, [array]$Endpoints, [string]$Version, [int]$TimeoutSeconds = 90)
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     $started = [DateTime]::UtcNow
+    $last = ''
     do {
         $Process.Refresh()
-        if ($Process.HasExited) { return $false }
-        $healthy = $true
+        if ($Process.HasExited) { return [pscustomobject]@{ready=$false;reason="Replacement exited with code $($Process.ExitCode)."} }
+        $failures = @()
         foreach ($endpoint in $Endpoints) {
-            try {
-                $reply = Invoke-RestMethod -Uri $endpoint.url -TimeoutSec 2 -UseBasicParsing
-                $actual = if ($endpoint.kind -eq 'mcp' -and $reply.name -eq 'coding-tools-mcp') { $reply.version } elseif ($endpoint.kind -eq 'actions') { $reply.info.version } else { '' }
-                if ([string]$actual -ne $Version) { $healthy = $false }
-            } catch { $healthy = $false }
+            $health = Get-EndpointHealth $endpoint
+            if (-not $health.healthy -or $health.version -ne $Version) {
+                $failures += "$($endpoint.kind) port=$(([uri]$endpoint.url).Port) expected=$Version observed=$($health.version) result=$($health.detail)"
+            }
         }
-        # Also detect immediate startup failures when no services were enabled.
-        if ($healthy -and ([DateTime]::UtcNow - $started).TotalSeconds -ge 3) { return $true }
+        $current = $failures -join '; '
+        if ($current -and $current -ne $last) { Write-UpgradeLog "Waiting for services: $current"; $last=$current }
+        if ($failures.Count -eq 0 -and ([DateTime]::UtcNow - $started).TotalSeconds -ge 3) { return [pscustomobject]@{ready=$true;reason='ready'} }
         Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
+    return [pscustomobject]@{ready=$false;reason="Services did not recover: $last"}
+}
+
+function Get-UpgradeTree($Root) {
+    $all = @(Get-CimInstance Win32_Process)
+    $matchingRoot = @($all | Where-Object { $_.ProcessId -eq $Root.ProcessId -and $_.SessionId -eq $Root.SessionId -and $_.CreationDate -and $_.CreationDate.ToUniversalTime().Ticks -eq $Root.CreatedAt })
+    if ($matchingRoot.Count -eq 0) { return }
+    $ids = [Collections.Generic.HashSet[int]]::new()
+    [void]$ids.Add([int]$Root.ProcessId)
+    do {
+        $changed=$false
+        foreach ($item in $all) {
+            if ($item.SessionId -eq $Root.SessionId -and $ids.Contains([int]$item.ParentProcessId)) {
+                if ($ids.Add([int]$item.ProcessId)) { $changed=$true }
+            }
+        }
+    } while ($changed)
+    foreach ($item in $all) {
+        if ($ids.Contains([int]$item.ProcessId) -and $item.CreationDate) {
+            [pscustomobject]@{ProcessId=[int]$item.ProcessId;SessionId=[int]$item.SessionId;CreatedAt=$item.CreationDate.ToUniversalTime().Ticks;Name=[string]$item.Name}
+        }
+    }
+}
+
+function Get-RemainingUpgradeProcesses([array]$Captured) {
+    $all = @(Get-CimInstance Win32_Process)
+    foreach ($identity in $Captured) {
+        foreach ($item in $all) {
+            if ($item.ProcessId -eq $identity.ProcessId -and $item.SessionId -eq $identity.SessionId -and $item.CreationDate -and $item.CreationDate.ToUniversalTime().Ticks -eq $identity.CreatedAt) { $identity }
+        }
+    }
+}
+
+function Invoke-UpgradeTaskKill([int]$ProcessId, [bool]$Tree = $false) {
+    # Calling a native command with 2>$null under Windows PowerShell + Stop
+    # can throw on stderr even when the target parent has already exited.
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = Join-Path $env:SystemRoot 'System32\taskkill.exe'
+    $start.Arguments = "/PID $ProcessId /F" + $(if($Tree){' /T'}else{''})
+    $start.UseShellExecute=$false; $start.CreateNoWindow=$true
+    $start.RedirectStandardOutput=$true; $start.RedirectStandardError=$true
+    $process = [Diagnostics.Process]::Start($start)
+    try {
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit(15000)) { $process.Kill(); throw 'Timed out while requesting application shutdown.' }
+        $null=$stdout.GetAwaiter().GetResult(); $null=$stderr.GetAwaiter().GetResult()
+        return $process.ExitCode
+    } finally { $process.Dispose() }
+}
+
+function Stop-UpgradeTree($Candidate) {
+    $captured = @(Get-UpgradeTree $Candidate)
+    if ($captured.Count -eq 0) { return }
+    $null = Invoke-UpgradeTaskKill $Candidate.ProcessId $true
+    $remaining = @(Get-RemainingUpgradeProcesses $captured)
+    # Retry only identities captured from this exact old process tree. A reused
+    # PID must never become a termination target.
+    foreach ($identity in $remaining) {
+        if (@(Get-RemainingUpgradeProcesses @($identity)).Count -gt 0) { $null = Invoke-UpgradeTaskKill $identity.ProcessId }
+    }
+    $deadline=[DateTime]::UtcNow.AddSeconds(15)
+    do {
+        $remaining=@(Get-RemainingUpgradeProcesses $captured)
+        if ($remaining.Count -eq 0) { return }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "The previous process tree did not exit: $($remaining.ProcessId -join ', '). Check whether it is running as administrator."
+}
+
+function Wait-DesktopMutexReleased([int]$TimeoutSeconds=15) {
+    $deadline=[DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        $existing=$null
+        try { $existing=[Threading.Mutex]::OpenExisting('Local\CodingToolsMcpDesktop-SingleInstance') }
+        catch [Threading.WaitHandleCannotBeOpenedException] { return $true }
+        finally { if($existing){$existing.Dispose()} }
+        Start-Sleep -Milliseconds 100
     } while ([DateTime]::UtcNow -lt $deadline)
     return $false
 }
@@ -106,6 +214,12 @@ try {
         try { $data = [IO.File]::ReadAllText($DataFile) | ConvertFrom-Json } catch { throw 'Saved workspace settings could not be read. The running application was not stopped.' }
     } else { $data = [pscustomobject]@{profiles=@();mcp_enabled_workspace_ids=@();actions_enabled_workspace_ids=@()} }
     $snapshot = Get-UpgradeSnapshot $data
+    $requiredEndpoints = @()
+    foreach ($endpoint in @($snapshot.endpoints)) {
+        if ((Get-EndpointHealth $endpoint).healthy) { $requiredEndpoints += $endpoint }
+        else { Write-UpgradeLog "Already unavailable before upgrade: $($endpoint.kind) port=$(([uri]$endpoint.url).Port)" }
+    }
+    Write-UpgradeLog "Preparing $NewVersion; previously healthy services=$($requiredEndpoints.Count)"
     $handoff = Join-Path $dataDir 'runtime-handoff.json'
     if (Test-Path -LiteralPath $handoff) { throw 'A previous runtime handoff is pending. Restart the existing application first.' }
     $json = @{mcpWorkspaceIds=@($snapshot.mcpWorkspaceIds);actionsWorkspaceIds=@($snapshot.actionsWorkspaceIds)} | ConvertTo-Json -Depth 4
@@ -114,28 +228,31 @@ try {
     Move-Item -LiteralPath $temporary -Destination $handoff
     $wroteHandoff = $true
     foreach ($candidate in $old) {
-        $current = @(Get-DesktopCandidates | Where-Object { $_.ProcessId -eq $candidate.ProcessId -and $_.ExecutablePath -eq $candidate.ExecutablePath -and $_.Version -eq $candidate.Version -and $_.SessionId -eq $sessionId })
+        $current = @(Get-DesktopCandidates | Where-Object { $_.ProcessId -eq $candidate.ProcessId -and $_.ExecutablePath -eq $candidate.ExecutablePath -and $_.Version -eq $candidate.Version -and $_.SessionId -eq $sessionId -and $_.CreatedAt -eq $candidate.CreatedAt })
         if ($current.Count -eq 0) { continue }
-        Add-Content -LiteralPath $log -Value "Replacing desktop pid=$($candidate.ProcessId) version=$($candidate.Version) with $NewVersion"
-        & taskkill.exe /PID $candidate.ProcessId /T /F 2>$null | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw 'The previous application could not be stopped. Check whether it is running as administrator.' }
+        Write-UpgradeLog "Replacing desktop pid=$($candidate.ProcessId) version=$($candidate.Version) with $NewVersion"
+        # Mark before shutdown: a native failure may have already stopped the
+        # root. Recovery below checks actual surviving desktop identities.
         $stoppedAny = $true
+        Stop-UpgradeTree $candidate
     }
-    $deadline = [DateTime]::UtcNow.AddSeconds(15)
-    do {
-        $remaining = @(Get-DesktopCandidates | Where-Object { $_.ProcessId -in $old.ProcessId -and $_.ExecutablePath -in $old.ExecutablePath })
-        if ($remaining.Count -eq 0) { break }
-        Start-Sleep -Milliseconds 100
-    } while ([DateTime]::UtcNow -lt $deadline)
-    if ($remaining.Count -gt 0) { throw 'The old application did not exit in time.' }
+    if (-not (Wait-DesktopMutexReleased)) { throw 'The desktop single-instance lock is still held after shutdown.' }
     $replacement = Start-Process -FilePath $target -WorkingDirectory (Split-Path -Parent $target) -ArgumentList '--handoff-child' -PassThru
-    if (-not (Test-UpgradeHealth $replacement @($snapshot.endpoints) $NewVersion)) { throw 'The new application did not restore its saved services.' }
-    Add-Content -LiteralPath $log -Value "Ready: desktop $NewVersion"
+    $health = Test-UpgradeHealth $replacement $requiredEndpoints $NewVersion
+    if (-not $health.ready) { throw $health.reason }
+    Write-UpgradeLog "Ready: desktop $NewVersion pid=$($replacement.Id)"
 } catch {
     $failure = $_.Exception.Message
-    if ($log) { Add-Content -LiteralPath $log -Value "Failed: $failure" }
-    if ($replacement -and -not $replacement.HasExited) { & taskkill.exe /PID $replacement.Id /T /F 2>$null | Out-Null }
-    if ($stoppedAny -and $old.Count -gt 0 -and (Test-Path -LiteralPath $old[0].ExecutablePath)) {
+    Write-UpgradeLog "Failed: $failure"
+    if ($replacement) {
+        $replacement.Refresh()
+        if (-not $replacement.HasExited) {
+            try { $null = Invoke-UpgradeTaskKill $replacement.Id $true; $null=$replacement.WaitForExit(15000) }
+            catch { Write-UpgradeLog 'Replacement shutdown failed; inspect the running application before retrying.' }
+        }
+    }
+    $survivors = @(Get-DesktopCandidates | Where-Object { $_.SessionId -eq $sessionId })
+    if ($stoppedAny -and $survivors.Count -eq 0 -and $old.Count -gt 0 -and (Test-Path -LiteralPath $old[0].ExecutablePath) -and (Wait-DesktopMutexReleased)) {
         try {
             Start-Process -FilePath $old[0].ExecutablePath -WorkingDirectory (Split-Path -Parent $old[0].ExecutablePath) | Out-Null
             $failure += "`nThe previous executable was launched again. Check its tray status."

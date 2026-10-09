@@ -81,9 +81,23 @@ test('real MCP catalog and explicit workspace routing complete the chat loop wit
     assert.equal(body.result?.structuredContent?.ok,true,JSON.stringify(body));return body.result.structuredContent;
   }
   const opened=await call('chat_open',{chat_id:session.id});
-  assert.match(opened.instruction,/awaiting_user=true/);
-  assert.match(opened.instruction,/never stop voluntarily/);
+  assert.match(opened.instruction,/skill.text/);
+  const skillText = readFileSync(new URL('../../../skills/local-chat/SKILL.md', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
+  assert.equal(opened.skill.text, skillText);
+  const resources = await responseJson(await mcpRequest(state, {jsonrpc:'2.0',id:++seq,method:'resources/list',params:{}}));
+  const listed = resources.result.resources.find(resource => resource.uri === opened.skill.uri);
+  assert.ok(listed);
+  assert.equal(listed.text, undefined, 'discovery returns metadata, not the full skill');
+  const resource = await responseJson(await mcpRequest(state, {jsonrpc:'2.0',id:++seq,method:'resources/read',params:{uri:opened.skill.uri}}));
+  assert.equal(resource.result.contents[0].text, opened.skill.text);
+  const denied = await mcpRequest(state, {jsonrpc:'2.0',id:++seq,method:'resources/read',params:{uri:opened.skill.uri}}, {auth:false});
+  assert.equal(denied.status, 401);
   const args={chat_id:session.id,attachment_id:opened.attachment_id};
+  const pairing = chatUi(state.root,{action:'request_connection',chat_id:session.id,message_id:'pair-http'});
+  assert.equal(pairing.session.messages.filter(m=>m.role==='assistant').length,0);
+  assert.equal((await call('chat_wait',{...args,timeout_ms:0})).message.kind,'connection_request');
+  await call('chat_reply',{...args,reply_to:pairing.connection_request_id,message_id:'hello-http',text:'你好，有什么能帮到你？',final:true});
+  assert.equal(chatUi(state.root,{action:'read',chat_id:session.id}).session.messages.at(-1).text,'你好，有什么能帮到你？');
   const waiting=call('chat_wait',{...args,timeout_ms:2000});
   chatUi(state.root,{action:'send',chat_id:session.id,message_id:'u1',text:'hello from local UI'});
   const incoming=await waiting;assert.equal(incoming.message.id,'u1');
@@ -209,11 +223,11 @@ test('Markdown tracks unread queue, actual pickup, confirmation and closure per 
   const send=id=>chatUi(root,{action:'send',chat_id:args.chat_id,message_id:id,text:id});
   const states=()=>readFileSync(path.join(root,`docs/chat-sessions/${args.chat_id}.md`),'utf8').split('\n').filter(line=>line.startsWith('消息状态：'));
   send('u1');send('u2');
-  assert.deepEqual(states(),['消息状态：未读 · 排队中','消息状态：未读 · 排队中']);
+  assert.deepEqual(states(),['消息状态：未读 · 排队中']);
   await chatWait(root,{...args,timeout_ms:0});
-  assert.deepEqual(states(),['消息状态：已读 · 正在处理','消息状态：未读 · 排队中']);
+  assert.deepEqual(states(),['消息状态：已读 · 正在处理']);
   chatTool(root,'chat_reply',{...args,message_id:'q1',reply_to:'u1',text:'Which option?',final:true,awaiting_user:true});
-  assert.deepEqual(states(),['消息状态：已读 · 待确认','消息状态：未读 · 排队中']);
+  assert.deepEqual(states(),['消息状态：已读 · 待确认']);
   send('u3');
   assert.equal(states()[0],'消息状态：已读 · 已回复');
   chatUi(root,{action:'close',chat_id:args.chat_id});
@@ -379,4 +393,163 @@ test('artifact preview is read-only for closed chats and rejects escapes, symlin
   writeFileSync(path.join(dir,'fake.png'),'not an image');assert.throws(()=>read('mcp-assistant/artifacts/fake.png'),/Only PNG/);
   writeFileSync(path.join(dir,'huge.png'),Buffer.alloc(2*1024*1024+1));assert.throws(()=>read('mcp-assistant/artifacts/huge.png'),/2 MiB/);
   if(process.platform!=='win32'){symlinkSync(path.join(dir,'preview.png'),path.join(dir,'link.png'));assert.throws(()=>read('mcp-assistant/artifacts/link.png'));}
+});
+
+test('connection request is idempotent, survives reload and requires a real AI reply', async t => {
+  const {root,args} = fixture(t);
+  const request = {action:'request_connection', chat_id:args.chat_id, message_id:'connect-1'};
+  const first = chatUi(root,request);
+  assert.equal(first.connection_request_id,'connect-1');
+  assert.equal(first.session.messages.length,1);
+  assert.equal(first.session.messages[0].kind,'connection_request');
+  assert.equal(chatUi(root,request).session.messages.length,1);
+  assert.equal(chatUi(root,{...request,message_id:'connect-2'}).connection_request_id,'connect-1');
+  assert.equal((await chatWait(root,{...args,timeout_ms:0})).message.id,'connect-1');
+  assert.equal(chatUi(root,{action:'read',chat_id:args.chat_id}).session.messages.filter(m=>m.role==='assistant').length,0);
+  assert.throws(()=>chatUi(root,{action:'send',chat_id:args.chat_id,message_id:'connect-1',text:first.session.messages[0].text}),/conflict/);
+  chatTool(root,'chat_reply',{...args,message_id:'greeting',reply_to:'connect-1',text:'你好，有什么能帮到你？',final:true});
+  assert.equal(chatUi(root,request).connection_request_id,'connect-1');
+  assert.equal((await chatWait(root,{...args,timeout_ms:0})).status,'idle');
+  const next = chatUi(root,{action:'send',chat_id:args.chat_id,message_id:'work',text:'Actual work title'}).session;
+  assert.equal(next.title,'Actual work title');
+  assert.match(readFileSync(path.join(root,next.archive_path),'utf8'),/接入请求/);
+  assert.throws(()=>chatUi(root,{...request,message_id:'work'}),/conflict/);
+  assert.equal(chatUi(root,{...request,message_id:'reconnect'}).connection_request_id,'reconnect');
+  // Existing work stays first: opening the dialog must not invalidate an in-flight reply.
+  assert.equal((await chatWait(root,{...args,timeout_ms:0})).message.id,'work');
+  chatUi(root,{action:'close',chat_id:args.chat_id});
+  assert.throws(()=>chatUi(root,{...request,message_id:'closed'}),/closed/);
+});
+
+test('chunk uploads persist large local files, stable references and safe retries',async t=>{
+ const {root,args}=fixture(t);const bytes=Buffer.alloc(3*1024*1024+17,7);Buffer.from([137,80,78,71,13,10,26,10]).copy(bytes);
+ const chunk=(offset,data=bytes.subarray(offset,offset+512*1024))=>({action:'upload_chunk',chat_id:args.chat_id,upload_id:'large',name:'image.png',offset,total_size:bytes.length,data_base64:data.toString('base64')});
+ const first=chatUi(root,chunk(0));assert.equal(first.attachment,undefined);assert.equal(chatUi(root,chunk(0)).next_offset,512*1024);
+ assert.throws(()=>chatUi(root,chunk(0,Buffer.from('wrong'))),/conflict/);
+ assert.throws(()=>chatUi(root,chunk(2*512*1024)),/offset/);
+ assert.throws(()=>chatUi(root,{...chunk(0),upload_id:'../escape'}),/Invalid/);
+ let result;for(let offset=512*1024;offset<bytes.length;offset+=512*1024)result=chatUi(root,chunk(offset));
+ const f=result.attachment;assert.equal(f.size,bytes.length);assert.equal(f.label,'图片1');assert.deepEqual(readFileSync(path.join(root,f.path)),bytes);
+ assert.equal(chatUi(root,chunk(bytes.length-17)).attachment.id,'large');
+ const parts=[];for(let offset=0;offset<f.size;){const part=chatUi(root,{action:'read_attachment_chunk',chat_id:args.chat_id,upload_id:f.id,offset});parts.push(Buffer.from(part.data_base64,'base64'));offset=part.next_offset;}
+ assert.deepEqual(Buffer.concat(parts),bytes);
+ const ids=[f.id];for(let i=0;i<6;i++){const extra=chatUi(root,{action:'upload_chunk',chat_id:args.chat_id,upload_id:'extra'+i,name:'report.txt',offset:0,total_size:1,data_base64:'YQ=='}).attachment;assert.equal(extra.label,`文件${i+1}`);ids.push(extra.id);}
+ const sent=chatUi(root,{action:'send',chat_id:args.chat_id,message_id:'many',text:'参考@图片1和@文件6',attachment_ids:ids}).session;
+ assert.equal(sent.messages[0].attachments.length,7);assert.equal(sent.messages[0].attachments[6].label,'文件6');
+ assert.match(readFileSync(path.join(root,sent.archive_path),'utf8'),/Reference: @图片1/);
+ assert.throws(()=>chatUi(root,{action:'read_attachment_chunk',chat_id:args.chat_id,upload_id:'large',offset:-1}),/range/);
+ assert.equal(chatUi(root,{action:'read',chat_id:args.chat_id}).session.messages[0].attachments[0].label,'图片1');
+});
+
+test('outbox releases only at next wait, merges attachments and survives retries and process reload', async t => {
+  const {root,args}=fixture(t);
+  const read=()=>chatUi(root,{action:'read',chat_id:args.chat_id}).session;
+  const upload=chatUi(root,{action:'upload',chat_id:args.chat_id,upload_id:'queue-file',name:'file.txt',data_base64:Buffer.from('queued file').toString('base64')}).attachment;
+  const send=(id,text=id)=>chatUi(root,{action:'send',chat_id:args.chat_id,message_id:id,text,attachment_ids:[upload.id]}).session;
+  send('u1');send('__proto__');send('constructor');send('constructor');
+  assert.equal(read().messages.length,1);
+  assert.equal(read().queued_messages.length,2);
+  assert.match(readFileSync(path.join(root,read().archive_path),'utf8'),/## 待发送队列/);
+  const opened=chatTool(root,'chat_open',args).session;
+  for(const key of ['queue','queued_messages','queue_receipts'])assert.equal(opened[key],undefined);
+  assert.equal(opened.messages.length,1);
+  chatTool(root,'chat_reply',{...args,message_id:'progress',reply_to:'u1',text:'working',final:false});
+  assert.equal((await chatWait(root,{...args,timeout_ms:0})).message.id,'u1');
+  assert.equal(read().queued_messages.length,2);
+  chatTool(root,'chat_reply',{...args,message_id:'done',reply_to:'u1',text:'done',final:true});
+  assert.equal(read().queued_messages.length,2);
+  assert.equal(chatTool(root,'chat_open',args).session.messages.length,3);
+  const delivered=(await chatWait(root,{...args,timeout_ms:0})).message;
+  assert.equal(delivered.id,'__proto__');
+  assert.equal(delivered.text,'队列1：__proto__\n\n队列2：constructor');
+  assert.deepEqual(delivered.attachments.map(f=>f.id),[upload.id]);
+  assert.ok(delivered.received_at>=delivered.created_at);
+  assert.equal(read().queued_messages.length,0);
+  send('__proto__');send('constructor');
+  assert.equal(read().messages.length,4);
+  assert.throws(()=>send('constructor','different'),/conflict/);
+  assert.throws(()=>chatUi(root,{action:'request_connection',chat_id:args.chat_id,message_id:'constructor'}),/conflict/);
+  assert.throws(()=>chatTool(root,'chat_reply',{...args,message_id:'constructor',reply_to:'__proto__',text:'collision',final:true}),/conflict/);
+  const {execFileSync}=await import('node:child_process');
+  const script=`import {chatUi} from ${JSON.stringify(new URL('../dist/chat/store.js',import.meta.url).href)}; const s=chatUi(process.argv[1],{action:'read',chat_id:process.argv[2]}).session; process.stdout.write(JSON.stringify(s));`;
+  const restarted=JSON.parse(execFileSync(process.execPath,['--input-type=module','-e',script,root,args.chat_id],{encoding:'utf8'}));
+  assert.deepEqual(restarted.messages,read().messages);
+  assert.deepEqual(restarted.queued_messages,[]);
+});
+
+test('split outbox pauses for confirmation, answers directly and resumes one per completion', async t => {
+  const {root,args}=fixture(t);
+  const read=()=>chatUi(root,{action:'read',chat_id:args.chat_id}).session;
+  const send=id=>chatUi(root,{action:'send',chat_id:args.chat_id,message_id:id,text:id});
+  const reply=(id,to,awaiting_user=false)=>chatTool(root,'chat_reply',{...args,message_id:id,reply_to:to,text:id,final:true,awaiting_user});
+  const wait=()=>chatWait(root,{...args,timeout_ms:0});
+  send('u1');send('u2');send('u3');
+  chatUi(root,{action:'set_queue_mode',chat_id:args.chat_id,mode:'split'});
+  assert.equal(read().queue_mode,'split');
+  assert.throws(()=>chatUi(root,{action:'set_queue_mode',chat_id:args.chat_id,mode:'bad'}),/Invalid/);
+  reply('question','u1',true);
+  assert.equal((await wait()).status,'idle');
+  assert.equal(read().queued_messages.length,2);
+  const waiting=chatWait(root,{...args,timeout_ms:2000});
+  send('confirmation');
+  assert.equal((await waiting).message.id,'confirmation');
+  assert.deepEqual(read().queued_messages.map(m=>m.id),['u2','u3']);
+  reply('confirmed','confirmation');
+  assert.equal((await wait()).message.id,'u2');
+  assert.equal((await wait()).message.id,'u2');
+  assert.deepEqual(read().queued_messages.map(m=>m.id),['u3']);
+  reply('a2','u2');
+  assert.equal((await wait()).message.id,'u3');
+  reply('a3','u3');
+  assert.equal((await wait()).status,'idle');
+});
+
+test('pin is persistent, scoped and sorts before recently updated sessions', t => {
+  const {root,args}=fixture(t);
+  const newer=chatUi(root,{action:'create',title:'newer'}).session;
+  chatUi(root,{action:'send',chat_id:newer.id,message_id:'new',text:'recent'});
+  chatUi(root,{action:'pin',chat_id:args.chat_id,pinned:true});
+  assert.equal(chatUi(root,{action:'list'}).sessions[0].id,args.chat_id);
+  assert.equal(chatUi(root,{action:'read',chat_id:args.chat_id}).session.pinned,true);
+  assert.throws(()=>chatUi(root,{action:'pin',chat_id:args.chat_id,pinned:'yes'}),/boolean/);
+  chatUi(root,{action:'pin',chat_id:args.chat_id,pinned:false});
+  assert.equal(chatUi(root,{action:'read',chat_id:args.chat_id}).session.pinned,false);
+});
+
+test('MCP plans persist per chat and request, reject foreign ownership and retain legacy plan calls',async t=>{
+ const fixture=await createMcpFixture(t);let seq=0;
+ const call=async(name,args)=>{
+  const response=await mcpRequest(fixture,{jsonrpc:'2.0',id:++seq,method:'tools/call',params:{name,arguments:{workspace_folder_id:'repo',...args}}});
+  assert.equal(response.status,200);const body=await responseJson(response);return body.result?.structuredContent??body;
+ };
+ const a=chatUi(fixture.root,{action:'create',title:'A'}).session.id,b=chatUi(fixture.root,{action:'create',title:'B'}).session.id;
+ for(const chat_id of [a,b])chatUi(fixture.root,{action:'send',chat_id,message_id:'same-user-id',text:'task'});
+ const ownA=(await call('chat_open',{chat_id:a})).attachment_id,ownB=(await call('chat_open',{chat_id:b})).attachment_id;
+ const scope={chat_id:a,attachment_id:ownA,reply_to:'same-user-id'};
+ const read=id=>chatUi(fixture.root,{action:'read',chat_id:id}).session;
+ const todos=[{id:'read',title:'Read code',status:'completed'},{id:'change',title:'Implement',status:'in_progress'}];
+ assert.equal((await call('set_todos',{...scope,goal:'Feature A',todos})).persisted,true);
+ assert.equal(read(b).messages[0].task_plan,undefined);
+ assert.equal((await call('set_todos',{...scope,attachment_id:ownB,todos})).ok,false);
+ assert.equal((await call('set_todos',{attachment_id:ownA,todos})).ok,false);
+ assert.equal((await call('report_progress',{...scope,message:'password=synthetic-value working',percent:40,todo_id:'change'})).persisted,true);
+ assert.doesNotMatch(JSON.stringify(read(a)),/synthetic-value/);
+ assert.equal(read(a).messages[0].task_plan.progress.percent,40);
+ for(const invalid of [{percent:101},{todo_id:'missing'},{percent:2.5}])assert.equal((await call('report_progress',{...scope,message:'bad',...invalid})).ok,false);
+ assert.equal((await call('update_plan',{...scope,explanation:'Next step',plan:[{step:'Read code',status:'completed'},{step:'Implement',status:'completed'},{step:'Verify',status:'in_progress'}]})).persisted,true);
+ assert.deepEqual(read(a).messages[0].task_plan.todos.map(t=>t.id),['read','change','todo-1']);
+ assert.match(readFileSync(path.join(fixture.root,read(a).archive_path),'utf8'),/任务计划[\s\S]*Feature A[\s\S]*Verify/);
+ assert.equal((await call('chat_open',{chat_id:a,attachment_id:ownA})).session.messages[0].task_plan.goal,'Feature A');
+ for(const bad of [[...todos,{id:'read',title:'dup',status:'pending'}],[{id:'a',title:'A',status:'in_progress'},{id:'b',title:'B',status:'in_progress'}]])assert.equal((await call('set_todos',{...scope,todos:bad})).ok,false);
+ assert.equal((await call('set_todos',{goal:'Legacy',todos})).ok,true);
+ assert.equal(read(a).messages[0].task_plan.goal,'Feature A');
+ await call('chat_reply',{...scope,message_id:'done',text:'done',final:true});
+ chatUi(fixture.root,{action:'send',chat_id:a,message_id:'new-user',text:'new request'});
+ assert.equal(read(a).messages.at(-1).task_plan,undefined);
+ assert.equal((await call('set_todos',{...scope,todos})).ok,false);
+ assert.equal((await call('set_todos',{...scope,reply_to:'new-user',todos})).persisted,true);
+ assert.equal((await call('set_todos',{...scope,reply_to:'new-user',todos:[]})).plan.cleared,true);
+ assert.equal(read(a).messages.at(-1).task_plan,undefined);
+ chatUi(fixture.root,{action:'detach',chat_id:a});
+ assert.equal((await call('set_todos',{...scope,reply_to:'new-user',todos})).ok,false);
 });

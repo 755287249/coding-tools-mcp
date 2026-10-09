@@ -2,6 +2,7 @@
   import {localChat} from '$lib/api/chat';
   import {t} from '$lib/i18n';
   import ImagePreview from './ImagePreview.svelte';
+  import LocalPathLink from './LocalPathLink.svelte';
   let {workspaceId,folderId,chatId,path,label}: {workspaceId:string;folderId:string;chatId:string;path:string;label:string}=$props();
   let src=$state(''), error=$state(''), busy=$state(false), request=$state(0);
   async function open(){if(busy)return;busy=true;error='';try{
@@ -11,6 +12,7 @@
   }catch(e){error=String(e)}finally{busy=false}}
 </script>
 <button class="artifact-link" title={$t('chat.66')} onclick={open} disabled={busy}>{label}</button>
+<LocalPathLink {workspaceId} {folderId} {chatId} {path} label={$t('chat.showInFolder')}/>
 {#if error}<span class="artifact-error" role="alert">{error}</span>{/if}
-{#if src}<ImagePreview {src} name={path.split('/').at(-1)??path} openRequest={request} thumbnail={false}/>{/if}
+{#if src}<ImagePreview {workspaceId} {folderId} {chatId} {path} {src} name={path.split('/').at(-1)??path} openRequest={request} thumbnail={false}/>{/if}
 <style>.artifact-link{display:inline;color:#81b4ff;text-decoration:underline;text-underline-offset:3px;cursor:zoom-in;text-align:left;overflow-wrap:anywhere}.artifact-link:disabled{opacity:.5}.artifact-error{display:block;color:var(--danger);font-size:11px}</style>

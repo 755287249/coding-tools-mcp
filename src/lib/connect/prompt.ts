@@ -23,37 +23,43 @@ function promptLanguage(locale: Locale): PromptLanguage {
 /** Host setup and a successful tool call are separate connection requirements. */
 const TEXT = {
   en: {
-    oauthManual: `Manual HTTP OAuth: redirect_uri=${MANUAL_OAUTH_REDIRECT_URI}; native hosts use their own callback. Discover auth/token endpoints; generate random state + S256 PKCE verifier/challenge. Authorize with response_type=code, client_id, redirect_uri, state, code_challenge, code_challenge_method=S256; submit password once without following redirects. Read code/state from Location; verify state. Exchange with grant_type=authorization_code, code, client_id, identical redirect_uri and code_verifier. Reuse the access token after restart until expiry; password is not a token.`,
-    bearerReuse: "Reuse this fixed Bearer token across restarts until rotated/deleted; no OAuth needed. On 401 check credentials, never loop invalid authentication.",
+    oauthCompact: `OAuth + S256 PKCE; discover auth/token endpoints. Manual HTTP redirect_uri=${MANUAL_OAUTH_REDIRECT_URI}; native hosts use their callback. Verify state, reuse valid tokens; password is not a token.`,
+    compactFlow: `Use native MCP or HTTP MCP (User-Agent required). initialize → notifications/initialized (no id) → tools/list → list_workspace_folders must succeed. HTTP access is not host registration. Never write credentials to files/replies.`,
+    oauthManual: `Manual OAuth (native hosts use their callback): discover auth/token endpoints; redirect_uri=${MANUAL_OAUTH_REDIRECT_URI}. Generate random state + PKCE verifier/challenge. Authorize: response_type=code, client_id, redirect_uri, state, code_challenge, code_challenge_method=S256; submit password once, do not follow redirects. Verify state from Location, then exchange code with grant_type=authorization_code, client_id, same redirect_uri, code_verifier. Reuse unexpired tokens; password is not a token.`,
+    bearerReuse: `Reuse Bearer until rotated/deleted; no OAuth. On 401 check credentials.`,
     intro: "Connect to this MCP server and read the project root:",
     url: "URL: ",
     clientId: (id: string) => `Client ID: ${id} (OAuth + PKCE, no secret)`,
     password: "Authorization password: ",
     bearer: "Auth header: ",
-    multi: "Several project folders: call conversation_bootstrap first to pick one.",
-    fallback: "Configure remote MCP + authentication in the host. If unsupported, use HTTP MCP with OAuth + PKCE or Bearer; every request needs User-Agent (Cloudflare). initialize → notifications/initialized (notification, no id) → tools/list → successful list_workspace_folders before confirming access. HTTP access is not native host registration. If blocked, give exact user setup steps. Remote AI needs a public URL. Credentials stay in host storage/memory, never project files/replies. Then follow the Chat page session instructions.",
+    multi: `Use the supplied workspace_folder_id; otherwise conversation_bootstrap returns folder choices.`,
+    fallback: `Configure remote MCP in the host; if unsupported, use HTTP MCP (OAuth/PKCE or Bearer). Send User-Agent (Cloudflare). initialize → notifications/initialized (no id) → tools/list → list_workspace_folders must succeed. HTTP access is not host registration; if blocked, give setup steps. Remote AI needs a public URL. Keep credentials in host storage/memory, never files/replies. Follow the session instructions below, if supplied.`,
   },
   "zh-CN": {
-    oauthManual: `手动 HTTP OAuth：redirect_uri=${MANUAL_OAUTH_REDIRECT_URI}；原生宿主用自己的回调。发现授权/令牌端点，生成随机 state 与 S256 PKCE verifier/challenge；授权传 response_type=code、client_id、redirect_uri、state、code_challenge、code_challenge_method=S256。密码只提交一次，不跟随跳转，从 Location 读取 code/state 并校验 state；换令牌传 grant_type=authorization_code、code、client_id、原 redirect_uri 和 code_verifier。重启后复用未过期令牌，密码不是令牌。`,
-    bearerReuse: "固定 Bearer 重启后继续复用，直到重新生成/删除，无需 OAuth。401 时检查凭据，别循环重试无效认证。",
+    oauthCompact: `OAuth + S256 PKCE，发现授权/令牌端点。手动 HTTP 用 redirect_uri=${MANUAL_OAUTH_REDIRECT_URI}，原生宿主用自身回调；校验 state，复用有效令牌，密码不是令牌。`,
+    compactFlow: `用宿主或 HTTP MCP 连接（带 User-Agent），initialize → notifications/initialized（无 id）→ tools/list → list_workspace_folders 成功才确认接通。HTTP 接通不等于宿主注册；凭据不写文件或回复。`,
+    oauthManual: `手动 OAuth（原生宿主用自身回调）：发现授权/令牌端点，redirect_uri=${MANUAL_OAUTH_REDIRECT_URI}。生成随机 state 和 PKCE verifier/challenge；授权传 response_type=code、client_id、redirect_uri、state、code_challenge、code_challenge_method=S256。密码提交一次，不跟随跳转；校验 Location 的 state，再以 grant_type=authorization_code、code、client_id、原 redirect_uri、code_verifier 换令牌。复用未过期令牌，密码不是令牌。`,
+    bearerReuse: `固定 Bearer 复用至重新生成/删除，无需 OAuth；401 时检查凭据。`,
     intro: "连接 MCP 服务器并读取项目根目录：",
     url: "地址：",
     clientId: (id: string) => `Client ID：${id}（OAuth + PKCE，无 Secret）`,
     password: "授权密码：",
     bearer: "认证头：",
-    multi: "有多个项目目录：先调用 conversation_bootstrap 选择目录。",
-    fallback: "优先在宿主配置远程 MCP 并认证；不支持则用 HTTP MCP + OAuth/PKCE 或 Bearer，每次请求带 User-Agent（Cloudflare）。依次 initialize → notifications/initialized（通知，不带 id）→ tools/list → 成功调用 list_workspace_folders 才确认接通；HTTP 接通不等于宿主注册。受阻时说明用户需做的配置。远程 AI 用公开地址；凭据仅存宿主存储/内存，不写项目或回复。随后执行对话页的会话指令。",
+    multi: `有目标 workspace_folder_id 就使用它；否则 conversation_bootstrap 返回目录选择。`,
+    fallback: `优先宿主配置；不支持则用 HTTP MCP（OAuth/PKCE 或 Bearer），带 User-Agent（Cloudflare）。initialize → notifications/initialized（无 id）→ tools/list → list_workspace_folders 成功才确认接通。HTTP 接通不等于宿主注册；受阻给出配置步骤。远程 AI 用公开地址，凭据仅存宿主/内存，不写文件或回复。若附有会话指令，立即执行。`,
   },
   "zh-TW": {
-    oauthManual: `手動 HTTP OAuth：redirect_uri=${MANUAL_OAUTH_REDIRECT_URI}；原生宿主用自己的回呼。探索授權/權杖端點，產生隨機 state 與 S256 PKCE verifier/challenge；授權傳 response_type=code、client_id、redirect_uri、state、code_challenge、code_challenge_method=S256。密碼只提交一次，不跟隨重新導向，從 Location 讀取 code/state 並驗證 state；換權杖傳 grant_type=authorization_code、code、client_id、原 redirect_uri 與 code_verifier。重啟後重用未過期權杖，密碼不是權杖。`,
-    bearerReuse: "固定 Bearer 重啟後繼續重用，直到重新產生/刪除，不需 OAuth。401 時檢查憑證，別循環重試無效認證。",
+    oauthCompact: `OAuth + S256 PKCE，探索授權/權杖端點。手動 HTTP 用 redirect_uri=${MANUAL_OAUTH_REDIRECT_URI}，原生宿主用自身回呼；驗證 state，重用有效權杖，密碼不是權杖。`,
+    compactFlow: `用宿主或 HTTP MCP 連接（帶 User-Agent），initialize → notifications/initialized（無 id）→ tools/list → list_workspace_folders 成功才確認連通。HTTP 連通不等於宿主註冊；憑證不寫檔案或回覆.`,
+    oauthManual: `手動 OAuth（原生宿主用自身回呼）：探索授權/權杖端點，redirect_uri=${MANUAL_OAUTH_REDIRECT_URI}。產生隨機 state 和 PKCE verifier/challenge；授權傳 response_type=code、client_id、redirect_uri、state、code_challenge、code_challenge_method=S256。密碼提交一次，不跟隨重新導向；驗證 Location 的 state，再以 grant_type=authorization_code、code、client_id、原 redirect_uri、code_verifier 換權杖。重用未過期權杖，密碼不是權杖。`,
+    bearerReuse: `固定 Bearer 重用至重新產生/刪除，不需 OAuth；401 時檢查憑證。`,
     intro: "連接 MCP 伺服器並讀取專案根目錄：",
     url: "位址：",
     clientId: (id: string) => `Client ID：${id}（OAuth + PKCE，無 Secret）`,
     password: "授權密碼：",
     bearer: "認證標頭：",
-    multi: "有多個專案目錄：先呼叫 conversation_bootstrap 選擇目錄。",
-    fallback: "優先在宿主設定遠端 MCP 並認證；不支援則用 HTTP MCP + OAuth/PKCE 或 Bearer，每次請求帶 User-Agent（Cloudflare）。依序 initialize → notifications/initialized（通知，不帶 id）→ tools/list → 成功呼叫 list_workspace_folders 才確認連通；HTTP 連通不等於宿主註冊。受阻時說明使用者需做的設定。遠端 AI 用公開位址；憑證僅存宿主儲存/記憶體，不寫專案或回覆。隨後執行對話頁的會話指令。",
+    multi: `有目標 workspace_folder_id 就使用它；否則 conversation_bootstrap 回傳目錄選擇。`,
+    fallback: `優先宿主設定；不支援則用 HTTP MCP（OAuth/PKCE 或 Bearer），帶 User-Agent（Cloudflare）。initialize → notifications/initialized（無 id）→ tools/list → list_workspace_folders 成功才確認連通。HTTP 連通不等於宿主註冊；受阻給出設定步驟。遠端 AI 用公開位址，憑證僅存宿主/記憶體，不寫檔案或回覆。若附有會話指令，立即執行。`,
   },
 } as const;
 
@@ -66,16 +72,16 @@ export function isTemporaryEndpoint(endpoint: string): boolean {
 }
 
 /** Build the copy-paste prompt any AI assistant can follow to connect. */
-export function buildConnectionPrompt(info: ConnectionInfo, locale: Locale): string {
+export function buildConnectionPrompt(info: ConnectionInfo, locale: Locale, compact = false): string {
   const text = TEXT[promptLanguage(locale)];
   const lines: string[] = [text.intro, `${text.url}${info.endpoint}`];
   if (info.authType === "oauth") {
-    lines.push(text.clientId(info.clientId), `${text.password}${info.password}`, text.oauthManual);
+    lines.push(text.clientId(info.clientId), `${text.password}${info.password}`, compact ? text.oauthCompact : text.oauthManual);
   } else if (info.authType === "bearer") {
     lines.push(`${text.bearer}Authorization: Bearer ${info.bearerToken}`, text.bearerReuse);
   }
-  if (info.folders.length > 1) lines.push(text.multi);
-  lines.push(text.fallback);
+  if (!compact && info.folders.length > 1) lines.push(text.multi);
+  lines.push(compact ? text.compactFlow : text.fallback);
   return lines.join("\n");
 }
 

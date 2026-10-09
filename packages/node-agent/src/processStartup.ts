@@ -343,7 +343,6 @@ export class ProcessStartupController {
     } catch (error) {
       handoff();
       await this.#terminate(child, options.terminate);
-      if (error instanceof ProcessStartupError) throw error;
       throw this.#normalizeError(error, diagnostics);
     }
 

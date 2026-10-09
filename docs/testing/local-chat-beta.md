@@ -203,3 +203,69 @@ The requested release bumps once to 0.1.66. Windows chat-storage checks run alon
 Double-clicking a newer **release** `ctmcp.exe` while an older desktop owns the single-instance mutex schedules an embedded Windows update worker. It only selects known executable names with the exact product name, an older numeric version, a different path, the same Windows session, and a rechecked process identity. Equal/newer or unidentifiable instances are left alone. The worker preserves enabled MCP/Actions IDs, stops the old process tree, starts the new executable, verifies saved service versions, and attempts to restart the old executable if startup fails. Old files and workspace data are retained. Diagnostics are stored in the application's data directory as `startup-handoff.log`. Debug builds do not replace a running release.
 
 `tests/desktop-startup-handoff.Tests.ps1` tests selection/snapshots without starting or stopping processes. The separate `.Integration.ps1` fixture refuses to run outside GitHub Actions and refuses runners with an existing desktop process. It compiles temporary dummy products to exercise process replacement and rollback. Actual wallpaper, window interactions and restored external tunnels still require the packaged Windows client.
+
+### Clickable local paths
+
+The chat renderer recognizes Windows drive paths, project-relative paths, inline-code paths with spaces, and labeled Markdown paths. File clicks reveal the file in Explorer on Windows (Finder on macOS); directories open directly. Linux opens the containing directory. Images retain preview and provide **Show in folder**, also available in the image dialog and attachment paths. HTTP(S) links are ordinary web links.
+
+The local UI `reveal_path` action is scoped to a configured folder and an existing chat (including closed chats); it is not an MCP tool. Relative paths cannot traverse or follow a symlink outside that folder. Explicit absolute local paths can be revealed, matching the local directory browser. UNC/network paths, device paths, URI schemes and alternate streams are rejected by the backend. Clicking a script reveals it; it does not run the script. The file manager opens on the machine running the desktop/Node host.
+
+Checks: `node --test tests/chat-local-links.test.mjs tests/chat-artifact-links.test.mjs`; Node `test/chat-reveal.test.mjs`; Rust `platform::reveal::tests`. Native Windows Explorer selection still requires an updated desktop binary; UI fixtures only verify the request, modal behavior and error presentation.
+
+### Standalone EXE and personal Releases publishing
+
+`desktop:portable` also emits `dist-portable/ctmcp-<version>-win64.exe` from the same production custom-protocol build. This file runs directly and does not require unpacking. ZIP output remains available for compatibility. The upgrade selector recognizes versioned and browser-numbered EXE filenames. Shutdown checks captured process identities and the single-instance mutex, not taskkill stderr/exit code alone. Previously responding local services must recover; saved but already unavailable services do not force rollback. Diagnostics are timestamped in `data/startup-handoff.log`.
+
+The chat CI can publish the verified EXE as a GitHub prerelease after both Windows jobs pass. Add a repository Actions secret named `PERSONAL_RELEASE_TOKEN`, authorized for Contents read/write in this repository. The publishing script verifies `/user` is the repository owner and a human User before any write. No default GitHub/installation token fallback is used. With no secret, CI retains the artifact and prints a notice; no Release is published. The release starts as a draft, verifies/uploads exactly one versioned EXE, then becomes public. Its SHA-256 is in the release body; no ZIP or checksum file is uploaded to Releases. ZIP and checksum files remain internal Actions artifacts. Unexpected existing assets stop publication for manual inspection; the script never deletes them. Existing tags targeting another commit and existing assets with different/unverifiable digests cause failure instead of replacement.
+
+### Concise connection and tool guidance (0.1.67)
+
+The copied instructions lead with one loop: connect and verify the folder, open the supplied chat, wait for a message, work locally, persist the reply, and wait again. MCP initialize/discover and Desktop/Node chat responses use the same model-independent guidance. Tool descriptions state the action, essential guards and next call; detailed parameters remain in the schemas.
+
+Progress uses `final=false`; completion or a question uses `final=true` (questions also `awaiting_user=true`). A final reply acknowledges only that user message. Idle waits and completed work continue the loop while the host allows execution. Deliverables must exist in the target workspace; attach them with `chat_upload` and reference the returned ID. Authentication secrets never enter project files or replies.
+
+Check: `node --test tests/local-chat-prompt.test.mjs` covers JSON-safe IDs, OAuth/Bearer connection details and shared runtime instruction parity.
+
+### Built-in local chat Skill
+
+`skills/local-chat/SKILL.md` is the single maintained session guide. Rust embeds it in the binary and the Rust catalog exporter generates the same text for the Node package. `chat_open` returns it in `skill.text`; `resources/list` advertises `coding-tools://skills/local-chat`, and authenticated `resources/read` returns the identical Markdown. No workspace Skill installation is required. LF normalization keeps Windows and Linux exports identical.
+
+The Chat page copies a short instruction referencing that returned Skill plus compact connection details. The Connection page retains the complete manual OAuth tutorial. The session-only copy is about 316 characters with UUID-sized IDs; total length depends on locale/auth/URL. The guide still consumes model context when read. Changes require upgrading the running server/client.
+
+An idle wait is not a disconnection: the assistant must issue the next wait. If the original AI host stops executing, local queued messages cannot wake it; continue in that host with the same chat/folder and saved attachment ID, or obtain a new attachment after expiration. Do not attach another AI merely to diagnose an existing conversation.
+
+### Conversation switching
+
+Selecting a conversation now reads it immediately instead of waiting for the 1.5-second poll/list sequence. Revisited conversations render their in-memory snapshot immediately while refreshing. A first visit shows a loading state rather than the new-chat welcome screen. The component-local LRU cache is scoped by workspace/folder/chat and bounded to 12 entries and 4 Mi serialized characters; it does not persist message history in browser storage.
+
+Read sequence guards discard late results after navigation or a successful mutation. Drafts remain scoped independently. Cached content stays visible during transient read failures. Verify with `node --test tests/chat-session-cache.test.mjs tests/chat-drafts.test.mjs`; browser checks also cover delayed reads, rapid A→C→A, identical chat IDs in separate folders, draft restoration and a send while an old read is pending. Synthetic 350ms reads measured about 368ms cold and 9ms cached, with zero welcome-screen frames, versus about 2s in the old polling path. These are fixture measurements, not Windows performance guarantees.
+
+### 接入配对与聊天布局（0.1.67）
+
+- 新对话仅显示“我们要做什么？”和居中输入框；对话标题、AI 状态、断开/接入、任务面板和设置合并在同一个顶部栏。
+- 接入弹窗提供完整可复制提示词。点击“已发送”通过本地 `request_connection` 写入 `kind=connection_request` 的控制消息，展示无确定百分比的等待条。
+- 控制消息保留在 JSON/Markdown（标记“接入请求”），从普通消息列表/大纲隐藏；不会生成假 AI 回复，也不占用第一条真实用户消息的自动标题。
+- 配对只接受对应控制消息的实际最终回复“你好，有什么能帮到你？”。连接状态、其他会话/旧请求的回复及 final=false 都不算完成。异常问候可重新发起；关闭弹窗不关闭会话，重新打开可恢复未完成配对。保持 FIFO，接入请求不打断已经在执行的消息。
+- `request_connection` 使用稳定 message_id，重试不重复写入；不同 ID 的并发请求复用未确认的控制消息，不改变现有 AI 租约。
+- 主聊天区域（包括输入框外围）统一为不透明底色。原有 Windows Mica 保留；导航和顶部栏使用比会话侧栏高 12 个百分点的不透明度。Windows 壁纸效果仍需原生安装包实机确认。
+- 任务面板四周留空、圆角阴影，可拖动左边缘调整宽度；聚焦边缘按钮后左右方向键每次调整 20px，Home/End 调整到边界。窄窗口使用受限宽度的悬浮层。
+- 回归：`node --test tests/chat-connection.test.mjs tests/chat-session-cache.test.mjs tests/chat-drafts.test.mjs tests/local-chat-prompt.test.mjs`，Node chat.test.mjs 和 Rust tools::chat::tests 覆盖幂等/真实 MCP 回信及标题；浏览器检查配对重开/错误回复重试、窄屏、拖宽与切换缓存。
+
+### 附件编号、引用与本地分块传输（0.1.67）
+
+- 附件在会话内分别编号为 `图片1` / `文件1`，同名文件也有独立编号。编号依据不可删除的附件清单顺序稳定生成；移除草稿卡片不会删除已落盘文件或重新编号。
+- 输入 `@` 显示当前草稿和已发送附件，`@图片` / `@文件` 或文件名筛选；方向键选择，Enter/Tab 插入。手动输入完整 `@图片N` 也会标蓝，发送时将对应附件元数据一并交付。IME 组合输入的 Enter 不发送。
+- 草稿附件在文本上方显示缩略图和编号，右上角 × 移除；预览、删除和图片查看器按钮明确 `type=button`，不能触发发送。发送后的引用可打开对应图片或本地文件。
+- 本地文件使用 `upload_chunk` 按 512 KiB 分块写入工作区 `mcp-assistant/chat-assets/<chat_id>/`，移除每条 5 个和每个 2 MiB 的本地上传限制；单次传输仍有边界，聊天 JSON/Markdown 只保存编号、路径、大小、SHA-256 等元数据。MCP `chat_upload` 的内联字节传输限制仍为 512 KiB，大型 AI 成果用 `source_path` 引用本地文件。
+- 分块使用固定上传 ID、字节偏移和总大小。重试核对已写入部分，不追加重复字节；不同内容/名称/大小冲突拒绝，乱序偏移拒绝。完整落盘后流式计算校验并加入清单；未完成的 `.part`/`.upload.json` 不作为可发送附件。中断的大文件可留下这些临时文件。
+- `read_attachment_chunk` 分块读取，浏览器显示前校验整文件摘要。为避免浏览器一次载入超大内容，超过 32 MiB 的文件通过“在文件夹中显示”本地打开；这是浏览器预览预算，不限制本地上传大小。磁盘容量、已有会话元数据总量和宿主资源上限仍适用。
+- 项目详情改用 top-layer popover，位于按钮右侧；底部空间不足则向上，窄视口向内限制边界。项目卡片、会话切换和大纲浮层使用 .97 底色，保证文字可读。
+- 验证：`tests/chat-mentions.test.mjs`、`tests/chat-drafts.test.mjs`、Rust `tools::chat::tests` 与 Node `chat.test.mjs`；浏览器用真实 Node chatUi 的隔离临时目录确认 3 MiB 图片、7 个附件、复制/手动引用、预览/删除无误发送和菜单位置。
+
+### Release audit corrections (0.1.67)
+
+- Group confirmation status uses the coordinator's final reply after collaborators finish, in the shared UI and both Markdown writers.
+- Node folder opening waits for the spawn event and returns a structured HTTP error if no file manager exists. This repairs Node-specific child-process event handling; the desktop native opener already returns launch errors.
+- Node startup errors retain the actual attempt diagnostics, and harness telemetry includes phases measured as zero milliseconds. Rust uses its own native startup/phase recording; no protocol or schema change is needed.
+- Git test fixtures isolate their local author identity from host environment overrides. Frontend verification supports both JavaScript package-manager launchers and pnpm 12 native executables.
+- Releases upload only `ctmcp-0.1.67-win64.exe`. SHA-256 stays in the release description. Automatic GitHub source archives may still be displayed by GitHub; they are not uploaded release assets.

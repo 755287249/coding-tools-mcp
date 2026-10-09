@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount } from "svelte";
+  import { onDestroy, onMount, untrack } from "svelte";
   import ArrowLeft from "@lucide/svelte/icons/arrow-left";
   import CheckCheck from "@lucide/svelte/icons/check-check";
   import ChevronDown from "@lucide/svelte/icons/chevron-down";
@@ -48,6 +48,7 @@
   import { CATEGORY_META, changedFiles, groupEvents, type ActivityCategory } from "./plan";
 
   interface Props {
+    resizable?: boolean;
     workspaceId: string;
     /** MCP runtime is running (drives the idle poll rate). */
     live: boolean;
@@ -56,7 +57,21 @@
     onClose: () => void;
   }
 
-  let { workspaceId, live, expanded, onToggleExpanded, onClose }: Props = $props();
+  let { resizable = false, workspaceId, live, expanded, onToggleExpanded, onClose }: Props = $props();
+
+  let drawer = $state<HTMLElement>();
+  let panelWidth = $state(360);
+  let panelMax = $state(720);
+  let resizing = $state<{x:number; width:number} | null>(null);
+  function resizePanel(width: number) { panelWidth = Math.round(Math.max(Math.min(280, panelMax), Math.min(panelMax, width))); }
+  $effect(() => { const wide = expanded; if (resizable) untrack(() => resizePanel(wide ? 640 : 360)); });
+  $effect(() => {
+    const parent = drawer?.parentElement;
+    if (!resizable || !parent) return;
+    const update = () => { const width = parent.clientWidth; panelMax = Math.max(220, width < 700 ? width - 24 : Math.min(900, width * .65)); resizePanel(panelWidth); };
+    const observer = new ResizeObserver(update); observer.observe(parent); untrack(update);
+    return () => observer.disconnect();
+  });
 
   const MAX_EVENTS = 240;
   type Filter = "all" | "read" | "edit" | "exec" | "error";
@@ -313,7 +328,13 @@
   );
 </script>
 
-<aside class="ad-drawer ax-glass" class:is-expanded={expanded} aria-label={$t("Task panel")}>
+<aside bind:this={drawer} class="ad-drawer ax-glass" class:resizable class:resizing={!!resizing} style:width={resizable ? `${panelWidth}px` : undefined} class:is-expanded={expanded} aria-label={$t("Task panel")}>
+  {#if resizable}<button class="task-resize-handle" aria-label={$t('chat.resizeTasks')} title={$t('chat.resizeTasks')}
+    onpointerdown={event=>{event.preventDefault();resizing={x:event.clientX,width:panelWidth};event.currentTarget.setPointerCapture(event.pointerId)}}
+    onpointermove={event=>{if(resizing)resizePanel(resizing.width+resizing.x-event.clientX)}}
+    onpointerup={event=>{resizing=null;event.currentTarget.releasePointerCapture(event.pointerId)}} onpointercancel={()=>resizing=null} onlostpointercapture={()=>resizing=null}
+    onkeydown={event=>{if(event.key==='ArrowLeft'||event.key==='ArrowRight'){event.preventDefault();resizePanel(panelWidth+(event.key==='ArrowLeft'?20:-20))}else if(event.key==='Home'){event.preventDefault();resizePanel(280)}else if(event.key==='End'){event.preventDefault();resizePanel(panelMax)}}}></button>{/if}
+
   <header class="ad-head">
     {#if detail}
       <button type="button" class="ad-icon-btn" onclick={back} title={$t("Back")} aria-label={$t("Back")}>
@@ -727,3 +748,9 @@
     </div>
   {/if}
 </aside>
+
+<style>
+.ad-drawer.resizable{position:relative;align-self:stretch;margin:14px 14px 14px 8px;border:1px solid var(--color-border);border-radius:18px;box-shadow:0 16px 42px #0004;max-width:calc(100% - 28px)}
+.task-resize-handle{position:absolute;inset:12px auto 12px 0;width:7px;z-index:5;cursor:col-resize;touch-action:none;border-radius:8px;background:transparent}.task-resize-handle:hover,.task-resize-handle:focus-visible,.resizing .task-resize-handle{background:#6096ec88;outline:none}.resizing{user-select:none}
+@media(max-width:1040px){.ad-drawer.resizable{position:absolute;top:0;right:0;bottom:0;z-index:35;background:color-mix(in srgb,var(--card-bg) 90%,transparent);backdrop-filter:blur(24px)}}
+</style>

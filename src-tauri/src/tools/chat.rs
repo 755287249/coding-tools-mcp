@@ -1,4 +1,6 @@
 //! Local chat v1. JSON is authoritative; Markdown is a rebuildable projection.
+#[path = "chat_group.rs"]
+mod group;
 use super::workspace::WorkspaceError;
 use serde_json::{json, Value};
 use std::{
@@ -8,6 +10,20 @@ use std::{
     sync::{Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
+
+pub const LOCAL_CHAT_SKILL_URI: &str = "coding-tools://skills/local-chat";
+const LOCAL_CHAT_SKILL: &str = include_str!("../../../skills/local-chat/SKILL.md");
+
+pub fn local_chat_skill() -> Value {
+    json!({"uri": LOCAL_CHAT_SKILL_URI, "name": "local-chat", "title": "Local continuous chat",
+        "mimeType": "text/markdown", "text": LOCAL_CHAT_SKILL.replace("\r\n", "\n")})
+}
+
+pub fn local_chat_skill_resource() -> Value {
+    let mut resource = local_chat_skill();
+    resource.as_object_mut().expect("skill object").remove("text");
+    resource
+}
 
 const DIR: &str = "docs/chat-sessions";
 const ASSET_DIR: &str = "mcp-assistant/chat-assets";
@@ -70,11 +86,12 @@ fn load(root: &Path, chat_id: &str) -> Result<Value> {
     if fs::metadata(&p).map_err(io)?.len() > MAX_BYTES {
         return Err(err("Chat archive exceeds size limit"));
     }
-    let s: Value =
+    let mut s: Value =
         serde_json::from_slice(&fs::read(p).map_err(io)?).map_err(|e| err(e.to_string()))?;
-    if s["version"] != 1 || s["id"] != chat_id || !s["messages"].is_array() {
+    if (s["version"] != 1 && s["version"] != 2) || s["id"] != chat_id || !s["messages"].is_array() {
         return Err(err("Invalid chat archive"));
     }
+    label_files(&mut s);
     Ok(s)
 }
 fn user_message_state(s: &Value, message: &Value) -> String {
@@ -92,7 +109,7 @@ fn user_message_state(s: &Value, message: &Value) -> String {
     } else {
         "排队中"
     };
-    if let Some(reply) = replies.iter().find(|reply| reply["final"] == true) {
+    if let Some(reply) = replies.iter().rev().find(|reply| reply["final"] == true && group::complete(s,message)) {
         let index = messages
             .iter()
             .position(|m| m["id"] == reply["id"])
@@ -119,9 +136,12 @@ pub fn markdown(s: &Value) -> String {
         s["title"].as_str().unwrap_or(""),
         s["id"].as_str().unwrap_or("")
     );
+    out.push_str(&group::markdown(s,None));
     if let Some(messages) = s["messages"].as_array() {
         for m in messages {
-            let role = if m["role"] == "user" {
+            let role = if m["kind"] == "connection_request" {
+                "接入请求"
+            } else if m["role"] == "user" {
                 "你"
             } else if m["final"] == false {
                 "AI · 进度"
@@ -140,6 +160,8 @@ pub fn markdown(s: &Value) -> String {
                 m["created_at"],
                 m["text"].as_str().unwrap_or("")
             ));
+            out.push_str(&group::markdown(s,Some(m)));
+            out.push_str(&super::chat_plan::markdown(&m["task_plan"]));
             if m["role"] == "user" {
                 out.push_str(&format!("{}\n\n", user_message_state(s, m)));
             }
@@ -164,15 +186,17 @@ pub fn markdown(s: &Value) -> String {
             if let Some(files) = m["attachments"].as_array() {
                 for f in files {
                     out.push_str(&format!(
-                        "Attachment: {} ({} bytes)\nPath: {}\n\n",
+                        "Attachment: {} ({} bytes)\nPath: {}\nReference: @{}\n\n",
                         f["name"].as_str().unwrap_or(""),
                         f["size"],
-                        f["path"].as_str().unwrap_or("")
+                        f["path"].as_str().unwrap_or(""),
+                        f["label"].as_str().unwrap_or("")
                     ));
                 }
             }
         }
     }
+    if let Some(queue)=s["queue"].as_array(){if !queue.is_empty(){out.push_str("\n## 待发送队列\n\n");for (i,m) in queue.iter().enumerate(){out.push_str(&format!("### 队列{}\n\n{}\n\n",i+1,m["text"].as_str().unwrap_or("")));if let Some(files)=m["attachments"].as_array(){for f in files{out.push_str(&format!("@{}: {}\n",f["label"].as_str().unwrap_or(""),f["path"].as_str().unwrap_or("")));}}}}}
     out
 }
 fn atomic(root: &Path, chat_id: &str, extension: &str, bytes: &[u8]) -> Result<()> {
@@ -233,6 +257,7 @@ fn lock(root: &Path) -> Result<DiskLock> {
     Ok(DiskLock(p))
 }
 fn pending(s: &Value) -> Option<Value> {
+    if group::grouped(s){return group::pending_for(s,None,false);}
     let messages = s["messages"].as_array()?;
     messages
         .iter()
@@ -244,14 +269,19 @@ fn pending(s: &Value) -> Option<Value> {
         })
         .cloned()
 }
+fn delivery(s:&Value,args:&Value,waiting:bool)->Result<Option<Value>>{if group::grouped(s){Ok(group::pending_for(s,Some(&group::member_for(s,args,false)?["id"]),waiting))}else{Ok(pending(s))}}
+fn wait_key(root:&Path,s:&Value,args:&Value)->Result<PathBuf>{Ok(file(root,id(&s["id"])?)?.join(id(&args["attachment_id"])?))}
+
 fn view(root: &Path, s: &Value) -> Result<Value> {
     let waiting = WAITERS
         .get_or_init(Default::default)
         .lock()
         .unwrap()
-        .contains(&file(root, id(&s["id"])?)?);
+        .contains(&file(root, id(&s["id"])?)?.join(s["attachment_id"].as_str().unwrap_or("")));
+    let public_members:Vec<_>=group::members(s).iter().map(|m|{let waiting=WAITERS.get_or_init(Default::default).lock().unwrap().contains(&file(root,id(&s["id"]).unwrap()).unwrap().join(m["attachment_id"].as_str().unwrap_or("")));json!({"id":m["id"],"name":m["name"],"role":m["role"],"paused":m["paused"]==true,"status":if s["closed"]==true{"offline"}else if waiting{"waiting"}else if m["lease_until"].as_u64().unwrap_or(0)>now(){"connected"}else{"offline"}})}).collect();
     let status = if s["closed"] == true {
         "closed"
+    } else if group::grouped(s) {if public_members.iter().any(|m|m["status"]=="waiting"){"waiting"}else if public_members.iter().any(|m|m["status"]=="connected"){"connected"}else{"offline"}
     } else if waiting {
         "waiting"
     } else if s["lease_until"].as_u64().unwrap_or(0) > now() {
@@ -265,7 +295,8 @@ fn view(root: &Path, s: &Value) -> Result<Value> {
         .ok_or_else(|| err("Invalid chat archive"))?;
     o.remove("attachment_id");
     o.remove("lease_until");
-    o.remove("version");
+    o.remove("version");o.insert("mode".into(),json!(s["mode"].as_str().unwrap_or("work")));o.insert("members".into(),json!(public_members));
+    o.remove("queue");o.remove("queue_receipts");
     o.insert("status".into(), json!(status));
     let work_state = if s["closed"] == true { None } else {
         pending(s).map(|message| {
@@ -363,7 +394,7 @@ fn upload(root: &Path, s: &mut Value, args: &Value) -> Result<Value> {
             if existing["local_reference"] != true || existing["path"] != relative || existing["sha256"] != sha256 || existing["name"] != name { return Err(err("Attachment ID conflict")); }
             save(root, s)?; return Ok(existing.clone());
         }
-        let f = json!({"id":upload_id,"name":name,"path":relative,"local_reference":true,"sha256":sha256,"size":size,"mime":mime});
+        let f = json!({"label":next_label(s,mime),"id":upload_id,"name":name,"path":relative,"local_reference":true,"sha256":sha256,"size":size,"mime":mime});
         s["files"].as_array_mut().unwrap().push(f.clone()); save(root, s)?; return Ok(f);
     }
     let encoded = args["data_base64"].as_str().unwrap_or("");
@@ -390,7 +421,7 @@ fn upload(root: &Path, s: &mut Value, args: &Value) -> Result<Value> {
         save(root, s)?;
         return Ok(existing.clone());
     }
-    let mut f = json!({"id":upload_id,"name":name,"mime":file_mime(&bytes),"size":bytes.len(),"sha256":sha256});
+    let mut f = json!({"label":next_label(s,file_mime(&bytes)),"id":upload_id,"name":name,"mime":file_mime(&bytes),"size":bytes.len(),"sha256":sha256});
     f["path"] = json!(file_path(s, &f)?);
     fs::create_dir_all(safe(root, &format!("{ASSET_DIR}/{}", id(&s["id"])?))?).map_err(io)?;
     let target = safe(root, f["path"].as_str().unwrap())?;
@@ -423,16 +454,13 @@ fn message_files(s: &Value, ids: Option<&Value>) -> Result<Vec<Value>> {
     };
     let ids = ids
         .as_array()
-        .ok_or_else(|| err("Select up to 5 unique attachments"))?;
-    if ids.len() > 5 {
-        return Err(err("Select up to 5 unique attachments"));
-    }
+        .ok_or_else(|| err("Select unique attachments"))?;
     let mut seen = HashSet::new();
     let mut result = Vec::new();
     for value in ids {
         let attachment_id = id(value)?;
         if !seen.insert(attachment_id) {
-            return Err(err("Select up to 5 unique attachments"));
+            return Err(err("Select unique attachments"));
         }
         let f = s["files"]
             .as_array()
@@ -505,18 +533,26 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
             v.as_object_mut().unwrap().remove("messages");
             sessions.push(v);
         }
-        sessions.sort_by_key(|s| std::cmp::Reverse(s["updated_at"].as_u64().unwrap_or(0)));
+        sessions.sort_by_key(|s| std::cmp::Reverse((s["pinned"]==true,s["updated_at"].as_u64().unwrap_or(0))));
         return Ok(json!({"sessions": sessions}));
     }
     if action == "create" {
         let title = text(args.get("title").unwrap_or(&json!("新对话")), 240)?;
-        let s = json!({"version":1,"id":uuid::Uuid::new_v4().to_string(),"title":title,"created_at":now(),"updated_at":now(),"closed":false,"messages":[],"attachment_id":"","lease_until":0});
+        let mut s = json!({"version":1,"id":uuid::Uuid::new_v4().to_string(),"title":title,"created_at":now(),"updated_at":now(),"closed":false,"messages":[],"attachment_id":"","lease_until":0});
+        if let Some(mode)=args.get("mode"){group::set_mode(&mut s,mode)?;}
         save(root, &s)?;
-        return Ok(json!({"session":view(root,&s)?}));
+        return Ok(json!({"session":local_view(root,&s)?}));
     }
     let mut s = load(root, id(&args["chat_id"])?)?;
     match action {
+        "set_mode"|"rename_member"|"detach_member"|"resume_member"|"set_coordinator"=>{group::ui(&mut s,args)?;s["updated_at"]=json!(now());save(root,&s)?;}
+        "reveal_path" => {
+            crate::platform::reveal::reveal_chat_path(root, args["source_path"].as_str().unwrap_or("")).map_err(err)?;
+            return Ok(json!({"ok":true}));
+        }
         "read_artifact" => return read_artifact(root, &args["source_path"]),
+        "upload_chunk" => return upload_chunk(root,&mut s,args),
+        "read_attachment_chunk" => return read_attachment_chunk(root,&s,args),
         "upload" => return Ok(json!({"attachment":upload(root,&mut s,args)?})),
         "read_attachment" => {
             use base64::{engine::general_purpose::STANDARD, Engine};
@@ -531,6 +567,26 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
             }
             return Ok(json!({"attachment":f,"data_base64":STANDARD.encode(bytes)}));
         }
+        "request_connection" => {
+            if s["closed"] == true { return Err(err("Conversation is closed")); }
+            let message_id = id(&args["message_id"])?;
+            if s["queue_receipts"].get(message_id).is_some() { return Err(err("Message ID conflicts with a queued delivery")); }
+            let messages = s["messages"].as_array().unwrap();
+            let existing = messages.iter().chain(s["queue"].as_array().into_iter().flatten()).find(|m| m["id"] == message_id);
+            if existing.is_some_and(|m| m["kind"] != "connection_request") {
+                return Err(err("Message ID conflicts with an existing message"));
+            }
+            let request = existing.or_else(|| messages.iter().find(|m| m["kind"] == "connection_request"
+                && !messages.iter().any(|r| r["role"] == "assistant" && r["reply_to"] == m["id"] && r["final"] == true)));
+            let request_id = request.map(|m| m["id"].clone()).unwrap_or(json!(message_id));
+            if request.is_none() {
+                s["messages"].as_array_mut().unwrap().push(json!({"id":message_id,"role":"user","kind":"connection_request",
+                    "text":"请通过 chat_reply 回复“你好，有什么能帮到你？”（final=true），确认接入后继续 chat_wait。","created_at":now()}));
+                s["updated_at"] = json!(now());
+            }
+            save(root, &s)?;
+            return Ok(json!({"session":local_view(root, &s)?,"connection_request_id":request_id}));
+        }
         "send" => {
             if s["closed"] == true {
                 return Err(err("Conversation is closed"));
@@ -544,20 +600,18 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
                 args["text"].clone()
             };
             let content = text(&value, 32000)?;
-            if let Some(m) = s["messages"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|m| m["id"] == message_id)
+            if let Some(receipt)=s["queue_receipts"][message_id].as_str(){if receipt!=queued_fingerprint(&content,&attachments){return Err(err("Message ID conflicts with a queued delivery"));}save(root,&s)?;return Ok(json!({"session":local_view(root,&s)?}));}
+            if let Some(m) = s["messages"].as_array().unwrap().iter().chain(s["queue"].as_array().into_iter().flatten()).find(|m|m["id"]==message_id)
             {
                 if m["role"] != "user"
+                    || m["kind"] == "connection_request"
                     || m["text"] != content
                     || m.get("attachments").cloned().unwrap_or(json!([])) != json!(attachments)
                 {
                     return Err(err("Message ID conflicts with an existing message"));
                 }
             } else {
-                if s["messages"].as_array().unwrap().is_empty() && s["title_custom"] != true {
+                if !s["messages"].as_array().unwrap().iter().any(|m| m["role"] == "user" && m["kind"] != "connection_request") && s["title_custom"] != true {
                     s["title"] = json!(content
                         .split_whitespace()
                         .collect::<Vec<_>>()
@@ -566,14 +620,14 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
                         .take(36)
                         .collect::<String>());
                 }
-                s["messages"]
-                    .as_array_mut()
-                    .unwrap()
-                    .push(json!({"id":message_id,"role":"user","text":content,"attachments":attachments,"created_at":now()}));
+                let mut message=json!({"id":message_id,"role":"user","text":content,"attachments":attachments,"created_at":now()});group::target_user(&s,&mut message);
+                if !awaiting_confirmation(&s)&&(pending(&s).is_some()||s["queue"].as_array().is_some_and(|q|!q.is_empty())){if s["queue"].is_null(){s["queue"]=json!([]);}s["queue"].as_array_mut().unwrap().push(message);}else{s["messages"].as_array_mut().unwrap().push(message);}
                 s["updated_at"] = json!(now());
             }
             save(root, &s)?;
         }
+        "set_queue_mode" => {if args["mode"]!="merge"&&args["mode"]!="split"{return Err(err("Invalid queue mode"));}s["queue_mode"]=args["mode"].clone();save(root,&s)?;}
+        "pin" => {if !args["pinned"].is_boolean(){return Err(err("pinned must be a boolean"));}s["pinned"]=args["pinned"].clone();save(root,&s)?;}
         "rename" => {
             let title = text(&args["title"], 240)?;
             s["title"] = json!(title.split_whitespace().collect::<Vec<_>>().join(" "));
@@ -582,6 +636,7 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
             save(root, &s)?;
         }
         "detach" => {
+            if let Some(members)=s["members"].as_array_mut(){for m in members{m["lease_until"]=json!(0);}}
             s["attachment_id"] = json!("");
             s["lease_until"] = json!(0);
             s["updated_at"] = json!(now());
@@ -597,9 +652,10 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
         "read" => (),
         _ => return Err(err("Unknown chat action")),
     }
-    Ok(json!({"session":view(root,&s)?}))
+    Ok(json!({"session":local_view(root,&s)?}))
 }
 fn owned(s: &Value, args: &Value) -> Result<()> {
+    if group::grouped(s){group::member_for(s,args,false)?;return Ok(());}
     if args["attachment_id"].as_str().unwrap_or("").is_empty()
         || args["attachment_id"] != s["attachment_id"]
         || s["lease_until"].as_u64().unwrap_or(0) <= now()
@@ -615,6 +671,9 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
         return Ok(json!({"ok":true,"status":"closed"}));
     }
     if name == "chat_open" {
+        if group::grouped(&s){let member=group::open(&mut s,args)?;group::bind_targets(&mut s);save(root,&s)?;return Ok(json!({"ok":true,"attachment_id":member["attachment_id"],"agent_id":member["id"],"role":member["role"],"session":view(root,&s)?,"instruction":"Read skill.text; reply only to your delivered message IDs. Call chat_wait.","skill":local_chat_skill()}));}
+        if args.get("agent_name").is_some(){s["agent_name"]=json!(group::member_name(&args["agent_name"])?);}
+
         if s["lease_until"].as_u64().unwrap_or(0) > now()
             && args["attachment_id"] != s["attachment_id"]
         {
@@ -625,10 +684,10 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
         if s["lease_until"].as_u64().unwrap_or(0) <= now() {
             s["attachment_id"] = json!(uuid::Uuid::new_v4().to_string());
         }
-        s["lease_until"] = json!(now() + LEASE_MS);
+        group::renew(&mut s,args)?;
         save(root, &s)?;
         return Ok(
-            json!({"ok":true,"attachment_id":s["attachment_id"],"session":view(root,&s)?,"instruction":"Use chat_reply for all user-visible replies, questions, progress and deliverables. Call chat_wait now with the returned attachment_id. Use final=false for progress and tool_event with actual name/status/input/output for tool calls; report results only after execution, redact secrets and mark shortened output. Use final=true to acknowledge reply_to; add awaiting_user=true for a question, then wait for the next message. Keep unique reply IDs and identical retry payloads; require persisted=true. Inspect records before repeating side effects. Immediately call chat_wait after idle or a persisted final reply; never stop voluntarily for idle duration, task completion or cost. Stop only on user cancellation, closed session, actual host limits or a blocking chat configuration error. Renew via chat_open with the same attachment_id before the 10-minute lease expires."}),
+            json!({"ok":true,"attachment_id":s["attachment_id"],"session":view(root,&s)?,"instruction":"Read skill.text and follow it for this session; save attachment_id and call chat_wait now.","skill":local_chat_skill()}),
         );
     }
     owned(&s, args)?;
@@ -639,12 +698,13 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
             if encoded.len() > 699052 || STANDARD.decode(encoded).is_ok_and(|bytes| bytes.len() > 512 * 1024) {
                 return Err(err("MCP attachment must not exceed 512 KiB; compress it before upload"));
             }
-            s["lease_until"] = json!(now() + LEASE_MS);
+            group::renew(&mut s,args)?;
             let attachment = upload(root, &mut s, args)?;
             Ok(json!({"ok":true,"attachment":attachment}))
         }
         "chat_reply" => {
             let message_id = id(&args["message_id"])?;
+            if s["queue_receipts"].get(message_id).is_some() { return Err(err("Message ID conflicts with a queued delivery")); }
             let reply_to = id(&args["reply_to"])?;
             let content = text(&args["text"], 32000)?;
             let attachments = message_files(&s, args.get("attachment_ids"))?;
@@ -657,13 +717,14 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
                 return Err(err("awaiting_user requires final=true"));
             }
             let event = tool_event(args.get("tool_event"), final_reply)?;
+            let identity=group::reply_identity(&s,args,final_reply)?;
             if let Some(m) = s["messages"]
                 .as_array()
                 .unwrap()
-                .iter()
+                .iter().chain(s["queue"].as_array().into_iter().flatten())
                 .find(|m| m["id"] == message_id)
             {
-                if m["role"] != "assistant"
+                if m["agent_id"]!=identity["agent_id"] || m["recipient_ids"]!=identity["recipient_ids"] || m["role"] != "assistant"
                     || m["text"] != content
                     || m["reply_to"] != reply_to
                     || m["final"] != final_reply
@@ -674,17 +735,19 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
                     return Err(err("Message ID conflicts with an existing reply"));
                 }
             } else {
-                if pending(&s).map(|m| m["id"].clone()) != Some(json!(reply_to)) {
+                group::validate_final(&s,args)?;
+                if delivery(&s,args,false)?.map(|m| m["id"].clone()) != Some(json!(reply_to)) {
                     return Err(err("Reply must address the oldest unanswered user message"));
                 }
-                s["messages"].as_array_mut().unwrap().push(json!({"id":message_id,"role":"assistant","text":content,"reply_to":reply_to,"final":final_reply,"awaiting_user":awaiting_user,"tool_event":event,"attachments":attachments,"created_at":now()}));
+                let mut reply=json!({"id":message_id,"role":"assistant","text":content,"reply_to":reply_to,"final":final_reply,"awaiting_user":awaiting_user,"tool_event":event,"attachments":attachments,"created_at":now()});reply.as_object_mut().unwrap().extend(identity.as_object().unwrap().clone());s["messages"].as_array_mut().unwrap().push(reply);
                 s["updated_at"] = json!(now());
             }
-            s["lease_until"] = json!(now() + LEASE_MS);
+            group::renew(&mut s,args)?;
             save(root, &s)?;
             Ok(json!({"ok":true,"persisted":true,"message_id":message_id}))
         }
         "chat_close" => {
+            if group::grouped(&s)&&group::member_for(&s,args,false)?["role"]!="coordinator"{return Err(err("Only the coordinator can close the group"));}
             s["closed"] = json!(true);
             s["attachment_id"] = json!("");
             s["lease_until"] = json!(0);
@@ -692,8 +755,10 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
             Ok(json!({"ok":true,"status":"closed"}))
         }
         "chat_wait" => {
-            s["lease_until"] = json!(now() + LEASE_MS);
-            if let Some(message) = pending(&s) {
+            publish_queued(&mut s);
+            group::renew(&mut s,args)?;
+            if let Some(message) = delivery(&s,args,true)? {
+                if group::grouped(&s){let agent=group::member_for(&s,args,false)?["id"].clone();let stored=s["messages"].as_array_mut().unwrap().iter_mut().find(|m|m["id"]==message["id"]).unwrap();if stored["received_by"].is_null(){stored["received_by"]=json!([]);}if !stored["received_by"].as_array().unwrap().contains(&agent){stored["received_by"].as_array_mut().unwrap().push(agent);s["updated_at"]=json!(now());}}
                 if message["received_at"].is_null() {
                     let received_at = now();
                     let stored = s["messages"]
@@ -707,9 +772,9 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
                 }
             }
             save(root, &s)?;
-            let message = pending(&s);
+            let message = delivery(&s,args,true)?;
             Ok(
-                json!({"ok":true,"status":if message.is_some(){"message"}else{"idle"},"message":message}),
+                json!({"ok":true,"status":if message.is_some(){"message"}else{"idle"},"message":message,"session":if group::grouped(&s){view(root,&s)?}else{Value::Null}}),
             )
         }
         _ => Err(err("Unknown chat tool")),
@@ -738,7 +803,7 @@ pub async fn wait(root: &Path, args: &Value) -> Result<Value> {
         return Ok(initial);
     }
     let chat_id = id(&args["chat_id"])?;
-    let path = file(root, chat_id)?;
+    let path = wait_key(root,&load(root,chat_id)?,args)?;
     if !WAITERS
         .get_or_init(Default::default)
         .lock()
@@ -755,7 +820,7 @@ pub async fn wait(root: &Path, args: &Value) -> Result<Value> {
             return Ok(json!({"ok":true,"status":"closed"}));
         }
         owned(&s, args)?;
-        if pending(&s).is_some() {
+        if delivery(&s,args,true)?.is_some() || (pending(&s).is_none() && s["queue"].as_array().is_some_and(|q|!q.is_empty()) && !awaiting_confirmation(&s)) {
             return tool(root, "chat_wait", args);
         }
         tokio::time::sleep_until(std::cmp::min(
@@ -765,13 +830,262 @@ pub async fn wait(root: &Path, args: &Value) -> Result<Value> {
         .await;
     }
     Ok(
-        json!({"ok":true,"status":"idle","instruction":"No message yet. Immediately call chat_wait again with the same session and attachment. Idle timeout does not end the conversation; do not stop for idle duration or cost."}),
+        json!({"ok":true,"status":"idle","instruction":"No message. Call chat_wait again now with the same session and attachment; idle is not an exit. Keep waiting within host limits."}),
     )
+}
+
+const CHUNK_BYTES: usize = 512 * 1024;
+fn label_files(s: &mut Value) {
+    let mut images = 0; let mut files = 0;
+    let mut labels = std::collections::HashMap::new();
+    if let Some(entries) = s["files"].as_array_mut() {
+        for f in entries {
+            let label = if f["mime"].as_str().unwrap_or("").starts_with("image/") { images += 1; format!("图片{images}") } else { files += 1; format!("文件{files}") };
+            f["label"] = json!(label); labels.insert(f["id"].as_str().unwrap_or("").to_owned(), label);
+        }
+    }
+    if let Some(messages) = s["messages"].as_array_mut() { for message in messages { if let Some(entries) = message["attachments"].as_array_mut() { for f in entries { if let Some(label) = labels.get(f["id"].as_str().unwrap_or("")) { f["label"] = json!(label); } } } } }
+}
+fn next_label(s: &Value, mime: &str) -> String {
+    let image = mime.starts_with("image/");
+    let count = s["files"].as_array().map(|files| files.iter().filter(|f| f["mime"].as_str().unwrap_or("").starts_with("image/") == image).count()).unwrap_or(0);
+    format!("{}{}", if image {"图片"} else {"文件"}, count + 1)
+}
+fn upload_chunk(root: &Path, s: &mut Value, args: &Value) -> Result<Value> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use std::io::{Read, Seek, SeekFrom, Write};
+    if s["closed"] == true { return Err(err("Conversation is closed")); }
+    let upload_id = id(&args["upload_id"])?; let name = text(&args["name"], 240)?;
+    if name.chars().any(|c| c.is_ascii_control() || c == '/' || c == '\\') { return Err(err("Invalid attachment name")); }
+    let offset = args["offset"].as_u64().ok_or_else(|| err("Invalid upload range"))?;
+    let total = args["total_size"].as_u64().filter(|v| *v > 0 && *v <= 9007199254740991 && offset < *v).ok_or_else(|| err("Invalid upload range"))?;
+    let encoded = args["data_base64"].as_str().unwrap_or("");
+    if encoded.len() > 699052 { return Err(err("Invalid chunk encoding or size")); }
+    let bytes = STANDARD.decode(encoded).map_err(|_| err("Invalid chunk encoding or size"))?;
+    if bytes.is_empty() || bytes.len() > CHUNK_BYTES || STANDARD.encode(&bytes) != encoded || offset + bytes.len() as u64 > total { return Err(err("Invalid chunk encoding or size")); }
+    let existing = s["files"].as_array().and_then(|files| files.iter().find(|f| f["id"] == upload_id)).cloned();
+    let dir = format!("{ASSET_DIR}/{}", id(&s["id"])?);
+    fs::create_dir_all(safe(root,&dir)?).map_err(io)?;
+    let meta_path = safe(root,&format!("{dir}/{upload_id}.upload.json"))?;
+    let part_path = safe(root,&format!("{dir}/{upload_id}.part"))?;
+    let meta: Value;
+    if let Some(f) = &existing {
+        if f["local_reference"] == true || f["name"] != name || f["size"] != total { return Err(err("Attachment ID conflict")); }
+        meta = f.clone();
+    } else if meta_path.exists() {
+        meta = serde_json::from_slice(&fs::read(&meta_path).map_err(io)?).map_err(|_| err("Invalid upload metadata"))?;
+        if meta["name"] != name || meta["size"] != total { return Err(err("Attachment ID conflict")); }
+    } else {
+        if offset != 0 { return Err(err("Upload must start at offset 0")); }
+        meta = json!({"name":name,"size":total,"mime":file_mime(&bytes)});
+        let mut options = fs::OpenOptions::new(); options.write(true).create_new(true);
+        #[cfg(unix)] { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
+        let mut file = options.open(&meta_path).map_err(io)?; file.write_all(meta.to_string().as_bytes()).map_err(io)?; file.sync_all().map_err(io)?;
+    }
+    let mut f = json!({"id":upload_id,"name":name,"size":total,"mime":meta["mime"]});
+    f["path"] = json!(file_path(s,&f)?); let target = safe(root,f["path"].as_str().unwrap())?;
+    let completed = existing.is_some() || target.exists(); let source = if completed {&target} else {&part_path};
+    if !source.exists() {
+        let mut options = fs::OpenOptions::new(); options.write(true).create_new(true);
+        #[cfg(unix)] { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
+        options.open(source).map_err(io)?;
+    }
+    let mut file = fs::OpenOptions::new().read(true).write(!completed).open(source).map_err(io)?;
+    let size = file.metadata().map_err(io)?.len();
+    if size > total || offset > size { return Err(err("Upload offset does not match stored bytes")); }
+    let overlap = (size-offset).min(bytes.len() as u64) as usize;
+    let mut prior = vec![0;overlap]; file.seek(SeekFrom::Start(offset)).map_err(io)?; file.read_exact(&mut prior).map_err(io)?;
+    if prior != bytes[..overlap] { return Err(err("Attachment ID conflict")); }
+    if overlap < bytes.len() {
+        if completed { return Err(err("Attachment content changed")); }
+        file.write_all(&bytes[overlap..]).map_err(io)?; file.sync_all().map_err(io)?;
+    }
+    drop(file);
+    if let Some(existing) = existing { save(root,s)?; return Ok(json!({"attachment":existing,"next_offset":offset+bytes.len() as u64})); }
+    if fs::metadata(source).map_err(io)?.len() < total { return Ok(json!({"next_offset":offset+bytes.len() as u64})); }
+    let (sha256,size,mime) = fingerprint(source)?;
+    f["sha256"]=json!(sha256);f["size"]=json!(size);f["mime"]=json!(mime);f["label"]=json!(next_label(s,mime));
+    if !completed {fs::rename(&part_path,&target).map_err(io)?;}
+    if s["files"].is_null() {s["files"]=json!([]);}
+    s["files"].as_array_mut().unwrap().push(f.clone());save(root,s)?;fs::remove_file(meta_path).map_err(io)?;
+    Ok(json!({"attachment":f,"next_offset":offset+bytes.len() as u64}))
+}
+fn read_attachment_chunk(root: &Path, s: &Value, args: &Value) -> Result<Value> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use std::io::{Read, Seek, SeekFrom};
+    let upload_id = id(&args["upload_id"])?;
+    let f = s["files"].as_array().and_then(|files| files.iter().find(|f| f["id"] == upload_id)).ok_or_else(|| err("Attachment not found"))?;
+    let size = f["size"].as_u64().unwrap_or(0);
+    let offset = args["offset"].as_u64().filter(|offset| *offset < size).ok_or_else(|| err("Invalid attachment range"))?;
+    let mut file = fs::File::open(safe(root,&file_path(s,f)?)?).map_err(io)?;
+    if !file.metadata().map_err(io)?.is_file() || file.metadata().map_err(io)?.len() != size {return Err(err("Attachment content changed"));}
+    let mut bytes = vec![0; (size-offset).min(CHUNK_BYTES as u64) as usize];file.seek(SeekFrom::Start(offset)).map_err(io)?;file.read_exact(&mut bytes).map_err(io)?;
+    Ok(json!({"attachment":f,"data_base64":STANDARD.encode(&bytes),"next_offset":offset+bytes.len() as u64}))
+}
+
+fn awaiting_confirmation(s: &Value) -> bool {
+    if let Some(messages)=s["messages"].as_array(){for m in messages.iter().rev(){if m["role"]=="user"{return false;}if m["role"]=="assistant"&&m["final"]==true{return m["awaiting_user"]==true;}}}false
+}
+fn queued_fingerprint(content: &str, attachments: &[Value]) -> String {
+    digest(json!([content,attachments.iter().map(|f|f["id"].clone()).collect::<Vec<_>>()]).to_string().as_bytes())
+}
+fn local_view(root: &Path,s: &Value)->Result<Value>{
+    let mut result=view(root,s)?;result["queued_messages"]=s.get("queue").cloned().unwrap_or(json!([]));result["queue_mode"]=if group::grouped(s){json!("split")}else{s.get("queue_mode").cloned().unwrap_or(json!("merge"))};Ok(result)
+}
+fn publish_queued(s: &mut Value) {
+    if pending(s).is_some()||awaiting_confirmation(s){return;}
+    let split=group::grouped(s)||s["queue_mode"]=="split";
+    let Some(queue)=s["queue"].as_array_mut() else{return;};if queue.is_empty(){return;}
+    let count=if split{1}else{queue.len()};let items=queue.drain(..count).collect::<Vec<_>>();
+    let mut message=items[0].clone();let mut attachments=Vec::new();let mut seen=HashSet::new();
+    for item in &items {if let Some(files)=item["attachments"].as_array(){for file in files{if seen.insert(file["id"].as_str().unwrap_or("").to_owned()){attachments.push(file.clone());}}}}
+    if s["queue_receipts"].is_null(){s["queue_receipts"]=json!({});}
+    for item in &items{s["queue_receipts"][item["id"].as_str().unwrap()]=json!(queued_fingerprint(item["text"].as_str().unwrap_or(""),item["attachments"].as_array().map(Vec::as_slice).unwrap_or(&[])));}
+    if items.len()>1 {message["text"]=json!(items.iter().enumerate().map(|(i,m)|format!("队列{}：{}",i+1,m["text"].as_str().unwrap_or(""))).collect::<Vec<_>>().join("\n\n"));}
+    message["attachments"]=json!(attachments);message["created_at"]=json!(now());if message["recipient_ids"].is_null(){group::target_user(s,&mut message);}s["messages"].as_array_mut().unwrap().push(message);s["updated_at"]=json!(now());
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn task_plans_are_owned_persistent_and_message_scoped() {
+        let temp=tempfile::tempdir().unwrap();let root=temp.path();
+        let a=ui(root,&json!({"action":"create"})).unwrap()["session"]["id"].clone();
+        let b=ui(root,&json!({"action":"create"})).unwrap()["session"]["id"].clone();
+        for cid in [&a,&b]{ui(root,&json!({"action":"send","chat_id":cid,"message_id":"user","text":"task"})).unwrap();}
+        let aid=tool(root,"chat_open",&json!({"chat_id":a})).unwrap()["attachment_id"].clone();
+        let bid=tool(root,"chat_open",&json!({"chat_id":b})).unwrap()["attachment_id"].clone();
+        let mut args=json!({"chat_id":a,"attachment_id":aid,"reply_to":"user","goal":"Goal A","todos":[{"id":"read","title":"Read","status":"completed"},{"id":"build","title":"Build","status":"in_progress"}]});
+        assert_eq!(plan(root,"set_todos",&args).unwrap()["persisted"],true);
+        let read=|cid:&Value|ui(root,&json!({"action":"read","chat_id":cid})).unwrap()["session"].clone();
+        assert!(read(&b)["messages"][0]["task_plan"].is_null());
+        args["attachment_id"]=bid;assert!(plan(root,"set_todos",&args).is_err());args["attachment_id"]=aid.clone();
+        assert!(plan(root,"set_todos",&json!({"attachment_id":aid})).is_err());
+        let mut progress=json!({"chat_id":a,"attachment_id":aid,"reply_to":"user","message":"password=synthetic-value working","percent":40,"todo_id":"build"});
+        assert_eq!(plan(root,"report_progress",&progress).unwrap()["persisted"],true);
+        assert!(!read(&a).to_string().contains("synthetic-value"));
+        progress["percent"]=json!(101);assert!(plan(root,"report_progress",&progress).is_err());progress["percent"]=json!(40);progress["todo_id"]=json!("missing");assert!(plan(root,"report_progress",&progress).is_err());
+        let update=json!({"chat_id":a,"attachment_id":aid,"reply_to":"user","explanation":"Next","plan":[{"step":"Read","status":"completed"},{"step":"Build","status":"completed"},{"step":"Verify","status":"in_progress"}]});
+        let next=plan(root,"update_plan",&update).unwrap();assert_eq!(next["plan"]["todos"][1]["id"],"build");assert_eq!(next["plan"]["todos"][2]["id"],"todo-1");
+        assert!(fs::read_to_string(root.join(format!("{DIR}/{}.md",a.as_str().unwrap()))).unwrap().contains("任务计划"));
+        assert_eq!(tool(root,"chat_open",&json!({"chat_id":a,"attachment_id":aid})).unwrap()["session"]["messages"][0]["task_plan"]["goal"],"Goal A");
+        tool(root,"chat_reply",&json!({"chat_id":a,"attachment_id":aid,"reply_to":"user","message_id":"done","text":"done","final":true})).unwrap();
+        ui(root,&json!({"action":"send","chat_id":a,"message_id":"new","text":"new task"})).unwrap();
+        assert!(read(&a)["messages"][2]["task_plan"].is_null());assert!(plan(root,"set_todos",&args).is_err());
+        args["reply_to"]=json!("new");plan(root,"set_todos",&args).unwrap();args["todos"]=json!([]);assert_eq!(plan(root,"set_todos",&args).unwrap()["plan"]["cleared"],true);
+        ui(root,&json!({"action":"detach","chat_id":a})).unwrap();assert!(plan(root,"set_todos",&args).is_err());
+    }
+
+    #[test]
+    fn outbox_wait_boundary_merge_receipts_and_pin_persist() {
+        let dir = tempfile::tempdir().unwrap(); let root=dir.path();
+        let session=ui(root,&json!({"action":"create"})).unwrap(); let cid=&session["session"]["id"];
+        let opened=tool(root,"chat_open",&json!({"chat_id":cid})).unwrap();
+        let args=json!({"chat_id":cid,"attachment_id":opened["attachment_id"]});
+        let uploaded=ui(root,&json!({"action":"upload","chat_id":cid,"upload_id":"q-file","name":"file.txt","data_base64":"ZmlsZQ=="})).unwrap();
+        let fid=&uploaded["attachment"]["id"];
+        let send=|id:&str, text:&str|ui(root,&json!({"action":"send","chat_id":cid,"message_id":id,"text":text,"attachment_ids":[fid]}));
+        send("u1","u1").unwrap();send("__proto__","__proto__").unwrap();send("constructor","constructor").unwrap();send("constructor","constructor").unwrap();
+        let read=||ui(root,&json!({"action":"read","chat_id":cid})).unwrap()["session"].clone();
+        assert_eq!(read()["messages"].as_array().unwrap().len(),1);
+        assert_eq!(read()["queued_messages"].as_array().unwrap().len(),2);
+        let public=tool(root,"chat_open",&args).unwrap();
+        for key in ["queue","queued_messages","queue_receipts"] {assert!(public["session"].get(key).is_none());}
+        tool(root,"chat_reply",&json!({"chat_id":cid,"attachment_id":args["attachment_id"],"message_id":"progress","reply_to":"u1","text":"working","final":false})).unwrap();
+        assert_eq!(tool(root,"chat_wait",&args).unwrap()["message"]["id"],"u1");
+        tool(root,"chat_reply",&json!({"chat_id":cid,"attachment_id":args["attachment_id"],"message_id":"done","reply_to":"u1","text":"done","final":true})).unwrap();
+        assert_eq!(read()["queued_messages"].as_array().unwrap().len(),2);
+        assert_eq!(tool(root,"chat_open",&args).unwrap()["session"]["messages"].as_array().unwrap().len(),3);
+        let delivered=tool(root,"chat_wait",&args).unwrap()["message"].clone();
+        assert_eq!(delivered["id"],"__proto__");
+        assert_eq!(delivered["text"],"队列1：__proto__\n\n队列2：constructor");
+        assert_eq!(delivered["attachments"].as_array().unwrap().len(),1);
+        assert!(delivered["received_at"].as_u64().unwrap()>=delivered["created_at"].as_u64().unwrap());
+        send("__proto__","__proto__").unwrap();send("constructor","constructor").unwrap();
+        assert_eq!(read()["messages"].as_array().unwrap().len(),4);
+        assert!(send("constructor","different").is_err());
+        assert!(ui(root,&json!({"action":"request_connection","chat_id":cid,"message_id":"constructor"})).is_err());
+        assert!(tool(root,"chat_reply",&json!({"chat_id":cid,"attachment_id":args["attachment_id"],"message_id":"constructor","reply_to":"__proto__","text":"collision","final":true})).is_err());
+        ui(root,&json!({"action":"create","title":"newer"})).unwrap();
+        ui(root,&json!({"action":"pin","chat_id":cid,"pinned":true})).unwrap();
+        assert_eq!(ui(root,&json!({"action":"list"})).unwrap()["sessions"][0]["id"],*cid);
+        assert!(ui(root,&json!({"action":"pin","chat_id":cid,"pinned":"yes"})).is_err());
+        ui(root,&json!({"action":"pin","chat_id":cid,"pinned":false})).unwrap();
+        assert_eq!(read()["pinned"],false);
+    }
+
+    #[tokio::test]
+    async fn split_outbox_pauses_for_confirmation_then_resumes_in_order() {
+        let dir=tempfile::tempdir().unwrap();let root=dir.path();
+        let session=ui(root,&json!({"action":"create"})).unwrap();let cid=&session["session"]["id"];
+        let opened=tool(root,"chat_open",&json!({"chat_id":cid})).unwrap();let aid=&opened["attachment_id"];
+        let args=json!({"chat_id":cid,"attachment_id":aid,"timeout_ms":0});
+        let send=|id:&str|ui(root,&json!({"action":"send","chat_id":cid,"message_id":id,"text":id})).unwrap();
+        let reply=|id:&str,to:&str,confirm:bool|tool(root,"chat_reply",&json!({"chat_id":cid,"attachment_id":aid,"message_id":id,"reply_to":to,"text":id,"final":true,"awaiting_user":confirm})).unwrap();
+        send("u1");send("u2");send("u3");
+        ui(root,&json!({"action":"set_queue_mode","chat_id":cid,"mode":"split"})).unwrap();
+        assert!(ui(root,&json!({"action":"set_queue_mode","chat_id":cid,"mode":"bad"})).is_err());
+        reply("question","u1",true);
+        assert_eq!(wait(root,&args).await.unwrap()["status"],"idle");
+        send("confirmation");
+        assert_eq!(wait(root,&args).await.unwrap()["message"]["id"],"confirmation");
+        let read=||ui(root,&json!({"action":"read","chat_id":cid})).unwrap()["session"].clone();
+        assert_eq!(read()["queued_messages"].as_array().unwrap().len(),2);
+        reply("confirmed","confirmation",false);
+        assert_eq!(wait(root,&args).await.unwrap()["message"]["id"],"u2");
+        assert_eq!(wait(root,&args).await.unwrap()["message"]["id"],"u2");
+        assert_eq!(read()["queued_messages"].as_array().unwrap().len(),1);
+        reply("a2","u2",false);
+        assert_eq!(wait(root,&args).await.unwrap()["message"]["id"],"u3");
+        reply("a3","u3",false);
+        assert_eq!(wait(root,&args).await.unwrap()["status"],"idle");
+    }
+
+    #[test]
+    fn chunk_uploads_preserve_large_files_and_stable_labels() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let temp = tempfile::tempdir().unwrap(); let root = temp.path();
+        let session = ui(root,&json!({"action":"create"})).unwrap();let cid = session["session"]["id"].clone();
+        let mut bytes = vec![7u8;3*1024*1024+17];bytes[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        let chunk = |offset:usize| json!({"action":"upload_chunk","chat_id":cid,"upload_id":"large","name":"image.png","offset":offset,"total_size":bytes.len(),"data_base64":STANDARD.encode(&bytes[offset..(offset+CHUNK_BYTES).min(bytes.len())])});
+        assert!(ui(root,&chunk(0)).unwrap()["attachment"].is_null());
+        assert_eq!(ui(root,&chunk(0)).unwrap()["next_offset"],CHUNK_BYTES);
+        let mut wrong=chunk(0);wrong["data_base64"]=json!("YQ==");assert!(ui(root,&wrong).is_err());
+        assert!(ui(root,&chunk(2*CHUNK_BYTES)).is_err());
+        let mut result=json!(null);for offset in (CHUNK_BYTES..bytes.len()).step_by(CHUNK_BYTES){result=ui(root,&chunk(offset)).unwrap();}
+        let file=&result["attachment"];assert_eq!(file["label"],"图片1");assert_eq!(fs::read(root.join(file["path"].as_str().unwrap())).unwrap(),bytes);
+        assert_eq!(ui(root,&chunk(bytes.len()-17)).unwrap()["attachment"]["id"],"large");
+        let mut ids=vec![json!("large")];for i in 0..6 {let id=format!("extra{i}");let f=ui(root,&json!({"action":"upload_chunk","chat_id":cid,"upload_id":id,"name":"report.txt","offset":0,"total_size":1,"data_base64":"YQ=="})).unwrap();assert_eq!(f["attachment"]["label"],format!("文件{}",i+1));ids.push(json!(id));}
+        let sent=ui(root,&json!({"action":"send","chat_id":cid,"message_id":"many","text":"参考@图片1和@文件6","attachment_ids":ids})).unwrap();assert_eq!(sent["session"]["messages"][0]["attachments"].as_array().unwrap().len(),7);
+        let part=ui(root,&json!({"action":"read_attachment_chunk","chat_id":cid,"upload_id":"large","offset":0})).unwrap();assert_eq!(STANDARD.decode(part["data_base64"].as_str().unwrap()).unwrap(),bytes[..CHUNK_BYTES]);
+        assert!(markdown(&sent["session"]).contains("Reference: @图片1"));
+    }
+
+    #[test]
+    fn connection_request_is_idempotent_and_preserves_first_user_title() {
+        let root = tempfile::tempdir().unwrap();
+        let session = ui(root.path(), &json!({"action":"create"})).unwrap();
+        let chat_id = session["session"]["id"].clone();
+        let request = json!({"action":"request_connection","chat_id":chat_id,"message_id":"connect-1"});
+        let first = ui(root.path(), &request).unwrap();
+        assert_eq!(first["session"]["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(first["session"]["messages"][0]["kind"], "connection_request");
+        assert_eq!(ui(root.path(), &request).unwrap()["connection_request_id"], "connect-1");
+        assert_eq!(ui(root.path(), &json!({"action":"request_connection","chat_id":chat_id,"message_id":"connect-2"})).unwrap()["connection_request_id"], "connect-1");
+        let open = tool(root.path(), "chat_open", &json!({"chat_id":chat_id})).unwrap();
+        let args = json!({"chat_id":chat_id,"attachment_id":open["attachment_id"]});
+        assert_eq!(tool(root.path(), "chat_wait", &args).unwrap()["message"]["id"], "connect-1");
+        assert!(ui(root.path(), &json!({"action":"send","chat_id":chat_id,"message_id":"connect-1","text":first["session"]["messages"][0]["text"]})).is_err());
+        let reply = json!({"chat_id":chat_id,"attachment_id":open["attachment_id"],"message_id":"hello","reply_to":"connect-1","text":"你好，有什么能帮到你？","final":true});
+        assert_eq!(tool(root.path(), "chat_reply", &reply).unwrap()["persisted"], true);
+        assert_eq!(tool(root.path(), "chat_wait", &args).unwrap()["status"], "idle");
+        let sent = ui(root.path(), &json!({"action":"send","chat_id":chat_id,"message_id":"work","text":"Actual work title"})).unwrap();
+        assert_eq!(sent["session"]["title"], "Actual work title");
+        assert!(markdown(&sent["session"]).contains("接入请求"));
+        assert!(ui(root.path(), &json!({"action":"request_connection","chat_id":chat_id,"message_id":"work"})).is_err());
+    }
+
     #[test]
     fn artifact_preview_is_read_only_and_bounded() {
         let temp = tempfile::tempdir().unwrap(); let root = temp.path();
@@ -1224,4 +1538,20 @@ mod tests {
         #[cfg(unix)] { std::os::unix::fs::symlink(root.join(relative),root.join("mcp-assistant/artifacts/link")).unwrap();let mut bad=request.clone();bad["source_path"]=json!("mcp-assistant/artifacts/link");assert!(tool(root,"chat_upload",&bad).is_err()); }
     }
 
+}
+
+/// Mutate only the active user's plan under the same lock as messages and leases.
+pub fn plan(root:&Path,name:&str,args:&Value)->Result<Value>{
+ let _lock=lock(root)?;let mut session=load(root,id(&args["chat_id"])?)?;owned(&session,args)?;
+ if session["closed"]==true{return Err(err("Conversation is closed"));}
+ let reply_to=id(&args["reply_to"])?;
+ let message=delivery(&session,args,false)?.filter(|m|m["id"]==reply_to&&m["kind"]!="connection_request").ok_or_else(||err("Plan must address the current unanswered user message"))?;
+ let actor=if group::grouped(&session){group::member_for(&session,args,false)?["id"].clone()}else{Value::Null};
+ let previous=if actor.is_null(){message["task_plan"].clone()}else{message["agent_plans"].as_array().and_then(|ps|ps.iter().find(|p|p["agent_id"]==actor)).map(|p|p["plan"].clone()).unwrap_or(Value::Null)};
+ let next=super::chat_plan::reduce(&previous,name,args,now())?;
+ let stored=session["messages"].as_array_mut().unwrap().iter_mut().find(|m|m["id"]==reply_to).unwrap();
+ if !actor.is_null(){if stored["agent_plans"].is_null(){stored["agent_plans"]=json!([]);}let plans=stored["agent_plans"].as_array_mut().unwrap();plans.retain(|p|p["agent_id"]!=actor);if !next.is_null(){plans.push(json!({"agent_id":actor,"plan":next}));}}
+ else if next.is_null(){stored.as_object_mut().unwrap().remove("task_plan");}else{stored["task_plan"]=next.clone();}
+ session["updated_at"]=json!(now());group::renew(&mut session,args)?;save(root,&session)?;
+ let mut result=json!({"ok":true,"persisted":true,"chat_id":session["id"],"reply_to":reply_to,"plan":super::chat_plan::summary(&next)});if name=="report_progress"{result["progress"]=next["progress"].clone();}Ok(result)
 }

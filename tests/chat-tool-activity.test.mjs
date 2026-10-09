@@ -61,3 +61,9 @@ test('closing a conversation ends incomplete reports and retains known failures'
     calls:2,completed:0,failed:1,running:0,unresolved:1,
   });
 });
+
+test('members with same request and tool name keep separate activity groups',()=>{
+ const a={...event('a','running'),agent_id:'a'},b={...event('b','running'),agent_id:'b'};
+ const groups=groupChatMessages([a,b,{id:'done',role:'assistant',reply_to:'u1',agent_id:'b',final:true}]).filter(x=>x.kind==='tools');
+ assert.equal(groups.length,2);assert.equal(groups[0].settled,false);assert.equal(groups[1].settled,true);
+});

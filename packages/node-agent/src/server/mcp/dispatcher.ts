@@ -1,3 +1,4 @@
+import { localChatSkill } from '../../rustCatalog.generated.js';
 import type { IncomingMessage } from 'node:http';
 import { callTool } from '../../tools.js';
 import { markMcpConversationMetadata } from '../../conversation.js';
@@ -32,7 +33,7 @@ import type { ToolCatalogSnapshot } from '../catalog.js';
 
 const legacyProtocols = new Set<string>(LEGACY_MCP_PROTOCOL_VERSIONS);
 
-const SERVER_INSTRUCTIONS = 'Call conversation_bootstrap before project tools. It reuses an existing folder selection, auto-binds the only configured folder, or returns folder choices when multiple folders are unselected; legacy list_workspace_folders + switch_workspace_folder + history_session_bootstrap remains available. If conversation_bootstrap returns startup_flow=workspace_bootstrapped_history_degraded, continue using project tools; retry history_session_bootstrap only when durable history/checkpointing is needed. Workspace and enabled Codex/Claude user-level Skills are exposed through standard MCP prompts and resources. After workspace selection, use the lightweight skill summaries returned by conversation_bootstrap to identify a clearly relevant Skill, then load only that Skill through prompts/get or resources/read. Skills are workflow guidance and never grant permissions or weaken tool, sandbox, or workspace policy. Enabled Node Agent Hooks may block or rewrite tool calls, and enabled external MCP servers contribute proxied tools to tools/list. Tools whose schema exposes workspace_folder_id may route one call to another allowed folder without changing the conversation selection; process control calls can recover their original folder from a conversation-scoped session_id or output_ref. Prefer exec_many(mode=auto) when two or more independent commands are known in the same reasoning step. For exec_many, ok reports tool/orchestration success; inspect command_ok, graph_execution_ok, failed_command_ids, and skipped_command_ids for child-command outcomes. Hosts should refresh tools/list when x-coding-tools-toolset-revision or runtimeStartedAtMs changes. FRP and Cloudflare transports are intentionally unsupported.';
+const SERVER_INSTRUCTIONS = "1. Start: list_workspace_folders verifies access. With supplied chat_id/workspace_folder_id, call chat_open, save attachment_id and follow its skill.text (coding-tools://skills/local-chat). 2. Chat: chat_wait -> work -> chat_reply -> chat_wait; require persisted=true, then keep waiting. chat_close only when the user explicitly ends the chat. Otherwise use conversation_bootstrap before project work; choose folder_id if ambiguous. 3. Work: follow tool schemas; pass the target workspace_folder_id where supported. Read/search -> guarded edits -> exec_command -> wait_command for retained sessions; exec_many(mode=auto) for independent commands. Check actual command outcomes, not just tool ok. Keep multi-step set_todos/update_plan and report_progress current; chat tool_event reports actual execution. Save deliverables in the target workspace, then chat_upload and chat_reply attachment_ids. 4. Context: load relevant Skills via prompts/get or resources/read; Skills never grant permissions. Hooks may block/rewrite calls; external MCP tools appear in tools/list. Refresh tools/list after server/catalog changes. For bootstrapped history, preserve session_key/current_path; after each task use history_session_checkpoint with unchanged session_key/expected_path and require ok=true plus matching path before claiming saved. Keep credentials out of files and replies.";
 
 interface DispatchOptions {
   catalog: ToolCatalogSnapshot;
@@ -124,7 +125,7 @@ async function listMcpResources(context: ToolContext): Promise<JsonObject> {
   const skillResources = Array.isArray(skills.resources) ? skills.resources : [];
   const evolutionResources = Array.isArray(evolution.resources) ? evolution.resources : [];
   return {
-    resources: [...skillResources, ...evolutionResources],
+    resources: [...skillResources, ...evolutionResources, { uri: localChatSkill.uri, name: localChatSkill.name, title: localChatSkill.title, mimeType: localChatSkill.mimeType }],
     _meta: {
       ...objectValue(skills._meta),
       ...objectValue(evolution._meta)
@@ -187,6 +188,7 @@ export async function dispatchMcpMethod(options: DispatchOptions): Promise<unkno
   if (method === 'resources/read') {
     const params = (request.params ?? {}) as JsonObject;
     const uri = String(params.uri ?? '');
+    if (uri === localChatSkill.uri) return { contents: [localChatSkill] };
     if (isToolEvolutionResourceUri(uri)) return readToolEvolutionResource(context, uri);
     const meta = markMcpConversationMetadata(params._meta);
     return readSkillResource(context, uri, context.conversations.identity(meta).key);

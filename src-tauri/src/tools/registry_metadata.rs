@@ -2,7 +2,7 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
         "chat_open",
         "Chat open",
-        "Attach to a local chat created in the client. Retain attachment_id and call chat_wait.",
+        "Attach to a client-created chat; read returned skill.text and session records, save attachment_id, then call chat_wait. Renew with the same ID before the 10-minute lease expires; never take another attachment.",
         false,
         false,
         false,
@@ -10,7 +10,7 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
         "chat_wait",
         "Chat wait",
-        "Wait for the next local user message. On idle, wait again. Reply with chat_reply before waiting for a new message.",
+        "Wait for one user message using the saved attachment_id; only one wait at a time. idle: immediately wait again. message: work and chat_reply. closed: stop.",
         false,
         false,
         false,
@@ -18,7 +18,7 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
         "chat_upload",
         "Chat upload",
-        "Attach an AI-generated file from mcp-assistant/artifacts/ using source_path, or upload bytes (max 512 KiB). Local references have no cumulative file-count or byte quota. Retain upload_id for retries, then pass returned attachment.id in chat_reply attachment_ids. Requires the current attachment_id; never upload credentials.",
+        "Attach a file under mcp-assistant/artifacts/ via source_path, or bytes up to 512 KiB. Use current attachment_id and stable upload_id for retries; pass returned attachment.id to chat_reply attachment_ids. Never upload credentials.",
         false,
         false,
         false,
@@ -26,7 +26,7 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
         "chat_reply",
         "Chat reply",
-        "Persist an AI reply or progress. final=true acknowledges reply_to; use a stable unique message_id for retries.",
+        "Persist a reply to reply_to using a unique message_id. Progress: final=false. Done/question: final=true; questions also awaiting_user=true. Require persisted=true; retries keep the entire payload. Then chat_wait; final does not close the chat.",
         false,
         false,
         false,
@@ -83,7 +83,7 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
         "switch_workspace_folder",
         "Switch conversation folder",
-        "Switch the current ChatGPT conversation to one allowed folder without reconnecting the shared MCP. Each folder keeps independent workspace history.",
+        "Select an allowed folder for this conversation without reconnecting; each folder retains independent history.",
         false,
         false,
         false,
@@ -91,7 +91,7 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
         "query_tool_usage",
         "Query tool usage",
-        "Safely query complete MCP tool-usage JSONL records and aggregate errors, latency, orchestration gaps, async child lifetimes, activity bursts, traffic, warnings, and sanitized command-pair parallelism statistics. Returns conflict/serialization evidence, Wilson confidence, and LLM-facing batching recommendations without reading a partial writer tail.",
+        "Query redacted tool-call history and summaries: errors, latency, traffic, async lifetimes and batching/conflict evidence. Use to diagnose tool execution.",
         true,
         false,
         false,
@@ -99,7 +99,7 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
         "history_session_bootstrap",
         "Initialize or restore development session",
-        "Direct or legacy history initialization for an already-bound workspace. Used internally by conversation_bootstrap; defaults to compact summaries and can return full prior-session detail on demand. Repeated calls for the same session resume without duplicates.",
+        "Initialize/resume history for a bound folder; conversation_bootstrap normally does this. Defaults to compact summaries; request full detail when needed.",
         false,
         false,
         false,
@@ -107,7 +107,7 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
         "history_session_checkpoint",
         "Save development checkpoint",
-        "Save or update one idempotent, redacted development handoff. Pass session_key and expected_path exactly as returned by conversation_bootstrap or history_session_bootstrap so changing host metadata cannot redirect the checkpoint. The turn_id is optional and generated deterministically when omitted.",
+        "Save an idempotent, redacted handoff. Pass unchanged session_key and expected_path from bootstrap; require ok=true and matching path. turn_id is optional and deterministic.",
         false,
         false,
         false,
@@ -235,7 +235,7 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
         "set_todos",
         "Set task checklist",
-        "Publish the goal and step checklist for the current multi-step job so the user can follow it live in the desktop task panel. Call it once you know the steps (3+ steps or any non-trivial change), then keep it current: mark a step in_progress before working on it and completed right after. Replaces the whole list; at most 24 todos, unique ids, at most one in_progress. An empty todos array clears the plan. Does not touch workspace files.",
+        "Publish the full checklist for multi-step work. Mark each step in_progress before work and completed after; at most 24 unique IDs and one in_progress. Empty todos clears the list. For local chat pass chat_id, attachment_id, reply_to and workspace_folder_id to persist a plan for that message.",
         false,
         false,
         false,
@@ -243,7 +243,7 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
         "update_plan",
         "Update plan",
-        "Codex-style plan update: send the full ordered list of steps with status pending, in_progress or completed. Steps keep their ids when the title is unchanged; the optional explanation is shown as the latest progress note. Same limits as set_todos. Does not touch workspace files.",
+        "Replace the full ordered plan (pending/in_progress/completed); unchanged titles retain IDs. Optional explanation updates progress. Same limits and chat scope parameters as set_todos.",
         false,
         false,
         false,
@@ -251,7 +251,7 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
         "report_progress",
         "Report progress",
-        "Report what you are doing right now (message, optional phase and a 0-100 percent estimate) in the desktop task panel. todo_id defaults to the step that is in_progress. Use it at meaningful milestones, not after every tool call. Does not touch workspace files.",
+        "Report a meaningful milestone in the task panel, with optional phase and 0-100 percent. todo_id defaults to the in_progress step.",
         false,
         false,
         false,
@@ -347,7 +347,7 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
         "exec_many",
         "Execute command graph",
-        "Run up to 256 structured exec_command requests. Auto mode combines non-bypassable safety rules, inferred or named Cargo/Git/Node resource locks, and sanitized historical command-pair statistics. Unknown pairs stay sequential until repeated explicit parallel runs establish a safe Wilson confidence bound; conflicts or lock serialization automatically reduce concurrency. Prefer this over repeated exec_command calls when two or more commands can overlap.",
+        "Run up to 256 command requests; prefer mode=auto for independent commands. Runtime locks/safety rules may serialize them. Inspect command_ok, graph_execution_ok, failed_command_ids and skipped_command_ids; tool ok alone does not mean commands passed.",
         false,
         true,
         true,

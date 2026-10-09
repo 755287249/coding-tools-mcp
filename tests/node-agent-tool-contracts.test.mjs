@@ -22,7 +22,7 @@ test('every Rust catalog tool has an explicit Node regression reference', async 
   const testSource = (await Promise.all(testFiles.map(name => readFile(path.join(directory, name), 'utf8')))).join('\n');
   const missing = toolNames.filter(name => !new RegExp(`\\b${escapePattern(name)}\\b`).test(testSource));
 
-  assert.equal(toolNames.length, 69);
+  assert.equal(toolNames.length, 71);
   assert.deepEqual(missing, []);
 });
 

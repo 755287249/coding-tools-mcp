@@ -52,7 +52,6 @@
   import Settings from '@lucide/svelte/icons/settings';
   import MessageSquare from '@lucide/svelte/icons/message-square';
   import ListChecks from '@lucide/svelte/icons/list-checks';
-  import ActivityDrawer from '$lib/components/activity/ActivityDrawer.svelte';
   import { activityPanelExpanded, activityPanelOpen } from '$lib/stores/activity-panel';
   import ChatPanel from "$lib/components/chat/ChatPanel.svelte";
   import AutoWorkspaceView from "$lib/components/auto/AutoWorkspaceView.svelte";
@@ -222,6 +221,10 @@
     if (tab === "actions") actionsSection = section;
   }
 
+  function openChatPlugins(folderId:string){
+    if($uiMode==='auto'){const url=new URL($page.url);url.searchParams.set('panel','plugins');url.searchParams.set('folder',folderId);void goto(url,{noScroll:true});}
+    else navigateWorkspace('features');
+  }
   function navigateWorkspace(tab: WorkspaceTab, section?: ServiceSection) {
     activeWorkspaceTab = tab;
     const nextUrl = new URL($page.url);
@@ -760,23 +763,19 @@
   });
 </script>
 
-{#if profile && ($uiMode === "auto" || activeWorkspaceTab === "chat")}
-  <div class="workspace-chat-bar">
-    <button class="workspace-chat-tab" class:active={activeWorkspaceTab === "chat"} onclick={() => navigateWorkspace("chat")}><MessageSquare size={15}/>{$t("chat.44")}</button>
-    <div class="workspace-chat-actions">
-      {#if activeWorkspaceTab === "chat" && capabilities.liveHistoryActivity}<button class="workspace-icon" class:active={$activityPanelOpen} title={$t('Task panel')} aria-label={$t('Task panel')} aria-expanded={$activityPanelOpen} onclick={() => activityPanelOpen.update(value => !value)}><ListChecks size={17}/></button>{/if}
-      <button class="workspace-icon" class:active={activeWorkspaceTab !== "chat"} title={$t("chat.43")} aria-label={$t("chat.43")} onclick={() => navigateWorkspace("overview")}><Settings size={17}/></button>
-    </div>
-  </div>
+{#if profile && $uiMode === "auto" && activeWorkspaceTab !== "chat"}
+  <div class="workspace-chat-bar"><button class="workspace-chat-tab" onclick={() => navigateWorkspace('chat')}><MessageSquare size={15}/>{$t('chat.44')}</button></div>
 {/if}
 {#if profile && activeWorkspaceTab === "chat"}
   <div class="ad-host chat-workspace">
     <div class="chat-workspace-main">
-      <ChatPanel externalNavigation connectRequested={$page.url.searchParams.get('connect') === '1'} requestedChatId={$page.url.searchParams.get('chat') ?? ''} requestedFolderId={$page.url.searchParams.get('folder') ?? ''} startNew={$page.url.searchParams.get('new') === '1'} onNavigate={(folder, chat) => void goto(appUrl(chatLocation(profile!.id, folder, chat)), {noScroll:true})} workspaceId={profile.id} folders={workspaceFolders(profile)} activeFolderId={profile.active_folder_id} endpoint={mcpPublic || mcpLocal} auth={profile.auth} />
+      <ChatPanel onPlugins={capabilities.workspaceFeatureControls?openChatPlugins:undefined} tasksOpen={$activityPanelOpen} tasksExpanded={$activityPanelExpanded} onCloseTasks={()=>activityPanelOpen.set(false)} onToggleTasksExpanded={()=>activityPanelExpanded.update(value=>!value)} externalNavigation connectRequested={$page.url.searchParams.get('connect') === '1'} requestedChatId={$page.url.searchParams.get('chat') ?? ''} requestedFolderId={$page.url.searchParams.get('folder') ?? ''} startNew={$page.url.searchParams.get('new') === '1'} onNavigate={(folder, chat) => void goto(appUrl(chatLocation(profile!.id, folder, chat)), {noScroll:true})} workspaceId={profile.id} folders={workspaceFolders(profile)} activeFolderId={profile.active_folder_id} endpoint={mcpPublic || mcpLocal} auth={profile.auth}>
+        {#snippet headerActions()}
+          <button class="workspace-icon" class:active={$activityPanelOpen} title={$t('Task panel')} aria-label={$t('Task panel')} aria-expanded={$activityPanelOpen} onclick={() => activityPanelOpen.update(value => !value)}><ListChecks size={17}/></button>
+          <button class="workspace-icon" title={$t('chat.43')} aria-label={$t('chat.43')} onclick={() => navigateWorkspace('overview')}><Settings size={17}/></button>
+        {/snippet}
+      </ChatPanel>
     </div>
-    {#if capabilities.liveHistoryActivity && $activityPanelOpen}
-      {#key profile.id}<ActivityDrawer workspaceId={profile.id} live={mcpStatus === 'running'} expanded={$activityPanelExpanded} onToggleExpanded={() => activityPanelExpanded.update(value => !value)} onClose={() => activityPanelOpen.set(false)}/>{/key}
-    {/if}
   </div>
 {:else if profile && $uiMode === "auto"}
   {#key profile.id}
@@ -962,5 +961,5 @@
 {/if}
 
 <style>
-.workspace-chat-bar{display:flex;align-items:center;justify-content:space-between;flex:none;gap:12px;border-bottom:1px solid var(--color-border);padding:8px 18px}.workspace-chat-tab{display:flex;gap:7px;align-items:center;padding:6px 9px;border-radius:7px;font-size:12px;color:var(--color-text-muted);cursor:pointer}.workspace-chat-tab.active{color:var(--color-text);background:var(--surface-hover)}.workspace-chat-actions{display:flex;gap:6px}.workspace-icon{display:grid;place-items:center;width:30px;height:30px;border-radius:7px;color:var(--color-text-muted);cursor:pointer}.workspace-icon:hover,.workspace-icon.active{background:var(--surface-hover);color:var(--color-text)}button:focus-visible{outline:2px solid var(--primary);outline-offset:2px}.chat-workspace-main{flex:1;min-width:0;min-height:0;padding:0}.chat-workspace :global(.ad-drawer){max-width:calc(100% - 20px)}@media(max-width:560px){.workspace-chat-bar{padding:6px 10px}.chat-workspace-main{padding:5px}}
+.workspace-chat-bar{display:flex;align-items:center;justify-content:space-between;flex:none;gap:12px;border-bottom:1px solid var(--color-border);padding:8px 18px}.workspace-chat-tab{display:flex;gap:7px;align-items:center;padding:6px 9px;border-radius:7px;font-size:12px;color:var(--color-text-muted);cursor:pointer}.workspace-icon{display:grid;place-items:center;width:30px;height:30px;border-radius:7px;color:var(--color-text-muted);cursor:pointer}.workspace-icon:hover,.workspace-icon.active{background:var(--surface-hover);color:var(--color-text)}button:focus-visible{outline:2px solid var(--primary);outline-offset:2px}.chat-workspace-main{flex:1;min-width:0;min-height:0;padding:0}.chat-workspace :global(.ad-drawer){max-width:calc(100% - 20px)}@media(max-width:560px){.workspace-chat-bar{padding:6px 10px}.chat-workspace-main{padding:5px}}
 </style>

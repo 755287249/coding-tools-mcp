@@ -15,10 +15,40 @@
   import Search from '@lucide/svelte/icons/search';
   import SquarePen from '@lucide/svelte/icons/square-pen';
   import Ellipsis from '@lucide/svelte/icons/ellipsis';
+  import Pin from '@lucide/svelte/icons/pin';
   import Pencil from '@lucide/svelte/icons/pencil';
   import Check from '@lucide/svelte/icons/check';
-  import { onMount } from 'svelte';
+  import { innerPopover } from '$lib/chat/popover';
+  import { onMount, tick } from 'svelte';
   let { onAddWorkspace, recent = false, searchOpen = false }: { onAddWorkspace?: () => void | Promise<void>; recent?: boolean; searchOpen?: boolean } = $props();
+  let projectMenu = $state<HTMLDivElement>();
+  let menuWorkspace = $state('');
+  let menuAnchor: HTMLElement | null = null;
+  let menuLeft=$state(0),menuTop=$state(0);
+  function positionProjectMenu() {
+    if(!menuAnchor || !projectMenu?.matches(':popover-open'))return;
+    const pos=innerPopover(menuAnchor.getBoundingClientRect(),{width:projectMenu.offsetWidth,height:projectMenu.offsetHeight},{width:innerWidth,height:innerHeight});
+    menuLeft=pos.left;menuTop=pos.top;
+  }
+  async function showProjectMenu(id:string,event:MouseEvent) {
+    if(menuWorkspace===id&&projectMenu?.matches(':popover-open')){projectMenu.hidePopover();return;}
+    menuWorkspace=id;menuAnchor=event.currentTarget as HTMLElement;
+    await tick();projectMenu?.showPopover();positionProjectMenu();
+  }
+  $effect(()=>{const route=$page.url.href;projectMenu?.hidePopover();});
+  let chatMenu = $state<HTMLDivElement>();
+  let chatMenuTarget = $state<{workspace:string;folder:string;chat:ChatSession} | null>(null);
+  let chatMenuLeft=$state(0),chatMenuTop=$state(0);
+  let chatMenuAnchor: HTMLElement | null=null;
+  let pinSaving=$state('');
+  function positionChatMenu(){if(!chatMenuAnchor||!chatMenu?.matches(':popover-open'))return;const pos=innerPopover(chatMenuAnchor.getBoundingClientRect(),{width:chatMenu.offsetWidth,height:chatMenu.offsetHeight},{width:innerWidth,height:innerHeight});chatMenuLeft=pos.left;chatMenuTop=pos.top;}
+  async function showChatMenu(workspace:string,folder:string,chat:ChatSession,event:MouseEvent){chatMenuTarget={workspace,folder,chat};chatMenuAnchor=event.currentTarget as HTMLElement;await tick();chatMenu?.showPopover();positionChatMenu();}
+  async function togglePin(workspace:string,folder:string,chat:ChatSession){
+    if(pinSaving)return;pinSaving=scope(scope(workspace,folder),chat.id);
+    try{const result=await localChat(workspace,folder,{action:'pin',chat_id:chat.id,pinned:!chat.pinned});if(result.session)sessions={...sessions,[scope(workspace,folder)]:(sessions[scope(workspace,folder)]??[]).map(item=>item.id===chat.id?result.session!:item).sort((a,b)=>Number(!!b.pinned)-Number(!!a.pinned)||b.updated_at-a.updated_at)};chatMenu?.hidePopover();}
+    catch(error){errors={...errors,[scope(workspace,folder)]:String(error)}}finally{pinSaving=''}
+  }
+  $effect(()=>{const route=$page.url.href;chatMenu?.hidePopover();});
   let query = $state('');
   let picker = $state<HTMLDivElement>();
   let pickerSearch = $state('');
@@ -63,7 +93,7 @@
     finally { creating = false; }
   }
   const needle = $derived(query.trim().toLocaleLowerCase());
-  const recentItems = $derived(groups.flatMap(group => (sessions[group.key] ?? []).map(chat => ({group, chat}))).filter(item => !needle || `${item.chat.title} ${item.group.workspace.name}`.toLocaleLowerCase().includes(needle)).sort((a,b) => b.chat.updated_at - a.chat.updated_at).slice(0,40));
+  const recentItems = $derived(groups.flatMap(group => (sessions[group.key] ?? []).map(chat => ({group, chat}))).filter(item => !needle || `${item.chat.title} ${item.group.workspace.name}`.toLocaleLowerCase().includes(needle)).sort((a,b) => Number(!!b.chat.pinned)-Number(!!a.chat.pinned)||b.chat.updated_at-a.chat.updated_at).slice(0,40));
   const presenceLabels = { online:'chat.98', offline:'chat.22', working:'chat.70', error:'chat.71', closed:'chat.21' } as const;
   onMount(() => { try { const value=JSON.parse(localStorage.getItem('ctmcp-project-collapse') ?? '{}'); if(value && typeof value==='object' && !Array.isArray(value)) collapsed=value; } catch {} });
   $effect(() => { if (searchOpen) searchInput?.focus(); });
@@ -104,6 +134,13 @@
   }
 </script>
 
+<svelte:window onresize={()=>{positionProjectMenu();positionChatMenu()}} onscrollcapture={()=>{positionProjectMenu();positionChatMenu()}}/>
+<div bind:this={chatMenu} class="chat-actions-menu" popover="auto" style:left={`${chatMenuLeft}px`} style:top={`${chatMenuTop}px`}>
+  {#if chatMenuTarget}{@const target=chatMenuTarget}<button onclick={()=>{rename=scope(scope(target.workspace,target.folder),target.chat.id);title=target.chat.title;chatMenu?.hidePopover()}}><Pencil size={15}/>{$t('chat.85')}</button><button disabled={!!pinSaving} onclick={()=>togglePin(target.workspace,target.folder,target.chat)}><Pin size={15}/>{$t(target.chat.pinned?'chat.unpin':'chat.pin')}</button>{/if}
+</div>
+<div bind:this={projectMenu} class="project-info-card" popover="auto" style:left={`${menuLeft}px`} style:top={`${menuTop}px`}>
+  {#if menuWorkspace}{@const workspace=$workspaces.find(w=>w.id===menuWorkspace)}{#if workspace}<strong>{workspace.name}</strong>{#each workspaceFolders(workspace) as folder}<p>{folder.path}</p>{/each}<button onclick={()=>{projectMenu?.hidePopover();editProject(workspace.id)}}>{$t('Workspace settings')}</button>{/if}{/if}
+</div>
 <div class="project-nav">
   <header><button class="session-picker-trigger" popovertarget="conversation-picker" onclick={preparePicker} title={$t('chat.113')} aria-label={$t('chat.113')}><strong>{activeChat?.title ?? $t('chat.99')}</strong><ChevronDown size={15}/></button><button type="button" title={$t('chat.100')} aria-label={$t('chat.100')} onclick={() => searchInput?.focus()}><Search size={15}/></button></header>
   <div id="conversation-picker" class="conversation-picker" popover="auto" bind:this={picker}>
@@ -125,7 +162,7 @@
       {#if createError}<p class="load-error" role="alert">{createError}</p>{/if}
     </form>
   </div>
-  <button class="new-conversation" onclick={() => goto(appUrl('/?new=1'))}><SquarePen size={16}/>{$t('chat.1')}</button>
+  <button class="new-conversation" onclick={() => goto(appUrl('/?new=1'))}><SquarePen size={18}/>{$t('chat.1')}</button>
   <label class="project-search"><Search size={13}/><input bind:this={searchInput} bind:value={query} placeholder={$t('chat.100')} aria-label={$t('chat.100')}/></label>
   <div class="nav-scroll">
     {#if recent}
@@ -142,9 +179,9 @@
           {#if !needle || workspace.name.toLocaleLowerCase().includes(needle) || matching}
             <div class="project-group">
               <div class="project-heading" class:current={$page.params.id===workspace.id}>
-                <button class="project-name" onclick={() => toggle(workspace.id)} aria-expanded={!collapsed[workspace.id]} title={workspace.name}><Folder size={14}/><span>{workspace.name}</span></button>
-                <details class="project-info"><summary aria-label={`${$t('chat.105')}: ${workspace.name}`} title={$t('chat.105')}><Ellipsis size={15}/></summary><div><strong>{workspace.name}</strong>{#each projectGroups as group}<p>{group.folder.path}</p>{/each}<button onclick={() => editProject(workspace.id)}>{$t('Workspace settings')}</button></div></details>
-                <button title={$t('chat.1')} aria-label={`${$t('chat.1')}: ${workspace.name}`} onclick={() => {const folder=projectGroups[0]?.folder;if(folder)open(workspace.id,folder.id)}}><SquarePen size={14}/></button>
+                <button class="project-name" onclick={() => toggle(workspace.id)} aria-expanded={!collapsed[workspace.id]} title={workspace.name}><Folder size={16}/><span>{workspace.name}</span></button>
+                <button class="project-info-trigger" aria-label={`${$t('chat.105')}: ${workspace.name}`} title={$t('chat.105')} onclick={event=>showProjectMenu(workspace.id,event)}><Ellipsis size={15}/></button>
+                <button title={$t('chat.1')} aria-label={`${$t('chat.1')}: ${workspace.name}`} onclick={() => {const folder=projectGroups[0]?.folder;if(folder)open(workspace.id,folder.id)}}><SquarePen size={16}/></button>
               </div>
               {#if !collapsed[workspace.id] || needle}
                 {#each projectGroups as group (group.key)}
@@ -173,14 +210,19 @@
     {#if rename===key}
       <form onsubmit={event=>{event.preventDefault();void renameChat(ws,folder,chat)}}><input bind:this={renameInput} aria-label={$t('chat.86')} bind:value={title} maxlength="240" disabled={saving} onkeydown={event=>{if(event.key==='Escape')rename=''}}/><button disabled={saving||!title.trim()}>{$t('Save')}</button></form>
     {:else}
-      <button class="chat-link" onclick={()=>open(ws,folder,chat.id)} aria-current={active?'page':undefined} title={`${chat.title} · ${$t(presenceLabels[presence])}`}><span>{chat.title}{#if showProject}<small>{$workspaces.find(item=>item.id===ws)?.name}</small>{/if}</span><i title={$t(presenceLabels[presence])}></i>{#if newCount}<b class="unread-count" aria-label={`${$t('chat.90')}: ${newCount}`}>{newCount>99?'99+':newCount}</b>{/if}</button>
-      <button class="rename-chat" title={$t('chat.85')} aria-label={`${$t('chat.85')}: ${chat.title}`} onclick={()=>{rename=key;title=chat.title}}><Pencil size={12}/></button>
+      <button class="chat-link" onclick={()=>open(ws,folder,chat.id)} aria-current={active?'page':undefined} title={`${chat.title} · ${$t(presenceLabels[presence])}`}><i title={$t(presenceLabels[presence])}></i><span>{chat.title}{#if showProject}<small>{$workspaces.find(item=>item.id===ws)?.name}</small>{/if}</span>{#if newCount}<b class="unread-count" aria-label={`${$t('chat.90')}: ${newCount}`}>{newCount>99?'99+':newCount}</b>{/if}</button>
+      <div class="chat-row-actions"><button title={$t('chat.conversationActions')} aria-label={`${$t('chat.conversationActions')}: ${chat.title}`} onclick={event=>showChatMenu(ws,folder,chat,event)}><Ellipsis size={15}/></button><button class:pinned={chat.pinned} disabled={!!pinSaving} title={$t(chat.pinned?'chat.unpin':'chat.pin')} aria-label={`${$t(chat.pinned?'chat.unpin':'chat.pin')}: ${chat.title}`} onclick={()=>togglePin(ws,folder,chat)}><Pin size={14}/></button></div>
     {/if}
   </div>
 {/snippet}
 <style>
 .session-picker-trigger{display:flex;align-items:center;gap:7px;min-width:0;max-width:calc(100% - 25px);padding:6px;text-align:left}.session-picker-trigger strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.session-picker-trigger :global(svg){flex:none}.conversation-picker{position:fixed;inset:52px auto auto 62px;margin:0;width:min(350px,calc(100vw - 76px));max-height:calc(100dvh - 72px);overflow:auto;padding:12px;border:1px solid var(--color-border);border-radius:12px;background:var(--card-bg);color:var(--color-text);box-shadow:0 10px 32px #0005}.conversation-picker h2{font-size:13px;margin:2px 5px 12px}.picker-list{max-height:38dvh;overflow:auto}.picker-chat{display:flex;align-items:center;gap:10px;width:100%;text-align:left;padding:10px;border-radius:8px}.picker-chat[aria-current=page]{background:var(--surface-hover)}.picker-chat>span{flex:1;min-width:0}.picker-chat strong,.picker-chat small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.picker-chat strong{font-size:12px;font-weight:500}.picker-chat small{font-size:10px;color:var(--color-text-muted);margin-top:4px}.picker-create{display:flex;flex-direction:column;gap:8px;border-top:1px solid var(--color-border);padding:12px 3px 2px;margin-top:8px;font-size:11px}.picker-create select{width:100%;padding:8px;border:1px solid var(--color-border);border-radius:6px;background:var(--card-bg);color:var(--color-text)}.picker-create button{display:flex;align-items:center;justify-content:center;gap:7px;padding:9px;background:var(--surface-hover)}.picker-create button:disabled{opacity:.5;cursor:default}.picker-create p{font-size:10px;color:var(--color-text-muted);line-height:1.6}.picker-create .load-error{color:var(--danger)}
 
-.project-nav{height:100%;display:flex;flex-direction:column;padding:14px 10px;color:var(--color-text);min-width:0}header{display:flex;align-items:center;justify-content:space-between;padding:2px 9px 16px;font-size:15px}button,summary{cursor:pointer}button{border-radius:6px}button:hover{background:var(--surface-hover)}button:focus-visible,summary:focus-visible,input:focus-visible{outline:2px solid var(--primary);outline-offset:1px}.new-conversation{display:flex;align-items:center;gap:10px;padding:9px;margin-bottom:14px;text-align:left;font-size:12px}.project-search{display:flex;align-items:center;gap:7px;border:1px solid var(--color-border);border-radius:7px;padding:7px;color:var(--color-text-muted);margin-bottom:14px}.project-search input{min-width:0;width:100%;background:transparent;border:0;font-size:11px}.nav-scroll{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden}.section-heading{display:flex;align-items:center;justify-content:space-between;color:var(--color-text-muted);padding:0 6px 8px;font-size:11px}.section-heading button{display:flex;align-items:center;gap:5px;padding:4px}.section-title{font-size:11px;color:var(--color-text-muted);padding:8px}.project-group{margin-bottom:16px}.project-heading{display:flex;align-items:center;gap:3px;padding:0 4px}.project-heading.current{background:color-mix(in srgb,var(--color-text) 5%,transparent);border-radius:7px}.project-heading>button:last-child{padding:4px;flex:none}.project-name{display:flex;align-items:center;gap:8px;min-width:0;flex:1;text-align:left;padding:8px 4px;font-size:12px}.project-name span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.project-info{position:relative;flex:none}.project-info summary{list-style:none;padding:4px}.project-info summary::-webkit-details-marker{display:none}.project-info>div{position:fixed;left:64px;top:140px;width:min(340px,calc(100vw - 80px));padding:15px;z-index:80;background:var(--card-bg);border:1px solid var(--color-border);border-radius:10px;box-shadow:0 8px 28px #0005;font-size:12px}.project-info p{overflow-wrap:anywhere;color:var(--color-text-muted);margin:9px 0}.project-info button{padding:7px;background:var(--surface-hover)}.tree-chat{display:flex;align-items:center;margin:2px 0 2px 22px;border-radius:7px;min-width:0}.tree-chat.active{background:var(--surface-hover)}.chat-link{display:flex;gap:7px;align-items:center;min-width:0;flex:1;text-align:left;padding:8px 6px;font-size:12px}.chat-link>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}.chat-link small{display:block;font-size:9px;color:var(--color-text-muted)}.chat-link i{width:5px;height:5px;border-radius:50%;background:#888;flex:none}.tree-chat[data-presence=online] i{background:#31a56c}.tree-chat[data-presence=working] i{background:#6a9bd4}.tree-chat[data-presence=error] i{background:#db7969}.rename-chat{padding:6px;opacity:0;color:var(--color-text-muted)}.tree-chat:hover .rename-chat,.tree-chat:focus-within .rename-chat{opacity:1}.tree-chat form{display:flex;gap:3px;width:100%;padding:5px;font-size:11px}.tree-chat input{width:0;flex:1;min-width:0;background:var(--card-bg);border:1px solid var(--color-border);padding:4px}.folder-name,.empty-project{display:flex;align-items:center;gap:5px;margin-left:28px;font-size:10px;color:var(--color-text-muted);padding:6px}.load-error{font-size:10px;color:var(--danger);overflow-wrap:anywhere;padding:7px}.muted{font-size:11px;color:var(--color-text-muted);padding:8px}
+.project-nav{height:100%;display:flex;flex-direction:column;padding:14px 10px;color:var(--color-text);min-width:0}header{display:flex;align-items:center;justify-content:space-between;padding:2px 9px 16px;font-size:15px}button{cursor:pointer}button{border-radius:6px}button:hover{background:var(--surface-hover)}button:focus-visible,input:focus-visible{outline:2px solid var(--primary);outline-offset:1px}.new-conversation{display:flex;align-items:center;gap:10px;padding:9px;margin-bottom:14px;text-align:left;font-size:12px}.project-search{display:flex;align-items:center;gap:7px;border:1px solid var(--color-border);border-radius:7px;padding:7px;color:var(--color-text-muted);margin-bottom:14px}.project-search input{min-width:0;width:100%;background:transparent;border:0;font-size:11px}.nav-scroll{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden}.section-heading{display:flex;align-items:center;justify-content:space-between;color:var(--color-text-muted);padding:0 6px 8px;font-size:11px}.section-heading button{display:flex;align-items:center;gap:5px;padding:4px}.section-title{font-size:11px;color:var(--color-text-muted);padding:8px}.project-group{margin-bottom:16px}.project-heading{display:flex;align-items:center;gap:3px;padding:0 4px}.project-heading.current{background:color-mix(in srgb,var(--color-text) 5%,transparent);border-radius:7px}.project-heading>button:last-child{padding:4px;flex:none}.project-name{display:flex;align-items:center;gap:8px;min-width:0;flex:1;text-align:left;padding:8px 4px;font-size:12px}.project-name span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.tree-chat{display:flex;align-items:center;margin:2px 0 2px 22px;border-radius:7px;min-width:0}.tree-chat.active{background:var(--surface-hover)}.chat-link{display:flex;gap:7px;align-items:center;min-width:0;flex:1;text-align:left;padding:8px 6px;font-size:12px}.chat-link>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}.chat-link small{display:block;font-size:9px;color:var(--color-text-muted)}.chat-link i{width:5px;height:5px;border-radius:50%;background:#888;flex:none}.tree-chat[data-presence=online] i{background:#31a56c}.tree-chat[data-presence=working] i{background:#6a9bd4}.tree-chat[data-presence=error] i{background:#db7969}.tree-chat form{display:flex;gap:3px;width:100%;padding:5px;font-size:11px}.tree-chat input{width:0;flex:1;min-width:0;background:var(--card-bg);border:1px solid var(--color-border);padding:4px}.folder-name,.empty-project{display:flex;align-items:center;gap:5px;margin-left:28px;font-size:10px;color:var(--color-text-muted);padding:6px}.load-error{font-size:10px;color:var(--danger);overflow-wrap:anywhere;padding:7px}.muted{font-size:11px;color:var(--color-text-muted);padding:8px}
 .unread-count{min-width:14px;border-radius:8px;background:#55749a;color:white;font:9px/14px system-ui;text-align:center;padding:0 3px}
+
+.project-info-trigger{padding:4px;flex:none}.project-info-card{position:fixed;inset:auto;margin:0;width:min(340px,calc(100vw - 16px));max-height:calc(100dvh - 16px);overflow:auto;padding:15px;border:1px solid var(--color-border);border-radius:12px;background:var(--color-bg);color:var(--color-text);box-shadow:0 12px 36px #0007;font-size:12px}.project-info-card p{overflow-wrap:anywhere;color:var(--color-text-muted);margin:9px 0}.project-info-card button{padding:7px;background:var(--surface-hover)}
+
+.project-name,.chat-link,.new-conversation{font-size:14px}.project-name{padding-top:7px;padding-bottom:7px}.project-group{margin-bottom:10px}.tree-chat{margin:2px 0 2px 4px}.chat-link{padding:7px 8px;gap:10px}.chat-link i{width:6px;height:6px}.project-heading .project-info-trigger,.project-heading>button:last-child,.chat-row-actions{opacity:0;pointer-events:none}.project-heading:hover .project-info-trigger,.project-heading:hover>button:last-child,.project-heading:focus-within .project-info-trigger,.project-heading:focus-within>button:last-child,.tree-chat:hover .chat-row-actions,.tree-chat:focus-within .chat-row-actions{opacity:1;pointer-events:auto}.chat-row-actions{display:flex;align-items:center;flex:none;gap:1px;margin-right:4px}.chat-row-actions button{display:grid;place-items:center;width:24px;height:26px;color:var(--color-text-muted)}.chat-row-actions button.pinned{color:#88b5f8}.chat-actions-menu{position:fixed;inset:auto;margin:0;width:210px;max-width:calc(100vw - 16px);padding:5px;border:1px solid var(--color-border);border-radius:11px;background:var(--color-bg);color:var(--color-text);box-shadow:0 12px 32px #0007}.chat-actions-menu button{display:flex;align-items:center;gap:10px;padding:10px;width:100%;font-size:13px;text-align:left}
+@media(hover:none){.project-heading .project-info-trigger,.project-heading>button:last-child,.chat-row-actions{opacity:1;pointer-events:auto}}
 </style>

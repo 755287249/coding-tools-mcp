@@ -10,13 +10,13 @@ export function groupChatMessages(messages: ChatMessage[], sessionClosed = false
   const groups = new Map<string, Extract<ChatFeedItem, { kind: 'tools' }>>();
   const finishedRequests = new Set(messages
     .filter(message => message.role === 'assistant' && message.final === true && message.reply_to)
-    .map(message => message.reply_to));
+    .map(message => message.agent_id?message.agent_id+':'+message.reply_to:message.reply_to));
   for (const message of messages) {
     if (message.role !== 'assistant' || !message.tool_event) {
       feed.push({ kind: 'message', id: `message:${message.id}`, message });
       continue;
     }
-    const key = message.reply_to ?? message.id;
+    const key = message.agent_id?message.agent_id+':'+(message.reply_to??message.id):message.reply_to ?? message.id;
     let group = groups.get(key);
     if (!group) {
       group = { kind: 'tools', id: `tools:${key}`, messages: [], settled: sessionClosed || finishedRequests.has(key) };

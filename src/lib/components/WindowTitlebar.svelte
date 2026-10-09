@@ -4,7 +4,7 @@
   import Minus from "@lucide/svelte/icons/minus";
   import Square from "@lucide/svelte/icons/square";
   import X from "@lucide/svelte/icons/x";
-  import { getCurrentWindow } from "@tauri-apps/api/window";
+  import { getCurrentWindow } from "$lib/backend/window";
   import { t } from "$lib/i18n";
 
   let maximized = $state(false);
@@ -22,11 +22,12 @@
   onMount(() => {
     void syncMaximized();
     let unlisten: (() => void) | undefined;
+    let disposed = false;
     void getCurrentWindow()
       .onResized(() => void syncMaximized())
-      .then((fn) => (unlisten = fn))
+      .then((fn) => { if (disposed) fn(); else unlisten = fn; })
       .catch(() => undefined);
-    return () => unlisten?.();
+    return () => { disposed = true; unlisten?.(); };
   });
 
   const minimize = () => void getCurrentWindow().minimize();

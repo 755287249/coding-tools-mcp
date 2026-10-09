@@ -21,10 +21,13 @@ function config(root, dataDir) {
 }
 
 async function git(cwd, ...args) {
+  const environment = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+  // Fixture commits must use each temporary repository's configured identity.
+  for (const key of ['GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL']) delete environment[key];
   const result = await execFile('git', args, {
     cwd,
     encoding: 'utf8',
-    env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }
+    env: environment
   });
   return result.stdout.trim();
 }

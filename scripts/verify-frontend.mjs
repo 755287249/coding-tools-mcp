@@ -2,8 +2,11 @@ import { spawn } from "node:child_process";
 
 function commandFor(script) {
   const packageManagerCli = process.env.npm_execpath;
-  if (packageManagerCli) {
+  if (packageManagerCli && /\.(?:[cm]?js)$/i.test(packageManagerCli)) {
     return { command: process.execPath, args: [packageManagerCli, "run", script] };
+  }
+  if (packageManagerCli && !/\.(?:cmd|bat|ps1)$/i.test(packageManagerCli)) {
+    return { command: packageManagerCli, args: ["run", script] };
   }
   return {
     command: process.platform === "win32" ? "cmd.exe" : "pnpm",

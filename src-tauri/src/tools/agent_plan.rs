@@ -86,6 +86,7 @@ fn plan_summary(plan: Option<&ActivityPlan>) -> Value {
 }
 
 pub fn set_todos(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
+    if ["chat_id","attachment_id","reply_to"].iter().any(|key|args.get(*key).is_some()) { return super::chat::plan(ctx.workspace.root(),"set_todos",args); }
     let goal = optional_text(args, "goal", MAX_GOAL_CHARS)?;
     let external_task_id =
         optional_text(args, "external_task_id", MAX_EXTERNAL_ID_CHARS)?.filter(|id| !id.is_empty());
@@ -106,6 +107,7 @@ pub fn set_todos(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceErro
 }
 
 pub fn update_plan(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
+    if ["chat_id","attachment_id","reply_to"].iter().any(|key|args.get(*key).is_some()) { return super::chat::plan(ctx.workspace.root(),"update_plan",args); }
     let goal = optional_text(args, "goal", MAX_GOAL_CHARS)?;
     let explanation = optional_text(args, "explanation", MAX_PROGRESS_CHARS)?;
     let steps = items(args, "plan")?
@@ -127,6 +129,7 @@ pub fn update_plan(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceEr
 }
 
 pub fn report_progress(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
+    if ["chat_id","attachment_id","reply_to"].iter().any(|key|args.get(*key).is_some()) { return super::chat::plan(ctx.workspace.root(),"report_progress",args); }
     let message = required_text(args, "message", MAX_PROGRESS_CHARS)?;
     let phase = optional_text(args, "phase", MAX_PHASE_CHARS)?.unwrap_or_default();
     let percent = match args.get("percent") {

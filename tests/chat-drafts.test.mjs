@@ -45,3 +45,13 @@ test('corrupt storage is bounded and conversation accents are stable',()=>{
   assert.notEqual(conversationAccent('a'),conversationAccent('b'));
   assert.match(conversationAccent('a'),/^hsl\(\d+ 34% 55%\)$/);
 });
+
+test('drafts retain more than five path-only attachment references',()=>{
+ const values=new Map();const store=createDraftStore(()=>({getItem:k=>values.get(k)??null,setItem:(k,v)=>values.set(k,v),removeItem:k=>values.delete(k)}));
+ const attachments=Array.from({length:12},(_,i)=>({id:String(i),label:`图片${i+1}`,name:'image.png',path:`assets/${i}.png`,mime:'image/png',size:4*1024*1024,sha256:'hash'}));
+ store.save('many',{text:'@图片12',attachments,retry:null});
+ assert.equal(store.load('many').draft.attachments.length,12);
+ const restored=createDraftStore(()=>({getItem:k=>values.get(k)??null,setItem(){},removeItem(){}}));
+ assert.equal(restored.load('many').draft.attachments[11].label,'图片12');
+ assert.equal(values.get('many').includes('data_base64'),false);
+});

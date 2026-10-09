@@ -26,7 +26,7 @@ test("saving shared MCP OAuth credentials schedules only one runtime restart", a
   assert.match(authForm, /sharedSecretChanged = clientId !== loadedSharedOauthClientId/);
   assert.match(
     authForm,
-    /await onSaveProfile\(\{ \.\.\.draft \}, \{ skipRuntimeRestart: sharedSecretChanged \}\)/,
+    /await onSaveProfile\(\s*\{\s*\.\.\.draft,[\s\S]*?oauth_token_ttl_seconds:[\s\S]*?\},\s*\{ skipRuntimeRestart: sharedSecretChanged \},?\s*\)/,
   );
   assert.match(authForm, /if \(sharedSecretChanged\) \{\s*await setSharedSecret/);
   assert.ok(

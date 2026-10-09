@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
 import { buildChatPrompt } from '../src/lib/connect/chat-prompt.ts';
 import { buildConnectionPrompt, buildClientConfigJson, MANUAL_OAUTH_REDIRECT_URI } from '../src/lib/connect/prompt.ts';
 
@@ -8,24 +9,11 @@ test('session target round-trips quotes and newlines as one JSON line', () => {
   const prompt = buildChatPrompt(chat, folder);
   const target = prompt.split('\n').find(line => line.startsWith('目标参数'));
   assert.deepEqual(JSON.parse(target.slice(target.indexOf('{'))), { chat_id: chat, workspace_folder_id: folder });
-  assert.match(prompt, /所有回复、提问、进度和成果都通过 chat_reply/);
-  assert.match(prompt, /awaiting_user:true/);
-  assert.match(prompt, /首次成功立即保存实际 attachment_id/);
-  assert.match(prompt, /每次 bash\/工作工具调用前后各发 tool_event/);
-  assert.match(prompt, /persisted=true/);
-  assert.match(prompt, /status=idle/);
-  assert.ok(prompt.length < 1120, 'session instructions should stay concise');
-  assert.match(prompt, /不设次数上限/);
-  assert.match(prompt, /此后每 30 秒重试/);
-  assert.doesNotMatch(prompt, /最多连续重试 3 次/);
-  assert.match(prompt, /status=idle 后立即再次调用，无论多少次都继续/);
-  assert.match(prompt, /final=true 只确认本条消息，不结束会话/);
-  assert.match(prompt, /只要聊天可用就继续等待/);
-  assert.match(prompt, /不计等待成本/);
-  assert.match(prompt, /宿主硬性上限实际触发/);
-  assert.match(prompt, /重试保留全部原参数/);
-  assert.match(prompt, /不能抢占/);
-  assert.match(prompt, /未经用户明确同意，不调用转交其他模型的生图\/语音工具/);
+  assert.match(prompt, /chat_open/);
+  assert.match(prompt, /attachment_id/);
+  assert.match(prompt, /skill.text/);
+  assert.match(prompt, /chat_wait → 工作 → chat_reply → 再等待/);
+  assert.ok(prompt.length < 400, 'copied session guidance should delegate details to the skill');
 });
 
 test('one copied prompt combines authentication, verified setup and the session loop', () => {
@@ -67,4 +55,44 @@ test('manual OAuth includes an explicit callback while fixed-token config bypass
   assert.ok(oauthConfig.headers['User-Agent']);
   assert.equal(oauthConfig.headers.Authorization, undefined);
   assert.ok(!JSON.stringify(oauthConfig).includes('synthetic-password'));
+});
+
+
+test('desktop and Node expose the same startup and chat guidance', () => {
+  const read = path => readFileSync(new URL('../' + path, import.meta.url), 'utf8');
+  const rust = read('src-tauri/src/mcp/server.rs').match(/const SERVER_INSTRUCTIONS: &str = ("[^\n]+");/)[1];
+  const node = read('packages/node-agent/src/server/mcp/dispatcher.ts').match(/const SERVER_INSTRUCTIONS = ("[^\n]+");/)[1];
+  assert.equal(JSON.parse(rust), JSON.parse(node));
+  assert.ok(JSON.parse(rust).length < 1900);
+  assert.doesNotMatch(JSON.parse(rust), /ChatGPT/);
+  const rustChat = [...read('src-tauri/src/tools/chat.rs').matchAll(/"instruction":"([^"]+)"/g)].map(m => m[1]);
+  const nodeChat = [...read('packages/node-agent/src/chat/store.ts').matchAll(/instruction: '([^']+)'/g)].map(m => m[1]);
+  assert.equal(rustChat.length, 3);
+  assert.deepEqual(nodeChat, rustChat);
+});
+
+
+test('compact chat connection retains authentication bootstrap without the manual tutorial', () => {
+  const info = { workspaceName: 'test', endpoint: 'https://example.test/mcp', authType: 'oauth', clientId: 'test-client', password: 'x'.repeat(64), bearerToken: 'x'.repeat(64), folders: ['/test'] };
+  for (const locale of ['en', 'zh-CN', 'zh-TW', 'ja']) {
+    for (const authType of ['oauth', 'bearer']) {
+      const prompt = buildConnectionPrompt({ ...info, authType }, locale, true);
+      assert.match(prompt, /User-Agent/);
+      assert.match(prompt, /notifications\/initialized/);
+      assert.match(prompt, /list_workspace_folders/);
+      assert.ok(prompt.length < buildConnectionPrompt({ ...info, authType }, locale).length);
+      if (authType === 'oauth') assert.ok(prompt.includes(MANUAL_OAUTH_REDIRECT_URI));
+      else assert.doesNotMatch(prompt, /redirect_uri/);
+    }
+  }
+});
+
+test('generated Node skill matches the single packaged Markdown source', () => {
+  const read = path => readFileSync(new URL('../' + path, import.meta.url), 'utf8').replaceAll('\r\n', '\n');
+  const generated = read('packages/node-agent/src/rustCatalog.generated.ts').match(/export const localChatSkill = (\{[\s\S]*?\}) as const;/);
+  assert.ok(generated);
+  const skill = JSON.parse(generated[1]);
+  assert.equal(skill.text, read('skills/local-chat/SKILL.md'));
+  assert.equal(skill.uri, 'coding-tools://skills/local-chat');
+  assert.match(read('src-tauri/src/tools/chat.rs'), /include_str!\("\.\.\/\.\.\/\.\.\/skills\/local-chat\/SKILL.md"\)/);
 });

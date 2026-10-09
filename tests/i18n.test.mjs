@@ -80,10 +80,11 @@ test("language selector keeps native options legible in the dark sidebar", async
     "utf8",
   );
 
-  assert.match(component, /class="language-select/);
-  assert.match(component, /color-scheme:\s*dark/);
-  assert.match(component, /\.language-select option\s*\{[^}]*background(?:-color)?:\s*#17243a/s);
-  assert.match(component, /\.language-select option\s*\{[^}]*color:\s*#eef4ff/s);
+  const css = await readFile(path.join(root, "src", "app.css"), "utf8");
+  assert.match(component, /class="tx-lang-select/);
+  assert.match(css, /color-scheme:\s*dark/);
+  assert.match(css, /\.tx-lang-select option\s*\{[^}]*background-color:\s*var\(--surface-2\)/s);
+  assert.match(css, /\.tx-lang-select option\s*\{[^}]*color:\s*var\(--text-main\)/s);
 });
 
 test("visible Svelte prose is routed through i18n without assuming a language", async () => {

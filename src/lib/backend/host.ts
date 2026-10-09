@@ -1,1 +1,1 @@
-export { installDesktopBackend as installHostBackend } from "./desktop";
+export { installDesktopBackend as installHostBackend, desktopWindowApi } from "./desktop";

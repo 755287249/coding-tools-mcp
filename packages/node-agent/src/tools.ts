@@ -688,6 +688,7 @@ async function callToolInScope(
   let harnessBeginMs = 0;
   let dispatchMs = 0;
   let harnessFinishMs = 0;
+  let harnessFinishObserved = false;
   let preflightObserved = false;
   let harnessBeginObserved = false;
   let dispatchObserved = false;
@@ -795,6 +796,7 @@ async function callToolInScope(
               result = await finishHarnessTracking(ctx, key, name, args, tracking, result, exposedTools);
               trackingFinished = true;
             } finally {
+              harnessFinishObserved = true;
               harnessFinishMs += elapsedPhaseMs(harnessFinishStartedAt);
             }
           } else if (runtimePolicy.harnessTool && result.ok === false) {
@@ -809,6 +811,7 @@ async function callToolInScope(
         try {
           result = await finishHarnessTracking(ctx, key, name, args, tracking, result, exposedTools).catch(() => result);
         } finally {
+          harnessFinishObserved = true;
           harnessFinishMs += elapsedPhaseMs(harnessFinishStartedAt);
         }
       } else if (error instanceof HarnessError) {
@@ -875,7 +878,7 @@ async function callToolInScope(
   if (preflightObserved) addPhaseDuration(result, 'preflight_ms', preflightMs);
   if (harnessBeginObserved) addPhaseDuration(result, 'harness_begin_ms', harnessBeginMs);
   if (dispatchObserved) addPhaseDuration(result, 'dispatch_ms', dispatchMs);
-  if (harnessFinishMs > 0) addPhaseDuration(result, 'harness_finish_ms', harnessFinishMs);
+  if (harnessFinishObserved) addPhaseDuration(result, 'harness_finish_ms', harnessFinishMs);
   result = normalizeToolResult(result);
   result = redaction.redact(result);
   recordConversationSessionRoutes(ctx, key, binding?.folderId, result);

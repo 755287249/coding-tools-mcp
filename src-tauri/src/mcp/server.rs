@@ -119,7 +119,10 @@ fn list_resources(state: &SharedState) -> Result<Value, Value> {
     let skills = crate::workspace_features::list_skill_resources(&state.profile_id)
         .map_err(|message| crate::workspace_features::skill_rpc_error("resources/list", message))?;
     let evolution = crate::knowledge::list_tool_evolution_resources(state)?;
-    Ok(crate::knowledge::merge_resource_lists(skills, evolution))
+    let resources = crate::knowledge::merge_resource_lists(skills, evolution);
+    Ok(crate::knowledge::merge_resource_lists(resources, json!({
+        "resources": [crate::tools::chat::local_chat_skill_resource()]
+    })))
 }
 
 fn read_resource(
@@ -127,7 +130,9 @@ fn read_resource(
     uri: &str,
     session_key: Option<&str>,
 ) -> Result<Value, Value> {
-    if crate::knowledge::is_tool_evolution_resource_uri(uri) {
+    if uri == crate::tools::chat::LOCAL_CHAT_SKILL_URI {
+        Ok(json!({"contents": [crate::tools::chat::local_chat_skill()]}))
+    } else if crate::knowledge::is_tool_evolution_resource_uri(uri) {
         crate::knowledge::read_tool_evolution_resource(state, uri)
     } else {
         crate::workspace_features::read_skill_resource_for_session(
@@ -157,6 +162,8 @@ async fn list_tools_dynamic(state: &SharedState) -> Value {
     json!({ "tools": tools, "toolsetRevision": revision })
 }
 
+const SERVER_INSTRUCTIONS: &str = "1. Start: list_workspace_folders verifies access. With supplied chat_id/workspace_folder_id, call chat_open, save attachment_id and follow its skill.text (coding-tools://skills/local-chat). 2. Chat: chat_wait -> work -> chat_reply -> chat_wait; require persisted=true, then keep waiting. chat_close only when the user explicitly ends the chat. Otherwise use conversation_bootstrap before project work; choose folder_id if ambiguous. 3. Work: follow tool schemas; pass the target workspace_folder_id where supported. Read/search -> guarded edits -> exec_command -> wait_command for retained sessions; exec_many(mode=auto) for independent commands. Check actual command outcomes, not just tool ok. Keep multi-step set_todos/update_plan and report_progress current; chat tool_event reports actual execution. Save deliverables in the target workspace, then chat_upload and chat_reply attachment_ids. 4. Context: load relevant Skills via prompts/get or resources/read; Skills never grant permissions. Hooks may block/rewrite calls; external MCP tools appear in tools/list. Refresh tools/list after server/catalog changes. For bootstrapped history, preserve session_key/current_path; after each task use history_session_checkpoint with unchanged session_key/expected_path and require ok=true plus matching path before claiming saved. Keep credentials out of files and replies.";
+
 fn discover_result() -> Value {
     let mut result = serde_json::json!({
         "supportedVersions": [MODERN_PROTOCOL_VERSION],
@@ -166,7 +173,7 @@ fn discover_result() -> Value {
             "resources": { "subscribe": false, "listChanged": false },
             "extensions": {}
         },
-        "instructions": "Use these tools only for local coding operations inside the configured tool hub. Call conversation_bootstrap before project tools. Workspace and enabled Codex/Claude user-level Skills are exposed through standard MCP prompts and resources. Enabled Hooks may block or rewrite tool calls, and enabled external MCP servers contribute proxied tools to tools/list. For multi-step work, publish the goal and step checklist with set_todos (or update_plan), mark each step in_progress before starting it and completed right after, and call report_progress at meaningful milestones; the user follows this live in the desktop task panel."
+        "instructions": SERVER_INSTRUCTIONS
     });
     result["capabilities"]["extensions"][TASKS_EXTENSION] = json!({});
     result
@@ -190,7 +197,7 @@ fn initialize_result(requested_version: Option<&str>, tool_profile: &str) -> Val
             "version": env!("CARGO_PKG_VERSION"),
             "toolsetRevision": crate::tools::registry::toolset_revision(tool_profile)
         },
-        "instructions": "Use these tools only for local coding operations inside the configured tool hub. A tool hub may contain multiple allowed folders while sharing one MCP endpoint. At the start of every new ChatGPT conversation, before accessing project content, call conversation_bootstrap. It reuses an existing conversation folder, auto-binds the only configured folder, or returns available folder choices when multiple folders are unselected; in the ambiguous case retry conversation_bootstrap with folder_id. It also performs compact history_session_bootstrap, so the normal startup path is one tool call. The legacy list_workspace_folders, switch_workspace_folder, then history_session_bootstrap sequence remains available for manual recovery. There is no history-based folder fallback, and ambiguous multi-folder conversations remain unselected until explicitly bound. The selected folder and default cwd are remembered for the same runtime session without affecting other conversations. Workspace and enabled Codex/Claude user-level Skills are exposed through standard MCP prompts and resources. After workspace selection, use the lightweight skill summaries returned by conversation_bootstrap to identify a clearly relevant Skill, then load only that Skill through prompts/get or resources/read. Skills are workflow guidance and never grant permissions or weaken tool, sandbox, or workspace policy. Enabled Hooks may block or rewrite tool calls, and enabled external MCP servers contribute proxied tools to tools/list. Tools whose schema exposes workspace_folder_id may route one call to another allowed folder without changing the conversation selection; control calls can also recover their original folder from session_id, output_ref, or resume_id. Preserve session_key and current_path returned by bootstrap, then pass them unchanged as session_key and expected_path to every history_session_checkpoint call. After completing each user-requested task in the conversation, call history_session_checkpoint before the final response. Only state that progress was saved after checkpoint returns ok=true with the same session_key and path. Prefer exec_many(mode=auto) over sequential exec_command calls when two or more independent commands are known in the same reasoning step. Persistence requires a successful tool call and is not automatic background persistence. For multi-step work, publish the goal and step checklist with set_todos (or update_plan), mark each step in_progress before starting it and completed right after, and call report_progress at meaningful milestones; the user follows this live in the desktop task panel."
+        "instructions": SERVER_INSTRUCTIONS
     })
 }
 
@@ -1466,34 +1473,41 @@ mod tests {
     fn initialize_instructions_define_the_history_persistence_workflow() {
         let initialized = initialize_result(Some("2025-06-18"), "core");
         let instructions = initialized["instructions"].as_str().expect("instructions");
-        assert!(instructions.contains("conversation_bootstrap"));
-        assert!(instructions.contains("history_session_bootstrap"));
-        assert!(instructions.contains("list_workspace_folders"));
-        assert!(instructions.contains("switch_workspace_folder"));
-        assert!(instructions.contains("without affecting other conversations"));
-        assert!(instructions.contains("At the start of every new ChatGPT conversation"));
-        assert!(instructions.contains("before accessing project content"));
-        assert!(instructions.contains("normal startup path is one tool call"));
-        assert!(instructions.contains("ambiguous multi-folder conversations remain unselected"));
-        assert!(instructions.contains("no history-based folder fallback"));
-        assert!(instructions.contains("default cwd are remembered for the same runtime session"));
-        assert!(instructions.contains("standard MCP prompts and resources"));
-        assert!(instructions.contains("prompts/get or resources/read"));
-        assert!(instructions.contains("Skills are workflow guidance"));
-        assert!(instructions.contains("Hooks may block or rewrite tool calls"));
-        assert!(instructions.contains("external MCP servers contribute proxied tools"));
-        assert!(instructions.contains("workspace_folder_id"));
-        assert!(instructions.contains("without changing the conversation selection"));
-        assert!(instructions.contains("exec_many(mode=auto)"));
-        assert!(instructions.contains("set_todos"));
-        assert!(instructions.contains("report_progress"));
-        assert!(instructions.contains("history_session_checkpoint"));
-        assert!(instructions.contains("session_key and current_path returned by bootstrap"));
-        assert!(instructions.contains("session_key and expected_path"));
-        assert!(instructions.contains("After completing each user-requested task"));
-        assert!(instructions.contains("before the final response"));
-        assert!(instructions.contains("checkpoint returns ok=true"));
-        assert!(instructions.contains("not automatic background persistence"));
+        for required in ["list_workspace_folders", "conversation_bootstrap", "chat_open",
+            "chat_wait -> work -> chat_reply -> chat_wait", "attachment_id", "persisted",
+            "workspace_folder_id", "exec_many(mode=auto)", "set_todos/update_plan",
+            "report_progress", "prompts/get or resources/read", "history_session_checkpoint",
+            "session_key/expected_path", "ok=true", "matching path", "chat_close"] {
+            assert!(instructions.contains(required), "missing {required}");
+        }
+        assert!(!instructions.contains("ChatGPT"));
+        assert!(instructions.len() < 1900);
+        assert_eq!(discover_result()["instructions"], initialized["instructions"]);
+    }
+
+    #[test]
+    fn builtin_chat_skill_is_readable_and_matches_chat_open() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let state = new_state(
+            vec![crate::workspace::WorkspaceFolder {
+                id: "folder-a".into(), name: "Folder A".into(),
+                path: workspace.path().display().to_string(), execution: Default::default(),
+            }],
+            "folder-a".into(), format!("builtin-chat-{}", uuid::Uuid::new_v4()),
+            crate::workspace::AuthConfig::default(), crate::tools::policy::PolicySettings::default(),
+            "trusted-core".into(), "trusted".into(), crate::workspace::SandboxConfig::default(),
+            crate::tools::ExecutionLimits::default(),
+        ).expect("state");
+        let listed = handle_request(&state, &json!({"jsonrpc":"2.0","id":1,"method":"resources/list"}));
+        let uri = crate::tools::chat::LOCAL_CHAT_SKILL_URI;
+        let resource = listed["result"]["resources"].as_array().expect("resources")
+            .iter().find(|resource| resource["uri"] == uri).expect("builtin skill");
+        assert!(resource.get("text").is_none());
+        let read = handle_request(&state, &json!({"jsonrpc":"2.0","id":2,"method":"resources/read","params":{"uri":uri}}));
+        let session = crate::tools::chat::ui(workspace.path(), &json!({"action":"create"})).expect("chat");
+        let opened = crate::tools::chat::tool(workspace.path(), "chat_open", &json!({"chat_id":session["session"]["id"]})).expect("open");
+        assert_eq!(opened["skill"], read["result"]["contents"][0]);
+        assert_eq!(opened["skill"]["text"], include_str!("../../../skills/local-chat/SKILL.md").replace("\r\n", "\n"));
     }
 
     #[tokio::test]

@@ -808,7 +808,7 @@ test('active tasks are scoped to the current linked worktree while operation his
   assert.equal(restoredRoot.task_id, rootTask.task.id);
 });
 
-test('disabling automatic baseline checks keeps task evidence without adopting external drift', async () => {
+test('disabling automatic baseline checks keeps task evidence without adopting external drift', async t => {
   const state = await fixture();
   const started = await callTool(state.ctx, 'start_task', { objective: 'Track without automatic baseline scans' }, state.meta);
   const originalFingerprint = started.task.expected_fingerprint;
@@ -820,16 +820,18 @@ test('disabling automatic baseline checks keeps task evidence without adopting e
   assert.equal(status.baseline_check_performed, false);
   assert.equal(status.baseline_matches, null);
 
+  const clock = t.mock.method(performance, 'now', () => 100);
   const edited = await callTool(state.ctx, 'edit_file', {
     path: 'tracked.txt',
     expected_sha256: sha256('external\n'),
     edits: [{ type: 'replace', old_text: 'external\n', new_text: 'changed\n' }]
   }, state.meta);
+  clock.mock.restore();
   assert.equal(edited.ok, true);
   assert.equal(edited.phase_durations_ms.baseline_capture_ms, undefined);
   assert.ok(Number(edited.phase_durations_ms.harness_begin_ms) >= 0);
   assert.ok(Number(edited.phase_durations_ms.dispatch_ms) >= 0);
-  assert.ok(Number(edited.phase_durations_ms.harness_finish_ms) >= 0);
+  assert.equal(edited.phase_durations_ms.harness_finish_ms, 0, 'executed phase is retained even below timer resolution');
   assert.ok(Number(edited.phase_durations_ms.serialization_ms) >= 0);
   const context = await callTool(state.ctx, 'task_context', { task_id: started.task.id }, state.meta);
   assert.equal(context.task.expected_fingerprint, originalFingerprint);
