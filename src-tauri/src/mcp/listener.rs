@@ -1409,7 +1409,7 @@ async fn oauth_authorization_server_metadata(
 /// themselves automatically instead of asking the user for a Client ID. This
 /// server has a single public client per workspace, so registration simply
 /// hands out that client id after validating the redirect URIs. Access is
-/// still gated by the one-time authorization password and PKCE.
+/// still gated by the authorization password and PKCE.
 async fn oauth_register_post(
     State(state): State<ListenerState>,
     Json(body): Json<Value>,
@@ -1466,7 +1466,7 @@ async fn oauth_register_post(
         "client_id_issued_at": issued_at,
         "redirect_uris": redirect_uris,
         "token_endpoint_auth_method": "none",
-        "grant_types": ["authorization_code"],
+        "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
         "scope": "mcp",
     });

@@ -240,7 +240,7 @@ export function overlayProfileOnConfig(
     sandbox: toNodeSandbox(sandboxConfig(profile.runtime)),
     oauth: {
       clientId: canonical.auth.oauthClientId || saved.oauth.clientId,
-      tokenTtlSeconds: canonical.auth.oauthTokenTtlSeconds || saved.oauth.tokenTtlSeconds || 7 * 24 * 60 * 60,
+      tokenTtlSeconds: canonical.auth.oauthTokenTtlSeconds || saved.oauth.tokenTtlSeconds || 3650 * 24 * 60 * 60,
       password: "",
       clientSecret: "",
       clearClientSecret: false,

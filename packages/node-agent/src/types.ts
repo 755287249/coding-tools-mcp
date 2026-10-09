@@ -130,6 +130,8 @@ export interface AgentConfig {
     password: string;
     tokenSecret: string;
     tokenTtlSeconds?: number;
+    /** Opt-in single-use authorization password for embedded runtimes. */
+    rotatePassword?: boolean;
   };
   folders: WorkspaceFolder[];
   limits: {

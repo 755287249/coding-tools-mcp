@@ -215,7 +215,7 @@ export function parseCanonicalWorkspace(value: unknown): CanonicalWorkspace {
     auth: {
       type: text(auth.type, 'oauth') || 'oauth',
       oauthClientId: text(auth.oauthClientId ?? auth.oauth_client_id),
-      oauthTokenTtlSeconds: integer(auth.oauthTokenTtlSeconds ?? auth.oauth_token_ttl_seconds, 7 * 24 * 60 * 60)
+      oauthTokenTtlSeconds: integer(auth.oauthTokenTtlSeconds ?? auth.oauth_token_ttl_seconds, 3650 * 24 * 60 * 60)
     },
     toolProfile: text(value.toolProfile, 'core') || 'core',
     permissionMode: text(value.permissionMode, 'trusted') || 'trusted',
@@ -311,7 +311,7 @@ export function migrateNodeV1Document(
     auth: {
       type: 'oauth',
       oauthClientId: text(oauth.clientId),
-      oauthTokenTtlSeconds: integer(oauth.tokenTtlSeconds, 7 * 24 * 60 * 60)
+      oauthTokenTtlSeconds: integer(oauth.tokenTtlSeconds, 3650 * 24 * 60 * 60)
     },
     toolProfile: text(value.toolProfile, 'core') || 'core',
     permissionMode: text(value.permissionMode, 'trusted') || 'trusted',
@@ -408,7 +408,7 @@ export function migrateDesktopProfile(value: unknown): CanonicalWorkspace {
     auth: {
       type: 'oauth',
       oauthClientId: text(auth.oauth_client_id),
-      oauthTokenTtlSeconds: integer(auth.oauth_token_ttl_seconds, 7 * 24 * 60 * 60)
+      oauthTokenTtlSeconds: integer(auth.oauth_token_ttl_seconds, 3650 * 24 * 60 * 60)
     },
     toolProfile: text(runtime.tool_profile, 'core') || 'core',
     permissionMode: text(runtime.permission_mode, 'trusted') || 'trusted',

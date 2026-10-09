@@ -27,8 +27,8 @@
   let { workspaceId, auth, onSaveProfile }: Props = $props();
   const capabilities = getBackend().capabilities;
   const SECONDS_PER_DAY = 24 * 60 * 60;
-  const DEFAULT_OAUTH_TOKEN_TTL_DAYS = 7;
-  const MAX_OAUTH_TOKEN_TTL_DAYS = 30;
+  const DEFAULT_OAUTH_TOKEN_TTL_DAYS = 3650;
+  const MAX_OAUTH_TOKEN_TTL_DAYS = 3650;
   const AUTH_OPTIONS = $derived(
     capabilities.staticBearerAuth
       ? [
@@ -151,7 +151,7 @@
           draftOauthTokenTtlDays < 1 ||
           draftOauthTokenTtlDays > MAX_OAUTH_TOKEN_TTL_DAYS)
       ) {
-        throw new Error(translate("OAuth token lifetime must be between 1 and 30 days"));
+        throw new Error(translate("OAuth token lifetime must be between 1 and 3650 days"));
       }
       // Persist the shared-secret flag first. If the secret value changes, the backend
       // owns the single runtime restart; the page must not race it with a second restart.

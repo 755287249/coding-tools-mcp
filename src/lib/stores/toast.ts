@@ -1,3 +1,4 @@
+import { randomId } from "$lib/browser-tools";
 import { writable } from "svelte/store";
 
 export type ToastKind = "info" | "success" | "warning" | "error";
@@ -21,7 +22,7 @@ const { subscribe, update } = writable<Toast[]>([]);
 export const toasts = { subscribe };
 
 function nextId(): string {
-  return crypto.randomUUID();
+  return randomId();
 }
 
 export function showToast(message: string, options: ToastOptions = {}): string {

@@ -9,7 +9,8 @@ pub(super) fn member_name(v:&Value)->Result<String>{
 pub(super) fn member_for(s:&Value,args:&Value,expired:bool)->Result<Value>{
  let member=members(s).into_iter().find(|m|args["attachment_id"].as_str().is_some_and(|v|!v.is_empty())&&m["attachment_id"]==args["attachment_id"]).ok_or_else(||err("Chat attachment expired; call chat_open again with the saved attachment_id"))?;
  if member["paused"]==true{return Err(err("Group member is paused; resume it in the local UI"));}
- if !expired&&member["lease_until"].as_u64().unwrap_or(0)<=now(){return Err(err("Chat attachment expired; call chat_open again with the saved attachment_id"));}Ok(member)
+ let _=expired;// Keepalive: a member's own attachment_id stays valid after the lease lapses.
+ Ok(member)
 }
 pub(super) fn renew(s:&mut Value,args:&Value)->Result<()>{
  if grouped(s){let m=member_for(s,args,false)?;for p in s["members"].as_array_mut().unwrap(){if p["id"]==m["id"]{p["lease_until"]=json!(now()+LEASE_MS);}}}else{s["lease_until"]=json!(now()+LEASE_MS);}Ok(())
@@ -73,13 +74,18 @@ pub(super) fn set_mode(s:&mut Value,value:&Value)->Result<()>{
  if *value=="group"{
   s["version"]=json!(2);s["mode"]=json!("group");s["members"]=json!([]);
   if s["attachment_id"].as_str().is_some_and(|v|!v.is_empty()){
-   s["members"]=json!([{ "id":uuid::Uuid::new_v4().to_string(),"name":s["agent_name"].as_str().unwrap_or("AI"),"role":"coordinator","attachment_id":s["attachment_id"],"lease_until":s["lease_until"] }]);
+   s["members"]=json!([{ "id":if s["work_member"]["attachment_id"]==s["attachment_id"]{s["work_member"]["id"].clone()}else{json!(uuid::Uuid::new_v4().to_string())},"name":s["agent_name"].as_str().unwrap_or("AI"),"role":"coordinator","attachment_id":s["attachment_id"],"lease_until":s["lease_until"] }]);
   }if let Some(chief)=members(s).first(){for m in s["messages"].as_array_mut().unwrap(){if m["role"]=="assistant"&&m["agent_id"].is_null(){m["agent_id"]=chief["id"].clone();m["agent_name"]=chief["name"].clone();}}}s["attachment_id"]=json!("");s["lease_until"]=json!(0);bind_targets(s);
  }else{
-  if pending_for(s,None,false).is_some()||s["queue"].as_array().is_some_and(|q|!q.is_empty()){return Err(err("Finish pending group tasks and outbox before switching to work"));}
-  let all=members(s);let active:Vec<_>=all.iter().filter(|m|m["lease_until"].as_u64().unwrap_or(0)>now()).collect();
+  let all=members(s);let active:Vec<_>=all.iter().filter(|m|m["paused"]!=true).collect();
   if active.len()>1||active.iter().any(|m|m["role"]!="coordinator"){return Err(err("Disconnect assisting members before switching to work"));}
-  let chief=all.iter().find(|m|m["role"]=="coordinator").cloned().unwrap_or(json!({"attachment_id":"","lease_until":0}));
+  let chief=all.iter().find(|m|m["role"]=="coordinator"&&m["paused"]!=true).cloned().unwrap_or(json!({"attachment_id":"","lease_until":0}));
+  let unfinished:Vec<Value>=s["messages"].as_array().unwrap().iter().filter(|m|(m["role"]=="user"||m["kind"]=="assignment")&&!complete(s,m)).cloned().collect();
+  let needs_others=|m:&Value|m["recipient_ids"].as_array().is_some_and(|ids|ids.iter().any(|id|*id!=chief["id"]));
+  if unfinished.iter().any(|m|m["kind"]=="assignment"||needs_others(m))||s["queue"].as_array().is_some_and(|q|q.iter().any(needs_others)){return Err(err("Finish assigned member tasks and queued member requests before switching to work"));}
+  for m in s["messages"].as_array_mut().unwrap(){if unfinished.iter().any(|u|u["id"]==m["id"]){m.as_object_mut().unwrap().remove("recipient_ids");}}
+  if let Some(queue)=s["queue"].as_array_mut(){for m in queue{m.as_object_mut().unwrap().remove("recipient_ids");}}
+  s["work_member"]=chief.clone();
   s["attachment_id"]=chief["attachment_id"].clone();s["lease_until"]=chief["lease_until"].clone();s["agent_name"]=chief["name"].clone();s["mode"]=json!("work");s["members"]=json!([]);
  }Ok(())
 }
@@ -103,4 +109,26 @@ pub(super) fn markdown(s:&Value,m:Option<&Value>)->String{
   if let Some(ids)=m["recipient_ids"].as_array(){out.push_str(&format!("\nRecipients: {}\n",ids.iter().map(name).collect::<Vec<_>>().join(", ")));}
   if let Some(plans)=m["agent_plans"].as_array(){for p in plans{out.push_str(&format!("\n### {}\n{}",name(&p["agent_id"]),super::super::chat_plan::markdown(&p["plan"])));}}out
  }else if grouped(s){format!("Mode: group\n\n{}\n\n",all.iter().map(|p|format!("- {} · {} ({})",p["name"].as_str().unwrap_or(""),p["role"].as_str().unwrap_or(""),p["id"].as_str().unwrap_or(""))).collect::<Vec<_>>().join("\n"))}else{String::new()}
+}
+
+#[cfg(test)]
+mod mode_tests {
+ use super::*;
+ #[test]
+ fn pending_requests_and_identity_survive_roundtrip() {
+  let mut s=json!({"mode":"work","closed":false,"attachment_id":"private","agent_name":"AI","lease_until":123,"messages":[{"id":"hello","role":"user","kind":"connection_request"}],"queue":[{"id":"later","role":"user","text":"later"}]});
+  set_mode(&mut s,&json!("group")).unwrap();let chief=s["members"][0]["id"].clone();
+  for _ in 0..2 {set_mode(&mut s,&json!("work")).unwrap();assert_eq!(s["attachment_id"],"private");assert!(s["messages"][0]["recipient_ids"].is_null());set_mode(&mut s,&json!("group")).unwrap();assert_eq!(s["members"][0]["id"],chief);assert_eq!(s["messages"][0]["recipient_ids"],json!([chief]));}
+  set_mode(&mut s,&json!("work")).unwrap();s["messages"].as_array_mut().unwrap().push(json!({"id":"done","role":"assistant","reply_to":"hello","final":true}));
+  set_mode(&mut s,&json!("group")).unwrap();assert!(complete(&s,&s["messages"][0]));
+ }
+ #[test]
+ fn unfinished_collaborator_requests_cannot_be_discarded() {
+  let mut s=json!({"mode":"group","closed":false,"members":[{"id":"chief","role":"coordinator","attachment_id":"private","lease_until":123},{"id":"helper","role":"member","paused":true}],"messages":[{"id":"u","role":"user","recipient_ids":["chief","helper"]}],"queue":[]});
+  let before=s.clone();assert!(set_mode(&mut s,&json!("work")).is_err());assert_eq!(s,before);
+  s["messages"][0]["recipient_ids"]=json!(["chief"]);s["queue"]=json!([{"id":"q","role":"user","recipient_ids":["chief","helper"]}]);
+  assert!(set_mode(&mut s,&json!("work")).is_err());
+  s["queue"]=json!([]);s["messages"].as_array_mut().unwrap().push(json!({"id":"assignment","role":"assistant","kind":"assignment","reply_to":"u","recipient_ids":["helper"]}));
+  assert!(set_mode(&mut s,&json!("work")).is_err());
+ }
 }

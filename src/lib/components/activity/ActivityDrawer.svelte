@@ -49,6 +49,7 @@
 
   interface Props {
     resizable?: boolean;
+    embedded?: boolean;
     workspaceId: string;
     /** MCP runtime is running (drives the idle poll rate). */
     live: boolean;
@@ -57,7 +58,7 @@
     onClose: () => void;
   }
 
-  let { resizable = false, workspaceId, live, expanded, onToggleExpanded, onClose }: Props = $props();
+  let { embedded = false, resizable = false, workspaceId, live, expanded, onToggleExpanded, onClose }: Props = $props();
 
   let drawer = $state<HTMLElement>();
   let panelWidth = $state(360);
@@ -328,7 +329,7 @@
   );
 </script>
 
-<aside bind:this={drawer} class="ad-drawer ax-glass" class:resizable class:resizing={!!resizing} style:width={resizable ? `${panelWidth}px` : undefined} class:is-expanded={expanded} aria-label={$t("Task panel")}>
+<aside bind:this={drawer} class="ad-drawer ax-glass" class:embedded class:resizable class:resizing={!!resizing} style:width={resizable ? `${panelWidth}px` : undefined} class:is-expanded={expanded} aria-label={$t(embedded?"chat.projectActivity":"Task panel")}>
   {#if resizable}<button class="task-resize-handle" aria-label={$t('chat.resizeTasks')} title={$t('chat.resizeTasks')}
     onpointerdown={event=>{event.preventDefault();resizing={x:event.clientX,width:panelWidth};event.currentTarget.setPointerCapture(event.pointerId)}}
     onpointermove={event=>{if(resizing)resizePanel(resizing.width+resizing.x-event.clientX)}}
@@ -343,7 +344,7 @@
       <h3 class="ad-title">{verbOf(detail)}</h3>
     {:else}
       <h3 class="ad-title">
-        {$t("Task panel")}
+        {$t(embedded?"chat.projectActivity":"Task panel")}
         {#if stats.running > 0}<span class="ad-live" title={$t("Running")}></span>{/if}
       </h3>
     {/if}
@@ -353,7 +354,7 @@
           <Trash2 size={14} />
         </button>
       {/if}
-      <button
+      {#if !embedded}<button
         type="button"
         class="ad-icon-btn"
         onclick={onToggleExpanded}
@@ -364,7 +365,7 @@
       </button>
       <button type="button" class="ad-icon-btn" onclick={onClose} title={$t("Collapse panel")} aria-label={$t("Collapse panel")}>
         <ChevronsRight size={16} />
-      </button>
+      </button>{/if}
     </div>
   </header>
 
@@ -753,4 +754,5 @@
 .ad-drawer.resizable{position:relative;align-self:stretch;margin:14px 14px 14px 8px;border:1px solid var(--color-border);border-radius:18px;box-shadow:0 16px 42px #0004;max-width:calc(100% - 28px)}
 .task-resize-handle{position:absolute;inset:12px auto 12px 0;width:7px;z-index:5;cursor:col-resize;touch-action:none;border-radius:8px;background:transparent}.task-resize-handle:hover,.task-resize-handle:focus-visible,.resizing .task-resize-handle{background:#6096ec88;outline:none}.resizing{user-select:none}
 @media(max-width:1040px){.ad-drawer.resizable{position:absolute;top:0;right:0;bottom:0;z-index:35;background:color-mix(in srgb,var(--card-bg) 90%,transparent);backdrop-filter:blur(24px)}}
+.ad-drawer.embedded{position:relative;inset:auto;width:100%;min-width:0;max-width:none;height:100%;flex:1;margin:0;border:0;border-radius:0;box-shadow:none;transform:none;z-index:auto}
 </style>

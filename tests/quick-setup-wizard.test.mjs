@@ -97,10 +97,10 @@ test("MCP completion explains advanced OAuth, empty client secret, then connecti
 
   assert.match(wizard, /Paste the Public MCP endpoint shown here and choose OAuth authentication\./);
   assert.match(wizard, /Expand Advanced OAuth settings, enter the Client ID shown here, leave Client Secret empty, and keep the other OAuth settings at their defaults\./);
-  assert.match(wizard, /Select Next, click Connect, then enter the one-time password shown here\./);
+  assert.match(wizard, /Select Next, click Connect, then enter the authorization password shown here\./);
   assert.match(wizard, /guidedMcp=\{service === "mcp"\}/);
   assert.match(quickCopy, /\{#if !guidedMcp && getBackend\(\)\.capabilities\.staticBearerAuth\}/);
-  assert.match(quickCopy, /guidedMcp \? \$t\("One-time password"\)/);
+  assert.match(quickCopy, /label=\{\$t\("Authorization password"\)\}/);
 });
 
 test("quick setup starts the local service before testing and retaining the tunnel", async () => {

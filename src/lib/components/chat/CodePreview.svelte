@@ -14,7 +14,7 @@
   function run() {
     if (!kind || !canRun) return;
     document = buildPreviewDocument(code, kind);
-    runner = getBackend().capabilities.host === 'node' ? appUrl('/chat-preview.html') : /Windows|Android/.test(navigator.userAgent) ? 'http://chatpreview.localhost/index.html' : 'chatpreview://localhost/index.html';
+    runner = getBackend().capabilities.host === 'node' || !("__TAURI_INTERNALS__" in window) ? appUrl('/chat-preview.html') : /Windows|Android/.test(navigator.userAgent) ? 'http://chatpreview.localhost/index.html' : 'chatpreview://localhost/index.html';
     revision++; mode = 'run';
   }
   function ready(event: MessageEvent) {

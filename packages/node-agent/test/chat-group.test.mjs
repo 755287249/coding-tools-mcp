@@ -63,7 +63,7 @@ test('legacy attachment becomes coordinator, group queue preserves recipients an
 });
 test('group membership identity survives lease expiry; false credentials, duplicate names and malformed assignments fail',t=>{
  const {root,a,b,join,send,reply}=fixture(t);const archive=path.join(root,'docs/chat-sessions',a.chat_id+'.json');const s=JSON.parse(readFileSync(archive));s.members[1].lease_until=0;writeFileSync(archive,JSON.stringify(s));
- assert.throws(()=>chatTool(root,'chat_wait',b),/expired/);assert.equal(chatTool(root,'chat_open',b).agent_id,b.agent_id);
+ assert.doesNotThrow(()=>chatTool(root,'chat_wait',b),'keepalive: own attachment survives lease expiry');assert.equal(chatTool(root,'chat_open',b).agent_id,b.agent_id);
  assert.throws(()=>join('前端'),/already exists/);assert.throws(()=>join('bad name'),/name/);assert.throws(()=>chatTool(root,'chat_open',{...a,attachment_id:'foreign'}),/expired/);
  send('u','Task');for(const ids of [[],[a.agent_id],[b.agent_id,b.agent_id],['foreign'],['__proto__']])assert.throws(()=>reply(a,'assign','u',{recipient_ids:ids,final:false}));
  assert.throws(()=>chatPlan(root,'set_todos',{...b,reply_to:'u',todos:[]}),/current unanswered/);
@@ -94,4 +94,78 @@ test('group Markdown follows the coordinator confirmation after a helper final',
  send('answer','Approved');
  md=readFileSync(path.join(root,read().archive_path),'utf8');
  assert.match(md,/消息状态：已读 · 已回复/);
+});
+
+test('disconnect all pauses members and switching mode cannot revive a paused identity',t=>{
+ const {root,a,b}=fixture(t);
+ chatUi(root,{action:'detach',chat_id:a.chat_id});
+ for(const args of [a,b]){
+  assert.throws(()=>chatTool(root,'chat_wait',args),/paused/);
+  assert.throws(()=>chatTool(root,'chat_open',args),/paused/);
+ }
+ chatUi(root,{action:'set_mode',chat_id:a.chat_id,mode:'work'});
+ assert.throws(()=>chatTool(root,'chat_open',a),/expired/);
+ const fresh=chatTool(root,'chat_open',{chat_id:a.chat_id});assert.notEqual(fresh.attachment_id,a.attachment_id);
+});
+
+test('pending greeting and queued work survive repeated mode roundtrips with the same AI',t=>{
+ const root=mkdtempSync(path.join(tmpdir(),'chat-roundtrip-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
+ const chat_id=chatUi(root,{action:'create'}).session.id;
+ const a={chat_id,attachment_id:chatTool(root,'chat_open',{chat_id,agent_name:'Roundtrip'}).attachment_id};
+ const mode=value=>chatUi(root,{action:'set_mode',chat_id,mode:value}).session;
+ const reply=(id,to)=>chatTool(root,'chat_reply',{...a,message_id:id,reply_to:to,text:'done',final:true});
+ chatUi(root,{action:'request_connection',chat_id,message_id:'greeting'});
+ const chief=mode('group').members[0].id;
+ for(let i=0;i<2;i++){mode('work');assert.equal(chatTool(root,'chat_wait',a).message.id,'greeting');assert.equal(mode('group').members[0].id,chief);}
+ mode('work');reply('hello','greeting');mode('group');assert.equal(chatTool(root,'chat_wait',a).status,'idle');
+ chatUi(root,{action:'send',chat_id,message_id:'one',text:'one'});
+ chatTool(root,'chat_reply',{...a,message_id:'progress',reply_to:'one',text:'working',final:false});
+ chatUi(root,{action:'send',chat_id,message_id:'two',text:'two'});
+ mode('work');mode('group');
+ assert.equal(chatTool(root,'chat_reply',{...a,message_id:'progress',reply_to:'one',text:'working',final:false}).persisted,true);
+ assert.equal(chatTool(root,'chat_wait',a).message.id,'one');reply('one-done','one');
+ assert.equal(chatTool(root,'chat_wait',a).message.id,'two');reply('two-done','two');
+ assert.equal(chatTool(root,'chat_wait',a).status,'idle');
+ const before=mode('work').messages;assert.deepEqual(mode('group').messages,before);
+});
+test('mode rollback cannot discard paused collaborators unfinished assignments or queued mentions',t=>{
+ const {root,chat_id,a,b,send,reply}=fixture(t);
+ send('one','one');reply(a,'assignment','one',{final:false,recipient_ids:[b.agent_id]});
+ chatUi(root,{action:'detach_member',chat_id,member_id:b.agent_id});
+ assert.throws(()=>chatUi(root,{action:'set_mode',chat_id,mode:'work'}),/assigned member/);
+ chatUi(root,{action:'resume_member',chat_id,member_id:b.agent_id});reply(b,'assigned-done','assignment');
+ send('two','@前端 later');chatUi(root,{action:'detach_member',chat_id,member_id:b.agent_id});
+ assert.throws(()=>chatUi(root,{action:'set_mode',chat_id,mode:'work'}),/queued member/);
+});
+
+test('group outbox merge/split is reversible and merged delivery preserves saved targets and receipts',t=>{
+ const {root,chat_id,a,b,send,reply,read}=fixture(t);
+ const file=chatUi(root,{action:'upload',chat_id,upload_id:'queue-attachment',name:'note.txt',data_base64:Buffer.from('attachment').toString('base64')}).attachment;
+ send('active','Active');
+ const enqueue=(id,text)=>chatUi(root,{action:'send',chat_id,message_id:id,text,attachment_ids:[file.id]});
+ enqueue('q1','First');enqueue('q2','Second');enqueue('q3','@前端 Third 😀');
+ const before=read().queued_messages;
+ for(const mode of ['merge','split','merge','split']){
+  const result=chatUi(root,{action:'set_queue_mode',chat_id,mode}).session;
+  assert.equal(result.queue_mode,mode);assert.deepEqual(result.queued_messages,before);
+  assert.equal(chatTool(root,'chat_wait',a).message.id,'active');
+ }
+ reply(a,'active-done','active');
+ assert.equal(chatTool(root,'chat_wait',a).message.id,'q1');
+ assert.deepEqual(read().queued_messages.map(m=>m.id),['q2','q3']);
+ chatUi(root,{action:'set_queue_mode',chat_id,mode:'merge'});
+ chatUi(root,{action:'rename_member',chat_id,member_id:b.agent_id,name:'Renamed'});
+ reply(a,'q1-done','q1');
+ assert.equal(read().queued_messages.length,2,'final reply does not publish');
+ const merged=chatTool(root,'chat_wait',a).message;
+ assert.equal(merged.text,'队列1：Second\n\n队列2：@前端 Third 😀');
+ assert.deepEqual(new Set(merged.recipient_ids),new Set([a.agent_id,b.agent_id]));
+ assert.deepEqual(merged.attachments.map(f=>f.id),[file.id]);
+ assert.equal(chatTool(root,'chat_wait',b).message.id,'q2');
+ assert.throws(()=>reply(a,'too-early','q2'),/assigned members/);
+ reply(b,'b-merged','q2');reply(a,'a-merged','q2');
+ enqueue('q2','Second');enqueue('q3','@前端 Third 😀');
+ assert.deepEqual(read().queued_messages,[]);assert.equal(chatTool(root,'chat_wait',a).status,'idle');
+ assert.throws(()=>enqueue('q3','Changed'),/conflicts/);
+ for(const mode of ['split','merge'])assert.equal(chatUi(root,{action:'set_queue_mode',chat_id,mode}).session.queue_mode,mode);
 });

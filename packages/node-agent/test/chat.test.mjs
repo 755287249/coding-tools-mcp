@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, readFileSync, mkdirSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, mkdirSync, symlinkSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { chatUi, chatTool, chatWait } from '../dist/chat/store.js';
@@ -56,6 +56,25 @@ test('wait is live only during the request, supports cancellation and close',asy
   const again=chatWait(root,{...args,timeout_ms:1000});
   chatUi(root,{action:'close',chat_id:args.chat_id});
   assert.equal((await again).status,'closed');
+});
+test('keepalive: the saved attachment survives lease expiry until another AI takes over', t => {
+  const { root, args } = fixture(t);
+  const file = path.join(root, 'docs/chat-sessions', args.chat_id + '.json');
+  const expire = () => { const s = JSON.parse(readFileSync(file, 'utf8')); s.lease_until = 0; writeFileSync(file, JSON.stringify(s)); };
+  expire();
+  assert.doesNotThrow(() => chatTool(root, 'chat_wait', args));
+  const publicId=chatUi(root,{action:'read',chat_id:args.chat_id}).session.connection_id;
+  assert.match(publicId,/^[a-f0-9]{12}$/);assert.notEqual(publicId,args.attachment_id);
+  chatUi(root,{action:'send',chat_id:args.chat_id,message_id:'long-task',text:'Work'});
+  chatTool(root,'chat_wait',args);expire();
+  assert.equal(chatTool(root,'chat_reply',{...args,reply_to:'long-task',message_id:'late-result',text:'Done',final:true}).persisted,true);
+  assert.equal(chatUi(root,{action:'read',chat_id:args.chat_id}).session.connection_id,publicId);
+  expire();
+  assert.equal(chatTool(root, 'chat_open', args).attachment_id, args.attachment_id);
+  expire();
+  const other = chatTool(root, 'chat_open', { chat_id: args.chat_id });
+  assert.notEqual(other.attachment_id, args.attachment_id);
+  assert.throws(() => chatTool(root, 'chat_wait', args), /expired/);
 });
 test('chat protects folder boundaries, rejects wrong attachments and concurrent writers',async t=>{
   const {root,args}=fixture(t);
@@ -516,6 +535,45 @@ test('pin is persistent, scoped and sorts before recently updated sessions', t =
   assert.equal(chatUi(root,{action:'read',chat_id:args.chat_id}).session.pinned,false);
 });
 
+test('conversations can be archived and deleted with their records and assets', t => {
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  const root = mkdtempSync(path.join(tmpdir(), 'chat-test-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const older = chatUi(root, { action: 'create', title: 'older' }).session;
+  now += 1;
+  const newer = chatUi(root, { action: 'create', title: 'newer' }).session;
+  assert.throws(() => chatUi(root, { action: 'archive', chat_id: newer.id, archived: 'yes' }), /boolean/);
+  assert.equal(chatUi(root, { action: 'archive', chat_id: newer.id, archived: true }).session.archived, true);
+  let sessions = chatUi(root, { action: 'list' }).sessions;
+  assert.equal(sessions[0].id, older.id, 'archived conversations sort last');
+  assert.equal(sessions[1].archived, true);
+  chatUi(root, { action: 'archive', chat_id: newer.id, archived: false });
+  assert.equal(chatUi(root, { action: 'list' }).sessions[0].id, newer.id);
+
+  const dir = path.join(root, 'docs/chat-sessions');
+  writeFileSync(path.join(dir, `${newer.id}.activity.json`), '{}');
+  writeFileSync(path.join(dir, `${newer.id}-0f1e2d3c-0000-4000-8000-000000000000.png`), 'png');
+  const assets = path.join(root, 'mcp-assistant/chat-assets', newer.id);
+  mkdirSync(assets, { recursive: true }); writeFileSync(path.join(assets, 'a.txt'), 'a');
+  const otherAssets = path.join(root, 'mcp-assistant/chat-assets', older.id); mkdirSync(otherAssets, { recursive: true });
+  assert.deepEqual(chatUi(root, { action: 'delete', chat_id: newer.id }), { deleted: true, chat_id: newer.id });
+  for (const name of [`${newer.id}.json`, `${newer.id}.md`, `${newer.id}.activity.json`, `${newer.id}-0f1e2d3c-0000-4000-8000-000000000000.png`]) {
+    assert.equal(existsSync(path.join(dir, name)), false, name);
+  }
+  assert.equal(existsSync(assets), false);
+  assert.equal(existsSync(path.join(dir, `${older.id}.json`)), true);
+  assert.equal(existsSync(otherAssets), true);
+  assert.equal(chatUi(root, { action: 'list' }).sessions.length, 1);
+  assert.throws(() => chatUi(root, { action: 'delete', chat_id: newer.id }));
+
+  chatTool(root, 'chat_open', { chat_id: older.id, agent_name: 'Tester' });
+  assert.throws(() => chatUi(root, { action: 'delete', chat_id: older.id }), /Disconnect the AI/);
+  chatUi(root, { action: 'detach', chat_id: older.id });
+  chatUi(root, { action: 'delete', chat_id: older.id });
+  assert.equal(existsSync(path.join(dir, `${older.id}.json`)), false);
+});
+
 test('MCP plans persist per chat and request, reject foreign ownership and retain legacy plan calls',async t=>{
  const fixture=await createMcpFixture(t);let seq=0;
  const call=async(name,args)=>{
@@ -552,4 +610,20 @@ test('MCP plans persist per chat and request, reject foreign ownership and retai
  assert.equal(read(a).messages.at(-1).task_plan,undefined);
  chatUi(fixture.root,{action:'detach',chat_id:a});
  assert.equal((await call('set_todos',{...scope,reply_to:'new-user',todos})).ok,false);
+});
+
+
+test('invalid deletion assets preserve the authoritative chat and operation records', t => {
+  const {root,args}=fixture(t);
+  chatUi(root,{action:'detach',chat_id:args.chat_id});
+  const dir=path.join(root,'docs/chat-sessions');
+  const record=path.join(dir,`${args.chat_id}.json`);
+  const original=readFileSync(record,'utf8');
+  writeFileSync(path.join(dir,`${args.chat_id}.operations.json`),'[]');
+  const assets=path.join(root,'mcp-assistant/chat-assets');mkdirSync(assets,{recursive:true});
+  writeFileSync(path.join(assets,args.chat_id),'invalid directory fixture');
+  assert.throws(()=>chatUi(root,{action:'delete',chat_id:args.chat_id}),/not a directory/);
+  assert.equal(readFileSync(record,'utf8'),original);
+  assert.equal(readFileSync(path.join(dir,`${args.chat_id}.operations.json`),'utf8'),'[]');
+  assert.ok(existsSync(path.join(dir,`${args.chat_id}.md`)));
 });

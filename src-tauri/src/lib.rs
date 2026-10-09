@@ -6,6 +6,8 @@ mod startup_handoff;
 mod actions;
 mod app_state;
 mod application;
+mod browser_share;
+mod updates;
 mod auth;
 #[cfg(feature = "desktop")]
 mod commands;
@@ -101,7 +103,7 @@ use commands::{
     get_runtime_status, get_shared_secret, get_workspace_extensions, get_workspace_secret,
     get_workspace_skills, import_workspace_pack, install_software, list_frp_profiles,
     local_chat, list_history_sessions, list_sandbox_backends, list_software, list_workspaces,
-    list_wsl_distributions, open_shared_workspace, open_workspace_directory, read_history_session,
+    list_wsl_distributions, open_external_url, open_shared_workspace, open_workspace_directory, read_history_session,
     read_workspace_logs, read_workspace_telemetry, regenerate_shared_secret,
     clear_workspace_activity, get_windows_build, read_workspace_activity,
     read_workspace_activity_detail,
@@ -236,6 +238,7 @@ pub fn run() {
                 })
                 .expect("failed to load runtime auto-start state");
             app.manage(state);
+            browser_share::init(app.handle().clone());
             if !mcp_auto_start_ids.is_empty() || !actions_auto_start_ids.is_empty() {
                 let app_handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
@@ -277,6 +280,11 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             quit_app,
+            updates::check_app_update,
+            updates::download_app_update,
+            updates::install_app_update,
+            browser_share::desktop::browser_sharing_status,
+            browser_share::desktop::configure_browser_sharing,
             list_workspaces,
             local_chat,
             list_history_sessions,
@@ -304,6 +312,7 @@ pub fn run() {
             add_wsl_workspace_folder,
             remove_workspace_folder,
             open_workspace_directory,
+            open_external_url,
             delete_workspace,
             start_runtime,
             stop_runtime,

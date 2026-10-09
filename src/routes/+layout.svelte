@@ -1,5 +1,7 @@
 <script lang="ts">
   import "../app.css";
+  import BrowserLogin from "$lib/components/BrowserLogin.svelte";
+  import { browserAuthenticated, browserLogout } from "$lib/backend/browser-session";
   import { onMount } from "svelte";
   import { goto } from "$app/navigation";
   import { page } from "$app/stores";
@@ -39,6 +41,7 @@
   let { children } = $props();
   const capabilities = getBackend().capabilities;
   const desktopWindow = isDesktopWindow();
+  const remoteDesktop = capabilities.host === "desktop" && !desktopWindow;
   let addWorkspacePickerOpen = $state(false);
   let workspaceFilter = $state("");
   const WORKSPACE_FILTER_THRESHOLD = 6;
@@ -155,16 +158,23 @@
   connectionActions.newConnection = () => void addWorkspace();
 
   onMount(async () => {
+    if (remoteDesktop && !$browserAuthenticated) return;
     await refreshWorkspaces();
     if (capabilities.runtimeSupervisor) startSessionPolling();
 
   });
 </script>
 
+{#if remoteDesktop && !$browserAuthenticated}
+  <BrowserLogin onLogin={refreshWorkspaces}/>
+{:else}
 <div class="win-root" class:is-desktop={desktopWindow}>
   <div class="win-body">
     <SimpleShell onQuickSetup={capabilities.guidedSetup ? openQuickSetup : undefined} onAddWorkspace={capabilities.workspaceLifecycle ? addWorkspace : undefined}>
         {#snippet settingsNav()}
+          {#if remoteDesktop}<button type="button" onclick={browserLogout}>{$t("sharing.logout")}</button>{/if}
+          <button type="button" onclick={()=>goto(appUrl("/settings/updates"))}>{$t("updates.title")}</button>
+          <button type="button" onclick={()=>goto(appUrl("/settings/sharing"))}>{$t("sharing.title")}</button>
           {#if capabilities.host === "desktop"}
             <button
               type="button"
@@ -247,3 +257,5 @@
 />
 
 <ToastHost />
+
+{/if}

@@ -23,7 +23,7 @@ Node Agent 默认本地入口为 `http://127.0.0.1:3789/ui`，以实际启动输
 2. 确认外部 AI 宿主支持 MCP；远程 AI 需要可访问的公开地址，本机地址只能由同机宿主访问。
 3. 打开本地“对话”，选择工作目录，点击“新建对话”。
 4. 点击“复制 AI 接入指令”，发给外部 AI。复制的完整指令包含当前连接地址、认证信息、本次会话 ID、明确的 `workspace_folder_id` 和恢复流程。妥善保管，不要发布到日志或仓库。AI 按指令检查工具和目录、加入会话并实际等待；宿主不能自动添加 MCP 或完成 OAuth 时仍需要手动配置。页面展开的协议不显示认证秘密；每次复制会重新读取凭据。
-5. 一次性密码失效或临时地址变化时重新复制；接入失败先处理报告的错误。当界面显示“AI 正在待命”时，在本地输入需求。
+5. 授权密码被手动重新生成或临时地址变化时重新复制；接入失败先处理报告的错误。当界面显示“AI 正在待命”时，在本地输入需求。
 6. AI 通过现有文件、命令等工具工作，通过 `chat_reply` 回传回复或进度，再调用 `chat_wait`。
 
 聊天工具在 `trusted-core`、`guarded-core`、`advanced` 中提供；`read-only` 不提供聊天写入工具。兼容工具目录仍按现有项目契约发布。
@@ -41,7 +41,7 @@ Node Agent 默认本地入口为 `http://127.0.0.1:3789/ui`，以实际启动输
 
 成功回复返回 `persisted=true`。失败时使用相同 `message_id` 重试；同 ID 不同正文会被拒绝。用户消息按顺序交付，直到最终回复确认前仍可再次交付，AI 应核对已有工作结果，不能把重投递当作“副作用尚未执行”。会话、消息 ID 不接受路径分隔符。
 
-占用有效期为 10 分钟，`chat_wait`、`chat_reply` 和携带原占用标识的 `chat_open` 会续期。长任务应定期报告进度。占用标识丢失时，先找首次返回；找不到可在本地点击“断开 AI”后用原会话重接，或等待占用过期。
+在线心跳窗口为 10 分钟，`chat_wait`、`chat_reply` 和携带原占用标识的 `chat_open` 会续期。长任务应定期报告进度；超过心跳窗口仍可使用原标识继续，除非已明确断开/暂停或被新接入替换。占用标识丢失时，先找首次返回；找不到可在本地点击“断开 AI”后用原会话重接，或等待占用过期。
 
 ## 状态与持久化
 
@@ -92,7 +92,7 @@ pnpm run node-agent:contract
 
 精简提示词仅保留接入、等待、回复、恢复、退出五项核心规则，把会话作为持续循环：无论连续多少次 `idle` 都立即再次等待，不设空闲时长、次数或成本退出阈值。`final=true` 只确认当前消息；任务完成、需要补充信息、任务操作失败或提交/发布受阻后，只要聊天工具可用，就继续实际调用 `chat_wait`，不以宿主最终总结结束循环。
 
-临时网络错误按 1、2、4、8、16、30 秒退避，此后每 30 秒重试，不设累计次数上限；遵守更长的 `Retry-After`，成功后重置退避。前一个等待请求结束或取消后才开始下一个，恢复连接先用原占用标识 `chat_open`。鉴权、目录/会话不存在等配置错误需要报告并修复，不进行无效重试。重复投递先检查结果，写入重试保留全部原字段，长任务在 10 分钟占用到期前续期。
+临时网络错误按 1、2、4、8、16、30 秒退避，此后每 30 秒重试，不设累计次数上限；遵守更长的 `Retry-After`，成功后重置退避。前一个等待请求结束或取消后才开始下一个，恢复连接先用原占用标识 `chat_open`。鉴权、目录/会话不存在等配置错误需要报告并修复，不进行无效重试。重复投递先检查结果，写入重试保留全部原字段，长任务结束后可直接使用原占用标识继续；心跳超时本身不会拒绝原持有者。
 
 用户明确结束、会话关闭、用户取消、聊天本身受阻或宿主硬性上限实际触发时停止；任务操作受限不等于聊天受限。被迫暂停时明确当前未在等待，保留会话与幂等信息供恢复。不通过提示词取消宿主的执行限制，也不把后台脚本当成持续运行的 AI。生成测试检查协议文字，真实第三方 AI 的长期执行行为仍需实测。
 
@@ -147,7 +147,7 @@ HTML、SVG、JS 回复代码块以及上传的 HTML/JS 文件提供“代码 / �
 
 桌面连接页提供“OAuth / PKCE”和“固定 Token / HTTP”。固定模式复用已有 Bearer 认证和本地凭据存储；服务或客户端重启不轮换 Token，只有手动重新生成/删除或更换配置才失效。切换会重启正在运行的服务，需要重新复制连接指令；使用固定域名能让 AI 继续用原地址退避重连。高级设置仍可轮换 Token。只接受 OAuth 的宿主应保留 OAuth 模式。
 
-HTTP 手动 OAuth 的复制指令包含 `redirect_uri=http://127.0.0.1:8765/callback`，使用服务端已允许的本机回调规则，不依赖动态客户端注册。手动客户端禁止跟随授权 POST 的跳转，读取 Location 并校验 state，再用同一 redirect_uri/verifier 换取访问令牌；原生宿主使用自己的回调。令牌应保存在宿主凭据存储或进程内存，网络重试/服务重启优先复用；一次性授权密码不能用作长期重连凭据。401、已轮换 Token 或丢失凭据需恢复认证，不能靠无限重试解决。
+HTTP 手动 OAuth 的复制指令包含 `redirect_uri=http://127.0.0.1:8765/callback`，使用服务端已允许的本机回调规则，不依赖动态客户端注册。手动客户端禁止跟随授权 POST 的跳转，读取 Location 并校验 state，再用同一 redirect_uri/verifier 换取访问令牌；原生宿主使用自己的回调。令牌应保存在宿主凭据存储或进程内存，网络重试/服务重启优先复用；授权密码默认可重复使用。新配置的访问令牌和刷新令牌默认十年有效；显式配置的访问期限仍生效，已有令牌保留签发时的到期日。401 时先用刷新令牌换取访问令牌；刷新凭据也丢失时可用原授权密码重新完成 PKCE。重新生成 Token Secret 会撤销已有令牌。
 
 共享 Svelte 提示词同时适用于 Desktop/Node。Node 本次对齐 Desktop 的 HTTP loopback 回调支持，但既有 Node 后端不提供静态 Bearer 认证，所以该入口按 capability 隐藏，继续使用 OAuth。静态 Bearer 不属于本次新增后端契约；当前差异明确保留。断网退避重连由仍在运行的 AI 宿主执行，客户端无法唤醒已停止的模型。
 
@@ -243,12 +243,12 @@ Read sequence guards discard late results after navigation or a successful mutat
 ### 接入配对与聊天布局（0.1.67）
 
 - 新对话仅显示“我们要做什么？”和居中输入框；对话标题、AI 状态、断开/接入、任务面板和设置合并在同一个顶部栏。
-- 接入弹窗提供完整可复制提示词。点击“已发送”通过本地 `request_connection` 写入 `kind=connection_request` 的控制消息，展示无确定百分比的等待条。
+- 接入弹窗自动通过本地 `request_connection` 准备 `kind=connection_request` 控制消息；用户只需复制提示词给 AI，无“已发送”步骤。等待期间提示词和复制按钮保持可见，可随时返回对话、再次打开。AI 接入后显示名称和公开接入 ID，收到持久化问候后显示成功及问候文字；公开 ID 不包含用于鉴权的完整 attachment_id。
 - 控制消息保留在 JSON/Markdown（标记“接入请求”），从普通消息列表/大纲隐藏；不会生成假 AI 回复，也不占用第一条真实用户消息的自动标题。
-- 配对只接受对应控制消息的实际最终回复“你好，有什么能帮到你？”。连接状态、其他会话/旧请求的回复及 final=false 都不算完成。异常问候可重新发起；关闭弹窗不关闭会话，重新打开可恢复未完成配对。保持 FIFO，接入请求不打断已经在执行的消息。
+- 配对接受对应控制消息的实际最终问候“你好，有什么能帮到你？”，容忍空白与中英文标点差异。连接状态、其他会话/旧请求的回复及 final=false 都不算完成。异常问候可重新发起；关闭弹窗不关闭会话，重新打开可恢复未完成配对。保持 FIFO，接入请求不打断已经在执行的消息。
 - `request_connection` 使用稳定 message_id，重试不重复写入；不同 ID 的并发请求复用未确认的控制消息，不改变现有 AI 租约。
 - 主聊天区域（包括输入框外围）统一为不透明底色。原有 Windows Mica 保留；导航和顶部栏使用比会话侧栏高 12 个百分点的不透明度。Windows 壁纸效果仍需原生安装包实机确认。
-- 任务面板四周留空、圆角阴影，可拖动左边缘调整宽度；聚焦边缘按钮后左右方向键每次调整 20px，Home/End 调整到边界。窄窗口使用受限宽度的悬浮层。
+- 任务面板停靠右侧，以分隔线隔开；可拖动左边缘调整宽度，聚焦边缘后左右方向键每次调整 20px。窄窗口面板占满可用区域，关闭后恢复对话。
 - 回归：`node --test tests/chat-connection.test.mjs tests/chat-session-cache.test.mjs tests/chat-drafts.test.mjs tests/local-chat-prompt.test.mjs`，Node chat.test.mjs 和 Rust tools::chat::tests 覆盖幂等/真实 MCP 回信及标题；浏览器检查配对重开/错误回复重试、窄屏、拖宽与切换缓存。
 
 ### 附件编号、引用与本地分块传输（0.1.67）
@@ -269,3 +269,40 @@ Read sequence guards discard late results after navigation or a successful mutat
 - Node startup errors retain the actual attempt diagnostics, and harness telemetry includes phases measured as zero milliseconds. Rust uses its own native startup/phase recording; no protocol or schema change is needed.
 - Git test fixtures isolate their local author identity from host environment overrides. Frontend verification supports both JavaScript package-manager launchers and pnpm 12 native executables.
 - Releases upload only `ctmcp-0.1.67-win64.exe`. SHA-256 stays in the release description. Automatic GitHub source archives may still be displayed by GitHub; they are not uploaded release assets.
+
+### Chat task operation details
+
+- The task panel now shows recent operation evidence with actor, tool/category, paths, status, duration, output summary and available unified diff. Filter by current request (including group assignments) or the whole conversation, and by read/edit/execute/search/failure. AI-reported external tools are labelled separately.
+- Desktop and Node bind successful `chat_open`/`chat_wait` results to the transport identity and exact folder. Only a delivered, unfinished request with a live attachment can receive records. Multiple live attachments sharing one identity are ambiguous: no automatic attribution is made. Use distinct platform conversation IDs or transport sessions for parallel agents. Reopen and wait again after a server restart.
+- Evidence is saved beside the chat as `<chat_id>.operations.json` and `<chat_id>.operations.md`. JSON is authoritative. Both contain only the most recent 240 operations within a 512,000-byte JSON budget; this does not consume the chat's 500-message budget. Input summaries exclude file bodies and attachment credentials, outputs/diffs are redacted and bounded. A logging failure adds `chat_activity_warning` to the tool result; never retry a write just to repair its log.
+- In-flight calls keep their original actor/request even if another request arrives. A cancelled call is marked result unknown; a background process remains running until separately observed. Records do not assert that an external process finished. Previous untracked activity and tools executed outside this MCP cannot be reconstructed automatically.
+- Regression coverage: `chat-operations.test.mjs` in root and Node tests, Rust `tools::chat::operations` plus `chat_operation_dispatch_tests`. These exercise real MCP read/write calls, persistence, group actors, cross-folder/client isolation, ambiguous identities, redaction, interruption, bounded archives and task filtering.
+
+
+## 0.1.70 task panel integration
+
+The docked chat task panel retains the complete desktop ActivityDrawer under Project activity: goal/progress, success rate, average/p95 latency, call/byte counts, read/search/edit/exec counters, timeline/category/file views, detail return navigation, and unified/split diffs. This workspace-wide in-memory source is explicitly separate from durable per-conversation operations. The existing Node backend has no live activity source (`liveHistoryActivity=false`); its project tab explains availability instead of displaying fabricated zero totals. Both hosts share real per-conversation metrics, historical request selection, coordinator plans, file paths, errors and persisted diff details. Running/unknown and AI-reported events do not inflate observed success rate. Request/filter selection survives polling.
+
+### Browser sharing and GitHub updates
+
+Desktop settings now include Browser sharing and Application updates. Browser sharing is opt-in and uses the existing MCP HTTP listener and embedded desktop assets. A hostname must route all paths, including `/`, `/_app` and `/browser`, to that listener. LAN access requires a non-loopback bind and firewall access. Existing Cloudflare quick/named tunnels can be reused. Built-in/path-prefixed MCP-only relays do not automatically provide a root browser route.
+
+Sharing grants the owner-level desktop command allowlist to anyone holding the independent sharing password. Password hashes, origin-bound 12-hour sessions and attempt limits are held in memory. Sharing starts disabled on every application launch. Password rotation and disable revoke all sessions. Only the local desktop can enable sharing or install an update; browser-only window controls and native directory selection are unavailable. No MCP credentials are injected into public HTML or URLs.
+
+The Node Agent has a separate local management transport; this desktop command bridge and Windows EXE installation are intentionally not exposed through it. Shared composer growth, full draft retention and private-network UUID/copy compatibility apply to both hosts. Existing Node local-only checks remain intact.
+
+Updates use a public GitHub `owner/repo` stable release with `vMAJOR.MINOR.PATCH` and `ctmcp-VERSION-win64.exe`. Automatic installation requires the GitHub asset `digest` with SHA-256, verifies the downloaded EXE and staged bytes, then uses a visible console to replace/restart and retain a `.previous` backup. Missing releases/assets/digests are reported; opening the release page remains possible. Downloads do not install until the user confirms restart. Other platforms and Node use their own release packages.
+
+Long text grows the composer on input, restored drafts, mode changes and resizing. Very long text scrolls within the viewport. Pasting does not truncate: the full draft is retained, and more than 32000 UTF-8 bytes blocks sending with a visible hint to split/attach the content.
+
+## 0.1.72 群组队列合分
+
+群组和工作模式均可点击队列「合/分」切换。合模式显示一张合并卡片，展开保留各条编号、文本和附件；分模式恢复队列1、2、3。切换只保存偏好，原始队列不改写；已投递的消息不拆回队列。没有显式偏好的旧群组保持逐条默认，工作模式默认合并。
+
+下一次有效 chat_wait 才按当前偏好投递。合并附件按ID去重，收件人使用各原始条目的ID并集，成员改名不影响投递；总管仍需等待所有被提及成员完成。原始消息ID重试保持幂等。超过发送限制的单条草稿规则不变。
+
+## 0.1.73 后续边界修复
+
+浏览器分享：非JSON的401也会清除失效登录；退出立即清除本地状态，旧请求、旧登录和迟到的退出响应不会覆盖新会话。成功响应必须符合登录/命令协议，避免代理错误页被误当作成功。
+
+桌面GitHub更新：下载与安装均绑定用户检查过的版本和SHA-256，检查后latest变化或暂存包被其他操作替换时要求重新检查。修改发布仓库会清除旧检查结果；安装确认期间锁定按钮。Node包更新流程不适用该原生桌面命令变更。

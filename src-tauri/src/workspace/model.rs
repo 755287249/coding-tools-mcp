@@ -413,7 +413,7 @@ fn default_oauth_client_id() -> String {
     format!("chatgpt-client-{}", &uuid::Uuid::new_v4().to_string()[..12])
 }
 
-pub const DEFAULT_OAUTH_TOKEN_TTL_SECONDS: u64 = 7 * 24 * 60 * 60;
+pub const DEFAULT_OAUTH_TOKEN_TTL_SECONDS: u64 = 3650 * 24 * 60 * 60;
 
 pub fn default_oauth_token_ttl_seconds() -> u64 {
     DEFAULT_OAUTH_TOKEN_TTL_SECONDS

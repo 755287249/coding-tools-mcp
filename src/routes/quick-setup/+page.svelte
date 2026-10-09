@@ -515,7 +515,7 @@
                   <li><strong>1.</strong> {$t("Open ChatGPT Settings → Connectors, then create a custom MCP connector.")}</li>
                   <li><strong>2.</strong> {$t("Paste the Public MCP endpoint shown here and choose OAuth authentication.")}</li>
                   <li><strong>3.</strong> {$t("Expand Advanced OAuth settings, enter the Client ID shown here, leave Client Secret empty, and keep the other OAuth settings at their defaults.")}</li>
-                  <li><strong>4.</strong> {$t("Select Next, click Connect, then enter the one-time password shown here.")}</li>
+                  <li><strong>4.</strong> {$t("Select Next, click Connect, then enter the authorization password shown here.")}</li>
                 </ol>
               {:else}
                 <ol class="grid gap-4 text-sm">

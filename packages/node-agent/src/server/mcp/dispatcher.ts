@@ -1,3 +1,4 @@
+import {activityClientIdentity} from '../../chat/transport.js';
 import { localChatSkill } from '../../rustCatalog.generated.js';
 import type { IncomingMessage } from 'node:http';
 import { callTool } from '../../tools.js';
@@ -289,6 +290,7 @@ export async function dispatchMcpMethod(options: DispatchOptions): Promise<unkno
     if (!processLifecycle) throw new Error('MCP tool call lifecycle is required');
     const argumentsValue = (params.arguments ?? {}) as JsonObject;
     const meta = markMcpConversationMetadata(params._meta);
+    meta['coding-tools/activity-client'] = activityClientIdentity(req.headers);
     delete meta['coding-tools/toolset-revision'];
     if (context.extensions.hasExternalTool(name)) {
       if (context.config.permissionMode === 'read-only') {

@@ -95,8 +95,8 @@
 
 #### 驗收標準（EARS）
 
-1. WHEN MCP 啟用成功 THEN 系統 SHALL 依序引導使用者貼上公開 MCP endpoint、選擇 OAuth、輸入 OAuth Client ID、保留其他 OAuth 預設值，再按下一步與連線並輸入一次性密碼。
-2. WHEN MCP 快速引導顯示設定值 THEN 系統 SHALL 只顯示公開 MCP endpoint、OAuth Client ID 與一次性密碼，不要求 PKCE 流程不使用的 Client Secret。
+1. WHEN MCP 啟用成功 THEN 系統 SHALL 依序引導使用者貼上公開 MCP endpoint、選擇 OAuth、輸入 OAuth Client ID、保留其他 OAuth 預設值，再按下一步與連線並輸入授權密碼（重新產生前可重複使用）。
+2. WHEN MCP 快速引導顯示設定值 THEN 系統 SHALL 只顯示公開 MCP endpoint、OAuth Client ID 與授權密碼（重新產生前可重複使用），不要求 PKCE 流程不使用的 Client Secret。
 3. WHEN Actions 啟用成功 THEN 系統 SHALL 顯示 GPT Actions 的操作順序與 OpenAPI Schema URL、隱私權網址、API Key 等實際值。
 4. WHEN 值可用 THEN 系統 SHALL 提供複製操作；IF 值尚未產生 THEN 系統 SHALL 明確標示未設定。
 5. WHEN 使用者完成 THEN 系統 SHALL 可前往新工作區，且不改變既有頁面行為。

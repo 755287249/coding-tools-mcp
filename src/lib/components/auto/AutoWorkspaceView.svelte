@@ -287,7 +287,7 @@
     if (!endpoint || copying) return;
     copying = true;
     try {
-      // Secrets are only read here, so the one-time password is always fresh.
+      // Secrets are only read here, so the current authorization password is used.
       const loaded = await loadMcpAuthSecrets(getBackend(), id, profile.auth);
       const text = buildConnectionPrompt(
         {
@@ -465,7 +465,7 @@
       <p class="sx-note">{$t("Changing authentication reconnects the service. Copy the new prompt for your AI.")}</p>
     {/if}
     <p class="sx-note">
-      {authType === "bearer" ? $t("Fixed token survives restarts until regenerated. Use a fixed domain for automatic reconnect.") : authType === "oauth" ? $t("The password authorizes once; reuse the access token after reconnect until it expires.") : ""}
+      {authType === "bearer" ? $t("Fixed token survives restarts until regenerated. Use a fixed domain for automatic reconnect.") : authType === "oauth" ? $t("Reuse your token when reconnecting; the authorization password stays valid until regenerated.") : ""}
     </p>
 
     <!-- Copy prompt -->

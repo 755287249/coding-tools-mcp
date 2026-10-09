@@ -322,8 +322,8 @@ export function normalizeConfig(
       tokenSecret,
       tokenTtlSeconds: positiveInt(
         environment.CTMCP_OAUTH_TOKEN_TTL_SECONDS ?? input.oauth?.tokenTtlSeconds,
-        7 * 24 * 60 * 60,
-        30 * 24 * 60 * 60
+        3650 * 24 * 60 * 60,
+        3650 * 24 * 60 * 60
       )
     },
     folders: environmentFolders !== undefined

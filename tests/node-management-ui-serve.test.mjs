@@ -87,6 +87,7 @@ test("handleManagementUiRequest serves the built Node Svelte artifact under /ui/
     assert.equal(page.status, 200);
     const csp = page.headers.get("content-security-policy") ?? "";
     assert.match(csp, /default-src 'none'/);
+    assert.match(csp, /img-src 'self' blob: data:/);
     assert.match(csp, /script-src 'self'/);
     assert.doesNotMatch(csp, /unsafe-inline/);
     const html = await page.text();
@@ -158,6 +159,7 @@ test("handleManagementUiRequest serves injected Svelte HTML and hashed assets un
     assert.equal(page.status, 200);
     const csp = page.headers.get("content-security-policy");
     assert.match(csp, /default-src 'none'/);
+    assert.match(csp, /img-src 'self' blob: data:/);
     assert.match(csp, /script-src 'self'/);
     assert.doesNotMatch(csp, /unsafe-inline/);
     const html = await page.text();

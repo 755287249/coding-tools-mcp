@@ -31,7 +31,7 @@ function unsupported(capability: BooleanCapability): () => Promise<never> {
   };
 }
 
-function createNative(dialog: TauriDialog): NativeUi {
+function createNative(dialog: TauriDialog, invoke: TauriBackendDeps["invoke"]): NativeUi {
   return {
     pickDirectory(options: PickDirectoryOptions = {}) {
       return dialog.open({
@@ -47,6 +47,9 @@ function createNative(dialog: TauriDialog): NativeUi {
     alert(message, options) {
       return dialog.message(message, options);
     },
+    openExternal(url) {
+      return invoke("open_external_url", { url });
+    },
   };
 }
 
@@ -55,7 +58,7 @@ export function createTauriBackend(deps: TauriBackendDeps): FrontendBackend {
 
   return {
     capabilities: DESKTOP_CAPABILITIES,
-    native: createNative(deps.dialog),
+    native: createNative(deps.dialog, deps.invoke),
 
     workspaces: {
       list: () => invoke("list_workspaces"),

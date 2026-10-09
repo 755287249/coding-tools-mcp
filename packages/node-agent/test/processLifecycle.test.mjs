@@ -536,6 +536,20 @@ test('exec_many explicit cancel still terminates an owned durable child', async 
   assert.equal(child.restart_recoverable, true);
   assert.equal(child.process_still_running, true);
 
+  // A session ID confirms ownership; wait for child output before testing cancellation.
+  let ready;
+  const readyDeadline = Date.now() + 10_000;
+  do {
+    ready = await callTool(ctx, 'wait_command', {
+      session_id: sessionId,
+      timeout_ms: 100,
+      until: 'exit',
+      output_mode: 'tail'
+    }, meta);
+  } while (!ready.stdout?.includes('cancel-start') && ready.process_still_running && Date.now() < readyDeadline);
+  assert.match(ready.stdout ?? '', /cancel-start/, JSON.stringify(ready));
+  assert.equal(ready.process_still_running, true);
+
   const cancelled = await callTool(ctx, 'exec_many', {
     operation_id: graphOperationId,
     action: 'cancel',

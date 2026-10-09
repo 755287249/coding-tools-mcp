@@ -1,8 +1,11 @@
 //! Local chat v1. JSON is authoritative; Markdown is a rebuildable projection.
+#[path = "chat_operations.rs"]
+pub(crate) mod operations;
 #[path = "chat_group.rs"]
 mod group;
 use super::workspace::WorkspaceError;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
     fs,
@@ -533,7 +536,7 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
             v.as_object_mut().unwrap().remove("messages");
             sessions.push(v);
         }
-        sessions.sort_by_key(|s| std::cmp::Reverse((s["pinned"]==true,s["updated_at"].as_u64().unwrap_or(0))));
+        sessions.sort_by_key(|s| (s["archived"]==true,std::cmp::Reverse((s["pinned"]==true,s["updated_at"].as_u64().unwrap_or(0)))));
         return Ok(json!({"sessions": sessions}));
     }
     if action == "create" {
@@ -628,6 +631,16 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
         }
         "set_queue_mode" => {if args["mode"]!="merge"&&args["mode"]!="split"{return Err(err("Invalid queue mode"));}s["queue_mode"]=args["mode"].clone();save(root,&s)?;}
         "pin" => {if !args["pinned"].is_boolean(){return Err(err("pinned must be a boolean"));}s["pinned"]=args["pinned"].clone();save(root,&s)?;}
+        "archive" => {if !args["archived"].is_boolean(){return Err(err("archived must be a boolean"));}s["archived"]=args["archived"].clone();save(root,&s)?;}
+        "delete" => {
+            let status = view(root, &s)?["status"].clone();
+            if status == "connected" || status == "waiting" {
+                return Err(err("Disconnect the AI before deleting this conversation"));
+            }
+            let chat_id = id(&s["id"])?.to_string();
+            delete_session_files(root, &chat_id)?;
+            return Ok(json!({"deleted":true,"chat_id":chat_id}));
+        }
         "rename" => {
             let title = text(&args["title"], 240)?;
             s["title"] = json!(title.split_whitespace().collect::<Vec<_>>().join(" "));
@@ -636,7 +649,7 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
             save(root, &s)?;
         }
         "detach" => {
-            if let Some(members)=s["members"].as_array_mut(){for m in members{m["lease_until"]=json!(0);}}
+            if let Some(members)=s["members"].as_array_mut(){for m in members{m["lease_until"]=json!(0);m["paused"]=json!(true);}}
             s["attachment_id"] = json!("");
             s["lease_until"] = json!(0);
             s["updated_at"] = json!(now());
@@ -654,11 +667,48 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
     }
     Ok(json!({"session":local_view(root,&s)?}))
 }
+/// Removes a conversation's JSON record, Markdown projection, sidecar records
+/// (`<id>.*`), pasted images (`<id>-<uuid>.<image>`) and its chat-assets folder.
+fn delete_session_files(root: &Path, chat_id: &str) -> Result<()> {
+    let dir = safe(root, DIR)?;
+    let dotted = format!("{chat_id}.");
+    let dashed = format!("{chat_id}-");
+    let mut targets = Vec::new();
+    for entry in fs::read_dir(&dir).map_err(io)? {
+        let entry = entry.map_err(io)?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        let image = name.rsplit_once('.').is_some_and(|(_, ext)| {
+            matches!(ext.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp")
+        });
+        if !(name.starts_with(&dotted) || (name.starts_with(&dashed) && image)) {
+            continue;
+        }
+        let path = safe(root, &format!("{DIR}/{name}"))?;
+        if fs::symlink_metadata(&path).map_err(io)?.is_file() {
+            targets.push(path);
+        }
+    }
+    let assets = safe(root, &format!("{ASSET_DIR}/{chat_id}"))?;
+    match fs::symlink_metadata(&assets) {
+        Ok(m) if m.is_dir() => fs::remove_dir_all(&assets).map_err(io)?,
+        Ok(_) => return Err(err("Chat asset path is not a directory")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+        Err(e) => return Err(io(e)),
+    }
+    // Keep the authoritative record until every other delete has succeeded.
+    let record = file(root, chat_id)?;
+    for target in targets.iter().filter(|target| **target != record) {
+        fs::remove_file(target).map_err(io)?;
+    }
+    fs::remove_file(record).map_err(io)?;
+    Ok(())
+}
 fn owned(s: &Value, args: &Value) -> Result<()> {
     if group::grouped(s){group::member_for(s,args,false)?;return Ok(());}
+    // The lease only decides whether another AI may take over; the current
+    // holder keeps working after a long task and every call renews the lease.
     if args["attachment_id"].as_str().unwrap_or("").is_empty()
         || args["attachment_id"] != s["attachment_id"]
-        || s["lease_until"].as_u64().unwrap_or(0) <= now()
     {
         return Err(err("Chat attachment expired; call chat_open again"));
     }
@@ -674,14 +724,19 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
         if group::grouped(&s){let member=group::open(&mut s,args)?;group::bind_targets(&mut s);save(root,&s)?;return Ok(json!({"ok":true,"attachment_id":member["attachment_id"],"agent_id":member["id"],"role":member["role"],"session":view(root,&s)?,"instruction":"Read skill.text; reply only to your delivered message IDs. Call chat_wait.","skill":local_chat_skill()}));}
         if args.get("agent_name").is_some(){s["agent_name"]=json!(group::member_name(&args["agent_name"])?);}
 
-        if s["lease_until"].as_u64().unwrap_or(0) > now()
-            && args["attachment_id"] != s["attachment_id"]
-        {
+        // Keepalive: the saved attachment_id always resumes, even after the lease
+        // lapsed, as long as no other AI attached in the meantime.
+        let resuming = args["attachment_id"].as_str().is_some_and(|v| !v.is_empty())
+            && args["attachment_id"] == s["attachment_id"];
+        if args["attachment_id"].as_str().is_some_and(|id|!id.is_empty()) && !resuming {
+            return Err(err("Chat attachment expired or replaced; start a new connection from the UI"));
+        }
+        if !resuming && s["lease_until"].as_u64().unwrap_or(0) > now() {
             return Err(err(
                 "Conversation already attached; close it in the UI or wait for the lease to expire",
             ));
         }
-        if s["lease_until"].as_u64().unwrap_or(0) <= now() {
+        if !resuming {
             s["attachment_id"] = json!(uuid::Uuid::new_v4().to_string());
         }
         group::renew(&mut s,args)?;
@@ -930,11 +985,15 @@ fn queued_fingerprint(content: &str, attachments: &[Value]) -> String {
     digest(json!([content,attachments.iter().map(|f|f["id"].clone()).collect::<Vec<_>>()]).to_string().as_bytes())
 }
 fn local_view(root: &Path,s: &Value)->Result<Value>{
-    let mut result=view(root,s)?;result["queued_messages"]=s.get("queue").cloned().unwrap_or(json!([]));result["queue_mode"]=if group::grouped(s){json!("split")}else{s.get("queue_mode").cloned().unwrap_or(json!("merge"))};Ok(result)
+    let mut result=view(root,s)?;
+    if let Some(attachment)=s["attachment_id"].as_str().filter(|id|!id.is_empty()) {
+        result["connection_id"]=json!(format!("{:x}",Sha256::digest(attachment.as_bytes()))[..12].to_string());
+    }
+    result.as_object_mut().unwrap().extend(operations::view(root,id(&s["id"])?).as_object().unwrap().clone());result["queued_messages"]=s.get("queue").cloned().unwrap_or(json!([]));result["queue_mode"]=s.get("queue_mode").cloned().unwrap_or_else(||json!(if group::grouped(s){"split"}else{"merge"}));Ok(result)
 }
 fn publish_queued(s: &mut Value) {
     if pending(s).is_some()||awaiting_confirmation(s){return;}
-    let split=group::grouped(s)||s["queue_mode"]=="split";
+    let split=s["queue_mode"].as_str().unwrap_or(if group::grouped(s){"split"}else{"merge"})=="split";
     let Some(queue)=s["queue"].as_array_mut() else{return;};if queue.is_empty(){return;}
     let count=if split{1}else{queue.len()};let items=queue.drain(..count).collect::<Vec<_>>();
     let mut message=items[0].clone();let mut attachments=Vec::new();let mut seen=HashSet::new();
@@ -942,7 +1001,13 @@ fn publish_queued(s: &mut Value) {
     if s["queue_receipts"].is_null(){s["queue_receipts"]=json!({});}
     for item in &items{s["queue_receipts"][item["id"].as_str().unwrap()]=json!(queued_fingerprint(item["text"].as_str().unwrap_or(""),item["attachments"].as_array().map(Vec::as_slice).unwrap_or(&[])));}
     if items.len()>1 {message["text"]=json!(items.iter().enumerate().map(|(i,m)|format!("队列{}：{}",i+1,m["text"].as_str().unwrap_or(""))).collect::<Vec<_>>().join("\n\n"));}
-    message["attachments"]=json!(attachments);message["created_at"]=json!(now());if message["recipient_ids"].is_null(){group::target_user(s,&mut message);}s["messages"].as_array_mut().unwrap().push(message);s["updated_at"]=json!(now());
+    message["attachments"]=json!(attachments);message["created_at"]=json!(now());if group::grouped(s){
+        // Union the saved identities, not names reparsed from merged text.
+        let mut targets=Vec::new();
+        for item in &items {let mut item=item.clone();if item["recipient_ids"].as_array().is_none_or(|ids|ids.is_empty()){group::target_user(s,&mut item);}
+            if let Some(ids)=item["recipient_ids"].as_array(){for id in ids {if !targets.contains(id){targets.push(id.clone());}}}}
+        message["recipient_ids"]=json!(targets);
+    }s["messages"].as_array_mut().unwrap().push(message);s["updated_at"]=json!(now());
 }
 
 #[cfg(test)]
@@ -975,6 +1040,33 @@ mod tests {
         assert!(read(&a)["messages"][2]["task_plan"].is_null());assert!(plan(root,"set_todos",&args).is_err());
         args["reply_to"]=json!("new");plan(root,"set_todos",&args).unwrap();args["todos"]=json!([]);assert_eq!(plan(root,"set_todos",&args).unwrap()["plan"]["cleared"],true);
         ui(root,&json!({"action":"detach","chat_id":a})).unwrap();assert!(plan(root,"set_todos",&args).is_err());
+    }
+
+    #[test]
+    fn group_outbox_modes_are_reversible_and_merge_preserves_targets() {
+        let dir=tempfile::tempdir().unwrap();let root=dir.path();
+        let cid=ui(root,&json!({"action":"create","mode":"group"})).unwrap()["session"]["id"].clone();
+        let a=tool(root,"chat_open",&json!({"chat_id":cid,"agent_name":"Chief"})).unwrap();
+        let b=tool(root,"chat_open",&json!({"chat_id":cid,"agent_name":"Helper"})).unwrap();
+        let file=ui(root,&json!({"action":"upload","chat_id":cid,"upload_id":"queue-file","name":"note.txt","data_base64":"ZmlsZQ=="})).unwrap()["attachment"]["id"].clone();
+        let send=|id:&str,text:&str|ui(root,&json!({"action":"send","chat_id":cid,"message_id":id,"text":text,"attachment_ids":[file]}));
+        let read=||ui(root,&json!({"action":"read","chat_id":cid})).unwrap()["session"].clone();
+        let wait=|who:&Value|tool(root,"chat_wait",&json!({"chat_id":cid,"attachment_id":who["attachment_id"]})).unwrap();
+        let reply=|who:&Value,id:&str,to:&str|tool(root,"chat_reply",&json!({"chat_id":cid,"attachment_id":who["attachment_id"],"message_id":id,"reply_to":to,"text":"done","final":true}));
+        send("active","Active").unwrap();send("q1","First").unwrap();send("q2","Second").unwrap();send("q3","@Helper Third 😀").unwrap();
+        let before=read()["queued_messages"].clone();assert_eq!(read()["queue_mode"],"split");
+        for mode in ["merge","split","merge","split"] {
+            let state=ui(root,&json!({"action":"set_queue_mode","chat_id":cid,"mode":mode})).unwrap()["session"].clone();
+            assert_eq!(state["queue_mode"],mode);assert_eq!(state["queued_messages"],before);assert_eq!(wait(&a)["message"]["id"],"active");
+        }
+        reply(&a,"active-done","active").unwrap();assert_eq!(wait(&a)["message"]["id"],"q1");assert_eq!(read()["queued_messages"].as_array().unwrap().len(),2);
+        ui(root,&json!({"action":"set_queue_mode","chat_id":cid,"mode":"merge"})).unwrap();
+        ui(root,&json!({"action":"rename_member","chat_id":cid,"member_id":b["agent_id"],"name":"Renamed"})).unwrap();
+        reply(&a,"q1-done","q1").unwrap();assert_eq!(read()["queued_messages"].as_array().unwrap().len(),2);
+        let merged=wait(&a)["message"].clone();assert_eq!(merged["text"],"队列1：Second\n\n队列2：@Helper Third 😀");
+        assert_eq!(merged["recipient_ids"],json!([a["agent_id"],b["agent_id"]]));assert_eq!(merged["attachments"].as_array().unwrap().len(),1);
+        assert_eq!(wait(&b)["message"]["id"],"q2");assert!(reply(&a,"early","q2").is_err());reply(&b,"b-done","q2").unwrap();reply(&a,"a-done","q2").unwrap();
+        send("q2","Second").unwrap();send("q3","@Helper Third 😀").unwrap();assert_eq!(read()["queued_messages"],json!([]));assert_eq!(wait(&a)["status"],"idle");assert!(send("q3","Changed").is_err());
     }
 
     #[test]
@@ -1013,6 +1105,61 @@ mod tests {
         assert!(ui(root,&json!({"action":"pin","chat_id":cid,"pinned":"yes"})).is_err());
         ui(root,&json!({"action":"pin","chat_id":cid,"pinned":false})).unwrap();
         assert_eq!(read()["pinned"],false);
+    }
+
+    #[test]
+    fn archive_and_delete_conversations() {
+        let dir=tempfile::tempdir().unwrap();let root=dir.path();
+        let older=ui(root,&json!({"action":"create","title":"older"})).unwrap()["session"]["id"].as_str().unwrap().to_string();
+        let newer=ui(root,&json!({"action":"create","title":"newer"})).unwrap()["session"]["id"].as_str().unwrap().to_string();
+        assert!(ui(root,&json!({"action":"archive","chat_id":newer,"archived":"yes"})).is_err());
+        let archived=ui(root,&json!({"action":"archive","chat_id":newer,"archived":true})).unwrap();
+        assert_eq!(archived["session"]["archived"],true);
+        let list=ui(root,&json!({"action":"list"})).unwrap();
+        assert_eq!(list["sessions"][0]["id"],*older,"archived conversations sort last");
+        assert_eq!(list["sessions"][1]["archived"],true);
+        ui(root,&json!({"action":"archive","chat_id":newer,"archived":false})).unwrap();
+        assert_eq!(ui(root,&json!({"action":"list"})).unwrap()["sessions"][0]["id"],*newer);
+
+        // Delete removes the record, Markdown, sidecars, pasted images and assets only for that chat.
+        let d=root.join(DIR);
+        fs::write(d.join(format!("{newer}.activity.json")),b"{}").unwrap();
+        fs::write(d.join(format!("{newer}-0f1e2d3c-0000-4000-8000-000000000000.png")),b"png").unwrap();
+        let assets=root.join(ASSET_DIR).join(&newer);fs::create_dir_all(&assets).unwrap();fs::write(assets.join("a.txt"),b"a").unwrap();
+        let other_assets=root.join(ASSET_DIR).join(&older);fs::create_dir_all(&other_assets).unwrap();
+        let deleted=ui(root,&json!({"action":"delete","chat_id":newer})).unwrap();
+        assert_eq!(deleted["deleted"],true);
+        for name in [format!("{newer}.json"),format!("{newer}.md"),format!("{newer}.activity.json"),format!("{newer}-0f1e2d3c-0000-4000-8000-000000000000.png")] {
+            assert!(!d.join(&name).exists(),"{name} should be deleted");
+        }
+        assert!(!assets.exists());
+        assert!(d.join(format!("{older}.json")).exists());
+        assert!(other_assets.exists());
+        let list=ui(root,&json!({"action":"list"})).unwrap();
+        assert_eq!(list["sessions"].as_array().unwrap().len(),1);
+        assert!(ui(root,&json!({"action":"delete","chat_id":newer})).is_err());
+
+        // A conversation with a live AI attachment cannot be deleted until it is detached.
+        tool(root,"chat_open",&json!({"chat_id":older,"agent_name":"Tester"})).unwrap();
+        assert!(ui(root,&json!({"action":"delete","chat_id":older})).is_err());
+        ui(root,&json!({"action":"detach","chat_id":older})).unwrap();
+        ui(root,&json!({"action":"delete","chat_id":older})).unwrap();
+        assert!(!d.join(format!("{older}.json")).exists());
+    }
+
+    #[test]
+    fn invalid_deletion_assets_preserve_chat_and_operations() {
+        let dir = tempfile::tempdir().unwrap(); let root = dir.path();
+        let cid = ui(root, &json!({"action":"create"})).unwrap()["session"]["id"].as_str().unwrap().to_string();
+        let record = file(root, &cid).unwrap(); let original = fs::read(&record).unwrap();
+        let operations = root.join(DIR).join(format!("{cid}.operations.json"));
+        fs::write(&operations, b"[]").unwrap();
+        fs::create_dir_all(root.join(ASSET_DIR)).unwrap();
+        fs::write(root.join(ASSET_DIR).join(&cid), b"invalid directory fixture").unwrap();
+        assert!(ui(root, &json!({"action":"delete","chat_id":cid})).is_err());
+        assert_eq!(fs::read(record).unwrap(), original);
+        assert_eq!(fs::read(operations).unwrap(), b"[]");
+        assert!(root.join(DIR).join(format!("{cid}.md")).exists());
     }
 
     #[tokio::test]
@@ -1060,6 +1207,54 @@ mod tests {
         let sent=ui(root,&json!({"action":"send","chat_id":cid,"message_id":"many","text":"参考@图片1和@文件6","attachment_ids":ids})).unwrap();assert_eq!(sent["session"]["messages"][0]["attachments"].as_array().unwrap().len(),7);
         let part=ui(root,&json!({"action":"read_attachment_chunk","chat_id":cid,"upload_id":"large","offset":0})).unwrap();assert_eq!(STANDARD.decode(part["data_base64"].as_str().unwrap()).unwrap(),bytes[..CHUNK_BYTES]);
         assert!(markdown(&sent["session"]).contains("Reference: @图片1"));
+    }
+
+    #[test]
+    fn keepalive_attachment_survives_lease_expiry_until_another_ai_takes_over() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let session = ui(root, &json!({"action":"create"})).unwrap();
+        let cid = session["session"]["id"].as_str().unwrap().to_string();
+        let open = tool(root, "chat_open", &json!({"chat_id":cid})).unwrap();
+        let args = json!({"chat_id":cid,"attachment_id":open["attachment_id"]});
+        let expire = || {
+            let mut s = load(root, &cid).unwrap();
+            s["lease_until"] = json!(0);
+            save(root, &s).unwrap();
+        };
+        expire();
+        assert!(tool(root, "chat_wait", &args).is_ok());
+        let public_id=ui(root,&json!({"action":"read","chat_id":cid})).unwrap()["session"]["connection_id"].clone();
+        assert_eq!(public_id.as_str().unwrap().len(),12);assert_ne!(public_id,args["attachment_id"]);
+        ui(root,&json!({"action":"send","chat_id":cid,"message_id":"long-task","text":"Work"})).unwrap();
+        tool(root,"chat_wait",&args).unwrap();expire();
+        assert_eq!(tool(root,"chat_reply",&json!({"chat_id":cid,"attachment_id":args["attachment_id"],"reply_to":"long-task","message_id":"late-result","text":"Done","final":true})).unwrap()["persisted"],true);
+        assert_eq!(ui(root,&json!({"action":"read","chat_id":cid})).unwrap()["session"]["connection_id"],public_id);
+        expire();
+        assert_eq!(tool(root, "chat_open", &args).unwrap()["attachment_id"], open["attachment_id"]);
+        expire();
+        let other = tool(root, "chat_open", &json!({"chat_id":cid})).unwrap();
+        assert_ne!(other["attachment_id"], open["attachment_id"]);
+        assert!(tool(root, "chat_wait", &args).is_err());
+    }
+
+    #[test]
+    fn group_reconnect_resumes_after_heartbeat_but_rejects_paused_members() {
+        let temp=tempfile::tempdir().unwrap();let root=temp.path();
+        let session=ui(root,&json!({"action":"create","mode":"group"})).unwrap();let cid=&session["session"]["id"];
+        let joined=tool(root,"chat_open",&json!({"chat_id":cid,"agent_name":"Tester"})).unwrap();
+        let args=json!({"chat_id":cid,"attachment_id":joined["attachment_id"]});
+        let mut stored=load(root,cid.as_str().unwrap()).unwrap();stored["members"][0]["lease_until"]=json!(0);save(root,&stored).unwrap();
+        assert!(tool(root,"chat_wait",&args).is_ok());
+        ui(root,&json!({"action":"detach_member","chat_id":cid,"member_id":joined["agent_id"]})).unwrap();
+        assert!(tool(root,"chat_wait",&args).is_err());assert!(tool(root,"chat_open",&args).is_err());
+        ui(root,&json!({"action":"resume_member","chat_id":cid,"member_id":joined["agent_id"]})).unwrap();
+        assert_eq!(tool(root,"chat_open",&args).unwrap()["agent_id"],joined["agent_id"]);
+        ui(root,&json!({"action":"detach","chat_id":cid})).unwrap();
+        assert!(tool(root,"chat_open",&args).is_err());assert!(tool(root,"chat_wait",&args).is_err());
+        ui(root,&json!({"action":"set_mode","chat_id":cid,"mode":"work"})).unwrap();
+        assert!(tool(root,"chat_open",&args).is_err());
+        assert_ne!(tool(root,"chat_open",&json!({"chat_id":cid})).unwrap()["attachment_id"],joined["attachment_id"]);
     }
 
     #[test]

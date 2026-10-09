@@ -33,7 +33,10 @@ pub(super) fn build_router(state: ListenerState) -> Router {
             )
             .route(&protected_metadata, get(oauth_protected_resource_metadata));
     }
-    router.with_state(state)
+    let router = router.with_state(state);
+    #[cfg(feature = "desktop")]
+    let router = router.merge(crate::browser_share::router());
+    router
 }
 
 fn service_routes_for_prefix(prefix: &str) -> Router<ListenerState> {

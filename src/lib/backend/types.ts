@@ -61,6 +61,8 @@ export interface NativeUi {
   pickDirectory(options?: PickDirectoryOptions): Promise<string | string[] | null>;
   confirm(message: string, options?: ConfirmOptions): Promise<boolean>;
   alert(message: string, options?: AlertOptions): Promise<void>;
+  /** Open an http(s) URL in the system/default browser. */
+  openExternal(url: string): Promise<void>;
 }
 
 export interface TelemetryQueryOptions {

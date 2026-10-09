@@ -85,7 +85,7 @@ test('OAuth metadata, redirect allowlist and Forwarded base resolution match Rus
     ' https://chatgpt.com/connector/oauth/test'
   ]) assert.equal(redirectUriAllowed(value), false, value);
 
-  assert.deepEqual(authorizationMetadata('https://mcp.example/base', runtime).grant_types_supported, ['authorization_code']);
+  assert.deepEqual(authorizationMetadata('https://mcp.example/base', runtime).grant_types_supported, ['authorization_code', 'refresh_token']);
   assert.deepEqual(authorizationMetadata('https://mcp.example/base', runtime).token_endpoint_auth_methods_supported, ['none']);
   assert.deepEqual(resourceMetadata('https://mcp.example/base').authorization_servers, ['https://mcp.example/base']);
 
@@ -119,10 +119,26 @@ test('OAuthRuntime rate limits repeated password failures and recovers after the
   assert.equal(runtime.authorizeSubmit(authorizationForm('unblocked'), base).status, 303);
 });
 
+test('OAuthRuntime keeps the authorization password reusable by default (keepalive)', async () => {
+  const base = 'https://public.example/builtin/clients/oauth-test';
+  const persisted = [];
+  const runtime = new OAuthRuntime(oauthConfig(), Date.now, async password => { persisted.push(password); });
+  const password = runtime.password;
+  const first = await runtime.authorizeSubmitOneTime(authorizationForm('reuse-1'), base);
+  const second = await runtime.authorizeSubmitOneTime(authorizationForm('reuse-2'), base);
+  assert.equal(first.status, 303);
+  assert.equal(second.status, 303);
+  assert.equal(runtime.password, password);
+  assert.deepEqual(persisted, []);
+  const exchanged = runtime.exchangeToken(tokenForm(new URL(first.location).searchParams.get('code')), {}, base);
+  assert.equal(exchanged.body.expires_in, 3650 * 24 * 60 * 60);
+  assert.equal(new OAuthRuntime(oauthConfig()).verifyBearer({authorization:`Bearer ${exchanged.body.access_token}`},base),true);
+});
+
 test('OAuthRuntime consumes authorization passwords once, persists rotation, and rejects concurrent reuse', async () => {
   const base = 'https://public.example/builtin/clients/oauth-test';
   const persisted = [];
-  const runtime = new OAuthRuntime(oauthConfig(), Date.now, async password => {
+  const runtime = new OAuthRuntime(oauthConfig({ rotatePassword: true }), Date.now, async password => {
     await new Promise(resolve => setTimeout(resolve, 5));
     persisted.push(password);
   });
@@ -145,7 +161,7 @@ test('OAuthRuntime consumes authorization passwords once, persists rotation, and
   assert.ok(firstCode);
   const exchanged = runtime.exchangeToken(tokenForm(firstCode), {}, base);
   assert.equal(exchanged.status, 200);
-  assert.equal(exchanged.body.expires_in, 7 * 24 * 60 * 60);
+  assert.equal(exchanged.body.expires_in, 3650 * 24 * 60 * 60);
 
   const nextPassword = runtime.password;
   const nextForm = authorizationForm('one-time-next');
@@ -156,7 +172,40 @@ test('OAuthRuntime consumes authorization passwords once, persists rotation, and
   assert.notEqual(runtime.password, nextPassword);
 });
 
-test('OAuthRuntime applies configurable access-token TTL with a 30-day cap', async () => {
+test('OAuthRuntime refresh_token renews access without the one-time password', async () => {
+  const base = 'https://public.example/builtin/clients/oauth-test';
+  let now = Date.now();
+  const runtime = new OAuthRuntime(oauthConfig(), () => now);
+  const authorized = await runtime.authorizeSubmitOneTime(authorizationForm('refresh-flow'), base);
+  assert.equal(authorized.status, 303);
+  const code = new URL(authorized.location).searchParams.get('code');
+  const exchanged = runtime.exchangeToken(tokenForm(code), {}, base);
+  assert.equal(exchanged.status, 200);
+  const { access_token: access, refresh_token: refresh } = exchanged.body;
+  assert.equal(typeof refresh, 'string');
+  assert.equal(runtime.verifyBearer({ authorization: `Bearer ${access}` }, base), true);
+  assert.equal(runtime.verifyBearer({ authorization: `Bearer ${refresh}` }, base), false, 'refresh token is not a bearer token');
+
+  const refreshForm = (token, clientId = 'chatgpt') => new URLSearchParams({ grant_type: 'refresh_token', refresh_token: token, client_id: clientId });
+  const renewed = runtime.exchangeToken(refreshForm(refresh), {}, base);
+  assert.equal(renewed.status, 200);
+  assert.equal(runtime.verifyBearer({ authorization: `Bearer ${renewed.body.access_token}` }, base), true);
+  assert.equal(typeof renewed.body.refresh_token, 'string');
+
+  assert.equal(runtime.exchangeToken(refreshForm(access), {}, base).status, 400, 'access token cannot refresh');
+  assert.equal(runtime.exchangeToken(refreshForm('garbage'), {}, base).status, 400);
+  assert.equal(runtime.exchangeToken(refreshForm(''), {}, base).body.error, 'invalid_request');
+  const otherClient = new OAuthRuntime(oauthConfig({ clientId: 'client-b' }));
+  assert.equal(otherClient.exchangeToken(refreshForm(refresh, 'client-b'), {}, base).status, 400, 'refresh token is client-bound');
+  assert.equal(runtime.exchangeToken(refreshForm(refresh), {}, 'https://other.example').status, 400, 'refresh token is issuer-bound');
+  const expiry = JSON.parse(Buffer.from(refresh.split('.')[1], 'base64url').toString()).exp;
+  now = (expiry + 1) * 1000;
+  assert.equal(runtime.exchangeToken(refreshForm(refresh), {}, base).status, 400, 'expired refresh token is rejected');
+  const other = new OAuthRuntime(oauthConfig({ tokenSecret: 'another-token-secret-that-is-long-enough' }));
+  assert.equal(other.exchangeToken(refreshForm(refresh), {}, base).status, 400, 'rotated token secret revokes refresh tokens');
+});
+
+test('OAuthRuntime applies configurable access-token TTL with a ten-year cap', async () => {
   const base = 'https://public.example/builtin/clients/oauth-test';
   const runtime = new OAuthRuntime(oauthConfig({ tokenTtlSeconds: 60 * 60 }));
   const authorized = await runtime.authorizeSubmitOneTime(authorizationForm('custom-ttl'), base);
@@ -170,13 +219,13 @@ test('OAuthRuntime applies configurable access-token TTL with a 30-day cap', asy
   const payload = JSON.parse(Buffer.from(payloadPart, 'base64url').toString('utf8'));
   assert.equal(payload.exp - payload.iat, 60 * 60);
 
-  const capped = new OAuthRuntime(oauthConfig({ tokenTtlSeconds: 365 * 24 * 60 * 60 }));
-  assert.equal(capped.tokenTtlSeconds, 30 * 24 * 60 * 60);
+  const capped = new OAuthRuntime(oauthConfig({ tokenTtlSeconds: 100 * 365 * 24 * 60 * 60 }));
+  assert.equal(capped.tokenTtlSeconds, 3650 * 24 * 60 * 60);
 });
 
 test('OAuthRuntime does not consume a valid password when persistence fails', async () => {
   const base = 'https://public.example/builtin/clients/oauth-test';
-  const runtime = new OAuthRuntime(oauthConfig(), Date.now, async () => {
+  const runtime = new OAuthRuntime(oauthConfig({ rotatePassword: true }), Date.now, async () => {
     throw new Error('simulated persistence failure');
   });
   const originalPassword = runtime.password;
@@ -240,7 +289,7 @@ test('authorization codes are isolated per OAuthRuntime and single-use', () => {
 
   const exchanged = first.exchangeToken(tokenForm(code), {}, base);
   assert.equal(exchanged.status, 200);
-  assert.equal(exchanged.body.expires_in, 7 * 24 * 60 * 60);
+  assert.equal(exchanged.body.expires_in, 3650 * 24 * 60 * 60);
   const accessToken = exchanged.body.access_token;
   assert.equal(first.verifyBearer({ authorization: `Bearer ${accessToken}` }, base), true);
   assert.deepEqual(first.exchangeToken(tokenForm(code), {}, base).body, {
@@ -413,4 +462,93 @@ test('HTTP reconnect resumes the same chat after service restart without reautho
   assert.equal((await call('chat_reply', { ...args, message_id: 'after-restart', reply_to: 'before-restart', text: 'Resumed', final: true })).persisted, true);
   assert.equal((await call('chat_wait', { ...args, timeout_ms: 0 })).status, 'idle');
   assert.equal(chatUi(root, { action: 'read', chat_id: session.id }).session.messages.length, 2);
+});
+
+test('failed PKCE and callback exchanges can be corrected, but successful codes remain single-use', () => {
+  const runtime = new OAuthRuntime(oauthConfig());
+  const base = 'https://audit.example';
+  const code = new URL(runtime.authorizeSubmit(authorizationForm(), base).location).searchParams.get('code');
+  const form = tokenForm(code);
+  form.set('redirect_uri', 'http://127.0.0.1:8765/wrong');
+  assert.equal(runtime.exchangeToken(form, {}, base).body.error_description, 'redirect_uri mismatch');
+  form.set('redirect_uri', redirectUri);
+  form.set('code_verifier', 'x'.repeat(43));
+  assert.equal(runtime.exchangeToken(form, {}, base).body.error_description, 'PKCE verification failed');
+  form.set('code_verifier', verifier);
+  assert.equal(runtime.exchangeToken(form, {}, base).status, 200);
+  assert.equal(runtime.exchangeToken(form, {}, base).status, 400);
+});
+
+test('no-op and TTL-only runtime updates preserve pending authorization; credentials revoke it', () => {
+  const runtime = new OAuthRuntime(oauthConfig());
+  const base = 'https://audit.example';
+  const code = new URL(runtime.authorizeSubmit(authorizationForm(), base).location).searchParams.get('code');
+  runtime.update(oauthConfig());
+  runtime.update(oauthConfig({ tokenTtlSeconds: 7200 }));
+  const result = runtime.exchangeToken(tokenForm(code), {}, base);
+  assert.equal(result.status, 200);
+  assert.equal(result.body.expires_in, 7200);
+  const revoked = new URL(runtime.authorizeSubmit(authorizationForm(), base).location).searchParams.get('code');
+  runtime.update(oauthConfig({ tokenSecret: 'new-test-signing-key' }));
+  assert.equal(runtime.exchangeToken(tokenForm(revoked), {}, base).status, 400);
+});
+
+test('Node callbacks and rotated Quick Tunnel metadata match Desktop', () => {
+  for (const uri of [
+    'https://claude.ai/api/mcp/auth_callback', 'https://claude.com/api/mcp/auth_callback',
+    'https://vscode.dev/redirect', 'https://insiders.vscode.dev/redirect',
+    'cursor://anysphere.cursor-mcp/oauth/callback', 'vscode://extension/callback',
+    'vscode-insiders://extension/callback', 'windsurf://extension/callback'
+  ]) assert.equal(redirectUriAllowed(uri), true, uri);
+  for (const uri of ['https://claude.ai.attacker.example/callback', 'cursor://user@callback', 'javascript:alert(1)']) {
+    assert.equal(redirectUriAllowed(uri), false, uri);
+  }
+  const config = agentConfig('/synthetic', '/synthetic-state', 'https://old.trycloudflare.com/prefix');
+  assert.equal(externalBase({ 'x-forwarded-host': 'new.trycloudflare.com' }, config), 'https://new.trycloudflare.com/prefix');
+  assert.equal(externalBase({ forwarded: 'host="new.trycloudflare.com";proto=https' }, config), 'https://new.trycloudflare.com/prefix');
+  for (const host of ['attacker.example', 'new.trycloudflare.com.attacker.example', '127.0.0.1:3789']) {
+    assert.equal(externalBase({ host }, config), config.publicBaseUrl);
+  }
+  config.publicBaseUrl = 'https://stable.example';
+  assert.equal(externalBase({ host: 'new.trycloudflare.com' }, config), config.publicBaseUrl);
+});
+
+test('HTTP public-client registration discovers and completes native-host PKCE on a prefixed route', async t => {
+  const root = await mkdtemp(path.join(tmpdir(), 'ctmcp-register-root-'));
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'ctmcp-register-state-'));
+  const config = agentConfig(root, dataDir);
+  const runtime = await createAgentRuntime(config);
+  t.after(async () => { await runtime.close(); await rm(root, {recursive:true,force:true}); await rm(dataDir, {recursive:true,force:true}); });
+  await new Promise(resolve => runtime.server.listen(0, '127.0.0.1', resolve));
+  const local = `http://127.0.0.1:${runtime.server.address().port}`;
+  const prefix = '/builtin/clients/oauth-test';
+  const meta = await (await fetch(local + '/.well-known/oauth-authorization-server' + prefix)).json();
+  assert.equal(meta.registration_endpoint, config.publicBaseUrl + '/oauth/register');
+  const post = (route, body, contentType = 'application/json') => fetch(local + prefix + route, {
+    method:'POST', headers:{'content-type':contentType,'User-Agent':'OAuth-Audit/1.0'}, body, redirect:'manual'
+  });
+  const callback = 'cursor://anysphere.cursor-mcp/oauth/callback';
+  const registered = await post('/oauth/register', JSON.stringify({redirect_uris:[callback],client_name:'Cursor fixture'}));
+  assert.equal(registered.status, 201);
+  const client = await registered.json();
+  assert.equal(client.client_id, config.oauth.clientId);
+  assert.equal(client.token_endpoint_auth_method, 'none');
+  assert.deepEqual(client.grant_types, ['authorization_code','refresh_token']);
+  const form = authorizationForm('native-state'); form.set('client_id',client.client_id); form.set('redirect_uri',callback);
+  const authorized = await post('/oauth/authorize', form.toString(), 'application/x-www-form-urlencoded');
+  assert.equal(authorized.status, 303);
+  const location = new URL(authorized.headers.get('location'));
+  assert.equal(location.searchParams.get('state'),'native-state');
+  const exchange = tokenForm(location.searchParams.get('code')); exchange.set('redirect_uri',callback);
+  const token = await post('/oauth/token',exchange.toString(),'application/x-www-form-urlencoded');
+  assert.equal(token.status,200);
+  const pair = await token.json();
+  assert.equal(runtime.oauth.verifyBearer({authorization:`Bearer ${pair.access_token}`},config.publicBaseUrl),true);
+  for (const body of ['{', 'null', '{}', JSON.stringify({redirect_uris:[callback,42]}), JSON.stringify({redirect_uris:['https://attacker.example']})]) {
+    assert.equal((await post('/oauth/register',body)).status,400,body);
+  }
+  runtime.oauth.update(oauthConfig({clientSecret:'synthetic-confidential-secret'}));
+  const confidential = await (await fetch(local + '/.well-known/oauth-authorization-server' + prefix)).json();
+  assert.equal(confidential.registration_endpoint,undefined);
+  assert.equal((await post('/oauth/register',JSON.stringify({redirect_uris:[callback]}))).status,400);
 });

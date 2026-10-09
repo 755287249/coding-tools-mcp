@@ -17,5 +17,9 @@ export function alert(message: string, options?: AlertOptions): Promise<void> {
   return getBackend().native.alert(message, options);
 }
 
+export function openExternal(url: string): Promise<void> {
+  return getBackend().native.openExternal(url);
+}
+
 /** @deprecated use alert() */
 export const message = alert;

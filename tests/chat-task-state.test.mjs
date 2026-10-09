@@ -32,3 +32,12 @@ test('group task panel keeps participant plans separate, including delegated wor
  const session={status:'connected',members:[{id:'a',name:'Chief'},{id:'b',name:'Builder'}],messages:[{id:'u',role:'user',text:'Task',recipient_ids:['a'],received_at:1,agent_plans:[{agent_id:'a',plan:{...p,goal:'Coordinate'}}]},{id:'assign',role:'assistant',kind:'assignment',reply_to:'u',recipient_ids:['b'],text:'Build component',agent_plans:[{agent_id:'b',plan:p}]},{id:'bdone',role:'assistant',agent_id:'b',reply_to:'assign',final:true}]};
  const task=currentChatTask(session);assert.equal(task.status,'processing');assert.deepEqual(task.agentTasks.map(x=>[x.name,x.plan.goal,x.complete]),[['Chief','Coordinate',false],['Builder','Build',true]]);
 });
+
+test('coordinator goal and progress lead the group task while historical tasks remain selectable',()=>{
+ const chief={goal:'Coordinate release',todos:[{id:'one',title:'Keep full UI',status:'in_progress'}],updated_ms:8,progress:{message:'Restoring metrics',updated_ms:9}};
+ const helper={goal:'Different helper goal',todos:[],updated_ms:10};
+ const session={status:'connected',members:[{id:'a',name:'Chief',role:'coordinator'},{id:'b',name:'Helper',role:'member'}],messages:[old,end,{id:'group',role:'user',text:'User request',recipient_ids:['a','b'],agent_plans:[{agent_id:'b',plan:helper},{agent_id:'a',plan:chief}],received_at:4}]};
+ const task=currentChatTask(session);assert.equal(task.plan,chief);assert.equal(task.progress,'Restoring metrics');assert.equal(task.agentTasks.length,2);
+ assert.equal(currentChatTask(session,'old').plan.goal,'Old goal');assert.equal(currentChatTask(session,'old').status,'completed');assert.equal(currentChatTask(session,'missing'),null);
+ const legacy={...session,members:[],messages:[{...session.messages.at(-1),agent_plans:[{agent_id:'a',plan:chief}]}]};assert.equal(currentChatTask(legacy).plan,chief);
+});

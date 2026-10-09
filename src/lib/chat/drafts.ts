@@ -10,7 +10,7 @@ function parseDraft(raw: string | null): ChatDraft {
   if (!raw) return empty();
   try {
     const value = JSON.parse(raw);
-    if (!value || typeof value.text !== 'string' || value.text.length > 32000 || !Array.isArray(value.attachments)) return empty();
+    if (!value || typeof value.text !== 'string' || !Array.isArray(value.attachments)) return empty();
     if (!value.attachments.every((file: ChatFile) => file && ['id','name','path','mime','sha256'].every(field => typeof file[field as keyof ChatFile] === 'string') && Number.isFinite(file.size) && file.size > 0)) return empty();
     const retry = value.retry;
     return { text: value.text, attachments: value.attachments, retry: retry && typeof retry.text === 'string' && typeof retry.id === 'string' && typeof retry.attachmentKey === 'string' ? retry : null };

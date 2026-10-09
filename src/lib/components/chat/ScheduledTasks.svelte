@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { randomId } from "$lib/browser-tools";
   import { localChat, type ChatSession } from '$lib/api/chat';
   import { scheduledChats, scheduleError, changeSchedule, type ScheduledChat } from '$lib/chat/schedules';
   import { t } from '$lib/i18n';
@@ -13,7 +14,7 @@
     const chat=chats.find(c=>c.id===chatId), when=new Date(due).getTime();
     if(saving||!chat||!text.trim()||!Number.isFinite(when)||when<=Date.now()){error=$t('shell.scheduleInvalid');return}
     saving=true;error='';
-    const task:ScheduledChat={id:crypto.randomUUID(),workspaceId,folderId,chatId,title:chat.title,text:text.trim(),due:when,status:'pending'};
+    const task:ScheduledChat={id:randomId(),workspaceId,folderId,chatId,title:chat.title,text:text.trim(),due:when,status:'pending'};
     try{await changeSchedule(tasks=>[...tasks,task]);text='';due=''}catch(e){error=String(e)}finally{saving=false}
   }
   async function update(id:string,status?:ScheduledChat['status']) {try{await changeSchedule(tasks=>status?tasks.map(task=>task.id===id?{...task,status}:task):tasks.filter(task=>task.id!==id))}catch(e){error=String(e)}}

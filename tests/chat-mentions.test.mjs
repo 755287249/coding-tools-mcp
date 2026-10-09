@@ -1,10 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mentionParts,mentionQuery,mentionChoices,referencedAttachments } from '../src/lib/chat/mentions.ts';
+import { appendAttachmentMention,mentionParts,mentionQuery,mentionChoices,referencedAttachments } from '../src/lib/chat/mentions.ts';
 import { innerPopover } from '../src/lib/chat/popover.ts';
 import { uploadLocalFile,TRANSFER_CHUNK_BYTES,readChatFile } from '../src/lib/chat/attachment-transfer.ts';
 import { createHash } from 'node:crypto';
 const files=[{id:'a',label:'图片1',name:'image.png'},{id:'b',label:'图片12',name:'image.png'},{id:'f',label:'文件1',name:'report.md'}];
+test('pasted images append exact labels after existing prose without duplicating references',()=>{
+ assert.equal(appendAttachmentMention('请看这里',files[0]),'请看这里 @图片1 ');
+ assert.equal(appendAttachmentMention('请看\n',files[0]),'请看\n@图片1 ');
+ assert.equal(appendAttachmentMention('',files[0]),'@图片1 ');
+ assert.equal(appendAttachmentMention('参考@图片1',files[0]),'参考@图片1');
+ assert.equal(appendAttachmentMention('参考@图片12',files[0]),'参考@图片12 @图片1 ');
+ assert.equal(appendAttachmentMention(appendAttachmentMention('对比',files[0]),files[1]),'对比 @图片1 @图片12 ');
+ assert.equal(appendAttachmentMention('原文',{id:'legacy',name:'image.png'}),'原文');
+});
 test('mentions resolve exact labels independently of filenames and numeric prefixes',()=>{
  const text='参考@图片12，然后@文件1，对比@图片1和@图片123';
  assert.deepEqual(referencedAttachments(text,files).map(f=>f.id),['b','f','a']);

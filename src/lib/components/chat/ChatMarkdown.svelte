@@ -7,10 +7,20 @@
   import LocalPathLink from './LocalPathLink.svelte';
   import {chatLinkParts} from '$lib/chat/local-links';
   let { text, attachments = [], workspaceId='', folderId='', chatId='' }: { text:string;attachments?:ChatFile[];workspaceId?:string;folderId?:string;chatId?:string } = $props();
+  import { openExternal } from '$lib/api/native';
+  /** The desktop webview cannot follow target=_blank; hand http(s) links (pages and downloads) to the system browser. */
+  function openLink(event: MouseEvent, href: string) {
+    if (event.type === 'auxclick' && event.button !== 1) return;
+    event.preventDefault();
+    openExternal(href).catch(error => {
+      console.warn('open link failed', error);
+      try { globalThis.open?.(href, '_blank', 'noopener,noreferrer'); } catch {}
+    });
+  }
   const blocks = $derived(text.split(/(```[^\n]*\n[\s\S]*?```)/g).filter(Boolean));
 </script>
 {#snippet inline(text:string,literal=false)}
-  {#each chatLinkParts(text,literal) as token}{#if token.href}<a href={token.href} target="_blank" rel="noopener noreferrer">{token.text}</a>{:else if token.path&&workspaceId&&folderId&&chatId}{#if token.image}<ArtifactLink {workspaceId} {folderId} {chatId} path={token.path} label={token.text}/>{:else}<LocalPathLink {workspaceId} {folderId} {chatId} path={token.path} label={token.text}/>{/if}{:else}{#each mentionParts(token.text,attachments) as part}{#if part.file}<AttachmentMention file={part.file} {workspaceId} {folderId} {chatId}/>{:else}{part.text}{/if}{/each}{/if}{/each}
+  {#each chatLinkParts(text,literal) as token}{#if token.href}<a href={token.href} target="_blank" rel="noopener noreferrer" title={token.href} onclick={event=>openLink(event,token.href!)} onauxclick={event=>openLink(event,token.href!)}>{token.text}</a>{:else if token.path&&workspaceId&&folderId&&chatId}{#if token.image}<ArtifactLink {workspaceId} {folderId} {chatId} path={token.path} label={token.text}/>{:else}<LocalPathLink {workspaceId} {folderId} {chatId} path={token.path} label={token.text}/>{/if}{:else}{#each mentionParts(token.text,attachments) as part}{#if part.file}<AttachmentMention file={part.file} {workspaceId} {folderId} {chatId}/>{:else}{part.text}{/if}{/each}{/if}{/each}
 {/snippet}
 {#snippet prose(text:string)}
   {#each text.split(/(`[^`]+`|\*\*[^*]+\*\*)/g) as part}{#if part.startsWith('`') && part.endsWith('`')}<code class="inline">{@render inline(part.slice(1,-1),true)}</code>{:else if part.startsWith('**') && part.endsWith('**')}<strong>{@render inline(part.slice(2,-2))}</strong>{:else}{@render inline(part)}{/if}{/each}

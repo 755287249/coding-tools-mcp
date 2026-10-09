@@ -1,4 +1,9 @@
 import type { ChatFile } from '../api/chat';
+/** Use the server's unique display label, even when clipboard filenames repeat. */
+export function appendAttachmentMention(text: string, file: ChatFile): string {
+  if (!file.label || referencedAttachments(text, [file]).length) return text;
+  return text + (text && !/\s$/.test(text) ? ' ' : '') + '@' + file.label + ' ';
+}
 export function attachmentCandidates(files: ChatFile[]): ChatFile[] {
   return [...new Map(files.filter(file=>file.label).map(file=>[file.id,file])).values()];
 }

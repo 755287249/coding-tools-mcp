@@ -1,7 +1,7 @@
 <script lang="ts">
  import type {ChatMember,ChatAction} from '$lib/api/chat';
  import {t} from '$lib/i18n';
- let {members=[],busy=false,onMention,onConnect,onChange}:{members?:ChatMember[];busy?:boolean;onMention:(name:string)=>void;onConnect:()=>void;onChange:(args:ChatAction)=>void}=$props();
+ let {members=[],busy=false,onMention,onConnect,onChange}:{members?:ChatMember[];busy?:boolean;onMention:(name:string)=>void;onConnect:()=>void;onChange:(args:ChatAction)=>Promise<boolean>}=$props();
  let editing=$state('');let name=$state('');
 </script>
 <div class="members">
@@ -15,7 +15,7 @@
  <button type="button" disabled={busy} onclick={()=>{editing=m.id;name=m.name}}>{$t('chat.renameMember')}</button>
  <button type="button" disabled={busy} onclick={()=>onChange({action:m.paused?'resume_member':'detach_member',member_id:m.id})}>{$t(m.paused?'shell.resume':'shell.pause')}</button>
  {#if m.role!=='coordinator'}<button type="button" disabled={busy} onclick={()=>onChange({action:'set_coordinator',member_id:m.id})}>{$t('chat.makeCoordinator')}</button>{/if}
- </div>{#if editing===m.id}<form onsubmit={e=>{e.preventDefault();onChange({action:'rename_member',member_id:m.id,name});editing='';}}><input aria-label={$t('chat.agentRemark')} bind:value={name} maxlength="80"/><button disabled={busy||!name.trim()}>{$t('Save')}</button><button type="button" onclick={()=>editing=''}>{$t('Cancel')}</button></form>{/if}{/each}
+ </div>{#if editing===m.id}<form onsubmit={async e=>{e.preventDefault();if(await onChange({action:'rename_member',member_id:m.id,name}))editing='';}}><input aria-label={$t('chat.agentRemark')} bind:value={name} maxlength="80"/><button disabled={busy||!name.trim()}>{$t('Save')}</button><button type="button" onclick={()=>editing=''}>{$t('Cancel')}</button></form>{/if}{/each}
  </div></details>{/if}
 </div>
 <style>

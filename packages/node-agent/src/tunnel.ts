@@ -314,6 +314,7 @@ export function tunnelPathAllowed(config: AgentConfig, pathname: string): boolea
     scoped('/mcp/info'),
     scoped('/oauth/authorize'),
     scoped('/oauth/token'),
+    scoped('/oauth/register'),
     `/.well-known/oauth-authorization-server${prefix}`,
     `/.well-known/oauth-protected-resource${prefix}/mcp`
   ]).has(pathname);

@@ -159,6 +159,7 @@ mod tests {
 
     use super::{input_schema, list_tools_for_profile, P0_TOOLS};
     use crate::tools::execution_timeout::ABSOLUTE_JOB_TIMEOUT_MAX_MS;
+    use crate::tools::registry_metadata::CORE_TOOLS;
     use crate::tools::ABSOLUTE_COMMAND_TIMEOUT_MAX_MS;
 
     #[test]
@@ -227,7 +228,10 @@ mod tests {
             .collect();
         let unique: HashSet<_> = names.iter().copied().collect();
 
-        assert_eq!(tools.len(), 40);
+        assert_eq!(tools.len(), CORE_TOOLS.len());
+        for name in ["chat_open", "chat_wait", "chat_reply", "chat_upload", "chat_close"] {
+            assert!(names.contains(&name), "missing local chat tool: {name}");
+        }
         assert_eq!(unique.len(), tools.len());
         assert!(names.contains(&"history_session_bootstrap"));
         assert!(names.contains(&"history_session_checkpoint"));
@@ -269,8 +273,12 @@ mod tests {
     fn guarded_core_adds_only_permission_requests() {
         let trusted = list_tools_for_profile("trusted-core");
         let guarded = list_tools_for_profile("guarded-core");
-        assert_eq!(trusted.len(), 37);
-        assert_eq!(guarded.len(), 38);
+        let trusted_names: HashSet<_> = trusted.iter().map(|tool| tool["name"].as_str().unwrap()).collect();
+        let guarded_names: HashSet<_> = guarded.iter().map(|tool| tool["name"].as_str().unwrap()).collect();
+        assert_eq!(trusted_names.len(), trusted.len());
+        assert_eq!(guarded_names.len(), guarded.len());
+        assert!(trusted_names.is_subset(&guarded_names));
+        assert_eq!(guarded_names.difference(&trusted_names).copied().collect::<HashSet<_>>(), HashSet::from(["request_permissions"]));
         assert!(guarded
             .iter()
             .any(|tool| tool["name"] == "request_permissions"));

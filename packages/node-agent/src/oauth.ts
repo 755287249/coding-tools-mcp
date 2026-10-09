@@ -23,10 +23,16 @@ interface TokenResponse {
   body: unknown;
 }
 
-const allowedOrigins = new Set(['https://chatgpt.com', 'https://chat.openai.com']);
+const allowedOrigins = new Set([
+  'https://chatgpt.com', 'https://chat.openai.com', 'https://claude.ai', 'https://claude.com',
+  'https://vscode.dev', 'https://insiders.vscode.dev'
+]);
+const allowedAppSchemes = new Set(['cursor:', 'vscode:', 'vscode-insiders:', 'windsurf:']);
 const codeTtlMs = 5 * 60_000;
-export const DEFAULT_OAUTH_TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60;
-export const MAX_OAUTH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
+// Keepalive by default: tokens stay valid for ten years. Rotate the token secret to revoke them all.
+export const DEFAULT_OAUTH_TOKEN_TTL_SECONDS = 3650 * 24 * 60 * 60;
+export const MAX_OAUTH_TOKEN_TTL_SECONDS = 3650 * 24 * 60 * 60;
+export const OAUTH_REFRESH_TTL_SECONDS = 3650 * 24 * 60 * 60;
 const loginFailureWindowMs = 60_000;
 const loginBlockMs = 60_000;
 const maxLoginFailures = 5;
@@ -73,7 +79,10 @@ function loopbackHost(value: string): boolean {
 
 export function externalBase(headers: IncomingHttpHeaders, config: AgentConfig): string {
   const configured = config.publicBaseUrl?.trim().replace(/\/$/, '');
-  if (configured) return configured;
+  if (configured) {
+    const live = rotatedQuickTunnelBase(headers, configured);
+    return live ?? configured;
+  }
   const host = safeHost(firstHeader(headers, 'x-forwarded-host'))
     || safeHost(forwardedHeaderParam(headers, 'host'))
     || safeHost(firstHeader(headers, 'host'))
@@ -83,6 +92,22 @@ export function externalBase(headers: IncomingHttpHeaders, config: AgentConfig):
     ? forwardedProto
     : loopbackHost(host) ? 'http' : 'https';
   return `${protocol}://${host}`;
+}
+
+/** Match Desktop when a restarted Quick Tunnel gets a new public hostname. */
+function rotatedQuickTunnelBase(headers: IncomingHttpHeaders, configured: string): string | undefined {
+  try {
+    const previous = new URL(configured);
+    const authority = safeHost(firstHeader(headers, 'x-forwarded-host'))
+      || safeHost(forwardedHeaderParam(headers, 'host')) || safeHost(firstHeader(headers, 'host'));
+    if (!authority || !['http:', 'https:'].includes(previous.protocol)) return;
+    const current = new URL(`https://${authority}`);
+    const quick = (host: string) => host.length > '.trycloudflare.com'.length
+      && host.endsWith('.trycloudflare.com') && /^[a-z0-9.-]+$/i.test(host);
+    if (!quick(previous.hostname) || !quick(current.hostname) || current.username || current.password
+      || current.search || current.hash || current.hostname === previous.hostname) return;
+    return `https://${current.hostname}${previous.pathname.replace(/\/$/, '')}`;
+  } catch { return; }
 }
 
 function wellKnownUrl(baseUrl: string, suffix: string, includeMcp: boolean): string {
@@ -113,8 +138,9 @@ export function authorizationMetadata(base: string, oauth: OAuthRuntime) {
     issuer,
     authorization_endpoint: `${issuer}/oauth/authorize`,
     token_endpoint: `${issuer}/oauth/token`,
+    ...(!oauth.clientSecret ? { registration_endpoint: `${issuer}/oauth/register` } : {}),
     response_types_supported: ['code'],
-    grant_types_supported: ['authorization_code'],
+    grant_types_supported: ['authorization_code', 'refresh_token'],
     code_challenge_methods_supported: ['S256'],
     token_endpoint_auth_methods_supported: oauth.clientSecret ? ['client_secret_post', 'client_secret_basic'] : ['none']
   };
@@ -139,6 +165,7 @@ export function redirectUriAllowed(value: string): boolean {
     if (url.protocol === 'http:') {
       return ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname);
     }
+    if (allowedAppSchemes.has(url.protocol)) return true;
     return url.protocol === 'https:'
       && (url.port === '' || url.port === '443')
       && allowedOrigins.has(url.origin);
@@ -202,6 +229,8 @@ export class OAuthRuntime {
   readonly #pending = new Map<string, PendingCode>();
   readonly #now: () => number;
   readonly #persistPassword?: (password: string) => Promise<void>;
+  /** Single-use passwords are opt-in; by default the authorization password is reusable. */
+  rotatePassword = false;
   #authorizationQueue: Promise<void> = Promise.resolve();
   #loginFailures = 0;
   #loginWindowStartedAt = 0;
@@ -221,19 +250,23 @@ export class OAuthRuntime {
     this.tokenTtlSeconds = Number.isInteger(requestedTokenTtl) && requestedTokenTtl > 0
       ? Math.min(requestedTokenTtl, MAX_OAUTH_TOKEN_TTL_SECONDS)
       : DEFAULT_OAUTH_TOKEN_TTL_SECONDS;
+    this.rotatePassword = config.rotatePassword === true;
     this.#now = now;
     this.#persistPassword = persistPassword;
   }
 
   update(config: AgentConfig['oauth']): void {
     const replacement = new OAuthRuntime(config, this.#now, this.#persistPassword);
+    const credentialsChanged = this.clientId !== replacement.clientId
+      || this.clientSecret !== replacement.clientSecret || this.password !== replacement.password
+      || this.tokenSecret !== replacement.tokenSecret;
     this.clientId = replacement.clientId;
     this.clientSecret = replacement.clientSecret;
     this.password = replacement.password;
     this.tokenSecret = replacement.tokenSecret;
     this.tokenTtlSeconds = replacement.tokenTtlSeconds;
-    this.#pending.clear();
-    this.#resetLoginFailures();
+    this.rotatePassword = replacement.rotatePassword;
+    if (credentialsChanged) { this.#pending.clear(); this.#resetLoginFailures(); }
   }
 
   clientIdAllowed(clientId: string): boolean {
@@ -327,16 +360,18 @@ export class OAuthRuntime {
         };
       }
 
-      const nextPassword = generateAuthorizationPassword();
-      try {
-        await this.#persistPassword?.(nextPassword);
-      } catch {
-        return {
-          status: 503,
-          body: loginPage({ ...values, error: 'Authorization password rotation failed; try again later' })
-        };
+      if (this.rotatePassword) {
+        const nextPassword = generateAuthorizationPassword();
+        try {
+          await this.#persistPassword?.(nextPassword);
+        } catch {
+          return {
+            status: 503,
+            body: loginPage({ ...values, error: 'Authorization password rotation failed; try again later' })
+          };
+        }
+        this.password = nextPassword;
       }
-      this.password = nextPassword;
       this.#resetLoginFailures();
 
       this.#cleanupPending();
@@ -359,8 +394,9 @@ export class OAuthRuntime {
   }
 
   exchangeToken(form: URLSearchParams, headers: IncomingHttpHeaders, base: string): TokenResponse {
-    if (form.get('grant_type') !== 'authorization_code') {
-      return tokenError('unsupported_grant_type', 'Only authorization_code is supported');
+    const grantType = form.get('grant_type');
+    if (grantType !== 'authorization_code' && grantType !== 'refresh_token') {
+      return tokenError('unsupported_grant_type', 'Only authorization_code and refresh_token are supported');
     }
 
     let clientId = form.get('client_id') ?? '';
@@ -374,6 +410,7 @@ export class OAuthRuntime {
     if (this.clientSecret && !constantTimeEqual(clientSecret, this.clientSecret)) {
       return tokenError('invalid_client', 'Invalid client_secret');
     }
+    if (grantType === 'refresh_token') return this.#refresh(form.get('refresh_token') ?? '', clientId, base);
 
     const code = form.get('code') ?? '';
     const redirectUri = form.get('redirect_uri') ?? '';
@@ -383,24 +420,66 @@ export class OAuthRuntime {
     if (!redirectUriAllowed(redirectUri)) return tokenError('invalid_grant', 'redirect_uri is not allowed');
 
     const data = this.#pending.get(code);
-    this.#pending.delete(code);
     if (!data) return tokenError('invalid_grant', 'Unknown or already-used authorization code');
-    if (this.#now() > data.expiresAt) return tokenError('invalid_grant', 'Authorization code expired');
+    if (this.#now() > data.expiresAt) {
+      this.#pending.delete(code);
+      return tokenError('invalid_grant', 'Authorization code expired');
+    }
     if (!constantTimeEqual(data.clientId, clientId)) return tokenError('invalid_grant', 'client_id mismatch');
     if (!constantTimeEqual(data.redirectUri, redirectUri)) return tokenError('invalid_grant', 'redirect_uri mismatch');
     const challenge = createHash('sha256').update(verifier).digest('base64url');
     if (!constantTimeEqual(challenge, data.challenge)) return tokenError('invalid_grant', 'PKCE verification failed');
 
-    const issuer = (data.issuer || base).replace(/\/$/, '');
+    // Only a valid exchange consumes the code; parameter corrections can retry.
+    this.#pending.delete(code);
+    return this.#issueTokens((data.issuer || base).replace(/\/$/, ''), clientId);
+  }
+
+  #issueTokens(issuer: string, clientId: string): TokenResponse {
     const issuedAt = Math.floor(this.#now() / 1000);
     return {
       status: 200,
       body: {
         access_token: signJwt({ iss: issuer, aud: `${issuer}/mcp`, iat: issuedAt, exp: issuedAt + this.tokenTtlSeconds, scope: 'mcp' }, this.tokenSecret),
         token_type: 'Bearer',
-        expires_in: this.tokenTtlSeconds
+        expires_in: this.tokenTtlSeconds,
+        refresh_token: signJwt({
+          iss: issuer, aud: `${issuer}/oauth/refresh`, iat: issuedAt, exp: issuedAt + OAUTH_REFRESH_TTL_SECONDS,
+          scope: 'mcp', typ: 'refresh', cid: clientId
+        }, this.tokenSecret),
+        scope: 'mcp'
       }
     };
+  }
+
+  /** grant_type=refresh_token: renew without re-entering the authorization password. */
+  #refresh(token: string, clientId: string, base: string): TokenResponse {
+    if (!token) return tokenError('invalid_request', 'refresh_token is required');
+    const issuer = base.replace(/\/$/, '');
+    const payload = this.#verifyJwt(token);
+    if (!payload
+      || payload.iss !== issuer
+      || payload.aud !== `${issuer}/oauth/refresh`
+      || payload.typ !== 'refresh') {
+      return tokenError('invalid_grant', 'Invalid or expired refresh_token');
+    }
+    if (typeof payload.cid !== 'string' || !constantTimeEqual(payload.cid, clientId)) {
+      return tokenError('invalid_grant', 'client_id mismatch');
+    }
+    return this.#issueTokens(issuer, clientId);
+  }
+
+  #verifyJwt(token: string): Record<string, unknown> | undefined {
+    const parts = token.trim().split('.');
+    if (parts.length !== 3) return undefined;
+    const expected = createHmac('sha256', this.tokenSecret).update(`${parts[0]}.${parts[1]}`).digest('base64url');
+    if (!constantTimeEqual(parts[2], expected)) return undefined;
+    try {
+      const header = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8')) as { alg?: unknown };
+      const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8')) as Record<string, unknown>;
+      if (header.alg !== 'HS256' || typeof payload.exp !== 'number' || payload.exp < this.#now() / 1000) return undefined;
+      return payload;
+    } catch { return undefined; }
   }
 
   verifyBearer(headers: IncomingHttpHeaders, base: string): boolean {
@@ -413,7 +492,7 @@ export class OAuthRuntime {
     try {
       const header = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8')) as { alg?: unknown };
       const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8')) as {
-        iss?: unknown; aud?: unknown; iat?: unknown; exp?: unknown; scope?: unknown;
+        iss?: unknown; aud?: unknown; iat?: unknown; exp?: unknown; scope?: unknown; typ?: unknown;
       };
       const issuer = base.replace(/\/$/, '');
       return header.alg === 'HS256'
@@ -423,7 +502,8 @@ export class OAuthRuntime {
         && typeof payload.iat === 'number'
         && typeof payload.exp === 'number'
         && payload.exp >= this.#now() / 1000
-        && typeof payload.scope === 'string';
+        && typeof payload.scope === 'string'
+        && payload.typ === undefined;
     } catch { return false; }
   }
 

@@ -2,7 +2,7 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
         "chat_open",
         "Chat open",
-        "Attach to a client-created chat; read returned skill.text and session records, save attachment_id, then call chat_wait. Renew with the same ID before the 10-minute lease expires; never take another attachment.",
+        "Attach to a client-created chat; read returned skill.text and session records, save attachment_id, then call chat_wait. Reuse the saved ID after long tasks or reconnects; calls renew presence automatically. Explicit detach/pause revokes access; never take another attachment.",
         false,
         false,
         false,

@@ -109,7 +109,7 @@
           />
         {/if}
         <CopyFieldRow
-          label={guidedMcp ? $t("One-time password") : $t("Authorization password")}
+          label={$t("Authorization password")}
           value={secrets.oauth_password ?? ""}
           hint={guidedMcp
             ? $t("Enter this after clicking Connect in ChatGPT")

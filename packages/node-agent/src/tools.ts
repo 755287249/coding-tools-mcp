@@ -1,3 +1,4 @@
+import {beginChatOperation,bindChatOperations} from './chat/operations.js';
 import { createHash } from 'node:crypto';
 import type { JsonObject, ToolContext } from './types.js';
 import { toolNamesForProfile, toolsetRevisionForProfile } from './catalog.js';
@@ -654,6 +655,23 @@ export async function callTool(
 }
 
 async function callToolInScope(
+ ctx:ToolContext,name:string,args:JsonObject,meta:unknown,skipPermission=false,
+ processLifecycle?:ProcessRequestLifecycle,telemetryArgs:JsonObject=args,recovery:RecoveryContext={}
+):Promise<JsonObject> {
+ const identity=ctx.conversations.identity(meta);
+ const root=currentExecutionBinding(ctx,identity.key)?.runtime?.workspacePath;
+ const transport=(meta as Record<string,unknown>|undefined)?.['coding-tools/activity-client'];
+ const key=identity.isolated?identity.key:typeof transport==='string'?transport:undefined;
+ const operation=root?beginChatOperation(root,key,name,args):undefined;
+ try {
+  const result=await executeToolInScope(ctx,name,args,meta,skipPermission,processLifecycle,telemetryArgs,recovery);
+  if(root)bindChatOperations(root,key,name,args,result);
+  const warning=operation?.finish(result);if(warning)result.chat_activity_warning=warning;
+  return result;
+ }catch(error){operation?.finish({},true);throw error;}
+}
+
+async function executeToolInScope(
   ctx: ToolContext,
   name: string,
   args: JsonObject,

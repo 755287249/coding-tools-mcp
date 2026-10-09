@@ -280,6 +280,8 @@ test('built-in tunnel exposes only scoped MCP and OAuth routes', () => {
   };
   assert.equal(tunnelPathAllowed(config, '/builtin/clients/device_1/mcp'), true);
   assert.equal(tunnelPathAllowed(config, '/builtin/clients/device_1/oauth/authorize'), true);
+  assert.equal(tunnelPathAllowed(config, '/builtin/clients/device_1/oauth/register'), true);
+  assert.equal(tunnelPathAllowed(config, '/builtin/clients/other/oauth/register'), false);
   assert.equal(tunnelPathAllowed(config, '/.well-known/oauth-protected-resource/builtin/clients/device_1/mcp'), true);
   assert.equal(tunnelPathAllowed(config, '/ui'), false);
   assert.equal(tunnelPathAllowed(config, '/admin/api/config'), false);

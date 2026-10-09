@@ -616,7 +616,8 @@ fn handle_tools_call(state: &SharedState, params: &Value) -> Result<Value, Value
             )
             .map_err(|message| workspace_routing_error(state, host_session_key, message))?;
             task_context = Some(routed.context.clone());
-            let structured = if let Some(retry) = permission_mrtr_retry(params)? {
+            let mut operation = crate::tools::chat::operations::begin(routed.context.workspace.root(), host_session_key, canonical_name, &args);
+            let mut structured = if let Some(retry) = permission_mrtr_retry(params)? {
                 if let Some(pending_name) = routed
                     .context
                     .pending_operations
@@ -638,6 +639,10 @@ fn handle_tools_call(state: &SharedState, params: &Value) -> Result<Value, Value
             } else {
                 call_tool(routed.context.as_ref(), canonical_name, &args)
             };
+            crate::tools::chat::operations::bind(routed.context.workspace.root(), host_session_key, canonical_name, &args, &structured);
+            if let Some(warning) = operation.as_mut().and_then(|op| op.finish(&structured, false)) {
+                structured["chat_activity_warning"] = json!(warning);
+            }
             let structured = enrich_alternate_workspace_recovery(
                 state,
                 host_session_key,
@@ -3203,4 +3208,29 @@ mod tests {
         );
         assert_eq!(state.sessions.active_slots_available(), 16);
     }
+}
+
+#[cfg(test)]
+mod chat_operation_dispatch_tests {
+ use super::*;
+ use super::{handle_request,handle_request_async};
+ use crate::tools::chat;
+ use std::fs;
+ use crate::tools::ToolContext;
+ use std::sync::Arc;
+ #[tokio::test]
+ async fn real_async_and_sync_mcp_dispatch_preserve_operation_evidence(){
+  let root=tempfile::tempdir().unwrap();let harness=tempfile::tempdir().unwrap();
+  let ctx=Arc::new(ToolContext::for_test(root.path().into(),harness.path().into()).unwrap());
+  let cid=chat::ui(root.path(),&json!({"action":"create"})).unwrap()["session"]["id"].clone();
+  let request=|name:&str,args:Value|json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":args,"_meta":{"openai/session":"rust-operations-test"}}});
+  let opened=handle_request_async(ctx.clone(),request("chat_open",json!({"chat_id":cid,"agent_name":"Builder"}))).await;
+  assert_eq!(opened["result"]["structuredContent"]["ok"],true,"{opened}");let aid=opened["result"]["structuredContent"]["attachment_id"].clone();
+  chat::ui(root.path(),&json!({"action":"send","chat_id":cid,"message_id":"u","text":"read"})).unwrap();
+  let waited=handle_request_async(ctx.clone(),request("chat_wait",json!({"chat_id":cid,"attachment_id":aid,"timeout_ms":0}))).await;assert_eq!(waited["result"]["structuredContent"]["message"]["id"],"u","{waited}");
+  fs::write(root.path().join("sample.txt"),"private-file-body").unwrap();
+  let result=handle_request_async(ctx.clone(),request("read_file",json!({"path":"sample.txt"}))).await;assert_eq!(result["result"]["structuredContent"]["ok"],true,"{result}");
+  let failed=handle_request(&ctx,&request("read_file",json!({"path":"missing.txt"})));assert_eq!(failed["result"]["structuredContent"]["ok"],false,"{failed}");
+  let local=chat::ui(root.path(),&json!({"action":"read","chat_id":cid})).unwrap();let events=local["session"]["operations"].as_array().unwrap();assert_eq!(events.len(),2);assert_eq!(events[0]["paths"],json!(["sample.txt"]));assert_eq!(events[0]["agent_name"],"Builder");assert_eq!(events[1]["status"],"failed");assert!(!serde_json::to_string(events).unwrap().contains("private-file-body"));
+ }
 }

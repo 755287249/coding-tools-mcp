@@ -36,11 +36,12 @@ test('unavailable storage retains memory drafts without throwing and reports the
   assert.equal(store.load('a').draft.text,'');
 });
 
-test('corrupt storage is bounded and conversation accents are stable',()=>{
+test('corrupt storage is ignored, long drafts are preserved and conversation accents are stable',()=>{
   const disk=storage();disk.setItem('bad','{broken');
   assert.equal(createDraftStore(()=>disk).load('bad').draft.text,'');
-  disk.setItem('bad',JSON.stringify({text:'x'.repeat(32001),attachments:[]}));
-  assert.equal(createDraftStore(()=>disk).load('bad').draft.text,'');
+  const long='中文😀'.repeat(9000);
+  disk.setItem('long',JSON.stringify({text:long,attachments:[],retry:null}));
+  assert.equal(createDraftStore(()=>disk).load('long').draft.text,long);
   assert.equal(conversationAccent('a'),conversationAccent('a'));
   assert.notEqual(conversationAccent('a'),conversationAccent('b'));
   assert.match(conversationAccent('a'),/^hsl\(\d+ 34% 55%\)$/);

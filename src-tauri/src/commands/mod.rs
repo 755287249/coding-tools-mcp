@@ -42,7 +42,7 @@ pub use tunnel::{get_frp_snippet, restart_tunnel, start_tunnel, stop_tunnel, tes
 pub use workspace::{
     add_workspace_folder, add_wsl_workspace_folder, create_workspace, delete_workspace,
     export_shared_workspace, export_workspace_pack, import_workspace_pack, list_workspaces,
-    list_wsl_distributions, open_shared_workspace, open_workspace_directory,
+    list_wsl_distributions, open_external_url, open_shared_workspace, open_workspace_directory,
     remove_workspace_folder, update_workspace,
 };
 pub use workspace_features::{

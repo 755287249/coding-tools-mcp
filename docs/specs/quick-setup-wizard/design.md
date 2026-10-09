@@ -114,7 +114,7 @@ docs/specs/quick-setup-wizard/
 
 **決策**：測試通道並啟動成功後刷新 profile，再將最終值交給 `GptQuickCopy`。
 
-MCP 快速引導使用 `GptQuickCopy` 的獨立 guided 模式，只顯示 Public MCP endpoint、OAuth Client ID 與一次性密碼。MCP runtime 使用 PKCE 且不驗證 Client Secret，因此教學要求其他 OAuth 欄位保留預設；一般工作區頁仍保留原本的完整設定卡。
+MCP 快速引導使用 `GptQuickCopy` 的獨立 guided 模式，只顯示 Public MCP endpoint、OAuth Client ID 與授權密碼（重新產生前可重複使用）。MCP runtime 使用 PKCE 且不驗證 Client Secret，因此教學要求其他 OAuth 欄位保留預設；一般工作區頁仍保留原本的完整設定卡。
 
 **理由**：內建 enrollment 與 Cloudflare Quick 都可能在啟動期間更新公開 URL。
 

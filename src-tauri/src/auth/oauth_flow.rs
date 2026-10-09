@@ -13,8 +13,14 @@ use sha2::{Digest, Sha256};
 use super::bearer::constant_time_eq_str;
 
 pub const OAUTH_CODE_TTL_SECONDS: u64 = 300;
-pub const OAUTH_TOKEN_TTL_SECONDS: i64 = 60 * 60 * 24 * 7;
-pub const OAUTH_TOKEN_TTL_MAX_SECONDS: i64 = 60 * 60 * 24 * 30;
+/// Keepalive by default: tokens stay valid for ten years. Regenerate the
+/// workspace token secret to revoke every issued token at once.
+pub const OAUTH_TOKEN_TTL_SECONDS: i64 = 60 * 60 * 24 * 3650;
+pub const OAUTH_TOKEN_TTL_MAX_SECONDS: i64 = 60 * 60 * 24 * 3650;
+/// Refresh tokens let a client that lost (or outlived) its access token renew
+/// without re-entering the authorization password.
+pub const OAUTH_REFRESH_TTL_SECONDS: i64 = 60 * 60 * 24 * 3650;
+const REFRESH_TOKEN_TYPE: &str = "refresh";
 #[allow(dead_code)]
 pub const OAUTH_MAX_BODY_BYTES: usize = 8_192;
 
@@ -42,6 +48,9 @@ pub struct OAuthRuntime {
     token_ttl_seconds: i64,
     pending: Arc<Mutex<HashMap<String, PendingCode>>>,
     password_persister: Option<PasswordPersister>,
+    /// When true the authorization password is single-use and rotates after
+    /// each successful authorization. Off by default: the password is reusable.
+    rotate_password: bool,
     authorization_lock: Arc<Mutex<()>>,
 }
 
@@ -63,6 +72,12 @@ struct TokenClaims {
     iat: i64,
     exp: i64,
     scope: String,
+    /// `None` for access tokens; `Some("refresh")` for refresh tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    typ: Option<String>,
+    /// Client bound to a refresh token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cid: Option<String>,
 }
 
 impl OAuthRuntime {
@@ -106,8 +121,15 @@ impl OAuthRuntime {
             token_ttl_seconds: OAUTH_TOKEN_TTL_SECONDS,
             pending: Arc::new(Mutex::new(HashMap::new())),
             password_persister,
+            rotate_password: false,
             authorization_lock: Arc::new(Mutex::new(())),
         })
+    }
+
+    /// Opt in to single-use authorization passwords.
+    pub fn with_password_rotation(mut self, rotate: bool) -> Self {
+        self.rotate_password = rotate;
+        self
     }
 
     pub fn with_token_ttl_seconds(mut self, token_ttl_seconds: u64) -> Result<Self, String> {
@@ -139,7 +161,7 @@ impl OAuthRuntime {
             &DecodingKey::from_secret(self.token_secret.as_bytes()),
             &validation,
         )
-        .is_ok()
+        .is_ok_and(|data| data.claims.typ.is_none())
     }
 }
 
@@ -221,14 +243,15 @@ pub struct AuthorizeForm {
 }
 
 #[derive(Debug, Deserialize, Default)]
+#[serde(default)]
 pub struct TokenForm {
     pub grant_type: String,
     pub code: String,
     pub redirect_uri: String,
     pub code_verifier: String,
     pub client_id: String,
-    #[serde(default)]
     pub client_secret: String,
+    pub refresh_token: String,
 }
 
 pub fn authorize_get(
@@ -312,26 +335,29 @@ pub fn authorize_post(oauth: &OAuthRuntime, form: AuthorizeForm, server_url: &st
             .into_response();
     }
 
-    let next_password =
-        format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4()).replace('-', "");
-    if let Some(persist) = oauth.password_persister.as_ref() {
-        if persist(&next_password).is_err() {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Html(login_page(
-                    &form.client_id,
-                    &form.redirect_uri,
-                    &form.code_challenge,
-                    &form.code_challenge_method,
-                    &form.state,
-                    "Authorization password rotation failed; try again later",
-                    None,
-                )),
-            )
-                .into_response();
+    // Single-use passwords are opt-in; by default the password stays reusable.
+    if oauth.rotate_password {
+        let next_password =
+            format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4()).replace('-', "");
+        if let Some(persist) = oauth.password_persister.as_ref() {
+            if persist(&next_password).is_err() {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Html(login_page(
+                        &form.client_id,
+                        &form.redirect_uri,
+                        &form.code_challenge,
+                        &form.code_challenge_method,
+                        &form.state,
+                        "Authorization password rotation failed; try again later",
+                        None,
+                    )),
+                )
+                    .into_response();
+            }
         }
+        *oauth.password.lock().expect("oauth password lock") = next_password;
     }
-    *oauth.password.lock().expect("oauth password lock") = next_password;
 
     let server_url = server_url.trim_end_matches('/').to_string();
     let code = uuid::Uuid::new_v4().to_string().replace('-', "");
@@ -372,10 +398,10 @@ pub fn token_exchange(
     mut form: TokenForm,
     server_url: &str,
 ) -> Response {
-    if form.grant_type != "authorization_code" {
+    if form.grant_type != "authorization_code" && form.grant_type != "refresh_token" {
         return token_error(
             "unsupported_grant_type",
-            "Only authorization_code is supported",
+            "Only authorization_code and refresh_token are supported",
         );
     }
 
@@ -396,6 +422,9 @@ pub fn token_exchange(
             return token_error("invalid_client", "Invalid client_secret");
         }
     }
+    if form.grant_type == "refresh_token" {
+        return refresh_exchange(oauth, &form, server_url);
+    }
     if form.code.is_empty() {
         return token_error("invalid_grant", "code is required");
     }
@@ -406,17 +435,17 @@ pub fn token_exchange(
         return token_error("invalid_grant", "redirect_uri is not allowed");
     }
 
-    let code_data = {
-        let mut pending = oauth.pending.lock().expect("oauth pending lock");
-        pending.remove(&form.code)
-    };
-    let Some(code_data) = code_data else {
+    // Keep validation and consumption under one lock: a failed exchange may be
+    // corrected, while simultaneous valid requests can redeem the code only once.
+    let mut pending = oauth.pending.lock().expect("oauth pending lock");
+    let Some(code_data) = pending.get(&form.code).cloned() else {
         return token_error(
             "invalid_grant",
             "Unknown or already-used authorization code",
         );
     };
     if unix_now() > code_data.expires_at {
+        pending.remove(&form.code);
         return token_error("invalid_grant", "Authorization code expired");
     }
     if !constant_time_eq_str(&code_data.client_id, &form.client_id) {
@@ -429,29 +458,88 @@ pub fn token_exchange(
         return token_error("invalid_grant", "PKCE verification failed");
     }
 
+    pending.remove(&form.code);
+    drop(pending);
     let issuer = if code_data.server_url.trim().is_empty() {
         server_url.trim_end_matches('/').to_string()
     } else {
         code_data.server_url.trim_end_matches('/').to_string()
     };
+    issue_token_pair(oauth, &issuer, &form.client_id)
+}
+
+fn refresh_audience(issuer: &str) -> String {
+    format!("{issuer}/oauth/refresh")
+}
+
+fn issue_token_pair(oauth: &OAuthRuntime, issuer: &str, client_id: &str) -> Response {
     let audience = format!("{issuer}/mcp");
-    match create_access_token(
-        &issuer,
-        &audience,
-        &oauth.token_secret,
-        oauth.token_ttl_seconds,
-    ) {
-        Ok(access_token) => (
+    let access = create_access_token(issuer, &audience, &oauth.token_secret, oauth.token_ttl_seconds);
+    let refresh = create_refresh_token(issuer, client_id, &oauth.token_secret);
+    match (access, refresh) {
+        (Ok(access_token), Ok(refresh_token)) => (
             StatusCode::OK,
+            [(axum::http::header::CACHE_CONTROL, "no-store")],
             axum::Json(json!({
                 "access_token": access_token,
                 "token_type": "Bearer",
-                "expires_in": oauth.token_ttl_seconds
+                "expires_in": oauth.token_ttl_seconds,
+                "refresh_token": refresh_token,
+                "scope": "mcp"
             })),
         )
             .into_response(),
-        Err(_) => token_error("server_error", "Failed to issue access token"),
+        _ => token_error("server_error", "Failed to issue access token"),
     }
+}
+
+/// `grant_type=refresh_token`: verify a refresh token signed by this server for
+/// the same client and issue a fresh access/refresh pair. Rotating the
+/// workspace token secret revokes every outstanding refresh token.
+fn refresh_exchange(oauth: &OAuthRuntime, form: &TokenForm, server_url: &str) -> Response {
+    if form.refresh_token.is_empty() {
+        return token_error("invalid_request", "refresh_token is required");
+    }
+    let issuer = server_url.trim_end_matches('/').to_string();
+    let audience = refresh_audience(&issuer);
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.set_audience(&[audience.as_str()]);
+    validation.set_issuer(&[issuer.as_str()]);
+    let claims = match decode::<TokenClaims>(
+        &form.refresh_token,
+        &DecodingKey::from_secret(oauth.token_secret.as_bytes()),
+        &validation,
+    ) {
+        Ok(data) => data.claims,
+        Err(_) => return token_error("invalid_grant", "Invalid or expired refresh_token"),
+    };
+    if claims.typ.as_deref() != Some(REFRESH_TOKEN_TYPE) {
+        return token_error("invalid_grant", "Invalid or expired refresh_token");
+    }
+    let bound_client = claims.cid.unwrap_or_default();
+    if !constant_time_eq_str(&bound_client, &form.client_id) {
+        return token_error("invalid_grant", "client_id mismatch");
+    }
+    issue_token_pair(oauth, &issuer, &form.client_id)
+}
+
+fn create_refresh_token(issuer: &str, client_id: &str, token_secret: &str) -> Result<String, ()> {
+    let now = unix_now() as i64;
+    let claims = TokenClaims {
+        iss: issuer.to_string(),
+        aud: refresh_audience(issuer),
+        iat: now,
+        exp: now + OAUTH_REFRESH_TTL_SECONDS,
+        scope: "mcp".into(),
+        typ: Some(REFRESH_TOKEN_TYPE.into()),
+        cid: Some(client_id.to_string()),
+    };
+    encode(
+        &Header::new(Algorithm::HS256),
+        &claims,
+        &EncodingKey::from_secret(token_secret.as_bytes()),
+    )
+    .map_err(|_| ())
 }
 
 fn create_access_token(
@@ -467,6 +555,8 @@ fn create_access_token(
         iat: now,
         exp: now + ttl,
         scope: "mcp".into(),
+        typ: None,
+        cid: None,
     };
     encode(
         &Header::new(Algorithm::HS256),
@@ -662,10 +752,132 @@ mod tests {
                 code_verifier: verifier.into(),
                 client_id: "chatgpt-client-test".into(),
                 client_secret: String::new(),
+                ..Default::default()
             },
             "https://lb.example.com",
         );
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn corrected_exchange_preserves_code_until_one_success_even_under_concurrency() {
+        let oauth = OAuthRuntime::try_new(
+            "https://audit.example".into(), "audit-client".into(), None,
+            Some("synthetic-password".into()), Some("synthetic-signing-secret".into()),
+        ).unwrap();
+        let verifier = "a".repeat(43);
+        oauth.pending.lock().unwrap().insert("audit-code".into(), PendingCode {
+            code_challenge: URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes())),
+            client_id: "audit-client".into(), redirect_uri: "http://127.0.0.1:8765/callback".into(),
+            state: "state".into(), expires_at: unix_now() + 300, server_url: "https://audit.example".into(),
+        });
+        let form = || TokenForm {
+            grant_type: "authorization_code".into(), code: "audit-code".into(),
+            client_id: "audit-client".into(), redirect_uri: "http://127.0.0.1:8765/callback".into(),
+            code_verifier: "a".repeat(43), ..Default::default()
+        };
+        let mut wrong = form(); wrong.redirect_uri = "http://127.0.0.1:8766/callback".into();
+        assert_eq!(token_exchange(&oauth, &HeaderMap::new(), wrong, "https://audit.example").status(), StatusCode::BAD_REQUEST);
+        let mut wrong = form(); wrong.code_verifier = "b".repeat(43);
+        assert_eq!(token_exchange(&oauth, &HeaderMap::new(), wrong, "https://audit.example").status(), StatusCode::BAD_REQUEST);
+        assert!(oauth.pending.lock().unwrap().contains_key("audit-code"));
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let handles: Vec<_> = (0..2).map(|_| {
+            let runtime = oauth.clone(); let barrier = barrier.clone(); let request = form();
+            std::thread::spawn(move || { barrier.wait(); token_exchange(&runtime, &HeaderMap::new(), request, "https://audit.example").status() })
+        }).collect();
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert_eq!(results.iter().filter(|&&s| s == StatusCode::OK).count(), 1);
+        assert_eq!(results.iter().filter(|&&s| s == StatusCode::BAD_REQUEST).count(), 1);
+        assert!(oauth.pending.lock().unwrap().is_empty());
+    }
+
+    fn token_json(response: Response) -> serde_json::Value {
+        let body = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(axum::body::to_bytes(response.into_body(), 1 << 20))
+            .expect("token body");
+        serde_json::from_slice(&body).expect("token json")
+    }
+
+    #[test]
+    fn refresh_token_renews_access_without_password() {
+        let base = "https://lb.example.com";
+        let oauth = OAuthRuntime::try_new(
+            base.into(),
+            "chatgpt-client-test".into(),
+            None,
+            Some("test-password".into()),
+            Some("token-signing-secret".into()),
+        )
+        .expect("valid OAuth runtime");
+        let refresh = create_refresh_token(base, "chatgpt-client-test", "token-signing-secret")
+            .expect("refresh token");
+        // A refresh token is never accepted as a bearer access token.
+        assert!(!oauth.verify_access_token(&refresh, base));
+
+        let form = |token: &str, client: &str| TokenForm {
+            grant_type: "refresh_token".into(),
+            refresh_token: token.into(),
+            client_id: client.into(),
+            ..Default::default()
+        };
+        let response = token_exchange(&oauth, &HeaderMap::new(), form(&refresh, "chatgpt-client-test"), base);
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = token_json(response);
+        let access = body["access_token"].as_str().expect("access token");
+        assert!(oauth.verify_access_token(access, base));
+        let rotated = body["refresh_token"].as_str().expect("rotated refresh token");
+        assert!(!oauth.verify_access_token(rotated, base));
+
+        // An access token cannot be used as a refresh token.
+        let misuse = token_exchange(&oauth, &HeaderMap::new(), form(access, "chatgpt-client-test"), base);
+        assert_eq!(misuse.status(), StatusCode::BAD_REQUEST);
+        // Garbage and empty refresh tokens are rejected.
+        let garbage = token_exchange(&oauth, &HeaderMap::new(), form("not-a-token", "chatgpt-client-test"), base);
+        assert_eq!(garbage.status(), StatusCode::BAD_REQUEST);
+        let empty = token_exchange(&oauth, &HeaderMap::new(), form("", "chatgpt-client-test"), base);
+        assert_eq!(empty.status(), StatusCode::BAD_REQUEST);
+        let expired = TokenClaims {
+            iss: base.into(), aud: refresh_audience(base), iat: 1, exp: 2,
+            scope: "mcp".into(), typ: Some(REFRESH_TOKEN_TYPE.into()),
+            cid: Some("chatgpt-client-test".into()),
+        };
+        let expired = encode(&Header::new(Algorithm::HS256), &expired,
+            &EncodingKey::from_secret(b"token-signing-secret")).unwrap();
+        assert_eq!(token_exchange(&oauth, &HeaderMap::new(), form(&expired, "chatgpt-client-test"), base).status(), StatusCode::BAD_REQUEST);
+        assert_eq!(token_exchange(&oauth, &HeaderMap::new(), form(&refresh, "chatgpt-client-test"), "https://other.example").status(), StatusCode::BAD_REQUEST);
+        // A token signed with another secret is rejected.
+        let foreign = create_refresh_token(base, "chatgpt-client-test", "other-secret").unwrap();
+        let foreign = token_exchange(&oauth, &HeaderMap::new(), form(&foreign, "chatgpt-client-test"), base);
+        assert_eq!(foreign.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn refresh_token_is_bound_to_its_client() {
+        let base = "https://lb.example.com";
+        let oauth = OAuthRuntime::try_new(
+            base.into(),
+            "client-b".into(),
+            None,
+            Some("test-password".into()),
+            Some("token-signing-secret".into()),
+        )
+        .expect("valid OAuth runtime");
+        let refresh = create_refresh_token(base, "client-a", "token-signing-secret").unwrap();
+        let response = token_exchange(
+            &oauth,
+            &HeaderMap::new(),
+            TokenForm {
+                grant_type: "refresh_token".into(),
+                refresh_token: refresh,
+                client_id: "client-b".into(),
+                ..Default::default()
+            },
+            base,
+        );
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[test]
@@ -767,6 +979,23 @@ mod tests {
     }
 
     #[test]
+    fn authorization_password_is_reusable_and_tokens_survive_runtime_restart() {
+        let create = || OAuthRuntime::try_new(
+            "https://lb.example.com".into(), "chatgpt-client-test".into(), None,
+            Some("test-password".into()), Some("token-signing-secret".into()),
+        ).unwrap();
+        let oauth = create();
+        for state in ["first", "retry", "reconnect"] {
+            let response = authorize_post(&oauth, authorize_form("test-password", state), "https://lb.example.com");
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        }
+        assert_eq!(*oauth.password.lock().unwrap(), "test-password");
+        let pair = token_json(issue_token_pair(&oauth, "https://lb.example.com", "chatgpt-client-test"));
+        assert_eq!(pair["expires_in"], OAUTH_TOKEN_TTL_SECONDS);
+        assert!(create().verify_access_token(pair["access_token"].as_str().unwrap(), "https://lb.example.com"));
+    }
+
+    #[test]
     fn authorization_password_is_single_use_under_concurrency() {
         let persisted = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let persisted_for_callback = persisted.clone();
@@ -784,6 +1013,7 @@ mod tests {
                 Ok(())
             })),
         )
+        .map(|oauth| oauth.with_password_rotation(true))
         .expect("valid OAuth runtime");
 
         let first_runtime = oauth.clone();
@@ -841,6 +1071,7 @@ mod tests {
                 Err("simulated persistence failure".into())
             })),
         )
+        .map(|oauth| oauth.with_password_rotation(true))
         .expect("valid OAuth runtime");
         let response = authorize_post(
             &oauth,
@@ -856,7 +1087,7 @@ mod tests {
     }
 
     #[test]
-    fn oauth_token_ttl_is_configurable_with_a_thirty_day_cap() {
+    fn oauth_token_ttl_is_configurable_with_a_ten_year_cap() {
         let oauth = OAuthRuntime::try_new(
             "https://lb.example.com".into(),
             "chatgpt-client-test".into(),
@@ -877,7 +1108,7 @@ mod tests {
             Some("token-signing-secret".into()),
         )
         .expect("valid OAuth runtime")
-        .with_token_ttl_seconds(365 * 24 * 60 * 60)
+        .with_token_ttl_seconds(100 * 365 * 24 * 60 * 60)
         .expect("capped TTL");
         assert_eq!(capped.token_ttl_seconds, OAUTH_TOKEN_TTL_MAX_SECONDS);
 

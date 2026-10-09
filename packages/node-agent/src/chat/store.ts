@@ -1,3 +1,4 @@
+import {operationsMarkdown, type ChatOperation} from './operations.js';
 import * as group from './group.js';
 import type {ChatMember} from './group.js';
 import {reduceChatPlan, chatPlanSummary, chatPlanMarkdown, type ChatTaskPlan} from './plan.js';
@@ -13,7 +14,7 @@ import { resolveChatPath } from './reveal.js';
 export interface ChatFile { label?: string; local_reference?: boolean; id: string; name: string; path: string; mime: string; size: number; sha256: string }
 export interface ToolEvent { name: string; status: 'running' | 'completed' | 'failed'; input?: string; output?: string; output_truncated?: boolean }
 export interface ChatMessage { received_by?:string[]; agent_id?:string;agent_name?:string;recipient_ids?:string[];agent_plans?:{agent_id:string;plan:ChatTaskPlan}[]; task_plan?:ChatTaskPlan; kind?: 'connection_request' | 'assignment'; awaiting_user?: boolean; received_at?: number; attachments?: ChatFile[]; tool_event?: ToolEvent; id: string; role: 'user' | 'assistant'; text: string; created_at: number; reply_to?: string; final?: boolean }
-export interface ChatSession { mode?:'work'|'group';members?:ChatMember[];agent_name?:string; pinned?: boolean; queue?: ChatMessage[]; queue_mode?: 'merge' | 'split'; queue_receipts?: Record<string,string>; title_custom?: boolean; files?: ChatFile[]; version: 1|2; id: string; title: string; created_at: number; updated_at: number; closed: boolean; messages: ChatMessage[]; attachment_id: string; lease_until: number }
+export interface ChatSession { work_member?:ChatMember; mode?:'work'|'group';members?:ChatMember[];agent_name?:string; pinned?: boolean; archived?: boolean; queue?: ChatMessage[]; queue_mode?: 'merge' | 'split'; queue_receipts?: Record<string,string>; title_custom?: boolean; files?: ChatFile[]; version: 1|2; id: string; title: string; created_at: number; updated_at: number; closed: boolean; messages: ChatMessage[]; attachment_id: string; lease_until: number }
 const DIR = 'docs/chat-sessions';
 const ASSET_DIR = 'mcp-assistant/chat-assets';
 const ARTIFACT_DIR = 'mcp-assistant/artifacts/';
@@ -98,7 +99,7 @@ function view(root: string, s: ChatSession) {
   const work_state = !message ? null : message.received_at || s.messages.some(r => r.role === 'assistant' && r.reply_to === message.id) ? 'processing' : 'queued';
   const members=group.members(s).map(m=>({id:m.id,name:m.name,role:m.role,paused:m.paused===true,status:s.closed?'offline':waiters.has(key(root,s.id)+':'+m.attachment_id)?'waiting':m.lease_until>Date.now()?'connected':'offline'}));
   const presence=members.some(m=>m.status==='waiting')?'waiting':members.some(m=>m.status==='connected')?'connected':'offline';
-  return { mode:s.mode??'work',members,agent_name:s.agent_name, pinned:s.pinned===true, work_state, id: s.id, title: s.title, created_at: s.created_at, updated_at: s.updated_at, closed: s.closed, messages: s.messages, assistant_message_count: s.messages.filter(m => m.role === 'assistant').length,
+  return { mode:s.mode??'work',members,agent_name:s.agent_name, pinned:s.pinned===true, archived:s.archived===true, work_state, id: s.id, title: s.title, created_at: s.created_at, updated_at: s.updated_at, closed: s.closed, messages: s.messages, assistant_message_count: s.messages.filter(m => m.role === 'assistant').length,
     status: s.closed ? 'closed' : group.grouped(s)?presence:waiters.has(key(root, s.id)+':'+s.attachment_id) ? 'waiting' : s.lease_until > Date.now() ? 'connected' : 'offline',
     archive_path: `${DIR}/${s.id}.md` };
 }
@@ -220,7 +221,7 @@ export function chatUi(root: string, args: Record<string, unknown>): Record<stri
     if (action === 'list') {
       const sessions = readdirSync(safe(root, DIR)).filter(n => /^[a-zA-Z0-9_-]{1,80}\.json$/.test(n)).map(n => {
         const s = view(root, load(root, n.slice(0, -5))); return { ...s, messages: undefined };
-      }).sort((a, b) => Number(b.pinned)-Number(a.pinned)||b.updated_at-a.updated_at);
+      }).sort((a, b) => Number(a.archived)-Number(b.archived)||Number(b.pinned)-Number(a.pinned)||b.updated_at-a.updated_at);
       return { sessions };
     }
     if (action === 'create') {
@@ -270,16 +271,42 @@ export function chatUi(root: string, args: Record<string, unknown>): Record<stri
       save(root, s);
     } else if(action==='set_queue_mode'){if(args.mode!=='merge'&&args.mode!=='split')throw new Error('Invalid queue mode');s.queue_mode=args.mode;save(root,s);}
     else if(action==='pin'){if(typeof args.pinned!=='boolean')throw new Error('pinned must be a boolean');s.pinned=args.pinned;save(root,s);}
+    else if(action==='archive'){if(typeof args.archived!=='boolean')throw new Error('archived must be a boolean');s.archived=args.archived;save(root,s);}
+    else if(action==='delete'){
+      const status=view(root,s).status;
+      if(status==='connected'||status==='waiting')throw new Error('Disconnect the AI before deleting this conversation');
+      deleteSessionFiles(root,s.id);
+      return {deleted:true,chat_id:s.id};
+    }
     else if (action === 'rename') { s.title = text(args.title, 240).replace(/\s+/gu, ' '); s.title_custom = true; s.updated_at = Date.now(); save(root, s); }
-    else if (action === 'detach') { for(const m of group.members(s))m.lease_until=0;s.attachment_id = ''; s.lease_until = 0; s.updated_at = Date.now(); save(root, s); }
+    else if (action === 'detach') { for(const m of group.members(s)){m.lease_until=0;m.paused=true;}s.attachment_id = ''; s.lease_until = 0; s.updated_at = Date.now(); save(root, s); }
     else if (action === 'close') { s.closed = true; s.attachment_id = ''; s.lease_until = 0; s.updated_at = Date.now(); save(root, s); }
     else if (action !== 'read') throw new Error('Unknown chat action');
     return { session: localView(root, s) };
   });
 }
+/** Removes the JSON record, Markdown projection, `<id>.*` sidecars, pasted `<id>-*.<image>` files and chat assets. */
+function deleteSessionFiles(root: string, id: string): void {
+  const dotted = `${id}.`; const dashed = `${id}-`;
+  const targets: string[] = [];
+  // Validate every path before deleting anything; a bad asset must not erase the transcript.
+  for (const name of readdirSync(safe(root, DIR))) {
+    const image = /\.(png|jpe?g|gif|webp|bmp)$/i.test(name);
+    if (!name.startsWith(dotted) && !(name.startsWith(dashed) && image)) continue;
+    const target = safe(root, `${DIR}/${name}`);
+    if (lstatSync(target).isFile()) targets.push(target);
+  }
+  const assets = safe(root, `${ASSET_DIR}/${id}`);
+  if (existsSync(assets) && !lstatSync(assets).isDirectory()) throw new Error('Chat asset path is not a directory');
+  if (existsSync(assets)) rmSync(assets, { recursive: true, force: true });
+  const record = file(root, id);
+  for (const target of targets.filter(target => target !== record)) rmSync(target, { force: true });
+  rmSync(record, { force: true });
+}
 function owned(s: ChatSession, attachment: unknown): void {
   if(group.grouped(s)){group.memberFor(s,attachment);return;}
-  if (!attachment || attachment !== s.attachment_id || s.lease_until <= Date.now()) throw new Error('Chat attachment expired; call chat_open again');
+  // The lease only governs takeover by another AI; the holder keeps working through long tasks.
+  if (!attachment || attachment !== s.attachment_id) throw new Error('Chat attachment expired; call chat_open again');
 }
 export function chatTool(root: string, name: string, args: Record<string, unknown>): Record<string, unknown> {
   return locked(root, () => {
@@ -288,8 +315,11 @@ export function chatTool(root: string, name: string, args: Record<string, unknow
     if (name === 'chat_open') {
       if(group.grouped(s)){const member=group.openGroup(s,args);group.bindTargets(s);save(root,s);return {ok:true,attachment_id:member.attachment_id,agent_id:member.id,role:member.role,session:view(root,s),instruction: 'Read skill.text; reply only to your delivered message IDs. Call chat_wait.',skill:localChatSkill};}
       if(args.agent_name!==undefined)s.agent_name=group.memberName(args.agent_name);
-      if (s.lease_until > Date.now() && args.attachment_id !== s.attachment_id) throw new Error('Conversation already attached; close it in the UI or wait for the lease to expire');
-      if (s.lease_until <= Date.now()) s.attachment_id = randomUUID();
+      // Keepalive: the saved attachment_id resumes even after the lease lapsed, unless another AI attached meanwhile.
+      const resuming = typeof args.attachment_id === 'string' && !!args.attachment_id && args.attachment_id === s.attachment_id;
+      if(args.attachment_id && !resuming)throw new Error('Chat attachment expired or replaced; start a new connection from the UI');
+      if (!resuming && s.lease_until > Date.now()) throw new Error('Conversation already attached; close it in the UI or wait for the lease to expire');
+      if (!resuming) s.attachment_id = randomUUID();
       group.renew(s,args.attachment_id); save(root, s);
       return { ok: true, attachment_id: s.attachment_id, session: view(root, s), instruction: 'Read skill.text and follow it for this session; save attachment_id and call chat_wait now.', skill: localChatSkill };
     }
@@ -442,14 +472,16 @@ function awaitingConfirmation(s: ChatSession): boolean {
 function queuedFingerprint(content: string, attachments: ChatFile[]): string {
   return createHash('sha256').update(JSON.stringify([content,attachments.map(f=>f.id)])).digest('hex');
 }
-function localView(root: string, s: ChatSession) {return {...view(root,s),queued_messages:s.queue ?? [],queue_mode:group.grouped(s)?'split':s.queue_mode ?? 'merge'};}
+function localView(root: string, s: ChatSession) {return {...view(root,s),connection_id:s.attachment_id?createHash('sha256').update(s.attachment_id).digest('hex').slice(0,12):undefined,...readChatOperations(root,s.id),queued_messages:s.queue ?? [],queue_mode:s.queue_mode ?? (group.grouped(s)?'split':'merge')};}
 function publishQueued(s: ChatSession): void {
   if(pending(s)||awaitingConfirmation(s)||!s.queue?.length)return;
-  const items=s.queue.splice(0,group.grouped(s)||s.queue_mode==='split'?1:s.queue.length);
+  const items=s.queue.splice(0,(s.queue_mode ?? (group.grouped(s)?'split':'merge'))==='split'?1:s.queue.length);
   const attachments=[...new Map(items.flatMap(m=>m.attachments??[]).map(f=>[f.id,f])).values()];
   const message:ChatMessage={...items[0],text:items.length===1?items[0].text:items.map((m,i)=>`队列${i+1}：${m.text}`).join('\n\n'),attachments,created_at:Date.now()};
   for(const item of items)Object.defineProperty(s.queue_receipts??={},item.id,{value:queuedFingerprint(item.text,item.attachments??[]),enumerable:true,writable:true,configurable:true});
-  if(!message.recipient_ids?.length)group.targetUser(s,message);s.messages.push(message);s.updated_at=Date.now();
+  // Preserve queued recipients even when a member has since been renamed.
+  if(group.grouped(s)){const targets=items.flatMap(item=>{if(!item.recipient_ids?.length)group.targetUser(s,item);return item.recipient_ids??[]});message.recipient_ids=[...new Set(targets)];}
+  s.messages.push(message);s.updated_at=Date.now();
 }
 function queuedMarkdown(s: ChatSession): string {
   return s.queue?.length ? '\n## 待发送队列\n\n'+s.queue.map((m,i)=>`### 队列${i+1}\n\n${m.text}\n\n${(m.attachments??[]).map(f=>`@${f.label??f.name}: ${f.path}`).join('\n')}\n`).join('\n') : '';
@@ -469,5 +501,35 @@ export function chatPlan(root:string,name:string,args:Record<string,unknown>):Re
   else if(plan)message.task_plan=plan;else delete message.task_plan;
   session.updated_at=Date.now();group.renew(session,args.attachment_id);save(root,session);
   return {ok:true,persisted:true,chat_id:session.id,reply_to:replyTo,plan:chatPlanSummary(plan),...(name==='report_progress'?{progress:plan?.progress}: {})};
+ });
+}
+
+// Operation archives have a separate budget from messages and never contain attachment IDs.
+export function chatOperationOwner(root:string,chatId:string,attachmentId:string,replyTo?:string):{agent_id?:string;agent_name:string}|undefined {
+ try {
+  const s=load(root,chatId);if(s.closed)return;owned(s,attachmentId);
+  const actor=group.grouped(s)?group.memberFor(s,attachmentId):undefined;
+  if(replyTo){const m=s.messages.find(m=>m.id===replyTo);if(!m||m.kind==='connection_request')return;
+   if(actor?!m.received_by?.includes(actor.id):!m.received_at)return;
+   if(s.messages.some(r=>r.reply_to===replyTo&&r.final===true&&(!actor||r.agent_id===actor.id)))return;
+  }
+  return {agent_name:actor?.name??s.agent_name??'AI',...(actor?{agent_id:actor.id}:{})};
+ }catch{return;}
+}
+export function readChatOperations(root:string,chatId:string):{operations:ChatOperation[];operations_error?:string} {
+ try{const target=safe(root,`${DIR}/${validId(chatId)}.operations.json`);if(!existsSync(target))return {operations:[]};
+  if(statSync(target).size>600000)throw new Error('Operation archive exceeds limit');
+  const events=JSON.parse(readFileSync(target,'utf8'));if(!Array.isArray(events))throw new Error('Invalid operation archive');return {operations:events};
+ }catch{return {operations:[],operations_error:'Operation archive unavailable'};}
+}
+export function writeChatOperation(root:string,chatId:string,event:ChatOperation):void {
+ locked(root,()=>{
+  const current=readChatOperations(root,chatId);if(current.operations_error)throw new Error(current.operations_error);
+  const events=current.operations;const i=events.findIndex(e=>e.id===event.id);if(i<0)events.push(event);else events[i]=event;
+  while(events.length>240||Buffer.byteLength(JSON.stringify(events))>512000)events.shift();
+  for(const [ext,body] of [['json',JSON.stringify(events)],['md',operationsMarkdown(events)]]){
+   const temporary=safe(root,`${DIR}/${validId(chatId)}.${randomUUID()}.tmp`);
+   try{writeFileSync(temporary,body,{mode:0o600,flag:'wx'});renameSync(temporary,safe(root,`${DIR}/${chatId}.operations.${ext}`));}finally{rmSync(temporary,{force:true});}
+  }
  });
 }

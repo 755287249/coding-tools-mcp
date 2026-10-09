@@ -204,6 +204,11 @@ pub(crate) async fn call_tool_async_with_canary_sample_key(
     args: Value,
     canary_sample_key: Option<String>,
 ) -> Value {
+    let activity_root = ctx.workspace.root().to_path_buf();
+    let activity_key = canary_sample_key.clone();
+    let activity_name = name.clone();
+    let activity_args = args.clone();
+    let mut activity = super::chat::operations::begin(&activity_root, activity_key.as_deref(), &name, &args);
     let policy = ctx.runtime_config().policy.security_policy;
     let redaction = OutputRedactionContext::new_with_policy(&name, &args, &policy);
     let lock_groups = mutation_lock_groups(ctx.as_ref(), &name, &args);
@@ -235,7 +240,12 @@ pub(crate) async fn call_tool_async_with_canary_sample_key(
         );
     }
     drop(mutation_guards);
-    redaction.redact(output)
+    let mut output = redaction.redact(output);
+    super::chat::operations::bind(&activity_root, activity_key.as_deref(), &activity_name, &activity_args, &output);
+    if let Some(warning) = activity.as_mut().and_then(|a| a.finish(&output, false)) {
+        output["chat_activity_warning"] = json!(warning);
+    }
+    output
 }
 
 fn mutation_lock_groups(ctx: &ToolContext, name: &str, args: &Value) -> Vec<MutationLockGroup> {

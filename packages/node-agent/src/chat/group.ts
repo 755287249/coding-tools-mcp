@@ -14,7 +14,8 @@ export function memberName(value:unknown):string {
 export function memberFor(s:ChatSession,attachment:unknown,expired=false):ChatMember {
  const m=members(s).find(m=>!!attachment&&m.attachment_id===attachment);
  if(m?.paused)throw new Error('Group member is paused; resume it in the local UI');
- if(!m||(!expired&&m.lease_until<=Date.now()))throw new Error('Chat attachment expired; call chat_open again with the saved attachment_id');
+ void expired;// Keepalive: a member's own attachment_id stays valid after its lease lapses.
+ if(!m)throw new Error('Chat attachment expired; call chat_open again with the saved attachment_id');
  return m;
 }
 export function renew(s:ChatSession,attachment:unknown):void {if(grouped(s))memberFor(s,attachment).lease_until=Date.now()+lease;else s.lease_until=Date.now()+lease;}
@@ -77,14 +78,20 @@ export function setMode(s:ChatSession,value:unknown):void {
  if(s.closed)throw new Error('Conversation is closed');
  if(value==='group'){
   s.version=2;s.mode='group';s.members=[];
-  if(s.attachment_id){s.members.push({id:randomUUID(),name:s.agent_name??'AI',role:'coordinator',attachment_id:s.attachment_id,lease_until:s.lease_until});}
+  if(s.attachment_id){s.members.push({id:s.work_member?.attachment_id===s.attachment_id?s.work_member.id:randomUUID(),name:s.agent_name??'AI',role:'coordinator',attachment_id:s.attachment_id,lease_until:s.lease_until});}
   const chief=s.members[0];if(chief)for(const m of s.messages)if(m.role==='assistant'&&!m.agent_id){m.agent_id=chief.id;m.agent_name=chief.name;}
   s.attachment_id='';s.lease_until=0;bindTargets(s);
  }else{
-  if(groupPending(s)||s.queue?.length)throw new Error('Finish pending group tasks and outbox before switching to work');
-  const active=members(s).filter(m=>m.lease_until>Date.now());
+  const active=members(s).filter(m=>!m.paused);
   if(active.length>1||active.some(m=>m.role!=='coordinator'))throw new Error('Disconnect assisting members before switching to work');
-  const chief=members(s).find(m=>m.role==='coordinator');s.attachment_id=chief?.attachment_id??'';s.lease_until=chief?.lease_until??0;s.agent_name=chief?.name;s.mode='work';s.members=[];
+  const chief=members(s).find(m=>m.role==='coordinator'&&!m.paused);
+  const unfinished=s.messages.filter(m=>(m.role==='user'||m.kind==='assignment')&&!taskComplete(s,m));
+  const needsOthers=(m:ChatMessage)=>m.recipient_ids?.some(id=>id!==chief?.id);
+  if(unfinished.some(m=>m.kind==='assignment'||needsOthers(m))||(s.queue??[]).some(needsOthers))throw new Error('Finish assigned member tasks and queued member requests before switching to work');
+  // Work replies have no group identity. Rebind only unfinished requests on the next group entry.
+  for(const m of [...unfinished,...s.queue??[]])delete m.recipient_ids;
+  s.work_member=chief;
+  s.attachment_id=chief?.attachment_id??'';s.lease_until=chief?.lease_until??0;s.agent_name=chief?.name;s.mode='work';s.members=[];
  }
 }
 export function groupUi(s:ChatSession,args:Record<string,unknown>):void {
