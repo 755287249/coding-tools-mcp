@@ -27,6 +27,7 @@ const allowedOrigins = new Set(['https://chatgpt.com', 'https://chat.openai.com'
 const codeTtlMs = 5 * 60_000;
 export const DEFAULT_OAUTH_TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60;
 export const MAX_OAUTH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
+export const OAUTH_REFRESH_TTL_SECONDS = 30 * 24 * 60 * 60;
 const loginFailureWindowMs = 60_000;
 const loginBlockMs = 60_000;
 const maxLoginFailures = 5;
@@ -114,7 +115,7 @@ export function authorizationMetadata(base: string, oauth: OAuthRuntime) {
     authorization_endpoint: `${issuer}/oauth/authorize`,
     token_endpoint: `${issuer}/oauth/token`,
     response_types_supported: ['code'],
-    grant_types_supported: ['authorization_code'],
+    grant_types_supported: ['authorization_code', 'refresh_token'],
     code_challenge_methods_supported: ['S256'],
     token_endpoint_auth_methods_supported: oauth.clientSecret ? ['client_secret_post', 'client_secret_basic'] : ['none']
   };
@@ -359,8 +360,9 @@ export class OAuthRuntime {
   }
 
   exchangeToken(form: URLSearchParams, headers: IncomingHttpHeaders, base: string): TokenResponse {
-    if (form.get('grant_type') !== 'authorization_code') {
-      return tokenError('unsupported_grant_type', 'Only authorization_code is supported');
+    const grantType = form.get('grant_type');
+    if (grantType !== 'authorization_code' && grantType !== 'refresh_token') {
+      return tokenError('unsupported_grant_type', 'Only authorization_code and refresh_token are supported');
     }
 
     let clientId = form.get('client_id') ?? '';
@@ -374,6 +376,7 @@ export class OAuthRuntime {
     if (this.clientSecret && !constantTimeEqual(clientSecret, this.clientSecret)) {
       return tokenError('invalid_client', 'Invalid client_secret');
     }
+    if (grantType === 'refresh_token') return this.#refresh(form.get('refresh_token') ?? '', clientId, base);
 
     const code = form.get('code') ?? '';
     const redirectUri = form.get('redirect_uri') ?? '';
@@ -391,16 +394,54 @@ export class OAuthRuntime {
     const challenge = createHash('sha256').update(verifier).digest('base64url');
     if (!constantTimeEqual(challenge, data.challenge)) return tokenError('invalid_grant', 'PKCE verification failed');
 
-    const issuer = (data.issuer || base).replace(/\/$/, '');
+    return this.#issueTokens((data.issuer || base).replace(/\/$/, ''), clientId);
+  }
+
+  #issueTokens(issuer: string, clientId: string): TokenResponse {
     const issuedAt = Math.floor(this.#now() / 1000);
     return {
       status: 200,
       body: {
         access_token: signJwt({ iss: issuer, aud: `${issuer}/mcp`, iat: issuedAt, exp: issuedAt + this.tokenTtlSeconds, scope: 'mcp' }, this.tokenSecret),
         token_type: 'Bearer',
-        expires_in: this.tokenTtlSeconds
+        expires_in: this.tokenTtlSeconds,
+        refresh_token: signJwt({
+          iss: issuer, aud: `${issuer}/oauth/refresh`, iat: issuedAt, exp: issuedAt + OAUTH_REFRESH_TTL_SECONDS,
+          scope: 'mcp', typ: 'refresh', cid: clientId
+        }, this.tokenSecret),
+        scope: 'mcp'
       }
     };
+  }
+
+  /** grant_type=refresh_token: renew without consuming the single-use authorization password. */
+  #refresh(token: string, clientId: string, base: string): TokenResponse {
+    if (!token) return tokenError('invalid_request', 'refresh_token is required');
+    const issuer = base.replace(/\/$/, '');
+    const payload = this.#verifyJwt(token);
+    if (!payload
+      || payload.iss !== issuer
+      || payload.aud !== `${issuer}/oauth/refresh`
+      || payload.typ !== 'refresh') {
+      return tokenError('invalid_grant', 'Invalid or expired refresh_token');
+    }
+    if (typeof payload.cid !== 'string' || !constantTimeEqual(payload.cid, clientId)) {
+      return tokenError('invalid_grant', 'client_id mismatch');
+    }
+    return this.#issueTokens(issuer, clientId);
+  }
+
+  #verifyJwt(token: string): Record<string, unknown> | undefined {
+    const parts = token.trim().split('.');
+    if (parts.length !== 3) return undefined;
+    const expected = createHmac('sha256', this.tokenSecret).update(`${parts[0]}.${parts[1]}`).digest('base64url');
+    if (!constantTimeEqual(parts[2], expected)) return undefined;
+    try {
+      const header = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8')) as { alg?: unknown };
+      const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8')) as Record<string, unknown>;
+      if (header.alg !== 'HS256' || typeof payload.exp !== 'number' || payload.exp < this.#now() / 1000) return undefined;
+      return payload;
+    } catch { return undefined; }
   }
 
   verifyBearer(headers: IncomingHttpHeaders, base: string): boolean {
@@ -413,7 +454,7 @@ export class OAuthRuntime {
     try {
       const header = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8')) as { alg?: unknown };
       const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8')) as {
-        iss?: unknown; aud?: unknown; iat?: unknown; exp?: unknown; scope?: unknown;
+        iss?: unknown; aud?: unknown; iat?: unknown; exp?: unknown; scope?: unknown; typ?: unknown;
       };
       const issuer = base.replace(/\/$/, '');
       return header.alg === 'HS256'
@@ -423,7 +464,8 @@ export class OAuthRuntime {
         && typeof payload.iat === 'number'
         && typeof payload.exp === 'number'
         && payload.exp >= this.#now() / 1000
-        && typeof payload.scope === 'string';
+        && typeof payload.scope === 'string'
+        && payload.typ === undefined;
     } catch { return false; }
   }
 

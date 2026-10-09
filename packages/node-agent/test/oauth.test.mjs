@@ -85,7 +85,7 @@ test('OAuth metadata, redirect allowlist and Forwarded base resolution match Rus
     ' https://chatgpt.com/connector/oauth/test'
   ]) assert.equal(redirectUriAllowed(value), false, value);
 
-  assert.deepEqual(authorizationMetadata('https://mcp.example/base', runtime).grant_types_supported, ['authorization_code']);
+  assert.deepEqual(authorizationMetadata('https://mcp.example/base', runtime).grant_types_supported, ['authorization_code', 'refresh_token']);
   assert.deepEqual(authorizationMetadata('https://mcp.example/base', runtime).token_endpoint_auth_methods_supported, ['none']);
   assert.deepEqual(resourceMetadata('https://mcp.example/base').authorization_servers, ['https://mcp.example/base']);
 
@@ -154,6 +154,32 @@ test('OAuthRuntime consumes authorization passwords once, persists rotation, and
   assert.equal(next.status, 303);
   assert.equal(persisted.length, 2);
   assert.notEqual(runtime.password, nextPassword);
+});
+
+test('OAuthRuntime refresh_token renews access without the one-time password', async () => {
+  const base = 'https://public.example/builtin/clients/oauth-test';
+  const runtime = new OAuthRuntime(oauthConfig());
+  const authorized = await runtime.authorizeSubmitOneTime(authorizationForm('refresh-flow'), base);
+  assert.equal(authorized.status, 303);
+  const code = new URL(authorized.location).searchParams.get('code');
+  const exchanged = runtime.exchangeToken(tokenForm(code), {}, base);
+  assert.equal(exchanged.status, 200);
+  const { access_token: access, refresh_token: refresh } = exchanged.body;
+  assert.equal(typeof refresh, 'string');
+  assert.equal(runtime.verifyBearer({ authorization: `Bearer ${access}` }, base), true);
+  assert.equal(runtime.verifyBearer({ authorization: `Bearer ${refresh}` }, base), false, 'refresh token is not a bearer token');
+
+  const refreshForm = (token, clientId = 'chatgpt') => new URLSearchParams({ grant_type: 'refresh_token', refresh_token: token, client_id: clientId });
+  const renewed = runtime.exchangeToken(refreshForm(refresh), {}, base);
+  assert.equal(renewed.status, 200);
+  assert.equal(runtime.verifyBearer({ authorization: `Bearer ${renewed.body.access_token}` }, base), true);
+  assert.equal(typeof renewed.body.refresh_token, 'string');
+
+  assert.equal(runtime.exchangeToken(refreshForm(access), {}, base).status, 400, 'access token cannot refresh');
+  assert.equal(runtime.exchangeToken(refreshForm('garbage'), {}, base).status, 400);
+  assert.equal(runtime.exchangeToken(refreshForm(''), {}, base).body.error, 'invalid_request');
+  const other = new OAuthRuntime(oauthConfig({ tokenSecret: 'another-token-secret-that-is-long-enough' }));
+  assert.equal(other.exchangeToken(refreshForm(refresh), {}, base).status, 400, 'rotated token secret revokes refresh tokens');
 });
 
 test('OAuthRuntime applies configurable access-token TTL with a 30-day cap', async () => {
