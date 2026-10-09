@@ -265,6 +265,7 @@ fn view(root: &Path, s: &Value) -> Result<Value> {
     o.remove("lease_until");
     o.remove("version");
     o.insert("status".into(), json!(status));
+    o.insert("assistant_message_count".into(), json!(s["messages"].as_array().map_or(0, |messages| messages.iter().filter(|m| m["role"] == "assistant").count())));
     o.insert(
         "archive_path".into(),
         json!(format!("{DIR}/{}.md", id(&s["id"])?)),
@@ -495,7 +496,7 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
                     return Err(err("Message ID conflicts with an existing message"));
                 }
             } else {
-                if s["messages"].as_array().unwrap().is_empty() {
+                if s["messages"].as_array().unwrap().is_empty() && s["title_custom"] != true {
                     s["title"] = json!(content
                         .split_whitespace()
                         .collect::<Vec<_>>()
@@ -510,6 +511,19 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
                     .push(json!({"id":message_id,"role":"user","text":content,"attachments":attachments,"created_at":now()}));
                 s["updated_at"] = json!(now());
             }
+            save(root, &s)?;
+        }
+        "rename" => {
+            let title = text(&args["title"], 240)?;
+            s["title"] = json!(title.split_whitespace().collect::<Vec<_>>().join(" "));
+            s["title_custom"] = json!(true);
+            s["updated_at"] = json!(now());
+            save(root, &s)?;
+        }
+        "detach" => {
+            s["attachment_id"] = json!("");
+            s["lease_until"] = json!(0);
+            s["updated_at"] = json!(now());
             save(root, &s)?;
         }
         "close" => {
@@ -558,10 +572,21 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
     }
     owned(&s, args)?;
     match name {
+        "chat_upload" => {
+            use base64::{engine::general_purpose::STANDARD, Engine};
+            let encoded = args["data_base64"].as_str().unwrap_or("");
+            if encoded.len() > 699052 || STANDARD.decode(encoded).is_ok_and(|bytes| bytes.len() > 512 * 1024) {
+                return Err(err("MCP attachment must not exceed 512 KiB; compress it before upload"));
+            }
+            s["lease_until"] = json!(now() + LEASE_MS);
+            let attachment = upload(root, &mut s, args)?;
+            Ok(json!({"ok":true,"attachment":attachment}))
+        }
         "chat_reply" => {
             let message_id = id(&args["message_id"])?;
             let reply_to = id(&args["reply_to"])?;
             let content = text(&args["text"], 32000)?;
+            let attachments = message_files(&s, args.get("attachment_ids"))?;
             let final_reply = args["final"] != false;
             if args.get("awaiting_user").is_some_and(|v| !v.is_boolean()) {
                 return Err(err("awaiting_user must be a boolean"));
@@ -583,6 +608,7 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
                     || m["final"] != final_reply
                     || (m["awaiting_user"] == true) != awaiting_user
                     || m["tool_event"] != event
+                    || m.get("attachments").cloned().unwrap_or(json!([])) != json!(attachments)
                 {
                     return Err(err("Message ID conflicts with an existing reply"));
                 }
@@ -590,7 +616,7 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
                 if pending(&s).map(|m| m["id"].clone()) != Some(json!(reply_to)) {
                     return Err(err("Reply must address the oldest unanswered user message"));
                 }
-                s["messages"].as_array_mut().unwrap().push(json!({"id":message_id,"role":"assistant","text":content,"reply_to":reply_to,"final":final_reply,"awaiting_user":awaiting_user,"tool_event":event,"created_at":now()}));
+                s["messages"].as_array_mut().unwrap().push(json!({"id":message_id,"role":"assistant","text":content,"reply_to":reply_to,"final":final_reply,"awaiting_user":awaiting_user,"tool_event":event,"attachments":attachments,"created_at":now()}));
                 s["updated_at"] = json!(now());
             }
             s["lease_until"] = json!(now() + LEASE_MS);
@@ -816,6 +842,141 @@ mod tests {
             load(root, cid.as_str().unwrap()).unwrap()["messages"][2]["received_at"],
             delayed["message"]["received_at"]
         );
+    }
+    #[test]
+    fn ai_upload_enforces_ownership_and_reply_attachment_identity() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let cid = ui(root, &json!({"action":"create"})).unwrap()["session"]["id"].clone();
+        let owner = tool(root, "chat_open", &json!({"chat_id":cid})).unwrap()["attachment_id"].clone();
+        let args = json!({"chat_id":cid,"attachment_id":owner,"upload_id":"image","name":"result.txt","data_base64":STANDARD.encode(b"AI test")});
+        let mut wrong = args.clone(); wrong["attachment_id"] = json!("wrong");
+        assert!(tool(root, "chat_upload", &wrong).is_err());
+        let first = tool(root, "chat_upload", &args).unwrap()["attachment"].clone();
+        assert_eq!(tool(root, "chat_upload", &args).unwrap()["attachment"], first);
+        assert_eq!(fs::read(root.join(first["path"].as_str().unwrap())).unwrap(), b"AI test");
+        let mut changed = args.clone(); changed["data_base64"] = json!(STANDARD.encode(b"changed"));
+        assert!(tool(root, "chat_upload", &changed).is_err());
+        changed = args.clone(); changed["upload_id"] = json!("bad"); changed["name"] = json!("../bad");
+        assert!(tool(root, "chat_upload", &changed).is_err());
+        changed = args.clone(); changed["data_base64"] = json!(STANDARD.encode(vec![0u8; 512 * 1024 + 1]));
+        assert!(tool(root, "chat_upload", &changed).is_err());
+        changed = args.clone(); changed["data_base64"] = json!("%%%=");
+        assert!(tool(root, "chat_upload", &changed).is_err());
+        ui(root, &json!({"action":"send","chat_id":cid,"message_id":"u1","text":"send file"})).unwrap();
+        let reply = json!({"chat_id":cid,"attachment_id":owner,"message_id":"a1","reply_to":"u1","text":"Saved file","final":true,"attachment_ids":[first["id"]]});
+        let mut invalid = reply.clone(); invalid["attachment_ids"] = json!(["foreign"]);
+        assert!(tool(root, "chat_reply", &invalid).is_err());
+        assert_eq!(tool(root, "chat_reply", &reply).unwrap()["persisted"], true);
+        assert_eq!(tool(root, "chat_reply", &reply).unwrap()["persisted"], true);
+        invalid = reply.clone(); invalid["attachment_ids"] = json!([]);
+        assert!(tool(root, "chat_reply", &invalid).is_err());
+        let session = load(root, cid.as_str().unwrap()).unwrap();
+        assert_eq!(session["messages"][1]["attachments"], json!([first]));
+        assert!(fs::read_to_string(file(root, cid.as_str().unwrap()).unwrap().with_extension("md")).unwrap().contains("Attachment: result.txt"));
+        ui(root, &json!({"action":"detach","chat_id":cid})).unwrap();
+        assert!(tool(root, "chat_upload", &args).is_err());
+    }
+    #[test]
+    fn summary_reply_count_deduplicates_and_excludes_user_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let cid = ui(root, &json!({"action":"create"})).unwrap()["session"]["id"].clone();
+        let opened = tool(root, "chat_open", &json!({"chat_id":cid})).unwrap();
+        ui(root, &json!({"action":"send","chat_id":cid,"message_id":"u1","text":"hello"})).unwrap();
+        assert_eq!(ui(root, &json!({"action":"list"})).unwrap()["sessions"][0]["assistant_message_count"], 0);
+        let reply = json!({"chat_id":cid,"attachment_id":opened["attachment_id"],"message_id":"a1","reply_to":"u1","text":"done","final":true});
+        tool(root, "chat_reply", &reply).unwrap();
+        tool(root, "chat_reply", &reply).unwrap();
+        let summary = ui(root, &json!({"action":"list"})).unwrap();
+        assert_eq!(summary["sessions"][0]["assistant_message_count"], 1);
+        assert!(summary["sessions"][0].get("messages").is_none());
+    }
+    #[tokio::test]
+    async fn local_detach_preserves_chat_and_invalidates_waiter() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let cid = ui(root, &json!({"action":"create"})).unwrap()["session"]["id"].clone();
+        let opened = tool(root, "chat_open", &json!({"chat_id":cid})).unwrap();
+        let args = json!({"chat_id":cid,"attachment_id":opened["attachment_id"],"timeout_ms":2000});
+        ui(root, &json!({"action":"send","chat_id":cid,"message_id":"u1","text":"keep me"})).unwrap();
+        tool(root, "chat_reply", &json!({"chat_id":cid,"attachment_id":opened["attachment_id"],"message_id":"a1","reply_to":"u1","text":"done","final":true})).unwrap();
+        let before = load(root, cid.as_str().unwrap()).unwrap();
+        let (result, _) = tokio::join!(wait(root, &args), async {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            ui(root, &json!({"action":"detach","chat_id":cid})).unwrap();
+        });
+        assert!(result.is_err());
+        let after = load(root, cid.as_str().unwrap()).unwrap();
+        assert_eq!(after["closed"], false);
+        assert_eq!(after["messages"], before["messages"]);
+        assert_eq!(after["title"], before["title"]);
+        assert!(tool(root, "chat_wait", &args).is_err());
+        let next = tool(root, "chat_open", &json!({"chat_id":cid})).unwrap();
+        assert_ne!(next["attachment_id"], opened["attachment_id"]);
+        ui(root, &json!({"action":"close","chat_id":cid})).unwrap();
+        assert_eq!(ui(root, &json!({"action":"detach","chat_id":cid})).unwrap()["session"]["closed"], true);
+    }
+    #[test]
+    fn rename_preserves_messages_attachment_and_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let cid = ui(root, &json!({"action":"create"})).unwrap()["session"]["id"].clone();
+        let opened = tool(root, "chat_open", &json!({"chat_id":cid})).unwrap();
+        ui(
+            root,
+            &json!({"action":"rename","chat_id":cid,"title":"  新名称\n project  "}),
+        )
+        .unwrap();
+        ui(
+            root,
+            &json!({"action":"send","chat_id":cid,"message_id":"u1","text":"Keep this message"}),
+        )
+        .unwrap();
+        let before = load(root, cid.as_str().unwrap()).unwrap();
+        assert_eq!(before["title"], "新名称 project");
+        assert_eq!(before["attachment_id"], opened["attachment_id"]);
+        let renamed = ui(
+            root,
+            &json!({"action":"rename","chat_id":cid,"title":"<b>Renamed again</b>"}),
+        )
+        .unwrap();
+        let after = load(root, cid.as_str().unwrap()).unwrap();
+        assert_eq!(after["messages"], before["messages"]);
+        assert_eq!(after["attachment_id"], before["attachment_id"]);
+        assert_eq!(after["lease_until"], before["lease_until"]);
+        let archive = renamed["session"]["archive_path"].as_str().unwrap();
+        assert_eq!(
+            archive,
+            format!("docs/chat-sessions/{}.md", cid.as_str().unwrap())
+        );
+        assert!(fs::read_to_string(root.join(archive))
+            .unwrap()
+            .starts_with("# <b>Renamed again</b>\n"));
+        assert_eq!(
+            ui(root, &json!({"action":"list"})).unwrap()["sessions"][0]["title"],
+            "<b>Renamed again</b>"
+        );
+        for title in [String::new(), " \n ".into(), "界".repeat(81)] {
+            assert!(ui(
+                root,
+                &json!({"action":"rename","chat_id":cid,"title":title})
+            )
+            .is_err());
+        }
+        assert_eq!(
+            load(root, cid.as_str().unwrap()).unwrap()["title"],
+            "<b>Renamed again</b>"
+        );
+        ui(root, &json!({"action":"close","chat_id":cid})).unwrap();
+        let closed = ui(
+            root,
+            &json!({"action":"rename","chat_id":cid,"title":"Archived name"}),
+        )
+        .unwrap();
+        assert_eq!(closed["session"]["closed"], true);
+        assert_eq!(closed["session"]["title"], "Archived name");
     }
     #[tokio::test]
     async fn durable_chat_loop_deduplicates_and_cancels_wait() {

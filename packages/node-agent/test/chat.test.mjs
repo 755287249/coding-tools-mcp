@@ -88,7 +88,14 @@ test('real MCP catalog and explicit workspace routing complete the chat loop wit
   chatUi(state.root,{action:'send',chat_id:session.id,message_id:'u1',text:'hello from local UI'});
   const incoming=await waiting;assert.equal(incoming.message.id,'u1');
   await call('chat_reply',{...args,reply_to:'u1',message_id:'p1',text:'tool result',final:false,tool_event:{name:'bash',status:'completed',input:'echo hello',output:'hello',output_truncated:false}});
-  await call('chat_reply',{...args,reply_to:'u1',message_id:'a1',text:'hello from MCP',final:true,awaiting_user:true});
+  const imageBytes = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aXioAAAAASUVORK5CYII=';
+  const uploaded = await call('chat_upload', { ...args, upload_id: 'http-image', name: 'test.png', data_base64: imageBytes });
+  assert.equal(uploaded.attachment.mime, 'image/png');
+  const boundary = await call('chat_upload', { ...args, upload_id: 'http-boundary', name: 'boundary.bin', data_base64: Buffer.alloc(512 * 1024, 7).toString('base64') });
+  assert.equal(boundary.attachment.size, 512 * 1024);
+  await call('chat_reply',{...args,reply_to:'u1',message_id:'a1',text:'hello from MCP',final:true,awaiting_user:true,attachment_ids:[uploaded.attachment.id]});
+  const read = chatUi(state.root, { action: 'read_attachment', chat_id: session.id, upload_id: uploaded.attachment.id });
+  assert.equal(read.data_base64, imageBytes);
   assert.equal(chatUi(state.root,{action:'read',chat_id:session.id}).session.messages.at(-1).text,'hello from MCP');
   assert.equal((await call('chat_wait',{...args,timeout_ms:0})).status,'idle');
   await call('chat_close',args);
@@ -211,4 +218,97 @@ test('Markdown tracks unread queue, actual pickup, confirmation and closure per 
   assert.equal(states()[0],'消息状态：已读 · 已回复');
   chatUi(root,{action:'close',chat_id:args.chat_id});
   assert.equal(states()[1],'消息状态：未读 · 会话已结束');
+});
+
+test('renaming persists title without changing messages, attachment ownership or archive identity', async t => {
+  const { root, args } = fixture(t);
+  const read = () => chatUi(root, { action: 'read', chat_id: args.chat_id }).session;
+  const archive = read().archive_path;
+  chatUi(root, { action: 'rename', chat_id: args.chat_id, title: '  新名称\n project  ' });
+  chatUi(root, { action: 'send', chat_id: args.chat_id, message_id: 'rename-u1', text: 'Keep this message' });
+  assert.equal(read().title, '新名称 project');
+  assert.equal((await chatWait(root, { ...args, timeout_ms: 0 })).message.id, 'rename-u1');
+  const before = JSON.parse(readFileSync(path.join(root, 'docs/chat-sessions', args.chat_id + '.json')));
+  chatUi(root, { action: 'rename', chat_id: args.chat_id, title: '<b>Renamed again</b>' });
+  const after = JSON.parse(readFileSync(path.join(root, 'docs/chat-sessions', args.chat_id + '.json')));
+  assert.deepEqual(after.messages, before.messages);
+  assert.equal(after.attachment_id, before.attachment_id);
+  assert.equal(after.lease_until, before.lease_until);
+  assert.equal(read().archive_path, archive);
+  assert.ok(readFileSync(path.join(root, archive), 'utf8').startsWith('# <b>Renamed again</b>\n'));
+  assert.equal(chatUi(root, { action: 'list' }).sessions[0].title, '<b>Renamed again</b>');
+  for (const title of ['', ' \n ', '界'.repeat(81)]) assert.throws(() => chatUi(root, { action: 'rename', chat_id: args.chat_id, title }));
+  assert.equal(read().title, '<b>Renamed again</b>');
+  chatUi(root, { action: 'close', chat_id: args.chat_id });
+  chatUi(root, { action: 'rename', chat_id: args.chat_id, title: 'Archived name' });
+  assert.equal(read().closed, true);
+  assert.equal(read().title, 'Archived name');
+});
+
+
+test('local detach releases a lost attachment, interrupts its wait and preserves the conversation', async t => {
+  const { root, args } = fixture(t);
+  chatUi(root, { action: 'send', chat_id: args.chat_id, message_id: 'u1', text: 'keep me' });
+  chatTool(root, 'chat_reply', { ...args, message_id: 'a1', reply_to: 'u1', text: 'done', final: true });
+  const before = chatUi(root, { action: 'read', chat_id: args.chat_id }).session;
+  const waiting = chatWait(root, { ...args, timeout_ms: 2000 });
+  const rejection = assert.rejects(waiting, /expired/);
+  const detached = chatUi(root, { action: 'detach', chat_id: args.chat_id }).session;
+  await rejection;
+  assert.equal(detached.closed, false);
+  assert.equal(detached.title, before.title);
+  assert.deepEqual(detached.messages, before.messages);
+  assert.equal(detached.archive_path, before.archive_path);
+  assert.equal(chatUi(root, { action: 'read', chat_id: args.chat_id }).session.status, 'offline');
+  assert.throws(() => chatTool(root, 'chat_reply', { ...args, message_id: 'late', reply_to: 'u1', text: 'late' }), /expired/);
+  const next = chatTool(root, 'chat_open', { chat_id: args.chat_id });
+  assert.notEqual(next.attachment_id, args.attachment_id);
+  assert.equal((await chatWait(root, { chat_id: args.chat_id, attachment_id: next.attachment_id, timeout_ms: 0 })).status, 'idle');
+  chatUi(root, { action: 'close', chat_id: args.chat_id });
+  assert.equal(chatUi(root, { action: 'detach', chat_id: args.chat_id }).session.closed, true);
+});
+
+
+test('session summaries count only persisted assistant replies without retry inflation', t => {
+  const { root, args } = fixture(t);
+  const summary = () => chatUi(root, { action: 'list' }).sessions[0];
+  assert.equal(summary().assistant_message_count, 0);
+  chatUi(root, { action: 'send', chat_id: args.chat_id, message_id: 'u1', text: 'hello' });
+  assert.equal(summary().assistant_message_count, 0);
+  const reply = { ...args, message_id: 'a1', reply_to: 'u1', text: 'working', final: false };
+  chatTool(root, 'chat_reply', reply); chatTool(root, 'chat_reply', reply);
+  assert.equal(summary().assistant_message_count, 1);
+  chatTool(root, 'chat_reply', { ...reply, message_id: 'a2', text: 'done', final: true });
+  assert.equal(summary().assistant_message_count, 2);
+  assert.equal(summary().messages, undefined);
+});
+
+
+test('AI upload requires ownership and reply references are immutable and conversation-local', t => {
+  const { root, args } = fixture(t);
+  const bytes = Buffer.from('AI attachment test');
+  const upload = { ...args, upload_id: 'ai-file', name: 'result.txt', data_base64: bytes.toString('base64') };
+  assert.throws(() => chatTool(root, 'chat_upload', { ...upload, attachment_id: 'wrong' }), /expired/);
+  const first = chatTool(root, 'chat_upload', upload).attachment;
+  assert.deepEqual(chatTool(root, 'chat_upload', upload).attachment, first);
+  assert.deepEqual(readFileSync(path.join(root, first.path)), bytes);
+  assert.throws(() => chatTool(root, 'chat_upload', { ...upload, data_base64: Buffer.from('changed').toString('base64') }), /conflict/);
+  assert.throws(() => chatTool(root, 'chat_upload', { ...upload, upload_id: 'bad', name: '../bad' }), /name/);
+  assert.throws(() => chatTool(root, 'chat_upload', { ...upload, upload_id: 'bad', data_base64: '%%%=' }), /encoding/);
+  assert.throws(() => chatTool(root, 'chat_upload', { ...upload, upload_id: 'large', data_base64: Buffer.alloc(524289).toString('base64') }), /512 KiB/);
+  const other = chatUi(root, { action: 'create' }).session;
+  chatUi(root, { action: 'upload', chat_id: other.id, upload_id: 'foreign', name: 'other.txt', data_base64: 'eA==' });
+  chatUi(root, { action: 'send', chat_id: args.chat_id, message_id: 'u1', text: 'send file' });
+  const reply = { ...args, message_id: 'a1', reply_to: 'u1', text: 'Saved file', final: true, attachment_ids: [first.id] };
+  assert.throws(() => chatTool(root, 'chat_reply', { ...reply, attachment_ids: ['foreign'] }), /does not belong/);
+  assert.throws(() => chatTool(root, 'chat_reply', { ...reply, attachment_ids: [first.id, first.id] }), /unique/);
+  assert.equal(chatTool(root, 'chat_reply', reply).persisted, true);
+  assert.equal(chatTool(root, 'chat_reply', reply).persisted, true);
+  assert.throws(() => chatTool(root, 'chat_reply', { ...reply, attachment_ids: [] }), /conflict/);
+  const session = chatUi(root, { action: 'read', chat_id: args.chat_id }).session;
+  assert.equal(session.messages.length, 2);
+  assert.deepEqual(session.messages[1].attachments, [first]);
+  assert.match(readFileSync(path.join(root, session.archive_path), 'utf8'), /Attachment: result.txt/);
+  chatUi(root, { action: 'detach', chat_id: args.chat_id });
+  assert.throws(() => chatTool(root, 'chat_upload', { ...upload, upload_id: 'after-detach' }), /expired/);
 });

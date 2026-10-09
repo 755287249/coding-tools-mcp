@@ -77,6 +77,7 @@ const TOOL_RUNTIME_MODULES: readonly ToolRuntimeModule[] = [
     tools: {
       chat_open: { lane: 'control', admission: 'none', coalescing: 'never' },
       chat_wait: { lane: 'control', admission: 'none', coalescing: 'never' },
+      chat_upload: { coalescing: 'never' },
       chat_reply: { lane: 'control', admission: 'none', coalescing: 'never' },
       chat_close: { lane: 'control', admission: 'none', coalescing: 'never' },
       server_info: { usageFamily: 'runtime' },

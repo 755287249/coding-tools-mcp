@@ -2,7 +2,7 @@ use serde_json::{json, Value};
 pub(super) fn input_schema(name: &str) -> Option<Value> {
     if !matches!(
         name,
-        "chat_open" | "chat_wait" | "chat_reply" | "chat_close"
+        "chat_open" | "chat_wait" | "chat_reply" | "chat_close" | "chat_upload"
     ) {
         return None;
     }
@@ -18,7 +18,14 @@ pub(super) fn input_schema(name: &str) -> Option<Value> {
         properties["timeout_ms"] =
             json!({"type":"integer","minimum":0,"maximum":180000,"default":120000});
     }
+    if name == "chat_upload" {
+        properties["upload_id"] = json!({"type":"string","minLength":1,"maxLength":80,"description":"Unique upload ID; preserve this ID, name and bytes for retries."});
+        properties["name"] = json!({"type":"string","minLength":1,"maxLength":240});
+        properties["data_base64"] = json!({"type":"string","minLength":4,"maxLength":699052,"description":"Canonical base64 file bytes, at most 512 KiB decoded. No data URL prefix."});
+        required.extend(["upload_id", "name", "data_base64"]);
+    }
     if name == "chat_reply" {
+        properties["attachment_ids"] = json!({"type":"array","maxItems":5,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":80},"description":"IDs returned by chat_upload in this conversation; include with a text caption."});
         properties["message_id"] = json!({"type":"string","minLength":1,"maxLength":80});
         properties["reply_to"] = json!({"type":"string","minLength":1,"maxLength":80});
         properties["text"] = json!({"type":"string","minLength":1,"maxLength":32000});

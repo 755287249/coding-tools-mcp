@@ -123,6 +123,81 @@ export const rustCatalog: readonly ToolDefinition[] = [
       "idempotentHint": false,
       "openWorldHint": false,
       "readOnlyHint": false,
+      "title": "Chat upload"
+    },
+    "description": "Upload an AI-generated image or file into this local conversation (max 512 KiB). Retain upload_id for retries, then pass returned attachment.id in chat_reply attachment_ids. Requires the current attachment_id; never upload credentials.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "attachment_id": {
+          "maxLength": 80,
+          "minLength": 1,
+          "type": "string"
+        },
+        "chat_id": {
+          "maxLength": 80,
+          "minLength": 1,
+          "type": "string"
+        },
+        "data_base64": {
+          "description": "Canonical base64 file bytes, at most 512 KiB decoded. No data URL prefix.",
+          "maxLength": 699052,
+          "minLength": 4,
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 240,
+          "minLength": 1,
+          "type": "string"
+        },
+        "recovery_action_id": {
+          "description": "Optional stable recovery action identifier selected from a previous error response. Removed before tool execution.",
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "recovery_of_operation_id": {
+          "description": "Optional recovery-chain correlation to a prior operation_id. The runtime hashes this identifier in telemetry and removes it before tool execution.",
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "retry_of_call_sequence": {
+          "description": "Optional telemetry correlation to the failed tool call_sequence being retried. Removed before tool execution and does not change tool semantics or dedupe identity.",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "upload_id": {
+          "description": "Unique upload ID; preserve this ID, name and bytes for retries.",
+          "maxLength": 80,
+          "minLength": 1,
+          "type": "string"
+        },
+        "workspace_folder_id": {
+          "description": "Optional one-call workspace selector. Routes only this tool call and does not change the conversation's selected folder.",
+          "minLength": 1,
+          "type": "string",
+          "x-mcp-header": "Workspace"
+        }
+      },
+      "required": [
+        "chat_id",
+        "attachment_id",
+        "upload_id",
+        "name",
+        "data_base64"
+      ],
+      "type": "object"
+    },
+    "name": "chat_upload",
+    "title": "Chat upload"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false,
       "title": "Chat reply"
     },
     "description": "Persist an AI reply or progress. final=true acknowledges reply_to; use a stable unique message_id for retries.",
@@ -133,6 +208,17 @@ export const rustCatalog: readonly ToolDefinition[] = [
           "maxLength": 80,
           "minLength": 1,
           "type": "string"
+        },
+        "attachment_ids": {
+          "description": "IDs returned by chat_upload in this conversation; include with a text caption.",
+          "items": {
+            "maxLength": 80,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 5,
+          "type": "array",
+          "uniqueItems": true
         },
         "awaiting_user": {
           "default": false,
@@ -5452,6 +5538,7 @@ export const rustToolNamesByProfile: Readonly<Record<ToolProfile, readonly strin
   "advanced": [
     "chat_open",
     "chat_wait",
+    "chat_upload",
     "chat_reply",
     "chat_close",
     "harness_status",
@@ -5543,6 +5630,7 @@ export const rustToolNamesByProfile: Readonly<Record<ToolProfile, readonly strin
   "compat-readonly-all": [
     "chat_open",
     "chat_wait",
+    "chat_upload",
     "chat_reply",
     "chat_close",
     "harness_status",
@@ -5615,6 +5703,7 @@ export const rustToolNamesByProfile: Readonly<Record<ToolProfile, readonly strin
     "chat_open",
     "chat_wait",
     "chat_reply",
+    "chat_upload",
     "chat_close",
     "server_info",
     "list_workspace_folders",
@@ -5662,6 +5751,7 @@ export const rustToolNamesByProfile: Readonly<Record<ToolProfile, readonly strin
     "chat_open",
     "chat_wait",
     "chat_reply",
+    "chat_upload",
     "chat_close",
     "server_info",
     "list_workspace_folders",
@@ -5722,6 +5812,13 @@ export const rustToolAnnotationOverridesByProfile: Readonly<Record<ToolProfile, 
       "openWorldHint": false,
       "readOnlyHint": true,
       "title": "Chat wait"
+    },
+    "chat_upload": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": "Chat upload"
     },
     "chat_reply": {
       "destructiveHint": false,
@@ -6015,11 +6112,11 @@ export const rustToolAnnotationOverridesByProfile: Readonly<Record<ToolProfile, 
   "trusted-core": {}
 };
 export const rustToolsetRevisionByProfile: Readonly<Record<ToolProfile, string>> = {
-  "advanced": "5b61c6769550cc8b",
+  "advanced": "8c1d1ced9201de54",
   "read-only": "0a428588c2f8c57f",
-  "compat-readonly-all": "32440396573a4208",
-  "guarded-core": "8194fc8cc9a713df",
-  "trusted-core": "35a10e892d0f9597"
+  "compat-readonly-all": "3b88d9b6cb547056",
+  "guarded-core": "9da615359ffc40fa",
+  "trusted-core": "7319980eec3523dd"
 };
 export const rustBehavioralParityFixtures: Readonly<Record<string, unknown>> = {
   "execution_limits": {

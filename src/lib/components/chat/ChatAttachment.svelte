@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { t } from '$lib/i18n';
   import CodePreview from './CodePreview.svelte';
   import ImagePreview from './ImagePreview.svelte';
@@ -9,6 +10,14 @@
   let code = $state<string | null>(null);
   let error = $state('');
   let busy = $state(false);
+  let autoPreviewKey = '';
+  $effect(() => {
+    const key = `${workspaceId}:${folderId}:${chatId}:${file.id}`;
+    if (['image/png','image/jpeg','image/gif','image/webp'].includes(file.mime) && autoPreviewKey !== key) {
+      autoPreviewKey = key;
+      untrack(() => { void open(false); });
+    }
+  });
   async function open(download: boolean) {
     if (busy) return;
     busy = true; error = '';

@@ -8,7 +8,7 @@ import { redactSensitiveText } from '../redaction.js';
 export interface ChatFile { id: string; name: string; path: string; mime: string; size: number; sha256: string }
 export interface ToolEvent { name: string; status: 'running' | 'completed' | 'failed'; input?: string; output?: string; output_truncated?: boolean }
 export interface ChatMessage { awaiting_user?: boolean; received_at?: number; attachments?: ChatFile[]; tool_event?: ToolEvent; id: string; role: 'user' | 'assistant'; text: string; created_at: number; reply_to?: string; final?: boolean }
-export interface ChatSession { files?: ChatFile[]; version: 1; id: string; title: string; created_at: number; updated_at: number; closed: boolean; messages: ChatMessage[]; attachment_id: string; lease_until: number }
+export interface ChatSession { title_custom?: boolean; files?: ChatFile[]; version: 1; id: string; title: string; created_at: number; updated_at: number; closed: boolean; messages: ChatMessage[]; attachment_id: string; lease_until: number }
 const DIR = 'docs/chat-sessions';
 const MAX_BYTES = 2 * 1024 * 1024;
 const LEASE_MS = 10 * 60_000;
@@ -85,7 +85,7 @@ function pending(s: ChatSession): ChatMessage | undefined {
   return s.messages.find(m => m.role === 'user' && !s.messages.some(r => r.role === 'assistant' && r.reply_to === m.id && r.final));
 }
 function view(root: string, s: ChatSession) {
-  return { id: s.id, title: s.title, created_at: s.created_at, updated_at: s.updated_at, closed: s.closed, messages: s.messages,
+  return { id: s.id, title: s.title, created_at: s.created_at, updated_at: s.updated_at, closed: s.closed, messages: s.messages, assistant_message_count: s.messages.filter(m => m.role === 'assistant').length,
     status: s.closed ? 'closed' : waiters.has(key(root, s.id)) ? 'waiting' : s.lease_until > Date.now() ? 'connected' : 'offline',
     archive_path: `${DIR}/${s.id}.md` };
 }
@@ -178,9 +178,11 @@ export function chatUi(root: string, args: Record<string, unknown>): Record<stri
       const id = validId(args.message_id); const attachments = messageFiles(s, args.attachment_ids); const content = text(args.text || (attachments.length ? '📎' : ''));
       const existing = s.messages.find(m => m.id === id);
       if (existing && (existing.role !== 'user' || existing.text !== content || JSON.stringify(existing.attachments ?? []) !== JSON.stringify(attachments))) throw new Error('Message ID conflicts with an existing message');
-      if (!existing) { if (!s.messages.length) s.title = [...content.replace(/\s+/g, ' ')].slice(0, 36).join(''); s.messages.push({ id, role: 'user', text: content, attachments, created_at: Date.now() }); s.updated_at = Date.now(); }
+      if (!existing) { if (!s.messages.length && !s.title_custom) s.title = [...content.replace(/\s+/g, ' ')].slice(0, 36).join(''); s.messages.push({ id, role: 'user', text: content, attachments, created_at: Date.now() }); s.updated_at = Date.now(); }
       save(root, s);
-    } else if (action === 'close') { s.closed = true; s.attachment_id = ''; s.lease_until = 0; s.updated_at = Date.now(); save(root, s); }
+    } else if (action === 'rename') { s.title = text(args.title, 240).replace(/\s+/gu, ' '); s.title_custom = true; s.updated_at = Date.now(); save(root, s); }
+    else if (action === 'detach') { s.attachment_id = ''; s.lease_until = 0; s.updated_at = Date.now(); save(root, s); }
+    else if (action === 'close') { s.closed = true; s.attachment_id = ''; s.lease_until = 0; s.updated_at = Date.now(); save(root, s); }
     else if (action !== 'read') throw new Error('Unknown chat action');
     return { session: view(root, s) };
   });
@@ -199,18 +201,24 @@ export function chatTool(root: string, name: string, args: Record<string, unknow
       return { ok: true, attachment_id: s.attachment_id, session: view(root, s), instruction: 'Use chat_reply for all user-visible replies, questions, progress and deliverables. Call chat_wait now with the returned attachment_id. Use final=false for progress and tool_event with actual name/status/input/output for tool calls; report results only after execution, redact secrets and mark shortened output. Use final=true to acknowledge reply_to; add awaiting_user=true for a question, then wait for the next message. Keep unique reply IDs and identical retry payloads; require persisted=true. Inspect records before repeating side effects. Immediately call chat_wait after idle or a persisted final reply; never stop voluntarily for idle duration, task completion or cost. Stop only on user cancellation, closed session, actual host limits or a blocking chat configuration error. Renew via chat_open with the same attachment_id before the 10-minute lease expires.' };
     }
     owned(s, args.attachment_id);
+    if (name === 'chat_upload') {
+      const encoded = args.data_base64;
+      if (typeof encoded === 'string' && (encoded.length > 699052 || Buffer.from(encoded, 'base64').length > 512 * 1024)) throw new Error('MCP attachment must not exceed 512 KiB; compress it before upload');
+      s.lease_until = Date.now() + LEASE_MS; return { ok: true, attachment: upload(root, s, args) };
+    }
     if (name === 'chat_reply') {
       const id = validId(args.message_id); const replyTo = validId(args.reply_to); const content = text(args.text);
+      const attachments = messageFiles(s, args.attachment_ids);
       const final = args.final !== false; const tool_event = toolEvent(args.tool_event, final);
       if (args.awaiting_user !== undefined && typeof args.awaiting_user !== 'boolean') throw new Error('awaiting_user must be a boolean');
       const awaiting_user = args.awaiting_user === true;
       if (awaiting_user && !final) throw new Error('awaiting_user requires final=true');
       const existing = s.messages.find(m => m.id === id);
       if (existing) {
-        if (existing.role !== 'assistant' || existing.text !== content || existing.reply_to !== replyTo || existing.final !== final || (existing.awaiting_user === true) !== awaiting_user || JSON.stringify(existing.tool_event ?? undefined) !== JSON.stringify(tool_event)) throw new Error('Message ID conflicts with an existing reply');
+        if (JSON.stringify(existing.attachments ?? []) !== JSON.stringify(attachments) || existing.role !== 'assistant' || existing.text !== content || existing.reply_to !== replyTo || existing.final !== final || (existing.awaiting_user === true) !== awaiting_user || JSON.stringify(existing.tool_event ?? undefined) !== JSON.stringify(tool_event)) throw new Error('Message ID conflicts with an existing reply');
       } else {
         if (pending(s)?.id !== replyTo) throw new Error('Reply must address the oldest unanswered user message');
-        s.messages.push({ id, role: 'assistant', text: content, reply_to: replyTo, final, awaiting_user, tool_event, created_at: Date.now() }); s.updated_at = Date.now();
+        s.messages.push({ id, role: 'assistant', text: content, reply_to: replyTo, final, awaiting_user, tool_event, attachments, created_at: Date.now() }); s.updated_at = Date.now();
       }
       s.lease_until = Date.now() + LEASE_MS; save(root, s); return { ok: true, persisted: true, message_id: id };
     }

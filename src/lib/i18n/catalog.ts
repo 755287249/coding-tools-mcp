@@ -1,4 +1,15 @@
 export const MESSAGES = {
+  "chat.94": ["Draft kept in this window only; browser storage is unavailable. Refreshing may lose it.", "草稿僅保留在目前視窗；瀏覽器儲存無法使用，重新整理可能遺失。", "草稿仅保留在当前窗口；浏览器存储不可用，刷新可能丢失。", "下書きはこのウィンドウ内にのみ保存されています。ブラウザーの保存領域が使えないため、再読み込みで失われる場合があります。"],
+  "chat.93": ["Started", "已開始", "已开始", "開始済み"],
+  "chat.92": ["Tool calls", "工具呼叫", "工具调用", "ツール呼び出し"],
+  "chat.90": ["New replies", "新回覆", "新回复", "新しい返信"],
+  "chat.91": ["Read new replies", "查看新回覆", "查看新回复", "新しい返信を読む"],
+  "chat.88": ["Disconnect AI", "中斷 AI", "断开 AI", "AI を切断"],
+  "chat.89": ["Release AI access; keep this conversation and messages. Running work processes continue.", "釋放 AI 接入，保留會話與訊息；已啟動的工作程序會繼續。", "释放 AI 接入，保留会话和消息；已启动的工作进程会继续。", "AI の接続を解除し、会話とメッセージを保持します。実行中のプロセスは継続します。"],
+  "chat.85": ["Rename conversation", "重新命名會話", "重命名会话", "会話の名前を変更"],
+  "chat.86": ["Conversation name", "會話名稱", "会话名称", "会話名"],
+  "chat.87": ["Enter a name up to 240 UTF-8 bytes (about 80 Chinese characters).", "請輸入最多 240 UTF-8 位元組的名稱（約 80 個中文字）。", "请输入最多 240 UTF-8 字节的名称（约 80 个汉字）。", "名前を 240 UTF-8 バイト以内で入力してください（日本語で約 80 文字）。"],
+
   "OAuth / PKCE": ["OAuth / PKCE", "OAuth / PKCE", "OAuth / PKCE", "OAuth / PKCE"],
   "Fixed token / HTTP": ["Fixed token / HTTP", "固定 Token / HTTP", "固定 Token / HTTP", "固定トークン / HTTP"],
   "Changing authentication reconnects the service. Copy the new prompt for your AI.": ["Changing authentication reconnects the service. Copy the new prompt for your AI.", "變更認證會重新連線服務，請複製新指令給 AI。", "更改认证会重新连接服务，请复制新指令给 AI。", "認証を変更するとサービスが再接続します。新しい指示を AI にコピーしてください。"],
