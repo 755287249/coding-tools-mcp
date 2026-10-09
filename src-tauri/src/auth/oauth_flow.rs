@@ -13,11 +13,13 @@ use sha2::{Digest, Sha256};
 use super::bearer::constant_time_eq_str;
 
 pub const OAUTH_CODE_TTL_SECONDS: u64 = 300;
-pub const OAUTH_TOKEN_TTL_SECONDS: i64 = 60 * 60 * 24 * 7;
-pub const OAUTH_TOKEN_TTL_MAX_SECONDS: i64 = 60 * 60 * 24 * 30;
+/// Keepalive by default: tokens stay valid for ten years. Regenerate the
+/// workspace token secret to revoke every issued token at once.
+pub const OAUTH_TOKEN_TTL_SECONDS: i64 = 60 * 60 * 24 * 3650;
+pub const OAUTH_TOKEN_TTL_MAX_SECONDS: i64 = 60 * 60 * 24 * 3650;
 /// Refresh tokens let a client that lost (or outlived) its access token renew
-/// without consuming the single-use authorization password again.
-pub const OAUTH_REFRESH_TTL_SECONDS: i64 = 60 * 60 * 24 * 30;
+/// without re-entering the authorization password.
+pub const OAUTH_REFRESH_TTL_SECONDS: i64 = 60 * 60 * 24 * 3650;
 const REFRESH_TOKEN_TYPE: &str = "refresh";
 #[allow(dead_code)]
 pub const OAUTH_MAX_BODY_BYTES: usize = 8_192;
@@ -46,6 +48,9 @@ pub struct OAuthRuntime {
     token_ttl_seconds: i64,
     pending: Arc<Mutex<HashMap<String, PendingCode>>>,
     password_persister: Option<PasswordPersister>,
+    /// When true the authorization password is single-use and rotates after
+    /// each successful authorization. Off by default: the password is reusable.
+    rotate_password: bool,
     authorization_lock: Arc<Mutex<()>>,
 }
 
@@ -116,8 +121,15 @@ impl OAuthRuntime {
             token_ttl_seconds: OAUTH_TOKEN_TTL_SECONDS,
             pending: Arc::new(Mutex::new(HashMap::new())),
             password_persister,
+            rotate_password: false,
             authorization_lock: Arc::new(Mutex::new(())),
         })
+    }
+
+    /// Opt in to single-use authorization passwords.
+    pub fn with_password_rotation(mut self, rotate: bool) -> Self {
+        self.rotate_password = rotate;
+        self
     }
 
     pub fn with_token_ttl_seconds(mut self, token_ttl_seconds: u64) -> Result<Self, String> {
@@ -323,26 +335,29 @@ pub fn authorize_post(oauth: &OAuthRuntime, form: AuthorizeForm, server_url: &st
             .into_response();
     }
 
-    let next_password =
-        format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4()).replace('-', "");
-    if let Some(persist) = oauth.password_persister.as_ref() {
-        if persist(&next_password).is_err() {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Html(login_page(
-                    &form.client_id,
-                    &form.redirect_uri,
-                    &form.code_challenge,
-                    &form.code_challenge_method,
-                    &form.state,
-                    "Authorization password rotation failed; try again later",
-                    None,
-                )),
-            )
-                .into_response();
+    // Single-use passwords are opt-in; by default the password stays reusable.
+    if oauth.rotate_password {
+        let next_password =
+            format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4()).replace('-', "");
+        if let Some(persist) = oauth.password_persister.as_ref() {
+            if persist(&next_password).is_err() {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Html(login_page(
+                        &form.client_id,
+                        &form.redirect_uri,
+                        &form.code_challenge,
+                        &form.code_challenge_method,
+                        &form.state,
+                        "Authorization password rotation failed; try again later",
+                        None,
+                    )),
+                )
+                    .into_response();
+            }
         }
+        *oauth.password.lock().expect("oauth password lock") = next_password;
     }
-    *oauth.password.lock().expect("oauth password lock") = next_password;
 
     let server_url = server_url.trim_end_matches('/').to_string();
     let code = uuid::Uuid::new_v4().to_string().replace('-', "");
@@ -937,6 +952,7 @@ mod tests {
                 Ok(())
             })),
         )
+        .map(|oauth| oauth.with_password_rotation(true))
         .expect("valid OAuth runtime");
 
         let first_runtime = oauth.clone();
@@ -994,6 +1010,7 @@ mod tests {
                 Err("simulated persistence failure".into())
             })),
         )
+        .map(|oauth| oauth.with_password_rotation(true))
         .expect("valid OAuth runtime");
         let response = authorize_post(
             &oauth,
@@ -1030,7 +1047,7 @@ mod tests {
             Some("token-signing-secret".into()),
         )
         .expect("valid OAuth runtime")
-        .with_token_ttl_seconds(365 * 24 * 60 * 60)
+        .with_token_ttl_seconds(100 * 365 * 24 * 60 * 60)
         .expect("capped TTL");
         assert_eq!(capped.token_ttl_seconds, OAUTH_TOKEN_TTL_MAX_SECONDS);
 

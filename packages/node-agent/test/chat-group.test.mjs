@@ -63,7 +63,7 @@ test('legacy attachment becomes coordinator, group queue preserves recipients an
 });
 test('group membership identity survives lease expiry; false credentials, duplicate names and malformed assignments fail',t=>{
  const {root,a,b,join,send,reply}=fixture(t);const archive=path.join(root,'docs/chat-sessions',a.chat_id+'.json');const s=JSON.parse(readFileSync(archive));s.members[1].lease_until=0;writeFileSync(archive,JSON.stringify(s));
- assert.throws(()=>chatTool(root,'chat_wait',b),/expired/);assert.equal(chatTool(root,'chat_open',b).agent_id,b.agent_id);
+ assert.doesNotThrow(()=>chatTool(root,'chat_wait',b),'keepalive: own attachment survives lease expiry');assert.equal(chatTool(root,'chat_open',b).agent_id,b.agent_id);
  assert.throws(()=>join('前端'),/already exists/);assert.throws(()=>join('bad name'),/name/);assert.throws(()=>chatTool(root,'chat_open',{...a,attachment_id:'foreign'}),/expired/);
  send('u','Task');for(const ids of [[],[a.agent_id],[b.agent_id,b.agent_id],['foreign'],['__proto__']])assert.throws(()=>reply(a,'assign','u',{recipient_ids:ids,final:false}));
  assert.throws(()=>chatPlan(root,'set_todos',{...b,reply_to:'u',todos:[]}),/current unanswered/);

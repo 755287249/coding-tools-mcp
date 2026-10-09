@@ -320,11 +320,13 @@ export function normalizeConfig(
       clientSecret: environment.CTMCP_OAUTH_CLIENT_SECRET ?? secrets.oauthClientSecret,
       password: environment.CTMCP_OAUTH_PASSWORD ?? secrets.oauthPassword ?? 'change-me',
       tokenSecret,
+      // Keepalive: ten-year tokens; the legacy workspace TTL field is ignored (env override only).
       tokenTtlSeconds: positiveInt(
-        environment.CTMCP_OAUTH_TOKEN_TTL_SECONDS ?? input.oauth?.tokenTtlSeconds,
-        7 * 24 * 60 * 60,
-        30 * 24 * 60 * 60
-      )
+        environment.CTMCP_OAUTH_TOKEN_TTL_SECONDS,
+        3650 * 24 * 60 * 60,
+        3650 * 24 * 60 * 60
+      ),
+      rotatePassword: environment.CTMCP_OAUTH_ROTATE_PASSWORD === '1'
     },
     folders: environmentFolders !== undefined
       ? parseFolders(environmentFolders)

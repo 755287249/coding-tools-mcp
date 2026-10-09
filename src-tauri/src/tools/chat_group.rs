@@ -9,7 +9,8 @@ pub(super) fn member_name(v:&Value)->Result<String>{
 pub(super) fn member_for(s:&Value,args:&Value,expired:bool)->Result<Value>{
  let member=members(s).into_iter().find(|m|args["attachment_id"].as_str().is_some_and(|v|!v.is_empty())&&m["attachment_id"]==args["attachment_id"]).ok_or_else(||err("Chat attachment expired; call chat_open again with the saved attachment_id"))?;
  if member["paused"]==true{return Err(err("Group member is paused; resume it in the local UI"));}
- if !expired&&member["lease_until"].as_u64().unwrap_or(0)<=now(){return Err(err("Chat attachment expired; call chat_open again with the saved attachment_id"));}Ok(member)
+ let _=expired;// Keepalive: a member's own attachment_id stays valid after the lease lapses.
+ Ok(member)
 }
 pub(super) fn renew(s:&mut Value,args:&Value)->Result<()>{
  if grouped(s){let m=member_for(s,args,false)?;for p in s["members"].as_array_mut().unwrap(){if p["id"]==m["id"]{p["lease_until"]=json!(now()+LEASE_MS);}}}else{s["lease_until"]=json!(now()+LEASE_MS);}Ok(())

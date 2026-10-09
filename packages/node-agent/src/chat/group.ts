@@ -14,7 +14,8 @@ export function memberName(value:unknown):string {
 export function memberFor(s:ChatSession,attachment:unknown,expired=false):ChatMember {
  const m=members(s).find(m=>!!attachment&&m.attachment_id===attachment);
  if(m?.paused)throw new Error('Group member is paused; resume it in the local UI');
- if(!m||(!expired&&m.lease_until<=Date.now()))throw new Error('Chat attachment expired; call chat_open again with the saved attachment_id');
+ void expired;// Keepalive: a member's own attachment_id stays valid after its lease lapses.
+ if(!m)throw new Error('Chat attachment expired; call chat_open again with the saved attachment_id');
  return m;
 }
 export function renew(s:ChatSession,attachment:unknown):void {if(grouped(s))memberFor(s,attachment).lease_until=Date.now()+lease;else s.lease_until=Date.now()+lease;}

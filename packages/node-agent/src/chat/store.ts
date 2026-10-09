@@ -301,7 +301,8 @@ function deleteSessionFiles(root: string, id: string): void {
 }
 function owned(s: ChatSession, attachment: unknown): void {
   if(group.grouped(s)){group.memberFor(s,attachment);return;}
-  if (!attachment || attachment !== s.attachment_id || s.lease_until <= Date.now()) throw new Error('Chat attachment expired; call chat_open again');
+  // The lease only governs takeover by another AI; the holder keeps working through long tasks.
+  if (!attachment || attachment !== s.attachment_id) throw new Error('Chat attachment expired; call chat_open again');
 }
 export function chatTool(root: string, name: string, args: Record<string, unknown>): Record<string, unknown> {
   return locked(root, () => {
@@ -310,8 +311,10 @@ export function chatTool(root: string, name: string, args: Record<string, unknow
     if (name === 'chat_open') {
       if(group.grouped(s)){const member=group.openGroup(s,args);group.bindTargets(s);save(root,s);return {ok:true,attachment_id:member.attachment_id,agent_id:member.id,role:member.role,session:view(root,s),instruction: 'Read skill.text; reply only to your delivered message IDs. Call chat_wait.',skill:localChatSkill};}
       if(args.agent_name!==undefined)s.agent_name=group.memberName(args.agent_name);
-      if (s.lease_until > Date.now() && args.attachment_id !== s.attachment_id) throw new Error('Conversation already attached; close it in the UI or wait for the lease to expire');
-      if (s.lease_until <= Date.now()) s.attachment_id = randomUUID();
+      // Keepalive: the saved attachment_id resumes even after the lease lapsed, unless another AI attached meanwhile.
+      const resuming = typeof args.attachment_id === 'string' && !!args.attachment_id && args.attachment_id === s.attachment_id;
+      if (!resuming && s.lease_until > Date.now()) throw new Error('Conversation already attached; close it in the UI or wait for the lease to expire');
+      if (!resuming) s.attachment_id = randomUUID();
       group.renew(s,args.attachment_id); save(root, s);
       return { ok: true, attachment_id: s.attachment_id, session: view(root, s), instruction: 'Read skill.text and follow it for this session; save attachment_id and call chat_wait now.', skill: localChatSkill };
     }

@@ -9,6 +9,7 @@ test('pairing requires the exact persisted final reply to the current request',(
   assert.equal(connectionResult({messages:[request,{...greeting,reply_to:'old'}]},'request'),'waiting');
   assert.equal(connectionResult({messages:[greeting]},'request'),'waiting');
   assert.equal(connectionResult({messages:[request,greeting]},'request'),'success');
+  for(const text of ['你好,有什么能帮到你?','你好 有什么能帮到你','你好，有什么能帮到你？我已接入。']) assert.equal(connectionResult({messages:[request,{...greeting,text}]},'request'),'success',text);
   assert.equal(connectionResult({messages:[request,{...greeting,text:'unrelated'}]},'request'),'failed');
   assert.equal(connectionResult({messages:[request,{...greeting,awaiting_user:true}]},'request'),'failed');
 });

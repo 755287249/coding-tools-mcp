@@ -695,9 +695,10 @@ fn delete_session_files(root: &Path, chat_id: &str) -> Result<()> {
 }
 fn owned(s: &Value, args: &Value) -> Result<()> {
     if group::grouped(s){group::member_for(s,args,false)?;return Ok(());}
+    // The lease only decides whether another AI may take over; the current
+    // holder keeps working after a long task and every call renews the lease.
     if args["attachment_id"].as_str().unwrap_or("").is_empty()
         || args["attachment_id"] != s["attachment_id"]
-        || s["lease_until"].as_u64().unwrap_or(0) <= now()
     {
         return Err(err("Chat attachment expired; call chat_open again"));
     }
@@ -713,14 +714,16 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
         if group::grouped(&s){let member=group::open(&mut s,args)?;group::bind_targets(&mut s);save(root,&s)?;return Ok(json!({"ok":true,"attachment_id":member["attachment_id"],"agent_id":member["id"],"role":member["role"],"session":view(root,&s)?,"instruction":"Read skill.text; reply only to your delivered message IDs. Call chat_wait.","skill":local_chat_skill()}));}
         if args.get("agent_name").is_some(){s["agent_name"]=json!(group::member_name(&args["agent_name"])?);}
 
-        if s["lease_until"].as_u64().unwrap_or(0) > now()
-            && args["attachment_id"] != s["attachment_id"]
-        {
+        // Keepalive: the saved attachment_id always resumes, even after the lease
+        // lapsed, as long as no other AI attached in the meantime.
+        let resuming = args["attachment_id"].as_str().is_some_and(|v| !v.is_empty())
+            && args["attachment_id"] == s["attachment_id"];
+        if !resuming && s["lease_until"].as_u64().unwrap_or(0) > now() {
             return Err(err(
                 "Conversation already attached; close it in the UI or wait for the lease to expire",
             ));
         }
-        if s["lease_until"].as_u64().unwrap_or(0) <= now() {
+        if !resuming {
             s["attachment_id"] = json!(uuid::Uuid::new_v4().to_string());
         }
         group::renew(&mut s,args)?;
@@ -1139,6 +1142,29 @@ mod tests {
         let sent=ui(root,&json!({"action":"send","chat_id":cid,"message_id":"many","text":"参考@图片1和@文件6","attachment_ids":ids})).unwrap();assert_eq!(sent["session"]["messages"][0]["attachments"].as_array().unwrap().len(),7);
         let part=ui(root,&json!({"action":"read_attachment_chunk","chat_id":cid,"upload_id":"large","offset":0})).unwrap();assert_eq!(STANDARD.decode(part["data_base64"].as_str().unwrap()).unwrap(),bytes[..CHUNK_BYTES]);
         assert!(markdown(&sent["session"]).contains("Reference: @图片1"));
+    }
+
+    #[test]
+    fn keepalive_attachment_survives_lease_expiry_until_another_ai_takes_over() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let session = ui(root, &json!({"action":"create"})).unwrap();
+        let cid = session["session"]["id"].as_str().unwrap().to_string();
+        let open = tool(root, "chat_open", &json!({"chat_id":cid})).unwrap();
+        let args = json!({"chat_id":cid,"attachment_id":open["attachment_id"]});
+        let expire = || {
+            let mut s = load(root, &cid).unwrap();
+            s["lease_until"] = json!(0);
+            save(root, &s).unwrap();
+        };
+        expire();
+        assert!(tool(root, "chat_wait", &args).is_ok());
+        expire();
+        assert_eq!(tool(root, "chat_open", &args).unwrap()["attachment_id"], open["attachment_id"]);
+        expire();
+        let other = tool(root, "chat_open", &json!({"chat_id":cid,"attachment_id":"someone-else"})).unwrap();
+        assert_ne!(other["attachment_id"], open["attachment_id"]);
+        assert!(tool(root, "chat_wait", &args).is_err());
     }
 
     #[test]

@@ -130,6 +130,8 @@ export interface AgentConfig {
     password: string;
     tokenSecret: string;
     tokenTtlSeconds?: number;
+    /** Opt-in single-use authorization password (CTMCP_OAUTH_ROTATE_PASSWORD=1). */
+    rotatePassword?: boolean;
   };
   folders: WorkspaceFolder[];
   limits: {

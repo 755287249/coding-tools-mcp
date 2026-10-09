@@ -57,6 +57,19 @@ test('wait is live only during the request, supports cancellation and close',asy
   chatUi(root,{action:'close',chat_id:args.chat_id});
   assert.equal((await again).status,'closed');
 });
+test('keepalive: the saved attachment survives lease expiry until another AI takes over', t => {
+  const { root, args } = fixture(t);
+  const file = path.join(root, 'docs/chat-sessions', args.chat_id + '.json');
+  const expire = () => { const s = JSON.parse(readFileSync(file, 'utf8')); s.lease_until = 0; writeFileSync(file, JSON.stringify(s)); };
+  expire();
+  assert.doesNotThrow(() => chatTool(root, 'chat_wait', args));
+  expire();
+  assert.equal(chatTool(root, 'chat_open', args).attachment_id, args.attachment_id);
+  expire();
+  const other = chatTool(root, 'chat_open', { chat_id: args.chat_id, attachment_id: 'someone-else' });
+  assert.notEqual(other.attachment_id, args.attachment_id);
+  assert.throws(() => chatTool(root, 'chat_wait', args), /expired/);
+});
 test('chat protects folder boundaries, rejects wrong attachments and concurrent writers',async t=>{
   const {root,args}=fixture(t);
   assert.throws(()=>chatTool(root,'chat_open',{chat_id:args.chat_id}),/already attached/);

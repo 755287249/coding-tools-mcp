@@ -25,9 +25,10 @@ interface TokenResponse {
 
 const allowedOrigins = new Set(['https://chatgpt.com', 'https://chat.openai.com']);
 const codeTtlMs = 5 * 60_000;
-export const DEFAULT_OAUTH_TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60;
-export const MAX_OAUTH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
-export const OAUTH_REFRESH_TTL_SECONDS = 30 * 24 * 60 * 60;
+// Keepalive by default: tokens stay valid for ten years. Rotate the token secret to revoke them all.
+export const DEFAULT_OAUTH_TOKEN_TTL_SECONDS = 3650 * 24 * 60 * 60;
+export const MAX_OAUTH_TOKEN_TTL_SECONDS = 3650 * 24 * 60 * 60;
+export const OAUTH_REFRESH_TTL_SECONDS = 3650 * 24 * 60 * 60;
 const loginFailureWindowMs = 60_000;
 const loginBlockMs = 60_000;
 const maxLoginFailures = 5;
@@ -203,6 +204,8 @@ export class OAuthRuntime {
   readonly #pending = new Map<string, PendingCode>();
   readonly #now: () => number;
   readonly #persistPassword?: (password: string) => Promise<void>;
+  /** Single-use passwords are opt-in; by default the authorization password is reusable. */
+  rotatePassword = false;
   #authorizationQueue: Promise<void> = Promise.resolve();
   #loginFailures = 0;
   #loginWindowStartedAt = 0;
@@ -222,6 +225,7 @@ export class OAuthRuntime {
     this.tokenTtlSeconds = Number.isInteger(requestedTokenTtl) && requestedTokenTtl > 0
       ? Math.min(requestedTokenTtl, MAX_OAUTH_TOKEN_TTL_SECONDS)
       : DEFAULT_OAUTH_TOKEN_TTL_SECONDS;
+    this.rotatePassword = config.rotatePassword === true;
     this.#now = now;
     this.#persistPassword = persistPassword;
   }
@@ -233,6 +237,7 @@ export class OAuthRuntime {
     this.password = replacement.password;
     this.tokenSecret = replacement.tokenSecret;
     this.tokenTtlSeconds = replacement.tokenTtlSeconds;
+    this.rotatePassword = replacement.rotatePassword;
     this.#pending.clear();
     this.#resetLoginFailures();
   }
@@ -328,16 +333,18 @@ export class OAuthRuntime {
         };
       }
 
-      const nextPassword = generateAuthorizationPassword();
-      try {
-        await this.#persistPassword?.(nextPassword);
-      } catch {
-        return {
-          status: 503,
-          body: loginPage({ ...values, error: 'Authorization password rotation failed; try again later' })
-        };
+      if (this.rotatePassword) {
+        const nextPassword = generateAuthorizationPassword();
+        try {
+          await this.#persistPassword?.(nextPassword);
+        } catch {
+          return {
+            status: 503,
+            body: loginPage({ ...values, error: 'Authorization password rotation failed; try again later' })
+          };
+        }
+        this.password = nextPassword;
       }
-      this.password = nextPassword;
       this.#resetLoginFailures();
 
       this.#cleanupPending();
@@ -414,7 +421,7 @@ export class OAuthRuntime {
     };
   }
 
-  /** grant_type=refresh_token: renew without consuming the single-use authorization password. */
+  /** grant_type=refresh_token: renew without re-entering the authorization password. */
   #refresh(token: string, clientId: string, base: string): TokenResponse {
     if (!token) return tokenError('invalid_request', 'refresh_token is required');
     const issuer = base.replace(/\/$/, '');

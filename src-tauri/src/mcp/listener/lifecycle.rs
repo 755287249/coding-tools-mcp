@@ -89,8 +89,9 @@ pub fn spawn_listener(
                 oauth_password,
                 oauth_token_secret,
                 Some(password_persister),
-            )?
-            .with_token_ttl_seconds(auth.oauth_token_ttl_seconds)?,
+            )?,
+            // Keepalive: tokens use the built-in ten-year lifetime; the legacy
+            // per-workspace TTL setting is intentionally ignored.
         ))
     } else {
         None

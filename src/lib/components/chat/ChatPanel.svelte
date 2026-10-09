@@ -20,6 +20,8 @@
   import Check from '@lucide/svelte/icons/check';
   import Pencil from '@lucide/svelte/icons/pencil';
   import X from '@lucide/svelte/icons/x';
+  import FolderIcon from '@lucide/svelte/icons/folder';
+  import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import ChatToolActivity from './ChatToolActivity.svelte';
   import { chatDrafts, chatDraftKey, conversationAccent } from '$lib/chat/drafts';
   import { createSessionCache, sessionCacheKey } from '$lib/chat/session-cache';
@@ -155,9 +157,24 @@
   let promptSequence = 0;
   const currentScope = $derived(sessionCacheKey(workspaceId, folderId, selected));
   const pairing = $derived(connectionRequest ? connectionResult(detail, connectionRequest) : 'waiting');
+  // Pairing must never wait silently forever: after PAIRING_TIMEOUT_MS the dialog
+  // switches to a recovery view (copy again / resend / continue / cancel).
+  const PAIRING_TIMEOUT_MS = 90_000;
+  let pairingSince = $state(0);
+  let pairingNow = $state(Date.now());
+  const pairingElapsed = $derived(pairingSince ? Math.max(0, Math.floor((pairingNow - pairingSince) / 1000)) : 0);
+  const pairingStalled = $derived(!!connectionRequest && pairing === 'waiting' && pairingSince > 0 && pairingNow - pairingSince >= PAIRING_TIMEOUT_MS);
+  const aiAttached = $derived(detail?.status === 'connected' || detail?.status === 'waiting' || !!detail?.members?.some(m => m.status !== 'offline' && !connectionMembers.includes(m.id)));
+  $effect(() => {
+    if (!connectionRequest || pairing !== 'waiting') return;
+    pairingNow = Date.now();
+    const timer = setInterval(() => { pairingNow = Date.now(); }, 1000);
+    return () => clearInterval(timer);
+  });
+  function retryPairing() { connectionRetry = ''; connectionRequest = ''; pairingSince = 0; copied = false; connectionError = ''; }
   $effect(() => {
     if (guide && connectionScope === currentScope) connectDialog?.showModal();
-    else { connectDialog?.close(); guide = false; connectionPrompt = ''; connectionError = ''; connectionRequest = ''; connectionRetry = ''; promptSequence++; }
+    else { connectDialog?.close(); guide = false; connectionPrompt = ''; connectionError = ''; connectionRequest = ''; connectionRetry = ''; pairingSince = 0; promptSequence++; }
   });
   $effect(() => {
     if (guide && ((mode==='group'&&detail?.members?.some(m=>!connectionMembers.includes(m.id)&&m.status!=='offline')) || (connectionRequest && pairing === 'success'))) { guide = false; }
@@ -172,7 +189,9 @@
     if (!selected || detail?.closed) return;
     onNavigate?.(folderId, selected);
     connectionMembers=(detail?.members??[]).map(m=>m.id);connectionScope = currentScope; connectionError = ''; copied = false; guide = true;
-    connectionRequest = detail?.messages?.find(m => m.kind === 'connection_request' && !detail?.messages?.some(r => r.role === 'assistant' && r.reply_to === m.id && r.final === true))?.id ?? '';
+    const pendingRequest = detail?.messages?.find(m => m.kind === 'connection_request' && !detail?.messages?.some(r => r.role === 'assistant' && r.reply_to === m.id && r.final === true));
+    connectionRequest = pendingRequest?.id ?? '';
+    pairingSince = pendingRequest ? (pendingRequest.created_at ?? Date.now()) : 0;
     const request = ++promptSequence, ws = workspaceId, folder = folderId, chat = selected, scope = currentScope;
     connectionLoading = true; connectionPrompt = '';
     try {
@@ -186,14 +205,14 @@
   async function confirmSent() {
     if (connectionSending || connectionScope !== currentScope || !selected || !connectionPrompt) return;
     const scope = currentScope, ws = workspaceId, folder = folderId, chat = selected;
-    if(mode==='group'){connectionRequest='group-join';return;}
+    if(mode==='group'){connectionRequest='group-join';pairingSince=Date.now();return;}
     connectionRetry ||= crypto.randomUUID();
     connectionSending = true; connectionError = '';
     try {
       const result = await localChat(ws, folder, {action:'request_connection', chat_id:chat, message_id:connectionRetry});
       if (scope !== currentScope || !guide) return;
       if (!result.connection_request_id || !result.session) throw new Error('Missing connection request');
-      readSequence++; detail = result.session; connectionRequest = result.connection_request_id;
+      readSequence++; detail = result.session; connectionRequest = result.connection_request_id; pairingSince = Date.now();
     } catch (e) { if (scope === currentScope && guide) connectionError = String(e); }
     finally { connectionSending = false; }
   }
@@ -538,14 +557,27 @@
       {#if detail?.queued_messages?.length}<div class="outbox" aria-label={$t('chat.outbox')}>
         <button type="button" class="queue-mode" disabled={queueChanging||mode==='group'} onclick={toggleQueueMode} title={$t(detail.queue_mode==='split'?'chat.queueSplitHint':'chat.queueMergeHint')} aria-label={$t(detail.queue_mode==='split'?'chat.queueSplitHint':'chat.queueMergeHint')}>{$t(detail.queue_mode==='split'?'chat.queueSplit':'chat.queueMerge')}</button>
         <div class="queued-items">{#each detail.queued_messages as item,i (item.id)}<details class="queued-card"><summary><span>{$t('chat.queueItem')} {i+1}</span><span>{item.text}</span></summary><div><p>{item.text}</p>{#if item.attachments?.length}<small>{item.attachments.map(f=>f.label??f.name).join(' · ')}</small>{/if}</div></details>{/each}</div>
-      </div>{/if}{#if referenceOpen}<div class="reference-input"><input aria-label={$t('chat.123')} placeholder="mcp-assistant/artifacts/file.png" bind:value={referenceInput} disabled={busy} onkeydown={event=>{if(event.key==='Enter'){event.preventDefault();void attachReference()}}}/><button type="button" onclick={attachReference} disabled={busy||!referenceInput.trim()}>{$t('chat.122')}</button></div>{/if}<div class="bottom-control"><button type="button" class="jump-bottom" onclick={toBottom} title={$t('chat.96')} aria-label={$t('chat.96')} aria-pressed={following}><ArrowDown size={16}/></button></div><form onsubmit={(e) => { e.preventDefault(); void send(); }}>{#if attachments.length}<div class="draft-files">{#each attachments as file (file.id)}<DraftAttachment {file} {workspaceId} {folderId} chatId={selected} disabled={busy} onRemove={()=>removeAttachment(file)}/>{/each}</div>{/if}<div class="composer-input"><div class="mention-input"><div class="draft-highlight" bind:this={draftHighlight} aria-hidden="true">{#each highlightedDraft as part}{#if part.file}<span class="attachment-mention">{part.text}</span>{:else}{part.text}{/if}{/each}{'\n'}</div><textarea bind:this={composer} aria-label={$t("chat.39")} bind:value={draft} oninput={(event) => { draft = event.currentTarget.value; updateCaret(); mentionFocused=true; persistDraft(); }} onfocus={()=>{mentionFocused=true;updateCaret()}} onblur={()=>mentionFocused=false} onclick={()=>{mentionFocused=true;updateCaret()}} onkeyup={updateCaret} onscroll={()=>{if(draftHighlight){draftHighlight.scrollTop=composer.scrollTop;draftHighlight.scrollLeft=composer.scrollLeft}}} onpaste={pasteImages} placeholder={detail?.closed ? $t('chat.30') : $t('chat.31')} disabled={!folderId || detail?.closed || (busy && !uploading)} onkeydown={composerKeys} rows={mode==='group'?1:3} maxlength="32000" aria-autocomplete="list" aria-controls="attachment-choices"></textarea></div>{#if mention && choices.length}<div class="mention-choices" id="attachment-choices" role="listbox" aria-label={$t('chat.attachmentChoices')}>{#each choices as file,i (file.id)}<button type="button" role="option" aria-selected={i===mentionIndex} class:active={i===mentionIndex} onpointerdown={event=>event.preventDefault()} onclick={()=>insertMention(file)}><strong>@{file.label}</strong><span>{file.name}</span></button>{/each}</div>{/if}</div><input class="file-input" type="file" multiple bind:this={fileInput} onchange={() => uploadFiles(fileInput.files)} aria-label={$t('chat.50')}/><div class="composer-toolbar"><span>{#if mode==='work'}<div class="project-picker"><button type="button" disabled={busy} aria-expanded={projectOpen} onclick={()=>projectOpen=!projectOpen}>{$t('chat.project')}⌄</button>{#if projectOpen}<div class="project-options">{#each folders as folder}<button type="button" onclick={()=>selectProject(folder.id)} class:chosen={folder.id===folderId}>{folder.name}</button>{/each}</div>{/if}</div><button type="button" disabled={busy||!folderId||detail?.closed} onclick={()=>fileInput.click()}>{$t('chat.files')}</button><button type="button" disabled={busy||!onPlugins} onclick={()=>{persistDraft();onPlugins?.(folderId)}}>{$t('chat.plugins')}</button>{/if}<button class="attach-button" type="button" disabled={busy || !folderId || detail?.closed} title={$t('chat.51')} aria-label={$t('chat.50')} onclick={() => fileInput.click()}><Plus size={19}/></button><button type="button" onclick={()=>referenceOpen=!referenceOpen} disabled={busy||detail?.closed}>{$t("chat.122")}</button></span><div><button class="send-button" aria-label={$t("chat.41")} disabled={busy || (!!selected && !detail) || (!draft.trim() && !attachments.length) || !folderId || detail?.closed}><ArrowUp size={18}/></button></div></div></form>{#if mode==='group'}<ChatMembers members={detail?.members??[]} busy={busy||memberBusy||!!detail?.closed} onMention={mentionAgent} onConnect={openConnection} onChange={memberAction}/>{/if}{#if draftStorageError}<p class="draft-warning" role="status">{$t("chat.94")}</p>{/if}<div class="composer-hint">{$t("chat.18")} <span>{detail?.archive_path ?? $t('chat.34')}</span></div></footer>
+      </div>{/if}{#if referenceOpen}<div class="reference-input"><input aria-label={$t('chat.123')} placeholder="mcp-assistant/artifacts/file.png" bind:value={referenceInput} disabled={busy} onkeydown={event=>{if(event.key==='Enter'){event.preventDefault();void attachReference()}}}/><button type="button" onclick={attachReference} disabled={busy||!referenceInput.trim()}>{$t('chat.122')}</button></div>{/if}<div class="bottom-control"><button type="button" class="jump-bottom" onclick={toBottom} title={$t('chat.96')} aria-label={$t('chat.96')} aria-pressed={following}><ArrowDown size={16}/></button></div><form class="has-tongue" onsubmit={(e) => { e.preventDefault(); void send(); }}><div class="composer-tongue"><div class="project-picker"><button type="button" disabled={busy || !isNewConversation} title={isNewConversation ? $t('chat.project') : undefined} aria-label={$t('chat.project')} aria-expanded={projectOpen} onclick={()=>projectOpen=!projectOpen}><FolderIcon size={13}/><span>{selectedFolder?.name ?? $t('chat.project')}</span>{#if isNewConversation && folders.length > 1}<ChevronDown size={12}/>{/if}</button>{#if projectOpen && isNewConversation}<div class="project-options">{#each folders as folder}<button type="button" onclick={()=>selectProject(folder.id)} class:chosen={folder.id===folderId}>{folder.name}</button>{/each}</div>{/if}</div></div>{#if attachments.length}<div class="draft-files">{#each attachments as file (file.id)}<DraftAttachment {file} {workspaceId} {folderId} chatId={selected} disabled={busy} onRemove={()=>removeAttachment(file)}/>{/each}</div>{/if}<div class="composer-input"><div class="mention-input"><div class="draft-highlight" bind:this={draftHighlight} aria-hidden="true">{#each highlightedDraft as part}{#if part.file}<span class="attachment-mention">{part.text}</span>{:else}{part.text}{/if}{/each}{'\n'}</div><textarea bind:this={composer} aria-label={$t("chat.39")} bind:value={draft} oninput={(event) => { draft = event.currentTarget.value; updateCaret(); mentionFocused=true; persistDraft(); }} onfocus={()=>{mentionFocused=true;updateCaret()}} onblur={()=>mentionFocused=false} onclick={()=>{mentionFocused=true;updateCaret()}} onkeyup={updateCaret} onscroll={()=>{if(draftHighlight){draftHighlight.scrollTop=composer.scrollTop;draftHighlight.scrollLeft=composer.scrollLeft}}} onpaste={pasteImages} placeholder={detail?.closed ? $t('chat.30') : $t('chat.31')} disabled={!folderId || detail?.closed || (busy && !uploading)} onkeydown={composerKeys} rows={mode==='group'?1:3} maxlength="32000" aria-autocomplete="list" aria-controls="attachment-choices"></textarea></div>{#if mention && choices.length}<div class="mention-choices" id="attachment-choices" role="listbox" aria-label={$t('chat.attachmentChoices')}>{#each choices as file,i (file.id)}<button type="button" role="option" aria-selected={i===mentionIndex} class:active={i===mentionIndex} onpointerdown={event=>event.preventDefault()} onclick={()=>insertMention(file)}><strong>@{file.label}</strong><span>{file.name}</span></button>{/each}</div>{/if}</div><input class="file-input" type="file" multiple bind:this={fileInput} onchange={() => uploadFiles(fileInput.files)} aria-label={$t('chat.50')}/><div class="composer-toolbar"><span>{#if mode==='work'}<button type="button" disabled={busy||!folderId||detail?.closed} onclick={()=>fileInput.click()}>{$t('chat.files')}</button><button type="button" disabled={busy||!onPlugins} onclick={()=>{persistDraft();onPlugins?.(folderId)}}>{$t('chat.plugins')}</button>{/if}<button class="attach-button" type="button" disabled={busy || !folderId || detail?.closed} title={$t('chat.51')} aria-label={$t('chat.50')} onclick={() => fileInput.click()}><Plus size={19}/></button><button type="button" onclick={()=>referenceOpen=!referenceOpen} disabled={busy||detail?.closed}>{$t("chat.122")}</button></span><div><button class="send-button" aria-label={$t("chat.41")} disabled={busy || (!!selected && !detail) || (!draft.trim() && !attachments.length) || !folderId || detail?.closed}><ArrowUp size={18}/></button></div></div></form>{#if mode==='group'}<ChatMembers members={detail?.members??[]} busy={busy||memberBusy||!!detail?.closed} onMention={mentionAgent} onConnect={openConnection} onChange={memberAction}/>{/if}{#if draftStorageError}<p class="draft-warning" role="status">{$t("chat.94")}</p>{/if}<div class="composer-hint">{$t("chat.18")} <span>{detail?.archive_path ?? $t('chat.34')}</span></div></footer>
   </div>
   {#if tasksOpen}<ChatTaskPanel bind:width={tasksWidth} session={detail} expanded={tasksExpanded} onClose={onCloseTasks} onToggleExpanded={onToggleTasksExpanded}/>{/if}
 </section>
 <dialog class="connect-dialog" bind:this={connectDialog} onclose={() => { guide = false; connectionPrompt = ''; }}>
   <header><h2>{$t('chat.connect')}</h2><button aria-label={$t('Close')} onclick={()=>guide=false}><X size={18}/></button></header>
-  {#if connectionRequest && pairing !== 'failed'}
-    <div class="pairing-state" role="status"><p>{$t('chat.pairing')}</p><progress aria-label={$t('chat.pairing')}></progress><p class="pairing-hint">{$t(mode==='group'?'chat.groupPairingHint':'chat.pairingHint')}</p></div>
+  {#if connectionRequest && pairing !== 'failed' && pairingStalled}
+    <div class="pairing-state stalled" role="alert">
+      <p><strong>{$t('chat.pairingStalled')}</strong></p>
+      <p class="pairing-hint">{$t(aiAttached ? 'chat.pairingAttachedNoGreeting' : 'chat.pairingNoAi')}</p>
+      <ul class="pairing-tips"><li>{$t('chat.pairingTip1')}</li><li>{$t('chat.pairingTip2')}</li><li>{$t('chat.pairingTip3')}</li></ul>
+    </div>
+    <div class="connection-buttons">
+      <button onclick={copyPrompt} disabled={connectionLoading || !connectionPrompt}>{#if copied}<Check size={14}/>{:else}<Copy size={14}/>{/if}{copied ? $t('chat.25') : $t('chat.24')}</button>
+      <button onclick={retryPairing}>{$t('chat.pairingRetry')}</button>
+      {#if aiAttached}<button class="connection-sent" onclick={()=>guide=false}>{$t('chat.pairingContinue')}</button>{/if}
+      <button onclick={()=>guide=false}>{$t('Cancel')}</button>
+    </div>
+  {:else if connectionRequest && pairing !== 'failed'}
+    <div class="pairing-state" role="status"><p>{$t('chat.pairing')}</p><progress aria-label={$t('chat.pairing')}></progress><p class="pairing-hint">{$t(mode==='group'?'chat.groupPairingHint':'chat.pairingHint')}</p>{#if aiAttached}<p class="pairing-hint">{$t('chat.pairingAttached')}</p>{/if}<p class="pairing-elapsed">{$t('chat.pairingElapsed', { seconds: pairingElapsed, limit: PAIRING_TIMEOUT_MS / 1000 })}</p></div>
+    <div class="connection-buttons"><button onclick={retryPairing}>{$t('chat.pairingBack')}</button><button onclick={()=>guide=false}>{$t('Cancel')}</button></div>
   {:else}
     <p>{$t('chat.sendInstruction')}</p>
     <textarea class="connection-prompt" readonly aria-label={$t('chat.9')} value={connectionLoading ? $t('Loading…') : connectionPrompt}></textarea>
@@ -585,6 +617,7 @@
 
 .chat-header{flex:none;min-height:60px;gap:12px}.chat-header .chat-heading{min-width:0;flex:1;gap:12px;flex-wrap:nowrap}.chat-heading strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.status{white-space:nowrap}.header-actions{flex-wrap:nowrap;gap:14px}.connection-actions{display:flex;border:1px solid #ffffff24;border-radius:9px;overflow:hidden}.connection-actions button{padding:7px 13px}.connection-actions button+button{border-left:1px solid #ffffff24}.connection-actions button:hover:enabled{background:#ffffff10}
 .landing .feed-frame{flex:0 0 auto;margin-top:auto}.landing .empty-state{padding:20px 16px 24px}.landing .empty-state h2{margin:0;font-size:30px;font-weight:500}.landing .composer-area{margin-bottom:auto;padding-top:0;padding-bottom:60px}.landing .bottom-control,.landing .composer-hint{display:none}.landing .message-feed{padding:0;overflow:visible}.composer-area{background:#181818}.composer-area textarea{color:#eee}
+.pairing-state.stalled{text-align:left}.pairing-tips{margin:8px 0 0;padding-left:18px;display:grid;gap:4px;font-size:12px;color:var(--color-text-muted)}.pairing-elapsed{font-size:11px;color:var(--color-text-muted);font-variant-numeric:tabular-nums}
 .connect-dialog{margin:auto;width:min(560px,calc(100vw - 32px));max-height:calc(100dvh - 32px);overflow:auto;padding:24px;border:1px solid var(--color-border);border-radius:18px;background:var(--color-bg);color:var(--color-text);box-shadow:0 20px 80px #0007}.connect-dialog::backdrop{background:#0007;backdrop-filter:blur(5px)}.connect-dialog header{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px}.connect-dialog h2{font-size:17px;font-weight:600}.connect-dialog p{font-size:13px;line-height:1.7;margin:12px 0}.connection-prompt{width:100%;height:220px;resize:vertical;padding:12px;border:1px solid var(--color-border);border-radius:10px;background:var(--card-bg);font:11px/1.7 monospace;color:var(--color-text)}.connection-buttons{display:flex;justify-content:space-between;gap:12px;margin-top:18px}.connection-buttons button{display:flex;align-items:center;gap:7px;padding:9px 14px;border:1px solid var(--color-border);border-radius:8px}.connection-sent{background:#2563eb;color:#fff}.pairing-state{padding:18px 0 22px}.pairing-state progress{width:100%;height:6px;accent-color:#6096ec}.pairing-hint{color:var(--color-text-muted)}.connection-error{color:var(--danger);overflow-wrap:anywhere}
 @media(max-width:700px){.chat-header,.external-navigation .chat-header{padding:12px}.chat-header .chat-heading{flex-direction:column;align-items:flex-start;gap:3px}.chat-heading strong{max-width:100%}.header-actions{gap:8px}.connection-actions button{padding:6px 8px}.landing .composer-area{padding-bottom:35px}}
 
@@ -595,4 +628,16 @@
 @container (min-width:800px){.tasks-visible .conversation{margin-right:var(--chat-task-width)}}
 .mode-switch{display:flex;justify-content:center;align-self:center;gap:3px;margin:20px 0 0;padding:4px;background:#252525;border:1px solid #ffffff0c;border-radius:22px;font-size:12px}.mode-switch button{padding:7px 22px;border-radius:18px;color:#969696}.mode-switch button[aria-pressed=true]{background:#414141;color:#eee;box-shadow:0 2px 4px #0003}.group-mode .composer-area form{position:relative;display:flex;flex-wrap:wrap;align-items:center;gap:8px;border-radius:28px;padding:10px 12px 10px 20px}.group-mode .composer-input{flex:1;min-width:100px;margin-left:26px}.group-mode .mention-input textarea,.group-mode .draft-highlight{min-height:28px;height:28px;line-height:28px}.group-mode .composer-toolbar{margin:0;gap:8px}.group-mode .composer-toolbar>span{position:absolute;left:12px}.group-mode .composer-toolbar>span>button:not(.attach-button){display:none}.group-mode .draft-files{width:100%;margin:0}.project-picker{position:relative}.project-picker>button{padding:5px}.project-options{position:absolute;left:0;bottom:calc(100% + 12px);z-index:25;min-width:190px;max-width:300px;max-height:250px;overflow:auto;padding:6px;background:#282828;border:1px solid #ffffff25;border-radius:12px;box-shadow:0 12px 25px #0008}.project-options button{display:block;width:100%;padding:10px;text-align:left;border-radius:7px;overflow-wrap:anywhere}.project-options button:hover,.project-options button.chosen{background:#ffffff0e}.composer-toolbar>span>button{padding:4px 6px}.group-mode.landing .composer-area{padding-bottom:35px}
 .mention-input textarea::placeholder{color:#aaa;opacity:1}
+.composer-area form.has-tongue{position:relative;margin-top:26px}
+/* "Tongue": a tab growing out of the composer's top edge; it carries the project picker. */
+.composer-tongue{position:absolute;left:18px;bottom:calc(100% - 1px);display:flex;align-items:center;padding:3px 4px 0;background:#363636;border:1px solid var(--color-border);border-bottom:0;border-radius:11px 11px 0 0;font-size:11px;color:#bdbdbd;z-index:2}
+.group-mode .composer-tongue{left:24px}
+.composer-tongue::before,.composer-tongue::after{content:'';position:absolute;bottom:0;width:10px;height:10px;background:transparent;pointer-events:none}
+.composer-tongue::before{left:-11px;border-bottom-right-radius:10px;box-shadow:4px 4px 0 3px #363636}
+.composer-tongue::after{right:-11px;border-bottom-left-radius:10px;box-shadow:-4px 4px 0 3px #363636}
+.composer-tongue .project-picker>button{display:flex;align-items:center;gap:5px;max-width:240px;padding:4px 8px 5px;border-radius:8px;color:inherit}
+.composer-tongue .project-picker>button span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.composer-tongue .project-picker>button:not(:disabled):hover{background:#ffffff12;color:#eee}
+.composer-tongue .project-picker>button:disabled{opacity:1;cursor:default}
+.composer-tongue .project-options{bottom:calc(100% + 8px)}
 </style>
