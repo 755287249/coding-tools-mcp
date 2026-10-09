@@ -48,7 +48,7 @@ test('chat protects folder boundaries, rejects wrong attachments and concurrent 
   const other=mkdtempSync(path.join(tmpdir(),'chat-other-'));t.after(()=>rmSync(other,{recursive:true,force:true}));
   assert.throws(()=>chatUi(other,{action:'read',chat_id:args.chat_id}));
   mkdirSync(path.join(root,'docs/chat-sessions/.lock'));
-  assert.throws(()=>chatUi(root,{action:'list'}),/EEXIST/);
+  assert.throws(()=>chatUi(root,{action:'list'}),/Chat storage is busy/);
   rmSync(path.join(root,'docs/chat-sessions/.lock'),{recursive:true});
   mkdirSync(path.join(other,'linked'));symlinkSync(path.join(root,'docs'),path.join(other,'linked/docs'),'dir');
   assert.throws(()=>chatUi(path.join(other,'linked'),{action:'list'}),/symlink/);
@@ -92,4 +92,53 @@ test('aborting the HTTP wait clears live waiting state before the tool timeout',
   const end = Date.now() + 1500;
   while (status() === 'waiting' && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 20));
   assert.notEqual(status(), 'waiting');
+});
+
+test('chat waits for a short-lived external lock and preserves a stale lock', async t => {
+  const { root } = fixture(t);
+  const lockPath = path.join(root, 'docs/chat-sessions/.lock');
+  mkdirSync(lockPath);
+  const { Worker } = await import('node:worker_threads');
+  const worker = new Worker(`const {workerData}=require('node:worker_threads'); setTimeout(()=>require('node:fs').rmdirSync(workerData),100)`, {eval:true,workerData:lockPath});
+  const exited = new Promise((resolve,reject)=>{worker.on('exit',resolve);worker.on('error',reject)});
+  assert.ok(Array.isArray(chatUi(root,{action:'list'}).sessions));
+  await exited;
+});
+
+test('attachments persist, dedupe and remain scoped to a conversation with integrity checks', async t => {
+  const {root,args}=fixture(t);
+  const data = Buffer.from('hello attachment');
+  const upload={action:'upload',chat_id:args.chat_id,upload_id:'file-1',name:'notes.txt',data_base64:data.toString('base64')};
+  const file=chatUi(root,upload).attachment;
+  assert.equal(file.mime,'application/octet-stream');
+  assert.deepEqual(chatUi(root,upload).attachment,file);
+  assert.throws(()=>chatUi(root,{...upload,data_base64:Buffer.from('changed').toString('base64')}),/conflict/);
+  assert.throws(()=>chatUi(root,{...upload,upload_id:'file-bad',name:'../bad'}),/name/);
+  assert.throws(()=>chatUi(root,{...upload,upload_id:'oversize',data_base64:Buffer.alloc(2097153).toString('base64')}),/size|bytes/);
+  const other=chatUi(root,{action:'create'}).session;
+  assert.throws(()=>chatUi(root,{action:'send',chat_id:other.id,message_id:'cross',text:'x',attachment_ids:[file.id]}),/belong/);
+  const send={action:'send',chat_id:args.chat_id,message_id:'attached',text:'',attachment_ids:[file.id]};
+  chatUi(root,send);chatUi(root,send);
+  assert.throws(()=>chatUi(root,{...send,text:'changed'}),/conflict/);
+  const msg=(await chatWait(root,{...args,timeout_ms:0})).message;
+  assert.equal(msg.attachments[0].sha256,file.sha256);
+  assert.equal(msg.text,'📎');
+  const download=chatUi(root,{action:'read_attachment',chat_id:args.chat_id,upload_id:file.id});
+  assert.equal(download.data_base64,data.toString('base64'));
+  assert.match(readFileSync(path.join(root,`docs/chat-sessions/${args.chat_id}.md`),'utf8'),/notes.txt/);
+  const {writeFileSync}=await import('node:fs');writeFileSync(path.join(root,file.path),'changed');
+  assert.throws(()=>chatUi(root,{action:'read_attachment',chat_id:args.chat_id,upload_id:file.id}),/changed/);
+});
+
+test('tool cards are progress events, are deduplicated and do not acknowledge a request', async t => {
+  const {root,args}=fixture(t);
+  chatUi(root,{action:'send',chat_id:args.chat_id,message_id:'u-tool',text:'inspect'});
+  const event={...args,message_id:'tool-1',reply_to:'u-tool',text:'Read project root',final:false,tool_event:{name:'list_files',status:'completed'}};
+  assert.equal(chatTool(root,'chat_reply',event).persisted,true);
+  chatTool(root,'chat_reply',event);
+  assert.equal((await chatWait(root,{...args,timeout_ms:0})).message.id,'u-tool');
+  assert.throws(()=>chatTool(root,'chat_reply',{...event,final:true}),/final=false/);
+  assert.throws(()=>chatTool(root,'chat_reply',{...event,tool_event:{name:'list_files',status:'failed'}}),/conflict/);
+  const session=chatUi(root,{action:'read',chat_id:args.chat_id}).session;
+  assert.equal(session.messages.filter(m=>m.tool_event).length,1);
 });

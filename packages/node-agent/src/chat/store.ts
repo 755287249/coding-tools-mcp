@@ -1,12 +1,14 @@
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { redactSensitiveText } from '../redaction.js';
 
 // The on-disk v1 contract is shared with tools/chat.rs. Never persist waiting=true.
-export interface ChatMessage { id: string; role: 'user' | 'assistant'; text: string; created_at: number; reply_to?: string; final?: boolean }
-export interface ChatSession { version: 1; id: string; title: string; created_at: number; updated_at: number; closed: boolean; messages: ChatMessage[]; attachment_id: string; lease_until: number }
+export interface ChatFile { id: string; name: string; path: string; mime: string; size: number; sha256: string }
+export interface ToolEvent { name: string; status: 'running' | 'completed' | 'failed' }
+export interface ChatMessage { attachments?: ChatFile[]; tool_event?: ToolEvent; id: string; role: 'user' | 'assistant'; text: string; created_at: number; reply_to?: string; final?: boolean }
+export interface ChatSession { files?: ChatFile[]; version: 1; id: string; title: string; created_at: number; updated_at: number; closed: boolean; messages: ChatMessage[]; attachment_id: string; lease_until: number }
 const DIR = 'docs/chat-sessions';
 const MAX_BYTES = 2 * 1024 * 1024;
 const LEASE_MS = 10 * 60_000;
@@ -36,7 +38,7 @@ function load(root: string, id: string): ChatSession {
   return s;
 }
 export function chatMarkdown(s: ChatSession): string {
-  return `# ${s.title}\n\nSession: ${s.id}\n\n` + s.messages.map(m => `## ${m.role === 'user' ? '你' : m.final === false ? 'AI · 进度' : 'AI'} · ${m.created_at}\n\n${m.text}\n`).join('\n');
+  return `# ${s.title}\n\nSession: ${s.id}\n\n` + s.messages.map(m => `## ${m.role === 'user' ? '你' : m.final === false ? 'AI · 进度' : 'AI'} · ${m.created_at}\n\n${m.tool_event ? `Tool (AI reported): ${m.tool_event.name} · ${m.tool_event.status}\n\n` : ''}${m.text}\n${(m.attachments ?? []).map(f => `\nAttachment: ${f.name} (${f.size} bytes)\nPath: ${f.path}\n`).join('')}`).join('\n');
 }
 function save(root: string, s: ChatSession): void {
   const body = JSON.stringify(s, null, 2);
@@ -55,8 +57,16 @@ function locked<T>(root: string, callback: () => T): T {
   const directory = safe(root, DIR);
   mkdirSync(directory, { recursive: true });
   const lock = safe(root, `${DIR}/.lock`);
-  // Fail closed on contention, including a stale lock left by a crashed writer.
-  mkdirSync(lock);
+  // Other processes may hold the lock briefly; never steal or remove their lock.
+  const deadline = Date.now() + 2000;
+  while (true) {
+    try { mkdirSync(lock); break; }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      if (Date.now() >= deadline) throw new Error('Chat storage is busy; retry shortly. If it persists, stop all clients before inspecting docs/chat-sessions/.lock');
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    }
+  }
   try { return callback(); } finally { rmSync(lock, { recursive: true }); }
 }
 function key(root: string, id: string): string { return `${realpathSync(root)}:${id}`; }
@@ -67,6 +77,60 @@ function view(root: string, s: ChatSession) {
   return { id: s.id, title: s.title, created_at: s.created_at, updated_at: s.updated_at, closed: s.closed, messages: s.messages,
     status: s.closed ? 'closed' : waiters.has(key(root, s.id)) ? 'waiting' : s.lease_until > Date.now() ? 'connected' : 'offline',
     archive_path: `${DIR}/${s.id}.md` };
+}
+const MAX_FILE_BYTES = 2 * 1024 * 1024;
+function fileMime(bytes: Buffer): string {
+  if (bytes.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10]))) return 'image/png';
+  if (bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255) return 'image/jpeg';
+  if (['GIF87a','GIF89a'].includes(bytes.subarray(0, 6).toString())) return 'image/gif';
+  if (bytes.subarray(0, 4).toString() === 'RIFF' && bytes.subarray(8, 12).toString() === 'WEBP') return 'image/webp';
+  return 'application/octet-stream';
+}
+function filePath(s: ChatSession, f: ChatFile): string {
+  const ext = ({'image/png':'png','image/jpeg':'jpg','image/gif':'gif','image/webp':'webp'} as Record<string,string>)[f.mime] ?? 'bin';
+  return `${DIR}/${validId(s.id)}-${validId(f.id)}.${ext}`;
+}
+function upload(root: string, s: ChatSession, args: Record<string, unknown>): ChatFile {
+  if (s.closed) throw new Error('Conversation is closed');
+  const id = validId(args.upload_id);
+  const name = text(args.name, 240);
+  if (/[\r\n\x00-\x1f\x7f\/\\]/.test(name)) throw new Error('Invalid attachment name');
+  const encoded = args.data_base64;
+  if (typeof encoded !== 'string' || encoded.length > 2796204 || encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) throw new Error('Invalid attachment encoding or size');
+  const bytes = Buffer.from(encoded, 'base64');
+  if (bytes.toString('base64') !== encoded) throw new Error('Invalid attachment encoding or size');
+  if (!bytes.length || bytes.length > MAX_FILE_BYTES) throw new Error('Attachment must contain 1–2097152 bytes');
+  const sha256 = createHash('sha256').update(bytes).digest('hex');
+  const files = s.files ??= [];
+  const existing = files.find(f => f.id === id);
+  if (existing) {
+    if (existing.sha256 !== sha256 || existing.name !== name) throw new Error('Attachment ID conflict');
+    save(root, s); return existing;
+  }
+  if (files.length >= 32 || files.reduce((sum,f) => sum + f.size, 0) + bytes.length > 32 * 1024 * 1024) throw new Error('Session attachment limit reached');
+  const f: ChatFile = {id,name,mime:fileMime(bytes),size:bytes.length,sha256,path:''};
+  f.path = filePath(s, f);
+  const target = safe(root, f.path);
+  // An interrupted upload may leave its immutable bytes; same-ID retry may reuse them.
+  if (existsSync(target)) {
+    if (statSync(target).size !== bytes.length || !readFileSync(target).equals(bytes)) throw new Error('Attachment ID conflict');
+  } else writeFileSync(target, bytes, {mode:0o600,flag:'wx'});
+  files.push(f); save(root, s); return f;
+}
+function messageFiles(s: ChatSession, ids: unknown): ChatFile[] {
+  if (ids === undefined) return [];
+  if (!Array.isArray(ids) || ids.length > 5 || new Set(ids).size !== ids.length) throw new Error('Select up to 5 unique attachments');
+  return ids.map(id => {
+    const f = s.files?.find(f => f.id === validId(id));
+    if (!f) throw new Error('Attachment does not belong to this conversation');
+    return f;
+  });
+}
+function toolEvent(value: unknown, final: boolean): ToolEvent | undefined {
+  if (value === undefined) return undefined;
+  const event = value as Record<string, unknown>;
+  if (!event || typeof event !== 'object' || final || !['running','completed','failed'].includes(String(event.status))) throw new Error('Tool events require final=false and a valid status');
+  return { name: text(event.name, 120), status: event.status as ToolEvent['status'] };
 }
 export function chatUi(root: string, args: Record<string, unknown>): Record<string, unknown> {
   return locked(root, () => {
@@ -82,12 +146,21 @@ export function chatUi(root: string, args: Record<string, unknown>): Record<stri
       save(root, s); return { session: view(root, s) };
     }
     const s = load(root, validId(args.chat_id));
+    if (action === 'upload') return { attachment: upload(root, s, args) };
+    if (action === 'read_attachment') {
+      const f = messageFiles(s, [args.upload_id])[0];
+      const target = safe(root, filePath(s, f));
+      if (statSync(target).size > MAX_FILE_BYTES) throw new Error('Attachment exceeds size limit');
+      const bytes = readFileSync(target);
+      if (createHash('sha256').update(bytes).digest('hex') !== f.sha256) throw new Error('Attachment content changed');
+      return { attachment: f, data_base64: bytes.toString('base64') };
+    }
     if (action === 'send') {
       if (s.closed) throw new Error('Conversation is closed');
-      const id = validId(args.message_id); const content = text(args.text);
+      const id = validId(args.message_id); const attachments = messageFiles(s, args.attachment_ids); const content = text(args.text || (attachments.length ? '📎' : ''));
       const existing = s.messages.find(m => m.id === id);
-      if (existing && (existing.role !== 'user' || existing.text !== content)) throw new Error('Message ID conflicts with an existing message');
-      if (!existing) { if (!s.messages.length) s.title = [...content.replace(/\s+/g, ' ')].slice(0, 36).join(''); s.messages.push({ id, role: 'user', text: content, created_at: Date.now() }); s.updated_at = Date.now(); }
+      if (existing && (existing.role !== 'user' || existing.text !== content || JSON.stringify(existing.attachments ?? []) !== JSON.stringify(attachments))) throw new Error('Message ID conflicts with an existing message');
+      if (!existing) { if (!s.messages.length) s.title = [...content.replace(/\s+/g, ' ')].slice(0, 36).join(''); s.messages.push({ id, role: 'user', text: content, attachments, created_at: Date.now() }); s.updated_at = Date.now(); }
       save(root, s);
     } else if (action === 'close') { s.closed = true; s.attachment_id = ''; s.lease_until = 0; s.updated_at = Date.now(); save(root, s); }
     else if (action !== 'read') throw new Error('Unknown chat action');
@@ -110,13 +183,13 @@ export function chatTool(root: string, name: string, args: Record<string, unknow
     owned(s, args.attachment_id);
     if (name === 'chat_reply') {
       const id = validId(args.message_id); const replyTo = validId(args.reply_to); const content = text(args.text);
-      const final = args.final !== false;
+      const final = args.final !== false; const tool_event = toolEvent(args.tool_event, final);
       const existing = s.messages.find(m => m.id === id);
       if (existing) {
-        if (existing.role !== 'assistant' || existing.text !== content || existing.reply_to !== replyTo || existing.final !== final) throw new Error('Message ID conflicts with an existing reply');
+        if (existing.role !== 'assistant' || existing.text !== content || existing.reply_to !== replyTo || existing.final !== final || JSON.stringify(existing.tool_event ?? undefined) !== JSON.stringify(tool_event)) throw new Error('Message ID conflicts with an existing reply');
       } else {
         if (pending(s)?.id !== replyTo) throw new Error('Reply must address the oldest unanswered user message');
-        s.messages.push({ id, role: 'assistant', text: content, reply_to: replyTo, final, created_at: Date.now() }); s.updated_at = Date.now();
+        s.messages.push({ id, role: 'assistant', text: content, reply_to: replyTo, final, tool_event, created_at: Date.now() }); s.updated_at = Date.now();
       }
       s.lease_until = Date.now() + LEASE_MS; save(root, s); return { ok: true, persisted: true, message_id: id };
     }

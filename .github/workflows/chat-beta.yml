@@ -1,4 +1,4 @@
-name: Local Chat Beta (Windows portable)
+name: Local Chat (Windows portable)
 
 on:
   push:
@@ -34,7 +34,9 @@ jobs:
       - run: pnpm run version:check
       - run: pnpm run check
       - name: Test chat prompts
-        run: node --test tests/local-chat-prompt.test.mjs
+        run: node --test tests/local-chat-prompt.test.mjs tests/chat-preview.test.mjs
+      - name: Test chat storage on Windows
+        run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib tools::chat::tests
       - name: Build production portable ZIP
         run: pnpm run desktop:portable
       - name: Verify ZIP and write checksum
@@ -55,7 +57,7 @@ jobs:
           Get-Content dist-portable/SHA256SUMS.txt >> $env:GITHUB_STEP_SUMMARY
       - uses: actions/upload-artifact@v4
         with:
-          name: local-chat-beta-windows-${{ github.sha }}
+          name: local-chat-windows-${{ github.sha }}
           path: |
             dist-portable/*.zip
             dist-portable/SHA256SUMS.txt

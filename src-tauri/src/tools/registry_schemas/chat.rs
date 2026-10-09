@@ -23,6 +23,7 @@ pub(super) fn input_schema(name: &str) -> Option<Value> {
         properties["reply_to"] = json!({"type":"string","minLength":1,"maxLength":80});
         properties["text"] = json!({"type":"string","minLength":1,"maxLength":32000});
         properties["final"] = json!({"type":"boolean","default":true});
+        properties["tool_event"] = json!({"type":"object","description":"AI-reported tool execution update; requires final=false. Not automatic server telemetry.","properties":{"name":{"type":"string","minLength":1,"maxLength":120},"status":{"type":"string","enum":["running","completed","failed"]}},"required":["name","status"],"additionalProperties":false});
         required.extend(["message_id", "reply_to", "text"]);
     }
     Some(

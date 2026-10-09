@@ -158,6 +158,21 @@ pub fn run() {
         return;
     }
     tauri::Builder::default()
+        .register_uri_scheme_protocol("chatpreview", |_context, request| {
+            let allowed = request.method() == "GET" && request.uri().path() == "/index.html";
+            tauri::http::Response::builder()
+                .status(if allowed { 200 } else { 404 })
+                .header("Content-Type", "text/html; charset=utf-8")
+                .header("Content-Security-Policy", "sandbox allow-scripts")
+                .header("Cache-Control", "no-store")
+                .header("Referrer-Policy", "no-referrer")
+                .body(if allowed {
+                    include_bytes!("../../static/chat-preview.html").to_vec()
+                } else {
+                    Vec::new()
+                })
+                .expect("static preview response")
+        })
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             use tauri::menu::MenuBuilder;

@@ -175,6 +175,30 @@ export const rustCatalog: readonly ToolDefinition[] = [
           "minLength": 1,
           "type": "string"
         },
+        "tool_event": {
+          "additionalProperties": false,
+          "description": "AI-reported tool execution update; requires final=false. Not automatic server telemetry.",
+          "properties": {
+            "name": {
+              "maxLength": 120,
+              "minLength": 1,
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "running",
+                "completed",
+                "failed"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "status"
+          ],
+          "type": "object"
+        },
         "workspace_folder_id": {
           "description": "Optional one-call workspace selector. Routes only this tool call and does not change the conversation's selected folder.",
           "minLength": 1,
@@ -5972,11 +5996,11 @@ export const rustToolAnnotationOverridesByProfile: Readonly<Record<ToolProfile, 
   "trusted-core": {}
 };
 export const rustToolsetRevisionByProfile: Readonly<Record<ToolProfile, string>> = {
-  "advanced": "72ca502b135af601",
+  "advanced": "45f52557f268301d",
   "read-only": "0a428588c2f8c57f",
-  "compat-readonly-all": "c71a4f76878db40d",
-  "guarded-core": "b4abce8410db1d02",
-  "trusted-core": "a9e959ba34b0e6ad"
+  "compat-readonly-all": "9f1334bacdd97395",
+  "guarded-core": "23b9e256d129ce64",
+  "trusted-core": "71a3044cfafccae5"
 };
 export const rustBehavioralParityFixtures: Readonly<Record<string, unknown>> = {
   "execution_limits": {

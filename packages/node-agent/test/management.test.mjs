@@ -1739,4 +1739,31 @@ test('local chat management requires admin authentication and isolates configure
   const sent = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify({ action: 'send', folder_id: folder, chat_id: session.id, message_id: 'local-1', text: 'UI message' }) });
   assert.equal(sent.status, 200);
   assert.equal((await sent.json()).session.messages[0].text, 'UI message');
+  const uploadBody = JSON.stringify({ action: 'upload', folder_id: folder, chat_id: session.id, upload_id: 'boundary-file', name: 'large.txt', data_base64: Buffer.alloc(600000, 65).toString('base64') });
+  assert.equal((await fetch(endpoint, {method:'POST',body:uploadBody})).status,403);
+  assert.equal((await fetch(endpoint, {method:'POST',headers:{...headers,origin:'https://attacker.example'},body:uploadBody})).status,403);
+  const uploaded = await fetch(endpoint, {method:'POST',headers,body:uploadBody});
+  assert.equal(uploaded.status,200);
+  assert.equal((await uploaded.json()).attachment.size,600000);
+  const overLimit = JSON.stringify({ action:'upload', folder_id:folder, chat_id:session.id, upload_id:'oversize', name:'large.bin', data_base64:'A'.repeat(3 * 1024 * 1024) });
+  assert.equal((await fetch(endpoint, {method:'POST',headers,body:overLimit})).status,400);
+
+});
+
+test('code preview has no admin token and runs only inside an opaque sandbox', async t => {
+  const runtime=await startManagementServer(t);
+  const page=await fetch(`${runtime.base}/ui`);
+  const pageHtml=await page.text();
+  assert.match(page.headers.get('content-security-policy'),/script-src 'self'/);
+  const response=await fetch(`${runtime.base}/ui/chat-preview.html`);
+  assert.equal(response.status,200);
+  assert.equal(response.headers.get('content-security-policy'),"sandbox allow-scripts; frame-ancestors 'self'");
+  assert.equal(response.headers.get('x-frame-options'),null);
+  const html=await response.text();
+  assert.ok(!html.includes(managementToken(pageHtml)));
+  assert.doesNotMatch(html,/ctmcp-admin-token/);
+  assert.match(html,/event.source !== parent/);
+  assert.match(html,/connect-src 'none'/);
+  assert.match(html,/frame-src 'none'/);
+  assert.equal((await fetch(`${runtime.base}/ui/chat-preview.html`,{method:'POST'})).status,405);
 });

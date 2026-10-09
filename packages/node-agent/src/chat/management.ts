@@ -11,7 +11,7 @@ export async function handleChatRoute(req: IncomingMessage, res: ServerResponse,
   try {
     const runtime = runtimeRecord(options, route[1]);
     if (!runtime) throw new Error('Workspace not found');
-    const body = await readManagementBody(req) as Record<string, unknown>;
+    const body = await readManagementBody(req, 3 * 1024 * 1024) as Record<string, unknown>;
     const folder = runtime.context.config.folders.find(f => f.id === body?.folder_id);
     if (!folder) throw new Error('Select a configured folder');
     sendJson(res, 200, chatUi(folder.path, body));

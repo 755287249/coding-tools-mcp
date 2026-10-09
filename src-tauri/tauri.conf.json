@@ -32,7 +32,8 @@
         "style-src": "'unsafe-inline' 'self'",
         "object-src": "'none'",
         "base-uri": "'self'",
-        "frame-ancestors": "'none'"
+        "frame-ancestors": "'none'",
+        "frame-src": "chatpreview: http://chatpreview.localhost https://chatpreview.localhost"
       },
       "devCsp": {
         "default-src": "'self' customprotocol: asset:",
@@ -42,7 +43,8 @@
         "style-src": "'unsafe-inline' 'self'",
         "object-src": "'none'",
         "base-uri": "'self'",
-        "frame-ancestors": "'none'"
+        "frame-ancestors": "'none'",
+        "frame-src": "chatpreview: http://chatpreview.localhost https://chatpreview.localhost"
       }
     }
   },

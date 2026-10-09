@@ -22,6 +22,7 @@ function securityHeaders(contentSecurityPolicy = false): Record<string, string> 
       "img-src 'self' data:",
       "manifest-src 'self'",
       "worker-src 'self'",
+      "frame-src 'self'",
       "base-uri 'none'",
       "form-action 'none'",
       "frame-ancestors 'none'",
@@ -156,6 +157,20 @@ export async function handleManagementUiRequest(
       "content-type": "application/json; charset=utf-8",
       ...securityHeaders(),
     }).end(JSON.stringify({ error: { code: "METHOD_NOT_ALLOWED", message: "Method not allowed." } }));
+    return true;
+  }
+  if (pathname === "/ui/chat-preview.html") {
+    try {
+      const runner = await readFile(path.join(assetRoot, "chat-preview.html"));
+      res.writeHead(200, {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-store",
+        "x-content-type-options": "nosniff",
+        "referrer-policy": "no-referrer",
+        "permissions-policy": "camera=(), microphone=(), geolocation=()",
+        "content-security-policy": "sandbox allow-scripts; frame-ancestors 'self'",
+      }).end(runner);
+    } catch { res.writeHead(404).end(); }
     return true;
   }
   if (pathname === "/" ) {

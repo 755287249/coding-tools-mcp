@@ -90,11 +90,28 @@ pub fn markdown(s: &Value) -> String {
             } else {
                 "AI"
             };
+            if !m["tool_event"].is_null() {
+                out.push_str(&format!(
+                    "Tool (AI reported): {} · {}\n\n",
+                    m["tool_event"]["name"].as_str().unwrap_or(""),
+                    m["tool_event"]["status"].as_str().unwrap_or("")
+                ));
+            }
             out.push_str(&format!(
                 "## {role} · {}\n\n{}\n\n",
                 m["created_at"],
                 m["text"].as_str().unwrap_or("")
             ));
+            if let Some(files) = m["attachments"].as_array() {
+                for f in files {
+                    out.push_str(&format!(
+                        "Attachment: {} ({} bytes)\nPath: {}\n\n",
+                        f["name"].as_str().unwrap_or(""),
+                        f["size"],
+                        f["path"].as_str().unwrap_or("")
+                    ));
+                }
+            }
         }
     }
     out
@@ -141,7 +158,19 @@ impl Drop for DiskLock {
 fn lock(root: &Path) -> Result<DiskLock> {
     fs::create_dir_all(safe(root, DIR)?).map_err(io)?;
     let p = safe(root, &format!("{DIR}/.lock"))?;
-    fs::create_dir(&p).map_err(io)?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match fs::create_dir(&p) {
+            Ok(()) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(err("Chat storage is busy; retry shortly. If it persists, stop all clients before inspecting docs/chat-sessions/.lock"));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(e) => return Err(io(e)),
+        }
+    }
     Ok(DiskLock(p))
 }
 fn pending(s: &Value) -> Option<Value> {
@@ -185,6 +214,147 @@ fn view(root: &Path, s: &Value) -> Result<Value> {
     );
     Ok(result)
 }
+const MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
+fn file_mime(bytes: &[u8]) -> &'static str {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        "image/png"
+    } else if bytes.starts_with(&[255, 216, 255]) {
+        "image/jpeg"
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        "image/gif"
+    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        "image/webp"
+    } else {
+        "application/octet-stream"
+    }
+}
+fn file_path(s: &Value, f: &Value) -> Result<String> {
+    let ext = match f["mime"].as_str().unwrap_or("") {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        _ => "bin",
+    };
+    Ok(format!("{DIR}/{}-{}.{}", id(&s["id"])?, id(&f["id"])?, ext))
+}
+fn digest(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(bytes))
+}
+fn upload(root: &Path, s: &mut Value, args: &Value) -> Result<Value> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    if s["closed"] == true {
+        return Err(err("Conversation is closed"));
+    }
+    let upload_id = id(&args["upload_id"])?;
+    let name = text(&args["name"], 240)?;
+    if name
+        .chars()
+        .any(|c| c.is_ascii_control() || c == '/' || c == '\\')
+    {
+        return Err(err("Invalid attachment name"));
+    }
+    let encoded = args["data_base64"].as_str().unwrap_or("");
+    if encoded.len() > 2796204 {
+        return Err(err("Invalid attachment encoding or size"));
+    }
+    let bytes = STANDARD
+        .decode(encoded)
+        .map_err(|_| err("Invalid attachment encoding or size"))?;
+    if bytes.is_empty() || bytes.len() > MAX_FILE_BYTES {
+        return Err(err("Attachment must contain 1–2097152 bytes"));
+    }
+    let sha256 = digest(&bytes);
+    if s["files"].is_null() {
+        s["files"] = json!([]);
+    }
+    let files = s["files"]
+        .as_array()
+        .ok_or_else(|| err("Invalid attachment manifest"))?;
+    if let Some(existing) = files.iter().find(|f| f["id"] == upload_id) {
+        if existing["sha256"] != sha256 || existing["name"] != name {
+            return Err(err("Attachment ID conflict"));
+        }
+        save(root, s)?;
+        return Ok(existing.clone());
+    }
+    if files.len() >= 32
+        || files
+            .iter()
+            .map(|f| f["size"].as_u64().unwrap_or(0))
+            .sum::<u64>()
+            + bytes.len() as u64
+            > 32 * 1024 * 1024
+    {
+        return Err(err("Session attachment limit reached"));
+    }
+    let mut f = json!({"id":upload_id,"name":name,"mime":file_mime(&bytes),"size":bytes.len(),"sha256":sha256});
+    f["path"] = json!(file_path(s, &f)?);
+    let target = safe(root, f["path"].as_str().unwrap())?;
+    if target.exists() {
+        if fs::metadata(&target).map_err(io)?.len() != bytes.len() as u64
+            || fs::read(&target).map_err(io)? != bytes
+        {
+            return Err(err("Attachment ID conflict"));
+        }
+    } else {
+        use std::io::Write;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut dest = options.open(target).map_err(io)?;
+        dest.write_all(&bytes).map_err(io)?;
+        dest.sync_all().map_err(io)?;
+    }
+    s["files"].as_array_mut().unwrap().push(f.clone());
+    save(root, s)?;
+    Ok(f)
+}
+fn message_files(s: &Value, ids: Option<&Value>) -> Result<Vec<Value>> {
+    let Some(ids) = ids else {
+        return Ok(vec![]);
+    };
+    let ids = ids
+        .as_array()
+        .ok_or_else(|| err("Select up to 5 unique attachments"))?;
+    if ids.len() > 5 {
+        return Err(err("Select up to 5 unique attachments"));
+    }
+    let mut seen = HashSet::new();
+    let mut result = Vec::new();
+    for value in ids {
+        let attachment_id = id(value)?;
+        if !seen.insert(attachment_id) {
+            return Err(err("Select up to 5 unique attachments"));
+        }
+        let f = s["files"]
+            .as_array()
+            .and_then(|files| files.iter().find(|f| f["id"] == attachment_id))
+            .ok_or_else(|| err("Attachment does not belong to this conversation"))?;
+        result.push(f.clone());
+    }
+    Ok(result)
+}
+fn tool_event(value: Option<&Value>, final_reply: bool) -> Result<Value> {
+    let Some(value) = value else {
+        return Ok(Value::Null);
+    };
+    if !value.is_object()
+        || final_reply
+        || !matches!(
+            value["status"].as_str(),
+            Some("running" | "completed" | "failed")
+        )
+    {
+        return Err(err("Tool events require final=false and a valid status"));
+    }
+    Ok(json!({"name":text(&value["name"],120)?,"status":value["status"]}))
+}
 pub fn ui(root: &Path, args: &Value) -> Result<Value> {
     let _lock = lock(root)?;
     let action = args["action"].as_str().unwrap_or("");
@@ -214,19 +384,43 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
     }
     let mut s = load(root, id(&args["chat_id"])?)?;
     match action {
+        "upload" => return Ok(json!({"attachment":upload(root,&mut s,args)?})),
+        "read_attachment" => {
+            use base64::{engine::general_purpose::STANDARD, Engine};
+            let f = message_files(&s, Some(&json!([args["upload_id"]])))?.remove(0);
+            let target = safe(root, &file_path(&s, &f)?)?;
+            if fs::metadata(&target).map_err(io)?.len() > MAX_FILE_BYTES as u64 {
+                return Err(err("Attachment exceeds size limit"));
+            }
+            let bytes = fs::read(target).map_err(io)?;
+            if digest(&bytes) != f["sha256"].as_str().unwrap_or("") {
+                return Err(err("Attachment content changed"));
+            }
+            return Ok(json!({"attachment":f,"data_base64":STANDARD.encode(bytes)}));
+        }
         "send" => {
             if s["closed"] == true {
                 return Err(err("Conversation is closed"));
             }
             let message_id = id(&args["message_id"])?;
-            let content = text(&args["text"], 32000)?;
+            let attachments = message_files(&s, args.get("attachment_ids"))?;
+            let value = if args["text"].as_str().unwrap_or("").is_empty() && !attachments.is_empty()
+            {
+                json!("📎")
+            } else {
+                args["text"].clone()
+            };
+            let content = text(&value, 32000)?;
             if let Some(m) = s["messages"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .find(|m| m["id"] == message_id)
             {
-                if m["role"] != "user" || m["text"] != content {
+                if m["role"] != "user"
+                    || m["text"] != content
+                    || m.get("attachments").cloned().unwrap_or(json!([])) != json!(attachments)
+                {
                     return Err(err("Message ID conflicts with an existing message"));
                 }
             } else {
@@ -242,7 +436,7 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
                 s["messages"]
                     .as_array_mut()
                     .unwrap()
-                    .push(json!({"id":message_id,"role":"user","text":content,"created_at":now()}));
+                    .push(json!({"id":message_id,"role":"user","text":content,"attachments":attachments,"created_at":now()}));
                 s["updated_at"] = json!(now());
             }
             save(root, &s)?;
@@ -298,6 +492,7 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
             let reply_to = id(&args["reply_to"])?;
             let content = text(&args["text"], 32000)?;
             let final_reply = args["final"] != false;
+            let event = tool_event(args.get("tool_event"), final_reply)?;
             if let Some(m) = s["messages"]
                 .as_array()
                 .unwrap()
@@ -308,6 +503,7 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
                     || m["text"] != content
                     || m["reply_to"] != reply_to
                     || m["final"] != final_reply
+                    || m["tool_event"] != event
                 {
                     return Err(err("Message ID conflicts with an existing reply"));
                 }
@@ -315,7 +511,7 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
                 if pending(&s).map(|m| m["id"].clone()) != Some(json!(reply_to)) {
                     return Err(err("Reply must address the oldest unanswered user message"));
                 }
-                s["messages"].as_array_mut().unwrap().push(json!({"id":message_id,"role":"assistant","text":content,"reply_to":reply_to,"final":final_reply,"created_at":now()}));
+                s["messages"].as_array_mut().unwrap().push(json!({"id":message_id,"role":"assistant","text":content,"reply_to":reply_to,"final":final_reply,"tool_event":event,"created_at":now()}));
                 s["updated_at"] = json!(now());
             }
             s["lease_until"] = json!(now() + LEASE_MS);
@@ -446,5 +642,68 @@ mod tests {
         assert!(tool(a.path(), "chat_reply", &args).is_err());
         assert!(tool(b.path(), "chat_open", &args).is_err());
         assert!(ui(a.path(), &json!({"action":"read","chat_id":"../other"})).is_err());
+    }
+    #[test]
+    fn temporary_lock_contention_recovers_without_stealing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join(DIR)).unwrap();
+        let path = root.join(DIR).join(".lock");
+        fs::create_dir(&path).unwrap();
+        let worker = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            fs::remove_dir(path).unwrap();
+        });
+        assert!(ui(root, &json!({"action":"list"})).is_ok());
+        worker.join().unwrap();
+    }
+    #[tokio::test]
+    async fn attachments_and_tool_events_preserve_message_contract() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let cid = ui(root, &json!({"action":"create"})).unwrap()["session"]["id"].clone();
+        let data = STANDARD.encode(b"hello attachment");
+        let mut upload_args = json!({"action":"upload","chat_id":cid,"upload_id":"file1","name":"notes.txt","data_base64":data});
+        let f = ui(root, &upload_args).unwrap()["attachment"].clone();
+        assert_eq!(ui(root, &upload_args).unwrap()["attachment"], f);
+        upload_args["name"] = json!("../bad");
+        assert!(ui(root, &upload_args).is_err());
+        let other = ui(root, &json!({"action":"create"})).unwrap()["session"]["id"].clone();
+        assert!(ui(root,&json!({"action":"send","chat_id":other,"message_id":"cross","text":"x","attachment_ids":["file1"]})).is_err());
+        let send = json!({"action":"send","chat_id":cid,"message_id":"u1","text":"","attachment_ids":["file1"]});
+        ui(root, &send).unwrap();
+        ui(root, &send).unwrap();
+        assert_eq!(
+            ui(
+                root,
+                &json!({"action":"read_attachment","chat_id":cid,"upload_id":"file1"})
+            )
+            .unwrap()["data_base64"],
+            data
+        );
+        let opened = tool(root, "chat_open", &json!({"chat_id":cid})).unwrap();
+        let mut args =
+            json!({"chat_id":cid,"attachment_id":opened["attachment_id"],"timeout_ms":0});
+        assert_eq!(
+            wait(root, &args).await.unwrap()["message"]["attachments"][0],
+            f
+        );
+        args["message_id"] = json!("t1");
+        args["reply_to"] = json!("u1");
+        args["text"] = json!("Read project root");
+        args["final"] = json!(false);
+        args["tool_event"] = json!({"name":"list_files","status":"completed"});
+        tool(root, "chat_reply", &args).unwrap();
+        tool(root, "chat_reply", &args).unwrap();
+        assert_eq!(wait(root, &args).await.unwrap()["status"], "message");
+        args["final"] = json!(true);
+        assert!(tool(root, "chat_reply", &args).is_err());
+        fs::write(root.join(f["path"].as_str().unwrap()), b"changed").unwrap();
+        assert!(ui(
+            root,
+            &json!({"action":"read_attachment","chat_id":cid,"upload_id":"file1"})
+        )
+        .is_err());
     }
 }
