@@ -98,6 +98,7 @@ export const MESSAGES = {
   'chat.unpin': ['Unpin conversation', '取消置頂', '取消置顶', '固定を解除'],
   'chat.conversationActions': ['Conversation actions', '對話操作', '对话操作', '会話の操作'],
   'chat.archive': ['Archive', '封存', '归档', 'アーカイブ'],
+  'chat.connectHint': ['No AI connected yet — click to connect one', '尚未接入 AI，點擊接入', '还没有接入 AI，点击接入', 'AI が未接続です。クリックして接続'],
   'chat.unarchive': ['Unarchive', '取消封存', '取消归档', 'アーカイブ解除'],
   'chat.archived': ['Archived', '已封存', '已归档', 'アーカイブ済み'],
   'chat.delete': ['Delete', '刪除', '删除', '削除'],
