@@ -37,6 +37,9 @@ test('one copied prompt combines authentication, verified setup and the session 
     assert.match(connection, /list_workspace_folders/);
     assert.match(prompt, /chat_open/);
     assert.match(prompt, /chat_wait/);
-    assert.doesNotMatch(connection, /connect manually over HTTP|用 HTTP 手动连接/);
+    assert.match(connection, /User-Agent/);
+    assert.match(connection, /Cloudflare/);
+    assert.match(connection, /HTTP/);
+    assert.match(connection, /PKCE/);
   }
 });
