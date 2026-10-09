@@ -1,12 +1,13 @@
 <script lang="ts">
   import { t } from '$lib/i18n';
-  let { src, name }: {src: string; name: string} = $props();
-  let viewer: HTMLDialogElement;
+  let { src, name, openRequest = 0, thumbnail = true }: {src: string; name: string; openRequest?:number; thumbnail?:boolean} = $props();
+  let viewer = $state<HTMLDialogElement>();
+  $effect(()=>{if(openRequest>0&&viewer){zoom=100;if(!viewer.open)viewer.showModal()}});
   let zoom = $state(100);
 </script>
-<button class="thumbnail" onclick={() => { zoom = 100; viewer.showModal(); }} title={$t('chat.66')}><img {src} alt={name}/></button>
+{#if thumbnail}<button class="thumbnail" onclick={() => { zoom = 100; viewer?.showModal(); }} title={$t('chat.66')}><img {src} alt={name}/></button>{/if}
 <dialog bind:this={viewer} aria-label={name}>
-  <header><strong>{name}</strong><button onclick={() => viewer.close()}>{$t('chat.67')}</button></header>
+  <header><strong>{name}</strong><button onclick={() => viewer?.close()}>{$t('chat.67')}</button></header>
   <div class="controls"><label>{$t('chat.68')} <input type="range" min="25" max="400" step="25" bind:value={zoom}/> {zoom}%</label><button onclick={() => zoom = 100}>{$t('chat.69')}</button></div>
   <div class="canvas"><img {src} alt={name} style:width={`${zoom}%`}/></div>
 </dialog>

@@ -29,7 +29,7 @@
       {#if message.tool_event}
         <details class="tool-report">
           <summary><span>{message.tool_event.name}</span><ChatStatusIcon state={message.tool_event.status === 'running' ? 'queued' : message.tool_event.status} label={message.tool_event.status === 'running' ? $t('chat.93') : message.tool_event.status === 'failed' ? $t('chat.58') : $t('chat.56')}/><time>{new Date(message.created_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</time></summary>
-          <ChatMarkdown text={message.text}/>
+          <ChatMarkdown text={message.text} {workspaceId} {folderId} {chatId}/>
           {#if message.tool_event.input}<h4>{$t('chat.76')}</h4><pre>{message.tool_event.input}</pre>{/if}
           {#if message.tool_event.output}<h4>{$t('chat.77')}</h4><pre>{message.tool_event.output}</pre>{/if}
           {#if message.tool_event.output_truncated}<p>{$t('chat.78')}</p>{/if}

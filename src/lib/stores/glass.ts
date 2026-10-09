@@ -3,7 +3,7 @@ import { derived, writable } from "svelte/store";
 
 /**
  * Translucent "glass" window support. The desktop window is frameless and
- * transparent with a native acrylic backdrop; the app paints a tint layer on
+ * transparent with a native Mica wallpaper backdrop; the app paints a tint layer on
  * top whose opacity the user controls (bottom-right slider).
  */
 
@@ -60,23 +60,18 @@ function initialBlur(): boolean {
   }
 }
 
-export type GlassEffectKind = "acrylic" | "blur";
+export type GlassEffectKind = "mica" | "solid";
 
-/**
- * Which native backdrop is in use. window-vibrancy's acrylic goes through the
- * legacy SetWindowCompositionAttribute API on Windows 10 and Windows 11 21H2
- * (build < 22523), which makes window dragging stutter badly. On those builds we
- * use the classic blur instead (smooth there); newer builds get the DWM system
- * backdrop acrylic, which drags smoothly.
- */
+/** Mica uses the wallpaper on Windows 11, without showing windows underneath.
+ * Older systems use a solid fallback so other windows never show through. */
 export const glassEffect = writable<GlassEffectKind | null>(null);
 
-/** First Windows build where acrylic uses the smooth DWM system backdrop. */
-const DWM_ACRYLIC_BUILD = 22523;
+
+
 
 export function effectForBuild(build: number | null | undefined): GlassEffectKind {
-  if (typeof build !== "number" || !Number.isFinite(build) || build <= 0) return "acrylic";
-  return build >= DWM_ACRYLIC_BUILD ? "acrylic" : "blur";
+  if (typeof build !== "number" || !Number.isFinite(build) || build <= 0) return "solid";
+  return build >= 22000 ? "mica" : "solid";
 }
 
 let effectKind: Promise<GlassEffectKind> | null = null;
@@ -85,9 +80,10 @@ function resolveEffectKind(): Promise<GlassEffectKind> {
   effectKind ??= import("@tauri-apps/api/core")
     .then(({ invoke }) => invoke<number | null>("get_windows_build"))
     .then(effectForBuild)
-    .catch(() => "acrylic" as const)
+    .catch(() => "solid" as const)
     .then((kind) => {
       glassEffect.set(kind);
+      document.documentElement.classList.toggle("wallpaper-unavailable", kind === "solid");
       return kind;
     });
   return effectKind;
@@ -118,16 +114,17 @@ const backdropWanted = derived(
 if (browser && isDesktopWindow()) {
   let applied: boolean | null = null;
   backdropWanted.subscribe((wanted) => {
+    document.documentElement.classList.toggle("backdrop-off", !wanted);
     if (wanted === applied) return;
     applied = wanted;
     void Promise.all([import("@tauri-apps/api/window"), resolveEffectKind()])
       .then(([{ getCurrentWindow, Effect }, kind]) => {
         // A newer toggle may have landed while the build lookup was pending.
         if (applied !== wanted) return;
-        return wanted
-          ? getCurrentWindow().setEffects({ effects: [kind === "acrylic" ? Effect.Acrylic : Effect.Blur] })
+        return wanted && kind === "mica"
+          ? getCurrentWindow().setEffects({ effects: [Effect.Mica] })
           : getCurrentWindow().clearEffects();
       })
-      .catch(() => undefined);
+      .catch(() => { document.documentElement.classList.add("wallpaper-unavailable"); glassEffect.set("solid"); });
   });
 }

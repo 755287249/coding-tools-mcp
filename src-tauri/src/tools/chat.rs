@@ -10,6 +10,8 @@ use std::{
 };
 
 const DIR: &str = "docs/chat-sessions";
+const ASSET_DIR: &str = "mcp-assistant/chat-assets";
+const ARTIFACT_DIR: &str = "mcp-assistant/artifacts/";
 const MAX_BYTES: u64 = 2 * 1024 * 1024;
 const LEASE_MS: u64 = 600_000;
 static WAITERS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
@@ -294,15 +296,45 @@ fn file_mime(bytes: &[u8]) -> &'static str {
         "application/octet-stream"
     }
 }
+fn reference_path(value: &Value) -> Result<String> {
+    let relative = value.as_str().unwrap_or("");
+    if !relative.starts_with(ARTIFACT_DIR) || relative.len() > 4096
+        || relative.chars().any(|c| c.is_ascii_control() || c == '\\' || c == ':')
+        || relative.split('/').any(|p| p.is_empty() || p == "." || p == "..") {
+        return Err(err("Local files must be inside mcp-assistant/artifacts"));
+    }
+    Ok(relative.to_owned())
+}
+fn fingerprint(target: &Path) -> Result<(String, u64, &'static str)> {
+    use std::io::Read;
+    use sha2::{Digest, Sha256};
+    if !fs::metadata(target).map_err(io)?.is_file() { return Err(err("Attachment must be a regular file")); }
+    let mut source = fs::File::open(target).map_err(io)?;
+    if !source.metadata().map_err(io)?.is_file() { return Err(err("Attachment must be a regular file")); }
+    let mut buffer = [0u8; 64 * 1024];
+    let mut hash = Sha256::new(); let mut size = 0u64; let mut mime = "application/octet-stream";
+    loop {
+        let count = source.read(&mut buffer).map_err(io)?;
+        if count == 0 { break; }
+        if size == 0 { mime = file_mime(&buffer[..count]); }
+        hash.update(&buffer[..count]); size += count as u64;
+    }
+    if size == 0 { return Err(err("Attachment must not be empty")); }
+    Ok((format!("{:x}", hash.finalize()), size, mime))
+}
 fn file_path(s: &Value, f: &Value) -> Result<String> {
+    if f["local_reference"] == true { return reference_path(&f["path"]); }
     let ext = match f["mime"].as_str().unwrap_or("") {
-        "image/png" => "png",
-        "image/jpeg" => "jpg",
-        "image/gif" => "gif",
-        "image/webp" => "webp",
-        _ => "bin",
+        "image/png" => "png", "image/jpeg" => "jpg", "image/gif" => "gif", "image/webp" => "webp", _ => "bin",
     };
-    Ok(format!("{DIR}/{}-{}.{}", id(&s["id"])?, id(&f["id"])?, ext))
+    let legacy = format!("{DIR}/{}-{}.{}", id(&s["id"])?, id(&f["id"])?, ext);
+    let current = format!("{ASSET_DIR}/{}/{}.{}", id(&s["id"])?, id(&f["id"])?, ext);
+    match f["path"].as_str() {
+        Some(p) if p == legacy => Ok(legacy),
+        None | Some("") => Ok(current),
+        Some(p) if p == current => Ok(current),
+        _ => Err(err("Invalid attachment path")),
+    }
 }
 fn digest(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
@@ -320,6 +352,19 @@ fn upload(root: &Path, s: &mut Value, args: &Value) -> Result<Value> {
         .any(|c| c.is_ascii_control() || c == '/' || c == '\\')
     {
         return Err(err("Invalid attachment name"));
+    }
+    if args.get("source_path").is_some() {
+        if args.get("data_base64").is_some() { return Err(err("Choose source_path or data_base64, not both")); }
+        let relative = reference_path(&args["source_path"])?;
+        let (sha256, size, mime) = fingerprint(&safe(root, &relative)?)?;
+        if s["files"].is_null() { s["files"] = json!([]); }
+        let files = s["files"].as_array().ok_or_else(|| err("Invalid attachment manifest"))?;
+        if let Some(existing) = files.iter().find(|f| f["id"] == upload_id) {
+            if existing["local_reference"] != true || existing["path"] != relative || existing["sha256"] != sha256 || existing["name"] != name { return Err(err("Attachment ID conflict")); }
+            save(root, s)?; return Ok(existing.clone());
+        }
+        let f = json!({"id":upload_id,"name":name,"path":relative,"local_reference":true,"sha256":sha256,"size":size,"mime":mime});
+        s["files"].as_array_mut().unwrap().push(f.clone()); save(root, s)?; return Ok(f);
     }
     let encoded = args["data_base64"].as_str().unwrap_or("");
     if encoded.len() > 2796204 {
@@ -339,24 +384,15 @@ fn upload(root: &Path, s: &mut Value, args: &Value) -> Result<Value> {
         .as_array()
         .ok_or_else(|| err("Invalid attachment manifest"))?;
     if let Some(existing) = files.iter().find(|f| f["id"] == upload_id) {
-        if existing["sha256"] != sha256 || existing["name"] != name {
+        if existing["local_reference"] == true || existing["sha256"] != sha256 || existing["name"] != name {
             return Err(err("Attachment ID conflict"));
         }
         save(root, s)?;
         return Ok(existing.clone());
     }
-    if files.len() >= 32
-        || files
-            .iter()
-            .map(|f| f["size"].as_u64().unwrap_or(0))
-            .sum::<u64>()
-            + bytes.len() as u64
-            > 32 * 1024 * 1024
-    {
-        return Err(err("Session attachment limit reached"));
-    }
     let mut f = json!({"id":upload_id,"name":name,"mime":file_mime(&bytes),"size":bytes.len(),"sha256":sha256});
     f["path"] = json!(file_path(s, &f)?);
+    fs::create_dir_all(safe(root, &format!("{ASSET_DIR}/{}", id(&s["id"])?))?).map_err(io)?;
     let target = safe(root, f["path"].as_str().unwrap())?;
     if target.exists() {
         if fs::metadata(&target).map_err(io)?.len() != bytes.len() as u64
@@ -435,6 +471,22 @@ fn tool_event(value: Option<&Value>, final_reply: bool) -> Result<Value> {
     }
     Ok(event)
 }
+fn read_artifact(root: &Path, value: &Value) -> Result<Value> {
+    use std::io::Read;
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let relative = reference_path(value)?;
+    let target = safe(root, &relative)?;
+    if !fs::metadata(&target).map_err(io)?.is_file() { return Err(err("Preview requires a regular image file")); }
+    let source = fs::File::open(target).map_err(io)?;
+    let meta = source.metadata().map_err(io)?;
+    if !meta.is_file() || meta.len() == 0 || meta.len() > MAX_FILE_BYTES as u64 { return Err(err("Image preview limit is 2 MiB")); }
+    let mut bytes = Vec::new();
+    source.take((MAX_FILE_BYTES + 1) as u64).read_to_end(&mut bytes).map_err(io)?;
+    if bytes.is_empty() || bytes.len() > MAX_FILE_BYTES { return Err(err("Image preview limit is 2 MiB")); }
+    let mime = file_mime(&bytes);
+    if !mime.starts_with("image/") { return Err(err("Only PNG, JPEG, GIF and WebP images can be previewed")); }
+    Ok(json!({"name":relative.rsplit('/').next().unwrap_or("image"), "mime":mime, "data_base64":STANDARD.encode(bytes)}))
+}
 pub fn ui(root: &Path, args: &Value) -> Result<Value> {
     let _lock = lock(root)?;
     let action = args["action"].as_str().unwrap_or("");
@@ -464,14 +516,15 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
     }
     let mut s = load(root, id(&args["chat_id"])?)?;
     match action {
+        "read_artifact" => return read_artifact(root, &args["source_path"]),
         "upload" => return Ok(json!({"attachment":upload(root,&mut s,args)?})),
         "read_attachment" => {
             use base64::{engine::general_purpose::STANDARD, Engine};
             let f = message_files(&s, Some(&json!([args["upload_id"]])))?.remove(0);
             let target = safe(root, &file_path(&s, &f)?)?;
-            if fs::metadata(&target).map_err(io)?.len() > MAX_FILE_BYTES as u64 {
-                return Err(err("Attachment exceeds size limit"));
-            }
+            let (sha256, size, _) = fingerprint(&target)?;
+            if sha256 != f["sha256"].as_str().unwrap_or("") || Some(size) != f["size"].as_u64() { return Err(err("Attachment content changed")); }
+            if size > MAX_FILE_BYTES as u64 { return Ok(json!({"attachment":f,"local_only":true})); }
             let bytes = fs::read(target).map_err(io)?;
             if digest(&bytes) != f["sha256"].as_str().unwrap_or("") {
                 return Err(err("Attachment content changed"));
@@ -719,6 +772,24 @@ pub async fn wait(root: &Path, args: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn artifact_preview_is_read_only_and_bounded() {
+        let temp = tempfile::tempdir().unwrap(); let root = temp.path();
+        let session = ui(root, &json!({"action":"create"})).unwrap(); let cid = &session["session"]["id"];
+        fs::create_dir_all(root.join("mcp-assistant/artifacts")).unwrap();
+        let bytes = b"\x89PNG\r\n\x1a\nfixture";
+        fs::write(root.join("mcp-assistant/artifacts/preview.png"), bytes).unwrap();
+        ui(root, &json!({"action":"close","chat_id":cid})).unwrap();
+        let session_path = root.join(format!("{DIR}/{}.json", cid.as_str().unwrap())); let before = fs::read(&session_path).unwrap();
+        let read = |path: &str| ui(root, &json!({"action":"read_artifact","chat_id":cid,"source_path":path}));
+        assert_eq!(read("mcp-assistant/artifacts/preview.png").unwrap()["mime"], "image/png");
+        assert_eq!(fs::read(&session_path).unwrap(), before);
+        for path in ["../preview.png", "mcp-assistant/artifacts/../preview.png", "mcp-assistant/artifacts/x:stream", "C:/preview.png"] { assert!(read(path).is_err()); }
+        fs::write(root.join("mcp-assistant/artifacts/fake.png"), b"not an image").unwrap(); assert!(read("mcp-assistant/artifacts/fake.png").is_err());
+        fs::write(root.join("mcp-assistant/artifacts/huge.png"), vec![0; MAX_FILE_BYTES+1]).unwrap(); assert!(read("mcp-assistant/artifacts/huge.png").is_err());
+        #[cfg(unix)] { std::os::unix::fs::symlink(root.join("mcp-assistant/artifacts/preview.png"),root.join("mcp-assistant/artifacts/link.png")).unwrap(); assert!(read("mcp-assistant/artifacts/link.png").is_err()); }
+    }
+
     #[test]
     fn markdown_receipts_keep_unread_queue_distinct() {
         let mut session = json!({"id":"test","title":"Test","closed":false,"messages":[{"id":"u1","role":"user","text":"first"},{"id":"u2","role":"user","text":"second"}]});
@@ -1119,4 +1190,38 @@ mod tests {
         )
         .is_err());
     }
+    #[test]
+    fn disk_pool_and_local_references_preserve_legacy_and_integrity() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let dir = tempfile::tempdir().unwrap(); let root = dir.path();
+        let cid = ui(root, &json!({"action":"create"})).unwrap()["session"]["id"].clone();
+        let opened = tool(root, "chat_open", &json!({"chat_id":cid})).unwrap();
+        let encoded = STANDARD.encode(vec![7u8; 1024 * 1024]); let mut first = Value::Null;
+        for i in 0..33 {
+            let f = ui(root, &json!({"action":"upload","chat_id":cid,"upload_id":format!("pool-{i}"),"name":"asset.bin","data_base64":encoded})).unwrap()["attachment"].clone();
+            assert!(f["path"].as_str().unwrap().starts_with(ASSET_DIR)); if i == 0 { first = f; }
+        }
+        let mut s = load(root, cid.as_str().unwrap()).unwrap();
+        let legacy = format!("{DIR}/{}-{}.bin", cid.as_str().unwrap(), first["id"].as_str().unwrap());
+        fs::rename(root.join(first["path"].as_str().unwrap()), root.join(&legacy)).unwrap();
+        s["files"][0]["path"] = json!(legacy); save(root, &s).unwrap();
+        assert_eq!(ui(root, &json!({"action":"read_attachment","chat_id":cid,"upload_id":first["id"]})).unwrap()["data_base64"], encoded);
+        s["files"][0]["path"] = json!("../outside.bin"); save(root,&s).unwrap();
+        assert!(ui(root, &json!({"action":"read_attachment","chat_id":cid,"upload_id":first["id"]})).is_err());
+        fs::create_dir_all(root.join("mcp-assistant/artifacts")).unwrap();
+        let relative = "mcp-assistant/artifacts/large.bin"; fs::write(root.join(relative),vec![9u8;3*1024*1024]).unwrap();
+        let request = json!({"chat_id":cid,"attachment_id":opened["attachment_id"],"upload_id":"reference","name":"large.bin","source_path":relative});
+        let f = tool(root,"chat_upload",&request).unwrap()["attachment"].clone();
+        assert_eq!(f["local_reference"],true); assert_eq!(f["size"],3*1024*1024);
+        assert_eq!(tool(root,"chat_upload",&request).unwrap()["attachment"],f);
+        assert_eq!(ui(root,&json!({"action":"read_attachment","chat_id":cid,"upload_id":"reference"})).unwrap()["local_only"],true);
+        for value in ["../secret","/etc/passwd","mcp-assistant/artifacts/../secret","mcp-assistant/artifacts/x:stream","mcp-assistant/artifacts//secret"] {
+            let mut bad=request.clone();bad["source_path"]=json!(value);assert!(tool(root,"chat_upload",&bad).is_err());
+        }
+        let mut both=request.clone();both["data_base64"]=json!("YQ==");assert!(tool(root,"chat_upload",&both).is_err());
+        fs::write(root.join(relative),b"changed").unwrap();assert!(tool(root,"chat_upload",&request).is_err());
+        assert!(ui(root,&json!({"action":"read_attachment","chat_id":cid,"upload_id":"reference"})).is_err());
+        #[cfg(unix)] { std::os::unix::fs::symlink(root.join(relative),root.join("mcp-assistant/artifacts/link")).unwrap();let mut bad=request.clone();bad["source_path"]=json!("mcp-assistant/artifacts/link");assert!(tool(root,"chat_upload",&bad).is_err()); }
+    }
+
 }

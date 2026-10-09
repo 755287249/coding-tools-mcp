@@ -330,3 +330,53 @@ test('summary work state tracks pickup, progress, final and close without messag
   chatUi(root, { action: 'close', chat_id: args.chat_id });
   assert.equal(state(), null);
 });
+
+test('disk asset pool passes former count/byte quotas and still reads legacy archives', async t => {
+  const {root,args}=fixture(t);
+  const fs=await import('node:fs');
+  const encoded=Buffer.alloc(1024*1024,7).toString('base64');
+  let first;
+  for(let i=0;i<33;i++) { const file=chatUi(root,{action:'upload',chat_id:args.chat_id,upload_id:`pool-${i}`,name:'asset.bin',data_base64:encoded}).attachment; first ??=file; assert.ok(file.path.startsWith(`mcp-assistant/chat-assets/${args.chat_id}/`)); }
+  assert.equal(chatUi(root,{action:'read_attachment',chat_id:args.chat_id,upload_id:first.id}).data_base64,encoded);
+  const archive=path.join(root,`docs/chat-sessions/${args.chat_id}.json`), state=JSON.parse(fs.readFileSync(archive,'utf8'));
+  const legacy=`docs/chat-sessions/${args.chat_id}-${first.id}.bin`;
+  fs.renameSync(path.join(root,first.path),path.join(root,legacy));state.files[0].path=legacy;fs.writeFileSync(archive,JSON.stringify(state));
+  assert.equal(chatUi(root,{action:'read_attachment',chat_id:args.chat_id,upload_id:first.id}).data_base64,encoded);
+  state.files[0].path='../outside.bin';fs.writeFileSync(archive,JSON.stringify(state));
+  assert.throws(()=>chatUi(root,{action:'read_attachment',chat_id:args.chat_id,upload_id:first.id}),/path/);
+});
+
+test('local artifact references avoid byte transfer and preserve scope, hash and retry identity', async t => {
+  const {root,args}=fixture(t);const fs=await import('node:fs');
+  fs.mkdirSync(path.join(root,'mcp-assistant/artifacts'),{recursive:true});
+  const relative='mcp-assistant/artifacts/large.bin',target=path.join(root,relative);
+  fs.writeFileSync(target,Buffer.alloc(3*1024*1024,9));
+  const request={...args,upload_id:'reference',name:'large.bin',source_path:relative};
+  const first=chatTool(root,'chat_upload',request).attachment;
+  assert.equal(first.local_reference,true);assert.equal(first.path,relative);assert.equal(first.size,3*1024*1024);
+  assert.deepEqual(chatTool(root,'chat_upload',request).attachment,first);
+  assert.equal(chatUi(root,{action:'read_attachment',chat_id:args.chat_id,upload_id:first.id}).local_only,true);
+  assert.throws(()=>chatTool(root,'chat_upload',{...request,data_base64:'YQ=='}),/not both/);
+  for(const source_path of ['../secret','/etc/passwd','mcp-assistant/artifacts/../secret','mcp-assistant/artifacts/x:stream','mcp-assistant/artifacts/dir\\secret','mcp-assistant/artifacts//secret']) assert.throws(()=>chatTool(root,'chat_upload',{...request,upload_id:'bad',source_path}),/inside/);
+  fs.writeFileSync(target,'changed');
+  assert.throws(()=>chatTool(root,'chat_upload',request),/conflict/);
+  assert.throws(()=>chatUi(root,{action:'read_attachment',chat_id:args.chat_id,upload_id:first.id}),/changed/);
+  if(process.platform!=='win32') {
+    fs.symlinkSync(target,path.join(root,'mcp-assistant/artifacts/link'));
+    assert.throws(()=>chatTool(root,'chat_upload',{...request,upload_id:'link',source_path:'mcp-assistant/artifacts/link'}),/symlink/);
+  }
+});
+
+test('artifact preview is read-only for closed chats and rejects escapes, symlinks, nonimages and oversize files', async t=>{
+  const {writeFileSync}=await import('node:fs');const {root,args}=fixture(t);
+  const dir=path.join(root,'mcp-assistant/artifacts');mkdirSync(dir,{recursive:true});
+  const bytes=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nXsAAAAASUVORK5CYII=','base64');
+  writeFileSync(path.join(dir,'preview.png'),bytes);chatUi(root,{action:'close',chat_id:args.chat_id});
+  const sessionPath=path.join(root,'docs/chat-sessions',args.chat_id+'.json'),before=readFileSync(sessionPath,'utf8');
+  const read=source_path=>chatUi(root,{action:'read_artifact',chat_id:args.chat_id,source_path});
+  const result=read('mcp-assistant/artifacts/preview.png');assert.equal(result.mime,'image/png');assert.equal(result.data_base64,bytes.toString('base64'));assert.equal(readFileSync(sessionPath,'utf8'),before);
+  for(const source of ['../preview.png','mcp-assistant/artifacts/../preview.png','mcp-assistant/artifacts/x:stream','C:/preview.png'])assert.throws(()=>read(source));
+  writeFileSync(path.join(dir,'fake.png'),'not an image');assert.throws(()=>read('mcp-assistant/artifacts/fake.png'),/Only PNG/);
+  writeFileSync(path.join(dir,'huge.png'),Buffer.alloc(2*1024*1024+1));assert.throws(()=>read('mcp-assistant/artifacts/huge.png'),/2 MiB/);
+  if(process.platform!=='win32'){symlinkSync(path.join(dir,'preview.png'),path.join(dir,'link.png'));assert.throws(()=>read('mcp-assistant/artifacts/link.png'));}
+});

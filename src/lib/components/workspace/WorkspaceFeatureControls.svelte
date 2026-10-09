@@ -7,9 +7,10 @@
 
   interface Props {
     workspaceId: string;
+    initialTab?: FeatureTab;
   }
 
-  let { workspaceId }: Props = $props();
+  let { workspaceId, initialTab = "skills" }: Props = $props();
 
   const backend = getBackend().workspaceFeatures;
   let skills = $state<SkillInventoryPayload | null>(null);
@@ -18,6 +19,7 @@
   let error = $state("");
   let busy = $state(new Set<string>());
   let activeTab = $state<FeatureTab>("skills");
+  $effect(() => { activeTab = initialTab; });
   let loadGeneration = 0;
 
   const featureTabs = $derived([

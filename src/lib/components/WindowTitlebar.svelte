@@ -3,7 +3,6 @@
   import Copy from "@lucide/svelte/icons/copy";
   import Minus from "@lucide/svelte/icons/minus";
   import Square from "@lucide/svelte/icons/square";
-  import SquareTerminal from "@lucide/svelte/icons/square-terminal";
   import X from "@lucide/svelte/icons/x";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { t } from "$lib/i18n";
@@ -37,10 +36,6 @@
 </script>
 
 <header class="wt-bar" data-tauri-drag-region>
-  <div class="wt-brand" data-tauri-drag-region>
-    <SquareTerminal size={14} strokeWidth={2.2} aria-hidden="true" />
-    <span data-tauri-drag-region>Coding Tools MCP</span>
-  </div>
   <div class="wt-controls">
     <button type="button" class="wt-btn" onclick={minimize} title={$t("Minimize")} aria-label={$t("Minimize")}>
       <Minus size={14} />
@@ -59,3 +54,5 @@
     </button>
   </div>
 </header>
+
+<style>.wt-bar{width:auto;flex:none;background:transparent;border:0;box-shadow:none;padding:0}</style>

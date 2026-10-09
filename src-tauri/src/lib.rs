@@ -1,5 +1,8 @@
 #![cfg_attr(target_os = "windows", allow(linker_messages))]
 
+#[cfg(all(feature = "desktop", target_os = "windows", not(debug_assertions)))]
+mod startup_handoff;
+
 mod actions;
 mod app_state;
 mod application;
@@ -113,6 +116,10 @@ use commands::{
 use tauri::Manager;
 
 #[cfg(feature = "desktop")]
+#[tauri::command]
+fn quit_app(app: tauri::AppHandle) { app.exit(0); }
+
+#[cfg(feature = "desktop")]
 fn show_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
@@ -155,6 +162,8 @@ fn acquire_single_instance() -> bool {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     if !acquire_single_instance() {
+        #[cfg(all(target_os = "windows", not(debug_assertions)))]
+        if let Err(error) = startup_handoff::schedule() { eprintln!("Desktop handoff: {error}"); }
         return;
     }
     tauri::Builder::default()
@@ -267,6 +276,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            quit_app,
             list_workspaces,
             local_chat,
             list_history_sessions,

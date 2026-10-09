@@ -125,7 +125,7 @@ export const rustCatalog: readonly ToolDefinition[] = [
       "readOnlyHint": false,
       "title": "Chat upload"
     },
-    "description": "Upload an AI-generated image or file into this local conversation (max 512 KiB). Retain upload_id for retries, then pass returned attachment.id in chat_reply attachment_ids. Requires the current attachment_id; never upload credentials.",
+    "description": "Attach an AI-generated file from mcp-assistant/artifacts/ using source_path, or upload bytes (max 512 KiB). Local references have no cumulative file-count or byte quota. Retain upload_id for retries, then pass returned attachment.id in chat_reply attachment_ids. Requires the current attachment_id; never upload credentials.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -167,6 +167,12 @@ export const rustCatalog: readonly ToolDefinition[] = [
           "minimum": 1,
           "type": "integer"
         },
+        "source_path": {
+          "description": "Reference an existing file under mcp-assistant/artifacts/ inside the selected workspace. Use instead of data_base64; file bytes stay local and are checked by SHA-256.",
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
         "upload_id": {
           "description": "Unique upload ID; preserve this ID, name and bytes for retries.",
           "maxLength": 80,
@@ -184,8 +190,7 @@ export const rustCatalog: readonly ToolDefinition[] = [
         "chat_id",
         "attachment_id",
         "upload_id",
-        "name",
-        "data_base64"
+        "name"
       ],
       "type": "object"
     },
@@ -6112,11 +6117,11 @@ export const rustToolAnnotationOverridesByProfile: Readonly<Record<ToolProfile, 
   "trusted-core": {}
 };
 export const rustToolsetRevisionByProfile: Readonly<Record<ToolProfile, string>> = {
-  "advanced": "8c1d1ced9201de54",
+  "advanced": "dd6c074d7f99da0c",
   "read-only": "0a428588c2f8c57f",
-  "compat-readonly-all": "3b88d9b6cb547056",
-  "guarded-core": "9da615359ffc40fa",
-  "trusted-core": "7319980eec3523dd"
+  "compat-readonly-all": "497113973f1b166a",
+  "guarded-core": "99816b86a1b8dc69",
+  "trusted-core": "3229376eceac1502"
 };
 export const rustBehavioralParityFixtures: Readonly<Record<string, unknown>> = {
   "execution_limits": {

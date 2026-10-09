@@ -4170,3 +4170,15 @@ html:has(.ad-drawer) .gc-pill {
   padding: 4px 10px;
   font-size: 12px;
 }
+
+/* Keep controls over the native wallpaper backdrop; only the transcript is solid. */
+.gc-pill{gap:0;padding:5px;opacity:.75}
+.gc-range{max-width:0;opacity:0;overflow:hidden;visibility:hidden;transition:max-width .18s,opacity .18s;white-space:nowrap}
+.gc-pill:hover .gc-range,.gc-pill:focus-within .gc-range{max-width:155px;opacity:1;visibility:visible;margin-left:8px;margin-right:5px}
+html.is-glass .unified-shell,html.is-glass .sx-main{background:transparent}
+@media(prefers-reduced-motion:reduce){.gc-range{transition:none}}
+
+html.is-glass .chat-shell{background:transparent}
+html.is-glass .message-feed{background:#181818}
+html.is-glass.wallpaper-unavailable .win-root,html.is-glass.backdrop-off .win-root{background:rgb(var(--glass-base))}
+html.is-glass .menu-popup,html.is-glass .disconnect-dialog,html.is-glass .shell-settings{background:rgb(var(--glass-base) / .96)}

@@ -13,6 +13,25 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  windows-chat-tests:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          save-if: false
+      - name: Test chat storage on Windows
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib tools::chat::tests
+      - name: Test desktop upgrade selection and runtime snapshot
+        shell: powershell
+        run: ./tests/desktop-startup-handoff.Tests.ps1
+      - name: Exercise upgrade and rollback with isolated dummy executables
+        shell: powershell
+        run: ./tests/desktop-startup-handoff.Integration.ps1
+
   windows-portable:
     runs-on: windows-latest
     timeout-minutes: 90
@@ -34,9 +53,7 @@ jobs:
       - run: pnpm run version:check
       - run: pnpm run check
       - name: Test chat prompts
-        run: node --test tests/local-chat-prompt.test.mjs tests/chat-preview.test.mjs tests/chat-status.test.mjs tests/chat-tool-activity.test.mjs tests/chat-drafts.test.mjs tests/chat-navigation.test.mjs
-      - name: Test chat storage on Windows
-        run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib tools::chat::tests
+        run: node --test tests/local-chat-prompt.test.mjs tests/chat-preview.test.mjs tests/chat-status.test.mjs tests/chat-tool-activity.test.mjs tests/chat-drafts.test.mjs tests/chat-navigation.test.mjs tests/chat-schedules.test.mjs tests/chat-artifact-links.test.mjs tests/portable-output-layout.test.mjs
       - name: Build production portable ZIP
         run: pnpm run desktop:portable
       - name: Verify ZIP and write checksum
@@ -62,4 +79,13 @@ jobs:
             dist-portable/*.zip
             dist-portable/SHA256SUMS.txt
           if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload compiler timings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-compiler-timings-${{ github.sha }}
+          path: src-tauri/target/cargo-timings/*.html
+          if-no-files-found: ignore
           retention-days: 14

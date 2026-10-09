@@ -15,6 +15,8 @@ function Get-Sha256 {
 }
 
 $ErrorActionPreference = 'Stop'
+$totalTimer = [Diagnostics.Stopwatch]::StartNew()
+$phaseTimer = [Diagnostics.Stopwatch]::new()
 $workspace = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $manifestPath = Join-Path $workspace 'src-tauri\Cargo.toml'
 $packageJsonPath = Join-Path $workspace 'package.json'
@@ -42,15 +44,20 @@ try {
         throw 'package.json does not define a version.'
     }
 
+    $phaseTimer.Restart()
     Write-Host 'Building frontend assets...'
     & pnpm run build
     if ($LASTEXITCODE -ne 0) {
         throw "Frontend build failed with exit code $LASTEXITCODE."
     }
 
+    Write-Host ('Frontend seconds: {0:N1}' -f $phaseTimer.Elapsed.TotalSeconds)
+    $phaseTimer.Restart()
     Write-Host 'Building production Tauri executable with custom protocol...'
     & cargo build `
         --release `
+        --locked `
+        --timings `
         --manifest-path $manifestPath `
         --features custom-protocol `
         --bin coding-tools-mcp-desktop
@@ -61,6 +68,8 @@ try {
         throw "Release executable was not produced: $releaseExe"
     }
 
+    Write-Host ('Rust seconds: {0:N1}' -f $phaseTimer.Elapsed.TotalSeconds)
+    $phaseTimer.Restart()
     $packageName = "ctmcp-${version}-win64"
     $expandedName = 'ctmcp-win64'
     $distRoot = Join-Path $workspace 'dist-portable'
@@ -119,6 +128,7 @@ try {
     Write-Host "ZIP bytes: $($zipInfo.Length)"
     Write-Host "ZIP SHA-256: $zipHash"
     Write-Host "Expanded portable: $expandedDir"
+    Write-Host ('Packaging seconds: {0:N1}; total seconds: {1:N1}' -f $phaseTimer.Elapsed.TotalSeconds, $totalTimer.Elapsed.TotalSeconds)
 } finally {
     Pop-Location
 }

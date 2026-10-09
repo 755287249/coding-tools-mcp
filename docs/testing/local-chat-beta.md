@@ -166,8 +166,40 @@ HTTP 手动 OAuth 的复制指令包含 `redirect_uri=http://127.0.0.1:8765/call
 
 ## AI 图片与文件回传
 
-AI 生成文件后调用 `chat_upload`（chat_id、attachment_id、唯一upload_id、原始文件名name、data_base64、目标workspace_folder_id），得到attachment.id，再用`chat_reply`的attachment_ids引用并附正文。远端单文件最多512KiB（符合1MiB请求体上限；本地UI上传仍为2MiB），每条回复最多5个，单会话最多32个/32MiB；大图先在AI宿主缩小或压缩。重试保持upload_id、名称和字节不变。图片缩略图自动显示，可放大/下载；非图片复用附件预览与下载。存储在项目docs/chat-sessions，按内容哈希验证；生成能力来自AI宿主，测试图仅验证传输，不冒充生图输出。0.1.63不提供chat_upload，需升级后刷新工具。
+AI 生成文件后调用 `chat_upload`（chat_id、attachment_id、唯一upload_id、原始文件名name、data_base64、目标workspace_folder_id），得到attachment.id，再用`chat_reply`的attachment_ids引用并附正文。远端单文件最多512KiB（符合1MiB请求体上限；本地UI上传仍为2MiB），每条回复最多5个，不再限制会话累计附件数量和总文件大小；大文件可用下文的本地路径引用。重试保持upload_id、名称和字节不变。图片缩略图自动显示，可放大/下载；非图片复用附件预览与下载。新附件存储在项目mcp-assistant/chat-assets，旧附件继续保留在docs/chat-sessions，按内容哈希验证；生成能力来自AI宿主，测试图仅验证传输，不冒充生图输出。0.1.63不提供chat_upload，需升级后刷新工具。
 
 工具过程按reply_to汇总：运行中的工具组展开，全部结束后自动折叠一行，失败保留摘要提示；手动可展开原始报告。中间夹文字进度不会拆组。并行同名工具按未完成数量保持进行态，原始命令/输出按消息顺序保留，不猜测配对关系。
 
 会话背景按ID生成稳定低饱和度色相；每次切换和刷新保持颜色。文本草稿、待发送附件和发送重试ID按工作区/目录/会话保存到本机localStorage，切换后恢复，成功发送才清理对应草稿；存储不可用时保留当前应用内存并提示刷新风险。提示词禁止未经用户明确同意转交其他模型生成图片/语音，代码绘图先说明。
+
+### 本地文件资料夹与路径索引
+
+新附件的二进制文件写入所选项目的 `mcp-assistant/chat-assets/<chat_id>/`，会话 JSON/Markdown 只保存文件名、路径、大小和 SHA-256 等索引。取消单会话累计 32 个附件和 32 MiB 的配额；旧版 `docs/chat-sessions/<chat_id>-<upload_id>.*` 文件继续读取，不迁移或删除历史文件。
+
+AI 可以将成果先写入所选项目的 `mcp-assistant/artifacts/`，再调用 `chat_upload`，提供 `source_path`（例如 `mcp-assistant/artifacts/result.png`），与 `data_base64` 二选一。这会登记该本地文件的路径与哈希，不复制文件内容、不把文件放入 MCP 请求体，也没有单文件传输配额。该目录属于会话资料，不应当作可自动清理的临时目录；登记后修改或删除文件会使原引用的完整性检查失败。
+
+用户可在对话输入区点“本地文件”，粘贴此资料目录内的项目相对路径。普通文件选择和图片粘贴继续自动存入资料夹。每条消息最多5个文件；base64 上传的单次传输限制仍为本地2MiB/MCP512KiB，较大的文件请先保存到 `mcp-assistant/artifacts/` 再引用。2MiB以内文件继续原有预览与下载，大文件显示可复制的本地路径，避免把整个文件载入聊天页面；文本预览仍限制256KiB。
+
+目录总量由本地磁盘容量决定。会话消息/索引文件自身的2MiB与500条消息保护仍在，不能承诺无限磁盘或无限历史。路径必须在明确的成果目录内，拒绝绝对路径、父目录跳转、ADS、符号链接；已登记文件每次读取均核验SHA-256。上传/引用失败时保留用户原文件，重试保持upload_id、文件名、路径/字节不变。
+
+## Shared desktop-style shell
+
+- The title row provides Back/Forward, sidebar toggle, and File/Edit/View/Help menus. Shortcuts: Ctrl+[, Ctrl+], Ctrl+Shift+S, Ctrl+N and Ctrl+K. Desktop Close hides the main window to the tray; Quit exits the application. The browser UI cannot close arbitrary browser tabs, so those entries are disabled there.
+- Home is the only rail hover target for the floating conversation sidebar. Assets, Scheduled tasks, Skills, Plugins and More open functioning pages/controls for the selected project. Assets index persisted chat attachments and `mcp-assistant/artifacts/` references; they do not delete or move files.
+- Scheduled tasks in this test version are one-time local message deliveries. Keep the client open; overdue tasks are delivered when it reopens. An attached AI is required to process them. Schedules are local to this browser/client profile. Web Locks serialize windows; stable message IDs make uncertain-response retries idempotent. Failed deliveries require explicit retry.
+- Disconnect AI has a ten-second confirmation. It releases the attachment while retaining the conversation, files and ability to reconnect. Cancelling changes nothing. It does not permanently close the conversation.
+- Windows 11 (build 22000+) uses Mica, showing the wallpaper rather than underlying application windows. Unsupported builds or effect errors use an opaque fallback. The message feed is opaque; surrounding chrome is tinted. Hover or keyboard-focus the bottom-right glass button to reveal opacity controls. Browser previews cannot verify native wallpaper behavior.
+
+### Clickable local image references
+
+Chat prose, bullet lists, inline code and Markdown links recognize PNG/JPEG/GIF/WebP paths under `mcp-assistant/artifacts/`. Clicking opens the zoomable viewer through the local UI `read_artifact` action. This read-only operation also works in closed chats, does not register attachments, validates workspace containment/symlink rejection and image signatures, and limits preview reads to 2 MiB. The artifact may change on disk; each click reads its current content. Existing attachment previews retain their immutable hash checks.
+
+The cumulative attachment cap removal and these UI changes require rebuilding and upgrading the running client. Updating source files alone cannot remove the old installed server's `Session attachment limit reached` error. Historical manifests/files must not be deleted to work around it.
+
+## Portable 0.1.66 startup and build timing
+
+The requested release bumps once to 0.1.66. Windows chat-storage checks run alongside the production build; deliver the package only after the entire workflow succeeds. Compiler timing HTML is uploaded separately, and the portable script prints frontend/Rust/packaging seconds. This shortens the serial test/build path; a new runner or cache miss can still require a full compile.
+
+Double-clicking a newer **release** `ctmcp.exe` while an older desktop owns the single-instance mutex schedules an embedded Windows update worker. It only selects known executable names with the exact product name, an older numeric version, a different path, the same Windows session, and a rechecked process identity. Equal/newer or unidentifiable instances are left alone. The worker preserves enabled MCP/Actions IDs, stops the old process tree, starts the new executable, verifies saved service versions, and attempts to restart the old executable if startup fails. Old files and workspace data are retained. Diagnostics are stored in the application's data directory as `startup-handoff.log`. Debug builds do not replace a running release.
+
+`tests/desktop-startup-handoff.Tests.ps1` tests selection/snapshots without starting or stopping processes. The separate `.Integration.ps1` fixture refuses to run outside GitHub Actions and refuses runners with an existing desktop process. It compiles temporary dummy products to exercise process replacement and rollback. Actual wallpaper, window interactions and restored external tunnels still require the packaged Windows client.

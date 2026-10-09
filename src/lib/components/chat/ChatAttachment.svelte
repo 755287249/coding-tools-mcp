@@ -10,6 +10,9 @@
   let code = $state<string | null>(null);
   let error = $state('');
   let busy = $state(false);
+  let localOnly = $state(false);
+  let pathCopied = $state(false);
+  async function copyPath() { try { await navigator.clipboard.writeText(file.path); pathCopied = true; } catch { error = $t('chat.42'); } }
   let autoPreviewKey = '';
   $effect(() => {
     const key = `${workspaceId}:${folderId}:${chatId}:${file.id}`;
@@ -23,6 +26,7 @@
     busy = true; error = '';
     try {
       const result = await localChat(workspaceId, folderId, { action: 'read_attachment', chat_id: chatId, upload_id: file.id });
+      if (result.local_only) { localOnly = true; return; }
       if (!result.data_base64) throw new Error($t('chat.57'));
       const bytes = Uint8Array.from(atob(result.data_base64), c => c.charCodeAt(0));
       if (!download && ['image/png','image/jpeg','image/gif','image/webp'].includes(file.mime)) preview = `data:${file.mime};base64,${result.data_base64}`;
@@ -40,9 +44,12 @@
 <div class="attachment">
   <button class="name" onclick={() => open(false)} disabled={busy} title={file.path}>📎 {file.name} <small>{Math.ceil(file.size / 1024)} {$t('chat.59')}</small></button>
   <button onclick={() => open(true)} disabled={busy}>{$t('chat.52')}</button>
+  <div class="local-path"><code>{file.path}</code><button onclick={copyPath}>{$t(pathCopied?'chat.25':'chat.120')}</button></div>
+  {#if localOnly}<p class="local-note">{$t('chat.121')}</p>{/if}
   {#if preview}<ImagePreview src={preview} name={file.name}/>{/if}{#if code !== null}<CodePreview {code} language={file.name}/>{/if}
   {#if error}<p role="alert">{error}</p>{/if}
 </div>
 <style>
 .attachment{margin:8px 0;padding:9px 12px;border:1px solid var(--color-border);border-radius:9px;display:flex;gap:12px;flex-wrap:wrap;align-items:center;font-size:11px}.name{flex:1;text-align:left;overflow-wrap:anywhere}small{color:var(--color-text-muted);white-space:nowrap}button{cursor:pointer}button:disabled{opacity:.5}p{color:var(--danger);width:100%;overflow-wrap:anywhere}
+.local-path{display:flex;gap:8px;width:100%;align-items:center;color:var(--color-text-muted)}.local-path code{flex:1;overflow-wrap:anywhere;font-size:10px}.local-note{color:var(--color-text-muted)}
 </style>

@@ -1,15 +1,17 @@
 import { randomUUID, createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, openSync, readSync, fstatSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { redactSensitiveText } from '../redaction.js';
 
 // The on-disk v1 contract is shared with tools/chat.rs. Never persist waiting=true.
-export interface ChatFile { id: string; name: string; path: string; mime: string; size: number; sha256: string }
+export interface ChatFile { local_reference?: boolean; id: string; name: string; path: string; mime: string; size: number; sha256: string }
 export interface ToolEvent { name: string; status: 'running' | 'completed' | 'failed'; input?: string; output?: string; output_truncated?: boolean }
 export interface ChatMessage { awaiting_user?: boolean; received_at?: number; attachments?: ChatFile[]; tool_event?: ToolEvent; id: string; role: 'user' | 'assistant'; text: string; created_at: number; reply_to?: string; final?: boolean }
 export interface ChatSession { title_custom?: boolean; files?: ChatFile[]; version: 1; id: string; title: string; created_at: number; updated_at: number; closed: boolean; messages: ChatMessage[]; attachment_id: string; lease_until: number }
 const DIR = 'docs/chat-sessions';
+const ASSET_DIR = 'mcp-assistant/chat-assets';
+const ARTIFACT_DIR = 'mcp-assistant/artifacts/';
 const MAX_BYTES = 2 * 1024 * 1024;
 const LEASE_MS = 10 * 60_000;
 const waiters = new Set<string>();
@@ -99,15 +101,51 @@ function fileMime(bytes: Buffer): string {
   if (bytes.subarray(0, 4).toString() === 'RIFF' && bytes.subarray(8, 12).toString() === 'WEBP') return 'image/webp';
   return 'application/octet-stream';
 }
+function referencePath(value: unknown): string {
+  if (typeof value !== 'string' || !value.startsWith(ARTIFACT_DIR) || value.length > 4096 || /[\\:\x00-\x1f\x7f]/.test(value) || value.split('/').some(p => !p || p === '.' || p === '..')) throw new Error('Local files must be inside mcp-assistant/artifacts');
+  return value;
+}
+function fingerprint(target: string): {sha256: string; size: number; mime: string} {
+  if (!statSync(target).isFile()) throw new Error('Attachment must be a regular file');
+  const fd = openSync(target, 'r');
+  try {
+    if (!fstatSync(fd).isFile()) throw new Error('Attachment must be a regular file');
+    const buffer = Buffer.alloc(64 * 1024), hash = createHash('sha256');
+    let size = 0, mime = 'application/octet-stream', count: number;
+    while ((count = readSync(fd, buffer, 0, buffer.length, null)) > 0) {
+      if (!size) mime = fileMime(buffer.subarray(0, count));
+      hash.update(buffer.subarray(0, count)); size += count;
+    }
+    if (!size) throw new Error('Attachment must not be empty');
+    return {sha256: hash.digest('hex'), size, mime};
+  } finally { closeSync(fd); }
+}
 function filePath(s: ChatSession, f: ChatFile): string {
+  if (f.local_reference) return referencePath(f.path);
   const ext = ({'image/png':'png','image/jpeg':'jpg','image/gif':'gif','image/webp':'webp'} as Record<string,string>)[f.mime] ?? 'bin';
-  return `${DIR}/${validId(s.id)}-${validId(f.id)}.${ext}`;
+  const legacy = `${DIR}/${validId(s.id)}-${validId(f.id)}.${ext}`;
+  const current = `${ASSET_DIR}/${validId(s.id)}/${validId(f.id)}.${ext}`;
+  if (f.path && f.path !== legacy && f.path !== current) throw new Error('Invalid attachment path');
+  return f.path === legacy ? legacy : current;
 }
 function upload(root: string, s: ChatSession, args: Record<string, unknown>): ChatFile {
   if (s.closed) throw new Error('Conversation is closed');
   const id = validId(args.upload_id);
   const name = text(args.name, 240);
   if (/[\r\n\x00-\x1f\x7f\/\\]/.test(name)) throw new Error('Invalid attachment name');
+  if (args.source_path !== undefined) {
+    if (args.data_base64 !== undefined) throw new Error('Choose source_path or data_base64, not both');
+    const relative = referencePath(args.source_path);
+    const info = fingerprint(safe(root, relative));
+    const files = s.files ??= [];
+    const existing = files.find(f => f.id === id);
+    if (existing) {
+      if (!existing.local_reference || existing.path !== relative || existing.sha256 !== info.sha256 || existing.name !== name) throw new Error('Attachment ID conflict');
+      save(root, s); return existing;
+    }
+    const f: ChatFile = {id, name, path:relative, local_reference:true, ...info};
+    files.push(f); save(root, s); return f;
+  }
   const encoded = args.data_base64;
   if (typeof encoded !== 'string' || encoded.length > 2796204 || encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) throw new Error('Invalid attachment encoding or size');
   const bytes = Buffer.from(encoded, 'base64');
@@ -117,12 +155,12 @@ function upload(root: string, s: ChatSession, args: Record<string, unknown>): Ch
   const files = s.files ??= [];
   const existing = files.find(f => f.id === id);
   if (existing) {
-    if (existing.sha256 !== sha256 || existing.name !== name) throw new Error('Attachment ID conflict');
+    if (existing.local_reference || existing.sha256 !== sha256 || existing.name !== name) throw new Error('Attachment ID conflict');
     save(root, s); return existing;
   }
-  if (files.length >= 32 || files.reduce((sum,f) => sum + f.size, 0) + bytes.length > 32 * 1024 * 1024) throw new Error('Session attachment limit reached');
   const f: ChatFile = {id,name,mime:fileMime(bytes),size:bytes.length,sha256,path:''};
   f.path = filePath(s, f);
+  mkdirSync(safe(root, `${ASSET_DIR}/${validId(s.id)}`), {recursive:true});
   const target = safe(root, f.path);
   // An interrupted upload may leave its immutable bytes; same-ID retry may reuse them.
   if (existsSync(target)) {
@@ -152,6 +190,21 @@ function toolEvent(value: unknown, final: boolean): ToolEvent | undefined {
   }
   return result;
 }
+function readArtifact(root: string, value: unknown): Record<string, unknown> {
+  const relative = referencePath(value), target = safe(root, relative);
+  if (!statSync(target).isFile()) throw new Error('Preview requires a regular image file');
+  const fd = openSync(target, 'r');
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || !stat.size || stat.size > MAX_FILE_BYTES) throw new Error('Image preview limit is 2 MiB');
+    const buffer = Buffer.alloc(MAX_FILE_BYTES + 1); let size = 0, count: number;
+    while (size < buffer.length && (count = readSync(fd, buffer, size, buffer.length - size, null)) > 0) size += count;
+    if (!size || size > MAX_FILE_BYTES) throw new Error('Image preview limit is 2 MiB');
+    const bytes = buffer.subarray(0, size), mime = fileMime(bytes);
+    if (!mime.startsWith('image/')) throw new Error('Only PNG, JPEG, GIF and WebP images can be previewed');
+    return {name: relative.split('/').at(-1), mime, data_base64: bytes.toString('base64')};
+  } finally { closeSync(fd); }
+}
 export function chatUi(root: string, args: Record<string, unknown>): Record<string, unknown> {
   return locked(root, () => {
     const action = args.action;
@@ -166,11 +219,14 @@ export function chatUi(root: string, args: Record<string, unknown>): Record<stri
       save(root, s); return { session: view(root, s) };
     }
     const s = load(root, validId(args.chat_id));
+    if (action === 'read_artifact') return readArtifact(root, args.source_path);
     if (action === 'upload') return { attachment: upload(root, s, args) };
     if (action === 'read_attachment') {
       const f = messageFiles(s, [args.upload_id])[0];
       const target = safe(root, filePath(s, f));
-      if (statSync(target).size > MAX_FILE_BYTES) throw new Error('Attachment exceeds size limit');
+      const info = fingerprint(target);
+      if (info.sha256 !== f.sha256 || info.size !== f.size) throw new Error('Attachment content changed');
+      if (info.size > MAX_FILE_BYTES) return {attachment:f, local_only:true};
       const bytes = readFileSync(target);
       if (createHash('sha256').update(bytes).digest('hex') !== f.sha256) throw new Error('Attachment content changed');
       return { attachment: f, data_base64: bytes.toString('base64') };

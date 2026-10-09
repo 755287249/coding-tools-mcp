@@ -18,7 +18,7 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
         "chat_upload",
         "Chat upload",
-        "Upload an AI-generated image or file into this local conversation (max 512 KiB). Retain upload_id for retries, then pass returned attachment.id in chat_reply attachment_ids. Requires the current attachment_id; never upload credentials.",
+        "Attach an AI-generated file from mcp-assistant/artifacts/ using source_path, or upload bytes (max 512 KiB). Local references have no cumulative file-count or byte quota. Retain upload_id for retries, then pass returned attachment.id in chat_reply attachment_ids. Requires the current attachment_id; never upload credentials.",
         false,
         false,
         false,

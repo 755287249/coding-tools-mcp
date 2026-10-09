@@ -10,7 +10,6 @@
   import AppShell from "$lib/components/AppShell.svelte";
   import GlassControl from "$lib/components/GlassControl.svelte";
   import SimpleShell from "$lib/components/SimpleShell.svelte";
-  import WindowTitlebar from "$lib/components/WindowTitlebar.svelte";
   import { isDesktopWindow } from "$lib/stores/glass";
   import { startSessionPolling } from "$lib/stores/sessions";
   import DirectoryPicker from "$lib/components/DirectoryPicker.svelte";
@@ -163,9 +162,6 @@
 </script>
 
 <div class="win-root" class:is-desktop={desktopWindow}>
-  {#if desktopWindow}
-    <WindowTitlebar />
-  {/if}
   <div class="win-body">
     <SimpleShell onQuickSetup={capabilities.guidedSetup ? openQuickSetup : undefined} onAddWorkspace={capabilities.workspaceLifecycle ? addWorkspace : undefined}>
         {#snippet settingsNav()}
