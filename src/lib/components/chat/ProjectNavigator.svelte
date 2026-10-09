@@ -18,6 +18,9 @@
   import Pin from '@lucide/svelte/icons/pin';
   import Pencil from '@lucide/svelte/icons/pencil';
   import Check from '@lucide/svelte/icons/check';
+  import Archive from '@lucide/svelte/icons/archive';
+  import ArchiveRestore from '@lucide/svelte/icons/archive-restore';
+  import Trash2 from '@lucide/svelte/icons/trash-2';
   import { innerPopover } from '$lib/chat/popover';
   import { onMount, tick } from 'svelte';
   let { onAddWorkspace, recent = false, searchOpen = false }: { onAddWorkspace?: () => void | Promise<void>; recent?: boolean; searchOpen?: boolean } = $props();
@@ -42,13 +45,34 @@
   let chatMenuAnchor: HTMLElement | null=null;
   let pinSaving=$state('');
   function positionChatMenu(){if(!chatMenuAnchor||!chatMenu?.matches(':popover-open'))return;const pos=innerPopover(chatMenuAnchor.getBoundingClientRect(),{width:chatMenu.offsetWidth,height:chatMenu.offsetHeight},{width:innerWidth,height:innerHeight});chatMenuLeft=pos.left;chatMenuTop=pos.top;}
-  async function showChatMenu(workspace:string,folder:string,chat:ChatSession,event:MouseEvent){chatMenuTarget={workspace,folder,chat};chatMenuAnchor=event.currentTarget as HTMLElement;await tick();chatMenu?.showPopover();positionChatMenu();}
+  async function showChatMenu(workspace:string,folder:string,chat:ChatSession,event:MouseEvent){deleteArmed=false;chatMenuTarget={workspace,folder,chat};chatMenuAnchor=event.currentTarget as HTMLElement;await tick();chatMenu?.showPopover();positionChatMenu();}
   async function togglePin(workspace:string,folder:string,chat:ChatSession){
     if(pinSaving)return;pinSaving=scope(scope(workspace,folder),chat.id);
-    try{const result=await localChat(workspace,folder,{action:'pin',chat_id:chat.id,pinned:!chat.pinned});if(result.session)sessions={...sessions,[scope(workspace,folder)]:(sessions[scope(workspace,folder)]??[]).map(item=>item.id===chat.id?result.session!:item).sort((a,b)=>Number(!!b.pinned)-Number(!!a.pinned)||b.updated_at-a.updated_at)};chatMenu?.hidePopover();}
+    try{const result=await localChat(workspace,folder,{action:'pin',chat_id:chat.id,pinned:!chat.pinned});if(result.session)sessions={...sessions,[scope(workspace,folder)]:(sessions[scope(workspace,folder)]??[]).map(item=>item.id===chat.id?result.session!:item).sort((a,b)=>Number(!!a.archived)-Number(!!b.archived)||Number(!!b.pinned)-Number(!!a.pinned)||b.updated_at-a.updated_at)};chatMenu?.hidePopover();}
     catch(error){errors={...errors,[scope(workspace,folder)]:String(error)}}finally{pinSaving=''}
   }
   $effect(()=>{const route=$page.url.href;chatMenu?.hidePopover();});
+  const sortChats=(list:ChatSession[])=>[...list].sort((a,b)=>Number(!!a.archived)-Number(!!b.archived)||Number(!!b.pinned)-Number(!!a.pinned)||b.updated_at-a.updated_at);
+  let deleteArmed=$state(false);
+  let showArchived=$state<Record<string,boolean>>({});
+  async function toggleArchive(workspace:string,folder:string,chat:ChatSession){
+    if(pinSaving)return;pinSaving=scope(scope(workspace,folder),chat.id);
+    try{const result=await localChat(workspace,folder,{action:'archive',chat_id:chat.id,archived:!chat.archived});if(result.session)sessions={...sessions,[scope(workspace,folder)]:sortChats((sessions[scope(workspace,folder)]??[]).map(item=>item.id===chat.id?result.session!:item))};chatMenu?.hidePopover();}
+    catch(error){errors={...errors,[scope(workspace,folder)]:String(error)}}finally{pinSaving=''}
+  }
+  async function deleteChat(workspace:string,folder:string,chat:ChatSession){
+    if(pinSaving)return;
+    if(!deleteArmed){deleteArmed=true;return;}
+    pinSaving=scope(scope(workspace,folder),chat.id);
+    try{
+      if(chat.status==='connected'||chat.status==='waiting')await localChat(workspace,folder,{action:'detach',chat_id:chat.id});
+      await localChat(workspace,folder,{action:'delete',chat_id:chat.id});
+      sessions={...sessions,[scope(workspace,folder)]:(sessions[scope(workspace,folder)]??[]).filter(item=>item.id!==chat.id)};
+      chatMenu?.hidePopover();
+      if($page.params.id===workspace&&$page.url.searchParams.get('folder')===folder&&$page.url.searchParams.get('chat')===chat.id)open(workspace,folder);
+    }
+    catch(error){errors={...errors,[scope(workspace,folder)]:String(error)}}finally{pinSaving='';deleteArmed=false}
+  }
   let query = $state('');
   let picker = $state<HTMLDivElement>();
   let pickerSearch = $state('');
@@ -70,7 +94,7 @@
   const groups = $derived($workspaces.flatMap(workspace => workspaceFolders(workspace).map(folder => ({workspace, folder, key: scope(workspace.id, folder.id)}))));
   const activeGroup = $derived(groups.find(group => group.workspace.id === $page.params.id && group.folder.id === $page.url.searchParams.get('folder')));
   const activeChat = $derived(activeGroup ? sessions[activeGroup.key]?.find(chat => chat.id === $page.url.searchParams.get('chat')) : undefined);
-  const pickerItems = $derived(groups.flatMap(group => (sessions[group.key] ?? []).map(chat => ({group, chat})))
+  const pickerItems = $derived(groups.flatMap(group => (sessions[group.key] ?? []).filter(chat => !chat.archived).map(chat => ({group, chat})))
     .filter(({group, chat}) => `${chat.title} ${group.workspace.name} ${group.folder.name}`.toLocaleLowerCase().includes(pickerSearch.trim().toLocaleLowerCase()))
     .sort((a, b) => b.chat.updated_at - a.chat.updated_at));
   $effect(() => { const route = $page.url.href; picker?.hidePopover(); });
@@ -93,7 +117,7 @@
     finally { creating = false; }
   }
   const needle = $derived(query.trim().toLocaleLowerCase());
-  const recentItems = $derived(groups.flatMap(group => (sessions[group.key] ?? []).map(chat => ({group, chat}))).filter(item => !needle || `${item.chat.title} ${item.group.workspace.name}`.toLocaleLowerCase().includes(needle)).sort((a,b) => Number(!!b.chat.pinned)-Number(!!a.chat.pinned)||b.chat.updated_at-a.chat.updated_at).slice(0,40));
+  const recentItems = $derived(groups.flatMap(group => (sessions[group.key] ?? []).filter(chat => !chat.archived).map(chat => ({group, chat}))).filter(item => !needle || `${item.chat.title} ${item.group.workspace.name}`.toLocaleLowerCase().includes(needle)).sort((a,b) => Number(!!b.chat.pinned)-Number(!!a.chat.pinned)||b.chat.updated_at-a.chat.updated_at).slice(0,40));
   const presenceLabels = { online:'chat.98', offline:'chat.22', working:'chat.70', error:'chat.71', closed:'chat.21' } as const;
   onMount(() => { try { const value=JSON.parse(localStorage.getItem('ctmcp-project-collapse') ?? '{}'); if(value && typeof value==='object' && !Array.isArray(value)) collapsed=value; } catch {} });
   $effect(() => { if (searchOpen) searchInput?.focus(); });
@@ -116,7 +140,7 @@
   });
   function unread(ws:string,folder:string,chat:ChatSession){try{const saved=JSON.parse(localStorage.getItem(`ctmcp-chat-seen:${ws}:${folder}`)??'{}');return Math.max(0,(chat.assistant_message_count??0)-(Number(saved?.[chat.id])||0))}catch{return 0}}
   function visibleChats(ws:string,folder:string,name:string){
-    const list=sessions[scope(ws,folder)]??[];
+    const list=(sessions[scope(ws,folder)]??[]).filter(chat=>!chat.archived);
     if(needle)return list.filter(chat=>name.toLocaleLowerCase().includes(needle)||chat.title.toLocaleLowerCase().includes(needle));
     if(expandedChats[scope(ws,folder)])return list;
     const first=list.slice(0,4);
@@ -124,6 +148,7 @@
     if(active&&!first.includes(active))first.push(active);
     return first;
   }
+  function archivedChats(ws:string,folder:string){return (sessions[scope(ws,folder)]??[]).filter(chat=>chat.archived&&(!needle||chat.title.toLocaleLowerCase().includes(needle)));}
   function toggle(id:string){collapsed={...collapsed,[id]:!collapsed[id]};try{localStorage.setItem('ctmcp-project-collapse',JSON.stringify(collapsed))}catch{}}
   function open(workspace:string,folder:string,chat?:string){void goto(appUrl(chatLocation(workspace,folder,chat)),{noScroll:true});}
   function editProject(id:string){uiMode.set('advanced');void goto(appUrl(`/workspace/${encodeURIComponent(id)}?tab=settings`));}
@@ -136,7 +161,7 @@
 
 <svelte:window onresize={()=>{positionProjectMenu();positionChatMenu()}} onscrollcapture={()=>{positionProjectMenu();positionChatMenu()}}/>
 <div bind:this={chatMenu} class="chat-actions-menu" popover="auto" style:left={`${chatMenuLeft}px`} style:top={`${chatMenuTop}px`}>
-  {#if chatMenuTarget}{@const target=chatMenuTarget}<button onclick={()=>{rename=scope(scope(target.workspace,target.folder),target.chat.id);title=target.chat.title;chatMenu?.hidePopover()}}><Pencil size={15}/>{$t('chat.85')}</button><button disabled={!!pinSaving} onclick={()=>togglePin(target.workspace,target.folder,target.chat)}><Pin size={15}/>{$t(target.chat.pinned?'chat.unpin':'chat.pin')}</button>{/if}
+  {#if chatMenuTarget}{@const target=chatMenuTarget}<button onclick={()=>{rename=scope(scope(target.workspace,target.folder),target.chat.id);title=target.chat.title;chatMenu?.hidePopover()}}><Pencil size={15}/>{$t('chat.85')}</button><button disabled={!!pinSaving} onclick={()=>togglePin(target.workspace,target.folder,target.chat)}><Pin size={15}/>{$t(target.chat.pinned?'chat.unpin':'chat.pin')}</button><button disabled={!!pinSaving} onclick={()=>toggleArchive(target.workspace,target.folder,target.chat)}>{#if target.chat.archived}<ArchiveRestore size={15}/>{$t('chat.unarchive')}{:else}<Archive size={15}/>{$t('chat.archive')}{/if}</button><hr/><button class="danger" class:armed={deleteArmed} disabled={!!pinSaving} onclick={()=>deleteChat(target.workspace,target.folder,target.chat)}><Trash2 size={15}/>{deleteArmed?$t(target.chat.status==='connected'||target.chat.status==='waiting'?'chat.deleteConfirmConnected':'chat.deleteConfirm'):$t('chat.delete')}</button>{/if}
 </div>
 <div bind:this={projectMenu} class="project-info-card" popover="auto" style:left={`${menuLeft}px`} style:top={`${menuTop}px`}>
   {#if menuWorkspace}{@const workspace=$workspaces.find(w=>w.id===menuWorkspace)}{#if workspace}<strong>{workspace.name}</strong>{#each workspaceFolders(workspace) as folder}<p>{folder.path}</p>{/each}<button onclick={()=>{projectMenu?.hidePopover();editProject(workspace.id)}}>{$t('Workspace settings')}</button>{/if}{/if}
@@ -185,11 +210,17 @@
               </div>
               {#if !collapsed[workspace.id] || needle}
                 {#each projectGroups as group (group.key)}
+                  {@const activeCount=(sessions[group.key]??[]).filter(chat=>!chat.archived).length}
+                  {@const archived=archivedChats(workspace.id,group.folder.id)}
                   {#if projectGroups.length>1}<button class="folder-name" onclick={() => open(workspace.id,group.folder.id)}><Folder size={12}/>{group.folder.name}</button>{/if}
                   {#each visibleChats(workspace.id,group.folder.id,workspace.name) as chat (chat.id)}
                     {@render chatRow(workspace.id,group.folder.id,chat,false)}
                   {:else}<button class="empty-project" onclick={() => open(workspace.id,group.folder.id)}>{$t('chat.104')}</button>{/each}
-                  {#if !needle && (sessions[group.key]?.length??0)>4}<button class="empty-project" onclick={()=>expandedChats={...expandedChats,[group.key]:!expandedChats[group.key]}}>{$t(expandedChats[group.key]?'chat.112':'chat.111')} ({sessions[group.key]?.length})</button>{/if}
+                  {#if !needle && activeCount>4}<button class="empty-project" onclick={()=>expandedChats={...expandedChats,[group.key]:!expandedChats[group.key]}}>{$t(expandedChats[group.key]?'chat.112':'chat.111')} ({activeCount})</button>{/if}
+                  {#if archived.length}
+                    <button class="empty-project archived-toggle" aria-expanded={!!showArchived[group.key]} onclick={()=>showArchived={...showArchived,[group.key]:!showArchived[group.key]}}><Archive size={12}/>{$t('chat.archived')} ({archived.length})<ChevronDown size={12}/></button>
+                    {#if showArchived[group.key]}{#each archived as chat (chat.id)}{@render chatRow(workspace.id,group.folder.id,chat,false)}{/each}{/if}
+                  {/if}
                   {#if errors[group.key]}<p class="load-error" role="status">{errors[group.key]}</p>{/if}
                 {/each}
               {/if}
@@ -206,7 +237,7 @@
   {@const active=$page.params.id===ws && $page.url.searchParams.get('folder')===folder && $page.url.searchParams.get('chat')===chat.id}
   {@const presence=sessionPresence(chat)}
   {@const newCount=unread(ws,folder,chat)}
-  <div class="tree-chat" class:active data-presence={presence}>
+  <div class="tree-chat" class:active class:archived-row={chat.archived} data-presence={presence}>
     {#if rename===key}
       <form onsubmit={event=>{event.preventDefault();void renameChat(ws,folder,chat)}}><input bind:this={renameInput} aria-label={$t('chat.86')} bind:value={title} maxlength="240" disabled={saving} onkeydown={event=>{if(event.key==='Escape')rename=''}}/><button disabled={saving||!title.trim()}>{$t('Save')}</button></form>
     {:else}
@@ -224,5 +255,7 @@
 .project-info-trigger{padding:4px;flex:none}.project-info-card{position:fixed;inset:auto;margin:0;width:min(340px,calc(100vw - 16px));max-height:calc(100dvh - 16px);overflow:auto;padding:15px;border:1px solid var(--color-border);border-radius:12px;background:var(--color-bg);color:var(--color-text);box-shadow:0 12px 36px #0007;font-size:12px}.project-info-card p{overflow-wrap:anywhere;color:var(--color-text-muted);margin:9px 0}.project-info-card button{padding:7px;background:var(--surface-hover)}
 
 .project-name,.chat-link,.new-conversation{font-size:14px}.project-name{padding-top:7px;padding-bottom:7px}.project-group{margin-bottom:10px}.tree-chat{margin:2px 0 2px 4px}.chat-link{padding:7px 8px;gap:10px}.chat-link i{width:6px;height:6px}.project-heading .project-info-trigger,.project-heading>button:last-child,.chat-row-actions{opacity:0;pointer-events:none}.project-heading:hover .project-info-trigger,.project-heading:hover>button:last-child,.project-heading:focus-within .project-info-trigger,.project-heading:focus-within>button:last-child,.tree-chat:hover .chat-row-actions,.tree-chat:focus-within .chat-row-actions{opacity:1;pointer-events:auto}.chat-row-actions{display:flex;align-items:center;flex:none;gap:1px;margin-right:4px}.chat-row-actions button{display:grid;place-items:center;width:24px;height:26px;color:var(--color-text-muted)}.chat-row-actions button.pinned{color:#88b5f8}.chat-actions-menu{position:fixed;inset:auto;margin:0;width:210px;max-width:calc(100vw - 16px);padding:5px;border:1px solid var(--color-border);border-radius:11px;background:var(--color-bg);color:var(--color-text);box-shadow:0 12px 32px #0007}.chat-actions-menu button{display:flex;align-items:center;gap:10px;padding:10px;width:100%;font-size:13px;text-align:left}
+.tree-chat{transition:background-color .12s}.tree-chat:hover,.tree-chat:focus-within{background:var(--surface-hover)}.tree-chat button:hover{background:transparent}.tree-chat:hover .chat-link,.tree-chat:hover .chat-row-actions button{color:var(--color-text)}.chat-row-actions button:hover{color:var(--color-text);background:color-mix(in srgb,var(--color-text) 10%,transparent)}.tree-chat.archived-row{opacity:.72}
+.chat-actions-menu hr{border:0;border-top:1px solid var(--color-border);margin:4px 2px}.chat-actions-menu button.danger{color:#e5786d}.chat-actions-menu button.danger.armed{background:#e5786d22;font-weight:600}.archived-toggle{display:flex;align-items:center;gap:6px}
 @media(hover:none){.project-heading .project-info-trigger,.project-heading>button:last-child,.chat-row-actions{opacity:1;pointer-events:auto}}
 </style>

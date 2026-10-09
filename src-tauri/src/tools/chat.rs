@@ -533,7 +533,7 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
             v.as_object_mut().unwrap().remove("messages");
             sessions.push(v);
         }
-        sessions.sort_by_key(|s| std::cmp::Reverse((s["pinned"]==true,s["updated_at"].as_u64().unwrap_or(0))));
+        sessions.sort_by_key(|s| (s["archived"]==true,std::cmp::Reverse((s["pinned"]==true,s["updated_at"].as_u64().unwrap_or(0)))));
         return Ok(json!({"sessions": sessions}));
     }
     if action == "create" {
@@ -628,6 +628,16 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
         }
         "set_queue_mode" => {if args["mode"]!="merge"&&args["mode"]!="split"{return Err(err("Invalid queue mode"));}s["queue_mode"]=args["mode"].clone();save(root,&s)?;}
         "pin" => {if !args["pinned"].is_boolean(){return Err(err("pinned must be a boolean"));}s["pinned"]=args["pinned"].clone();save(root,&s)?;}
+        "archive" => {if !args["archived"].is_boolean(){return Err(err("archived must be a boolean"));}s["archived"]=args["archived"].clone();save(root,&s)?;}
+        "delete" => {
+            let status = view(root, &s)?["status"].clone();
+            if status == "connected" || status == "waiting" {
+                return Err(err("Disconnect the AI before deleting this conversation"));
+            }
+            let chat_id = id(&s["id"])?.to_string();
+            delete_session_files(root, &chat_id)?;
+            return Ok(json!({"deleted":true,"chat_id":chat_id}));
+        }
         "rename" => {
             let title = text(&args["title"], 240)?;
             s["title"] = json!(title.split_whitespace().collect::<Vec<_>>().join(" "));
@@ -653,6 +663,35 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
         _ => return Err(err("Unknown chat action")),
     }
     Ok(json!({"session":local_view(root,&s)?}))
+}
+/// Removes a conversation's JSON record, Markdown projection, sidecar records
+/// (`<id>.*`), pasted images (`<id>-<uuid>.<image>`) and its chat-assets folder.
+fn delete_session_files(root: &Path, chat_id: &str) -> Result<()> {
+    let dir = safe(root, DIR)?;
+    let dotted = format!("{chat_id}.");
+    let dashed = format!("{chat_id}-");
+    for entry in fs::read_dir(&dir).map_err(io)? {
+        let entry = entry.map_err(io)?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        let image = name.rsplit_once('.').is_some_and(|(_, ext)| {
+            matches!(ext.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp")
+        });
+        if !(name.starts_with(&dotted) || (name.starts_with(&dashed) && image)) {
+            continue;
+        }
+        let path = safe(root, &format!("{DIR}/{name}"))?;
+        if fs::symlink_metadata(&path).map_err(io)?.is_file() {
+            fs::remove_file(&path).map_err(io)?;
+        }
+    }
+    let assets = safe(root, &format!("{ASSET_DIR}/{chat_id}"))?;
+    match fs::symlink_metadata(&assets) {
+        Ok(m) if m.is_dir() => fs::remove_dir_all(&assets).map_err(io)?,
+        Ok(_) => return Err(err("Chat asset path is not a directory")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+        Err(e) => return Err(io(e)),
+    }
+    Ok(())
 }
 fn owned(s: &Value, args: &Value) -> Result<()> {
     if group::grouped(s){group::member_for(s,args,false)?;return Ok(());}
@@ -1013,6 +1052,46 @@ mod tests {
         assert!(ui(root,&json!({"action":"pin","chat_id":cid,"pinned":"yes"})).is_err());
         ui(root,&json!({"action":"pin","chat_id":cid,"pinned":false})).unwrap();
         assert_eq!(read()["pinned"],false);
+    }
+
+    #[test]
+    fn archive_and_delete_conversations() {
+        let dir=tempfile::tempdir().unwrap();let root=dir.path();
+        let older=ui(root,&json!({"action":"create","title":"older"})).unwrap()["session"]["id"].as_str().unwrap().to_string();
+        let newer=ui(root,&json!({"action":"create","title":"newer"})).unwrap()["session"]["id"].as_str().unwrap().to_string();
+        assert!(ui(root,&json!({"action":"archive","chat_id":newer,"archived":"yes"})).is_err());
+        let archived=ui(root,&json!({"action":"archive","chat_id":newer,"archived":true})).unwrap();
+        assert_eq!(archived["session"]["archived"],true);
+        let list=ui(root,&json!({"action":"list"})).unwrap();
+        assert_eq!(list["sessions"][0]["id"],*older,"archived conversations sort last");
+        assert_eq!(list["sessions"][1]["archived"],true);
+        ui(root,&json!({"action":"archive","chat_id":newer,"archived":false})).unwrap();
+        assert_eq!(ui(root,&json!({"action":"list"})).unwrap()["sessions"][0]["id"],*newer);
+
+        // Delete removes the record, Markdown, sidecars, pasted images and assets only for that chat.
+        let d=root.join(DIR);
+        fs::write(d.join(format!("{newer}.activity.json")),b"{}").unwrap();
+        fs::write(d.join(format!("{newer}-0f1e2d3c-0000-4000-8000-000000000000.png")),b"png").unwrap();
+        let assets=root.join(ASSET_DIR).join(&newer);fs::create_dir_all(&assets).unwrap();fs::write(assets.join("a.txt"),b"a").unwrap();
+        let other_assets=root.join(ASSET_DIR).join(&older);fs::create_dir_all(&other_assets).unwrap();
+        let deleted=ui(root,&json!({"action":"delete","chat_id":newer})).unwrap();
+        assert_eq!(deleted["deleted"],true);
+        for name in [format!("{newer}.json"),format!("{newer}.md"),format!("{newer}.activity.json"),format!("{newer}-0f1e2d3c-0000-4000-8000-000000000000.png")] {
+            assert!(!d.join(&name).exists(),"{name} should be deleted");
+        }
+        assert!(!assets.exists());
+        assert!(d.join(format!("{older}.json")).exists());
+        assert!(other_assets.exists());
+        let list=ui(root,&json!({"action":"list"})).unwrap();
+        assert_eq!(list["sessions"].as_array().unwrap().len(),1);
+        assert!(ui(root,&json!({"action":"delete","chat_id":newer})).is_err());
+
+        // A conversation with a live AI attachment cannot be deleted until it is detached.
+        tool(root,"chat_open",&json!({"chat_id":older,"agent_name":"Tester"})).unwrap();
+        assert!(ui(root,&json!({"action":"delete","chat_id":older})).is_err());
+        ui(root,&json!({"action":"detach","chat_id":older})).unwrap();
+        ui(root,&json!({"action":"delete","chat_id":older})).unwrap();
+        assert!(!d.join(format!("{older}.json")).exists());
     }
 
     #[tokio::test]

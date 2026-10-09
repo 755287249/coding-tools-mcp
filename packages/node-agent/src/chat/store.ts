@@ -13,7 +13,7 @@ import { resolveChatPath } from './reveal.js';
 export interface ChatFile { label?: string; local_reference?: boolean; id: string; name: string; path: string; mime: string; size: number; sha256: string }
 export interface ToolEvent { name: string; status: 'running' | 'completed' | 'failed'; input?: string; output?: string; output_truncated?: boolean }
 export interface ChatMessage { received_by?:string[]; agent_id?:string;agent_name?:string;recipient_ids?:string[];agent_plans?:{agent_id:string;plan:ChatTaskPlan}[]; task_plan?:ChatTaskPlan; kind?: 'connection_request' | 'assignment'; awaiting_user?: boolean; received_at?: number; attachments?: ChatFile[]; tool_event?: ToolEvent; id: string; role: 'user' | 'assistant'; text: string; created_at: number; reply_to?: string; final?: boolean }
-export interface ChatSession { mode?:'work'|'group';members?:ChatMember[];agent_name?:string; pinned?: boolean; queue?: ChatMessage[]; queue_mode?: 'merge' | 'split'; queue_receipts?: Record<string,string>; title_custom?: boolean; files?: ChatFile[]; version: 1|2; id: string; title: string; created_at: number; updated_at: number; closed: boolean; messages: ChatMessage[]; attachment_id: string; lease_until: number }
+export interface ChatSession { mode?:'work'|'group';members?:ChatMember[];agent_name?:string; pinned?: boolean; archived?: boolean; queue?: ChatMessage[]; queue_mode?: 'merge' | 'split'; queue_receipts?: Record<string,string>; title_custom?: boolean; files?: ChatFile[]; version: 1|2; id: string; title: string; created_at: number; updated_at: number; closed: boolean; messages: ChatMessage[]; attachment_id: string; lease_until: number }
 const DIR = 'docs/chat-sessions';
 const ASSET_DIR = 'mcp-assistant/chat-assets';
 const ARTIFACT_DIR = 'mcp-assistant/artifacts/';
@@ -98,7 +98,7 @@ function view(root: string, s: ChatSession) {
   const work_state = !message ? null : message.received_at || s.messages.some(r => r.role === 'assistant' && r.reply_to === message.id) ? 'processing' : 'queued';
   const members=group.members(s).map(m=>({id:m.id,name:m.name,role:m.role,paused:m.paused===true,status:s.closed?'offline':waiters.has(key(root,s.id)+':'+m.attachment_id)?'waiting':m.lease_until>Date.now()?'connected':'offline'}));
   const presence=members.some(m=>m.status==='waiting')?'waiting':members.some(m=>m.status==='connected')?'connected':'offline';
-  return { mode:s.mode??'work',members,agent_name:s.agent_name, pinned:s.pinned===true, work_state, id: s.id, title: s.title, created_at: s.created_at, updated_at: s.updated_at, closed: s.closed, messages: s.messages, assistant_message_count: s.messages.filter(m => m.role === 'assistant').length,
+  return { mode:s.mode??'work',members,agent_name:s.agent_name, pinned:s.pinned===true, archived:s.archived===true, work_state, id: s.id, title: s.title, created_at: s.created_at, updated_at: s.updated_at, closed: s.closed, messages: s.messages, assistant_message_count: s.messages.filter(m => m.role === 'assistant').length,
     status: s.closed ? 'closed' : group.grouped(s)?presence:waiters.has(key(root, s.id)+':'+s.attachment_id) ? 'waiting' : s.lease_until > Date.now() ? 'connected' : 'offline',
     archive_path: `${DIR}/${s.id}.md` };
 }
@@ -220,7 +220,7 @@ export function chatUi(root: string, args: Record<string, unknown>): Record<stri
     if (action === 'list') {
       const sessions = readdirSync(safe(root, DIR)).filter(n => /^[a-zA-Z0-9_-]{1,80}\.json$/.test(n)).map(n => {
         const s = view(root, load(root, n.slice(0, -5))); return { ...s, messages: undefined };
-      }).sort((a, b) => Number(b.pinned)-Number(a.pinned)||b.updated_at-a.updated_at);
+      }).sort((a, b) => Number(a.archived)-Number(b.archived)||Number(b.pinned)-Number(a.pinned)||b.updated_at-a.updated_at);
       return { sessions };
     }
     if (action === 'create') {
@@ -270,12 +270,34 @@ export function chatUi(root: string, args: Record<string, unknown>): Record<stri
       save(root, s);
     } else if(action==='set_queue_mode'){if(args.mode!=='merge'&&args.mode!=='split')throw new Error('Invalid queue mode');s.queue_mode=args.mode;save(root,s);}
     else if(action==='pin'){if(typeof args.pinned!=='boolean')throw new Error('pinned must be a boolean');s.pinned=args.pinned;save(root,s);}
+    else if(action==='archive'){if(typeof args.archived!=='boolean')throw new Error('archived must be a boolean');s.archived=args.archived;save(root,s);}
+    else if(action==='delete'){
+      const status=view(root,s).status;
+      if(status==='connected'||status==='waiting')throw new Error('Disconnect the AI before deleting this conversation');
+      deleteSessionFiles(root,s.id);
+      return {deleted:true,chat_id:s.id};
+    }
     else if (action === 'rename') { s.title = text(args.title, 240).replace(/\s+/gu, ' '); s.title_custom = true; s.updated_at = Date.now(); save(root, s); }
     else if (action === 'detach') { for(const m of group.members(s))m.lease_until=0;s.attachment_id = ''; s.lease_until = 0; s.updated_at = Date.now(); save(root, s); }
     else if (action === 'close') { s.closed = true; s.attachment_id = ''; s.lease_until = 0; s.updated_at = Date.now(); save(root, s); }
     else if (action !== 'read') throw new Error('Unknown chat action');
     return { session: localView(root, s) };
   });
+}
+/** Removes the JSON record, Markdown projection, `<id>.*` sidecars, pasted `<id>-*.<image>` files and chat assets. */
+function deleteSessionFiles(root: string, id: string): void {
+  const dotted = `${id}.`; const dashed = `${id}-`;
+  for (const name of readdirSync(safe(root, DIR))) {
+    const image = /\.(png|jpe?g|gif|webp|bmp)$/i.test(name);
+    if (!name.startsWith(dotted) && !(name.startsWith(dashed) && image)) continue;
+    const target = safe(root, `${DIR}/${name}`);
+    if (lstatSync(target).isFile()) rmSync(target, { force: true });
+  }
+  const assets = safe(root, `${ASSET_DIR}/${id}`);
+  if (existsSync(assets)) {
+    if (!lstatSync(assets).isDirectory()) throw new Error('Chat asset path is not a directory');
+    rmSync(assets, { recursive: true, force: true });
+  }
 }
 function owned(s: ChatSession, attachment: unknown): void {
   if(group.grouped(s)){group.memberFor(s,attachment);return;}

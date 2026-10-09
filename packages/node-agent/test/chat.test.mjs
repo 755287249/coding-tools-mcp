@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, readFileSync, mkdirSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, mkdirSync, symlinkSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { chatUi, chatTool, chatWait } from '../dist/chat/store.js';
@@ -514,6 +514,42 @@ test('pin is persistent, scoped and sorts before recently updated sessions', t =
   assert.throws(()=>chatUi(root,{action:'pin',chat_id:args.chat_id,pinned:'yes'}),/boolean/);
   chatUi(root,{action:'pin',chat_id:args.chat_id,pinned:false});
   assert.equal(chatUi(root,{action:'read',chat_id:args.chat_id}).session.pinned,false);
+});
+
+test('conversations can be archived and deleted with their records and assets', t => {
+  const root = mkdtempSync(path.join(tmpdir(), 'chat-test-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const older = chatUi(root, { action: 'create', title: 'older' }).session;
+  const newer = chatUi(root, { action: 'create', title: 'newer' }).session;
+  assert.throws(() => chatUi(root, { action: 'archive', chat_id: newer.id, archived: 'yes' }), /boolean/);
+  assert.equal(chatUi(root, { action: 'archive', chat_id: newer.id, archived: true }).session.archived, true);
+  let sessions = chatUi(root, { action: 'list' }).sessions;
+  assert.equal(sessions[0].id, older.id, 'archived conversations sort last');
+  assert.equal(sessions[1].archived, true);
+  chatUi(root, { action: 'archive', chat_id: newer.id, archived: false });
+  assert.equal(chatUi(root, { action: 'list' }).sessions[0].id, newer.id);
+
+  const dir = path.join(root, 'docs/chat-sessions');
+  writeFileSync(path.join(dir, `${newer.id}.activity.json`), '{}');
+  writeFileSync(path.join(dir, `${newer.id}-0f1e2d3c-0000-4000-8000-000000000000.png`), 'png');
+  const assets = path.join(root, 'mcp-assistant/chat-assets', newer.id);
+  mkdirSync(assets, { recursive: true }); writeFileSync(path.join(assets, 'a.txt'), 'a');
+  const otherAssets = path.join(root, 'mcp-assistant/chat-assets', older.id); mkdirSync(otherAssets, { recursive: true });
+  assert.deepEqual(chatUi(root, { action: 'delete', chat_id: newer.id }), { deleted: true, chat_id: newer.id });
+  for (const name of [`${newer.id}.json`, `${newer.id}.md`, `${newer.id}.activity.json`, `${newer.id}-0f1e2d3c-0000-4000-8000-000000000000.png`]) {
+    assert.equal(existsSync(path.join(dir, name)), false, name);
+  }
+  assert.equal(existsSync(assets), false);
+  assert.equal(existsSync(path.join(dir, `${older.id}.json`)), true);
+  assert.equal(existsSync(otherAssets), true);
+  assert.equal(chatUi(root, { action: 'list' }).sessions.length, 1);
+  assert.throws(() => chatUi(root, { action: 'delete', chat_id: newer.id }));
+
+  chatTool(root, 'chat_open', { chat_id: older.id, agent_name: 'Tester' });
+  assert.throws(() => chatUi(root, { action: 'delete', chat_id: older.id }), /Disconnect the AI/);
+  chatUi(root, { action: 'detach', chat_id: older.id });
+  chatUi(root, { action: 'delete', chat_id: older.id });
+  assert.equal(existsSync(path.join(dir, `${older.id}.json`)), false);
 });
 
 test('MCP plans persist per chat and request, reject foreign ownership and retain legacy plan calls',async t=>{
