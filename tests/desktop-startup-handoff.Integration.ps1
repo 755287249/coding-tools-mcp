@@ -38,12 +38,13 @@ while(true) {
     }
 }
 "@ }
+    $members = if ($Fail) { '' } else { 'static System.Threading.Mutex mutex;' }
     $source = @"
 using System.Reflection;
 [assembly: AssemblyProduct("Coding Tools MCP")]
 [assembly: AssemblyFileVersion("$Version")]
 [assembly: AssemblyInformationalVersion("$Version")]
-public static class $entry { static System.Threading.Mutex mutex; public static void Main(string[] args) { $body } }
+public static class $entry { $members public static void Main(string[] args) { $body } }
 "@
     Add-Type -TypeDefinition $source -OutputAssembly $exe -OutputType ConsoleApplication
     return $exe
