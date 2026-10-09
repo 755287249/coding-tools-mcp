@@ -1,3 +1,4 @@
+import { chatToolHandlers } from './chat/tools.js';
 import { toolNames } from './catalog.js';
 import { permissionToolHandlers } from './permissionTools.js';
 import { desktopToolHandlers } from './toolDispatchers/desktop.js';
@@ -39,6 +40,7 @@ const DELEGATED_DOMAINS = new Set<ToolDomain>([
 ]);
 
 const TOOL_HANDLER_MODULES: readonly ToolHandlerModule[] = [
+  { name: 'chat', handlers: chatToolHandlers },
   { name: 'desktop', handlers: desktopToolHandlers },
   { name: 'workspace', handlers: workspaceToolHandlers },
   { name: 'git', handlers: gitToolHandlers },

@@ -8,6 +8,7 @@ pub mod file;
 pub mod file_action;
 pub mod git;
 pub mod history;
+pub mod chat;
 pub mod hub;
 mod image_tool;
 pub(crate) mod parallel_stats;

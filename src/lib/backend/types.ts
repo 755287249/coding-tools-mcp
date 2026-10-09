@@ -390,7 +390,12 @@ export interface OperationsBackend {
   ): Promise<OperationLogPayload>;
 }
 
+export interface ChatBackend {
+  request(workspaceId: string, folderId: string, args: import("../api/chat").ChatAction): Promise<import("../api/chat").ChatResult>;
+}
+
 export interface FrontendBackend {
+  readonly chat: ChatBackend;
   readonly capabilities: FrontendCapabilities;
   readonly native: NativeUi;
   readonly workspaces: WorkspaceBackend;

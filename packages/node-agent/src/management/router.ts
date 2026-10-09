@@ -1,3 +1,4 @@
+import { handleChatRoute } from '../chat/management.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { handleManagementUiRequest, isManagementUiPath } from '../managementUi.js';
 import { sendJson } from '../oauth.js';
@@ -40,6 +41,7 @@ export async function handleManagementRequest(
     sendJson(res, 200, statusPayload(options));
     return true;
   }
+  if (await handleChatRoute(req, res, pathname, options)) return true;
   if (await handleManagementObservabilityRoute(req, res, pathname, options)) return true;
   if (await handleManagementConfigurationRoute(req, res, pathname, options)) return true;
   sendJson(res, 405, {

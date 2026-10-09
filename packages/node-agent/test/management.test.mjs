@@ -259,7 +259,7 @@ test('management UI is loopback-only, token protected and never returns configur
   const status = await statusResponse.json();
   assert.equal(status.configuredToolProfile, 'core');
   assert.equal(status.toolProfile, 'trusted-core');
-  assert.equal(status.tools, 40);
+  assert.equal(status.tools, 44);
   assert.match(status.toolsetRevision, /^[0-9a-f]{16}$/);
 });
 
@@ -1717,4 +1717,26 @@ test('management UI can be disabled without disabling the headless server', asyn
   assert.equal(health.ok, true);
   assert.equal(health.headless, true);
   assert.equal(health.management.enabled, false);
+});
+
+test('local chat management requires admin authentication and isolates configured folders', async t => {
+  const runtime = await startManagementServer(t);
+  const html = await (await fetch(`${runtime.base}/ui`)).text();
+  const token = managementToken(html);
+  const id = runtime.context.config.workspaceId ?? runtime.context.workspaceProfileId;
+  const endpoint = `${runtime.base}/admin/api/workspaces/${id}/chat`;
+  const folder = runtime.context.config.folders[0].id;
+  const headers = { 'content-type': 'application/json', 'x-ctmcp-admin-token': token };
+  const body = JSON.stringify({ action: 'create', folder_id: folder });
+  assert.equal((await fetch(endpoint, { method: 'POST', body })).status, 403);
+  assert.equal((await fetch(endpoint, { method: 'POST', headers: { ...headers, origin: 'https://attacker.example' }, body })).status, 403);
+  const created = await fetch(endpoint, { method: 'POST', headers, body });
+  assert.equal(created.status, 200);
+  const { session } = await created.json();
+  assert.equal(session.attachment_id, undefined);
+  const wrong = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify({ action: 'read', chat_id: session.id, folder_id: 'unknown' }) });
+  assert.equal(wrong.status, 400);
+  const sent = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify({ action: 'send', folder_id: folder, chat_id: session.id, message_id: 'local-1', text: 'UI message' }) });
+  assert.equal(sent.status, 200);
+  assert.equal((await sent.json()).session.messages[0].text, 'UI message');
 });

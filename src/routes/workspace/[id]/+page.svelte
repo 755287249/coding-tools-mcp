@@ -48,14 +48,16 @@
     workspaceFolders,
   } from "$lib/types";
   import { t } from "$lib/i18n";
+  import ChatPanel from "$lib/components/chat/ChatPanel.svelte";
   import AutoWorkspaceView from "$lib/components/auto/AutoWorkspaceView.svelte";
   import { uiMode } from "$lib/stores/ui-mode";
 
-  type WorkspaceTab = "overview" | "history" | "telemetry" | "logs" | "health" | "features" | "mcp" | "actions" | "settings";
+  type WorkspaceTab = "overview" | "history" | "telemetry" | "logs" | "health" | "features" | "mcp" | "actions" | "settings" | "chat";
   type ServiceSection = "service" | "tunnel" | "auth" | "policy" | "logs" | "health";
 
   const capabilities = getBackend().capabilities;
   const workspaceTabValues: WorkspaceTab[] = [
+    "chat",
     "overview",
     "history",
     "telemetry",
@@ -122,6 +124,7 @@
 
   const workspaceTabs = $derived(
     [
+      { value: "chat", label: $t("chat.46") },
       { value: "overview", label: $t("Overview") },
       { value: "history", label: $t("History") },
       { value: "telemetry", label: $t("Telemetry") },
@@ -752,6 +755,17 @@
 </script>
 
 {#if profile && $uiMode === "auto"}
+  <div class="flex shrink-0 gap-2 border-b border-[var(--color-border)] px-6 py-3">
+    <button class="tx-btn-ghost" class:font-semibold={activeWorkspaceTab !== "chat"} onclick={() => navigateWorkspace("overview")}>{$t("chat.43")}</button>
+    <button class="tx-btn-ghost" class:font-semibold={activeWorkspaceTab === "chat"} onclick={() => navigateWorkspace("chat")}>{$t("chat.44")} <span class="text-xs opacity-60">{$t("chat.49")}</span></button>
+  </div>
+{/if}
+{#if profile && activeWorkspaceTab === "chat"}
+  <div class="min-h-0 flex-1 overflow-auto p-3 md:p-6">
+    <ChatPanel workspaceId={profile.id} folders={workspaceFolders(profile)} activeFolderId={profile.active_folder_id} endpoint={mcpPublic || mcpLocal} auth={profile.auth} />
+    {#if $uiMode !== "auto"}<button class="tx-btn-ghost mt-2" onclick={() => navigateWorkspace("overview")}>{$t("chat.45")}</button>{/if}
+  </div>
+{:else if profile && $uiMode === "auto"}
   {#key profile.id}
     <AutoWorkspaceView {profile} onProfileChange={applyWorkspaceProfile} />
   {/key}

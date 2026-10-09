@@ -108,6 +108,8 @@ export function createTauriBackend(deps: TauriBackendDeps): FrontendBackend {
       clear: (workspaceId) => invoke("clear_workspace_activity", { id: workspaceId }),
     },
 
+    chat: { request: (workspaceId, folderId, args) => invoke("local_chat", { id: workspaceId, folderId, args }) },
+
     history: {
       list: (workspaceId, folderId) =>
         invoke("list_history_sessions", { id: workspaceId, folderId }),

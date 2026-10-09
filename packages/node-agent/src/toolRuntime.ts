@@ -52,7 +52,7 @@ const GIT_LOCK = ['git'] as const;
 const TASK_LOCK = ['task'] as const;
 
 function workspaceSelectorFor(name: string): boolean {
-  return name.startsWith('git_') || [
+  return name.startsWith('chat_') || name.startsWith('git_') || [
     'set_default_cwd',
     'read_file', 'read_many', 'list_files', 'project_map', 'search_text',
     'apply_patch', 'edit', 'file_ops', 'patch_check', 'format_files', 'view_image',
@@ -75,6 +75,10 @@ const TOOL_RUNTIME_MODULES: readonly ToolRuntimeModule[] = [
     domain: 'runtime',
     usageFamily: 'other',
     tools: {
+      chat_open: { lane: 'control', admission: 'none', coalescing: 'never' },
+      chat_wait: { lane: 'control', admission: 'none', coalescing: 'never' },
+      chat_reply: { lane: 'control', admission: 'none', coalescing: 'never' },
+      chat_close: { lane: 'control', admission: 'none', coalescing: 'never' },
       server_info: { usageFamily: 'runtime' },
       list_workspace_folders: {},
       conversation_bootstrap: { lockGroups: ['history'], coalescing: 'never' },

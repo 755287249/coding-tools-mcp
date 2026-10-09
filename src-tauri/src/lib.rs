@@ -97,7 +97,7 @@ use commands::{
     get_app_settings, get_download_config, get_frp_snippet, get_last_workspace_id, get_proxy,
     get_runtime_status, get_shared_secret, get_workspace_extensions, get_workspace_secret,
     get_workspace_skills, import_workspace_pack, install_software, list_frp_profiles,
-    list_history_sessions, list_sandbox_backends, list_software, list_workspaces,
+    local_chat, list_history_sessions, list_sandbox_backends, list_software, list_workspaces,
     list_wsl_distributions, open_shared_workspace, open_workspace_directory, read_history_session,
     read_workspace_logs, read_workspace_telemetry, regenerate_shared_secret,
     clear_workspace_activity, get_windows_build, read_workspace_activity,
@@ -253,6 +253,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             list_workspaces,
+            local_chat,
             list_history_sessions,
             read_history_session,
             read_workspace_telemetry,

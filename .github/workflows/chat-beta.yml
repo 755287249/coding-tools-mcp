@@ -1,0 +1,63 @@
+name: Local Chat Beta (Windows portable)
+
+on:
+  push:
+    branches: [coderabbit/mcp-ai-local-chat/c2753b71]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chat-beta-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-portable:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/setup@v2
+        with:
+          version: 12.0.0
+          install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run version:check
+      - run: pnpm run check
+      - name: Test chat prompts
+        run: node --test tests/local-chat-prompt.test.mjs
+      - name: Build production portable ZIP
+        run: pnpm run desktop:portable
+      - name: Verify ZIP and write checksum
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $zip = "dist-portable/ctmcp-$version-win64.zip"
+          if (!(Test-Path $zip)) { throw "Missing portable ZIP" }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [IO.Compression.ZipFile]::OpenRead((Resolve-Path $zip))
+          try {
+            $entry = $archive.GetEntry("ctmcp-$version-win64/ctmcp.exe")
+            if (!$entry -or $entry.Length -lt 2000000) { throw "Missing or invalid desktop executable" }
+          } finally { $archive.Dispose() }
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  ctmcp-$version-win64.zip" | Set-Content dist-portable/SHA256SUMS.txt
+          "Version: $version; commit: $env:GITHUB_SHA; bytes: $((Get-Item $zip).Length)" >> $env:GITHUB_STEP_SUMMARY
+          Get-Content dist-portable/SHA256SUMS.txt >> $env:GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: local-chat-beta-windows-${{ github.sha }}
+          path: |
+            dist-portable/*.zip
+            dist-portable/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14

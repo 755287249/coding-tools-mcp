@@ -256,6 +256,16 @@ async fn call_tool_async_inner(
     args: Value,
     execution: ToolCallExecutionContext,
 ) -> Value {
+    if matches!(name.as_str(), "chat_open" | "chat_wait" | "chat_reply" | "chat_close") {
+        let runtime = ctx.runtime_config();
+        if let Err(error) = validate_tool_arguments_for_workspace(&name, &args, &runtime.policy, Some(&ctx.workspace)) {
+            return policy_tool_err(ctx.as_ref(), &name, &args, error);
+        }
+        let result = if name == "chat_wait" {
+            super::chat::wait(ctx.workspace.root(), &args).await
+        } else { super::chat::tool(ctx.workspace.root(), &name, &args) };
+        return result.unwrap_or_else(|error| error.to_error_value());
+    }
     if name == "exec_many" {
         return call_exec_many_async(ctx, &args).await;
     }

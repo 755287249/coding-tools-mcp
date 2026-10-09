@@ -136,7 +136,8 @@ pub(crate) fn descriptor(name: &str) -> ToolRuntimeDescriptor {
 
     runtime.lane = match canonical {
         "server_info" | "set_todos" | "update_plan" | "report_progress" => ToolExecutionLane::Fast,
-        "wait_command" | "resolve_operation" | "list_sessions" | "send_input" | "kill_session"
+        "chat_open" | "chat_wait" | "chat_reply" | "chat_close"
+        | "wait_command" | "resolve_operation" | "list_sessions" | "send_input" | "kill_session"
         | "read_output" => ToolExecutionLane::Control,
         "exec_command" | "exec_many" | "exec_health_check" | "request_permissions" => {
             ToolExecutionLane::Process
@@ -202,7 +203,7 @@ pub(crate) fn descriptor(name: &str) -> ToolRuntimeDescriptor {
         _ => ToolBaselinePolicy::Never,
     };
 
-    runtime.workspace_selector = canonical.starts_with("git_")
+    runtime.workspace_selector = canonical.starts_with("chat_") || canonical.starts_with("git_")
         || matches!(
             canonical,
             "set_default_cwd"

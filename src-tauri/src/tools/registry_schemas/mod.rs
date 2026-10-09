@@ -2,6 +2,7 @@ mod desktop;
 mod file;
 mod git;
 mod history;
+mod chat;
 mod image;
 mod mutation;
 mod permission;
@@ -21,6 +22,7 @@ const SCHEMA_ROUTERS: &[(&str, SchemaRouter)] = &[
     ("image", image::input_schema),
     ("workspace", workspace::input_schema),
     ("history", history::input_schema),
+    ("chat", chat::input_schema),
     ("task", task::input_schema),
     ("process", process::input_schema),
     ("git", git::input_schema),

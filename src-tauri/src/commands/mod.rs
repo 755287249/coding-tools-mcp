@@ -2,6 +2,8 @@ mod activity;
 mod frp_profiles;
 mod health;
 mod history;
+mod chat;
+pub use chat::local_chat;
 mod logs;
 mod runtime;
 mod sandbox;

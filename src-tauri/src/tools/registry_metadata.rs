@@ -1,5 +1,38 @@
 pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
+        "chat_open",
+        "Chat open",
+        "Attach to a local chat created in the client. Retain attachment_id and call chat_wait.",
+        false,
+        false,
+        false,
+    ),
+    (
+        "chat_wait",
+        "Chat wait",
+        "Wait for the next local user message. On idle, wait again. Reply with chat_reply before waiting for a new message.",
+        false,
+        false,
+        false,
+    ),
+    (
+        "chat_reply",
+        "Chat reply",
+        "Persist an AI reply or progress. final=true acknowledges reply_to; use a stable unique message_id for retries.",
+        false,
+        false,
+        false,
+    ),
+    (
+        "chat_close",
+        "Chat close",
+        "Close a local chat only when the user explicitly ends the conversation.",
+        false,
+        false,
+        false,
+    ),
+
+    (
         "harness_status",
         "Harness status",
         "Return durable task, workspace, capability, and recovery status.",
@@ -523,6 +556,10 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
 
 /// old Python 版本默认提供的核心工具集。默认 MCP 只暴露这一组，保持 Agent 的工具面稳定。
 pub const CORE_TOOLS: &[&str] = &[
+    "chat_open",
+    "chat_wait",
+    "chat_reply",
+    "chat_close",
     "server_info",
     "list_workspace_folders",
     "conversation_bootstrap",
@@ -566,6 +603,10 @@ pub const CORE_TOOLS: &[&str] = &[
 ];
 
 pub const GUARDED_CORE_TOOLS: &[&str] = &[
+    "chat_open",
+    "chat_wait",
+    "chat_reply",
+    "chat_close",
     "server_info",
     "list_workspace_folders",
     "conversation_bootstrap",
@@ -631,6 +672,10 @@ pub const CORE_READ_ONLY_TOOLS: &[&str] = &[
 ];
 
 pub const ALLOWED_TOOLS: &[&str] = &[
+    "chat_open",
+    "chat_wait",
+    "chat_reply",
+    "chat_close",
     "harness_status",
     "operation_log",
     "server_info",

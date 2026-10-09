@@ -5,6 +5,253 @@ export const rustCatalog: readonly ToolDefinition[] = [
   {
     "annotations": {
       "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false,
+      "title": "Chat open"
+    },
+    "description": "Attach to a local chat created in the client. Retain attachment_id and call chat_wait.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "attachment_id": {
+          "maxLength": 80,
+          "minLength": 1,
+          "type": "string"
+        },
+        "chat_id": {
+          "maxLength": 80,
+          "minLength": 1,
+          "type": "string"
+        },
+        "recovery_action_id": {
+          "description": "Optional stable recovery action identifier selected from a previous error response. Removed before tool execution.",
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "recovery_of_operation_id": {
+          "description": "Optional recovery-chain correlation to a prior operation_id. The runtime hashes this identifier in telemetry and removes it before tool execution.",
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "retry_of_call_sequence": {
+          "description": "Optional telemetry correlation to the failed tool call_sequence being retried. Removed before tool execution and does not change tool semantics or dedupe identity.",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "workspace_folder_id": {
+          "description": "Optional one-call workspace selector. Routes only this tool call and does not change the conversation's selected folder.",
+          "minLength": 1,
+          "type": "string",
+          "x-mcp-header": "Workspace"
+        }
+      },
+      "required": [
+        "chat_id"
+      ],
+      "type": "object"
+    },
+    "name": "chat_open",
+    "title": "Chat open"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false,
+      "title": "Chat wait"
+    },
+    "description": "Wait for the next local user message. On idle, wait again. Reply with chat_reply before waiting for a new message.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "attachment_id": {
+          "maxLength": 80,
+          "minLength": 1,
+          "type": "string"
+        },
+        "chat_id": {
+          "maxLength": 80,
+          "minLength": 1,
+          "type": "string"
+        },
+        "recovery_action_id": {
+          "description": "Optional stable recovery action identifier selected from a previous error response. Removed before tool execution.",
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "recovery_of_operation_id": {
+          "description": "Optional recovery-chain correlation to a prior operation_id. The runtime hashes this identifier in telemetry and removes it before tool execution.",
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "retry_of_call_sequence": {
+          "description": "Optional telemetry correlation to the failed tool call_sequence being retried. Removed before tool execution and does not change tool semantics or dedupe identity.",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "timeout_ms": {
+          "default": 120000,
+          "maximum": 180000,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "workspace_folder_id": {
+          "description": "Optional one-call workspace selector. Routes only this tool call and does not change the conversation's selected folder.",
+          "minLength": 1,
+          "type": "string",
+          "x-mcp-header": "Workspace"
+        }
+      },
+      "required": [
+        "chat_id",
+        "attachment_id"
+      ],
+      "type": "object"
+    },
+    "name": "chat_wait",
+    "title": "Chat wait"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false,
+      "title": "Chat reply"
+    },
+    "description": "Persist an AI reply or progress. final=true acknowledges reply_to; use a stable unique message_id for retries.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "attachment_id": {
+          "maxLength": 80,
+          "minLength": 1,
+          "type": "string"
+        },
+        "chat_id": {
+          "maxLength": 80,
+          "minLength": 1,
+          "type": "string"
+        },
+        "final": {
+          "default": true,
+          "type": "boolean"
+        },
+        "message_id": {
+          "maxLength": 80,
+          "minLength": 1,
+          "type": "string"
+        },
+        "recovery_action_id": {
+          "description": "Optional stable recovery action identifier selected from a previous error response. Removed before tool execution.",
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "recovery_of_operation_id": {
+          "description": "Optional recovery-chain correlation to a prior operation_id. The runtime hashes this identifier in telemetry and removes it before tool execution.",
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "reply_to": {
+          "maxLength": 80,
+          "minLength": 1,
+          "type": "string"
+        },
+        "retry_of_call_sequence": {
+          "description": "Optional telemetry correlation to the failed tool call_sequence being retried. Removed before tool execution and does not change tool semantics or dedupe identity.",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "text": {
+          "maxLength": 32000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "workspace_folder_id": {
+          "description": "Optional one-call workspace selector. Routes only this tool call and does not change the conversation's selected folder.",
+          "minLength": 1,
+          "type": "string",
+          "x-mcp-header": "Workspace"
+        }
+      },
+      "required": [
+        "chat_id",
+        "attachment_id",
+        "message_id",
+        "reply_to",
+        "text"
+      ],
+      "type": "object"
+    },
+    "name": "chat_reply",
+    "title": "Chat reply"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false,
+      "title": "Chat close"
+    },
+    "description": "Close a local chat only when the user explicitly ends the conversation.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "attachment_id": {
+          "maxLength": 80,
+          "minLength": 1,
+          "type": "string"
+        },
+        "chat_id": {
+          "maxLength": 80,
+          "minLength": 1,
+          "type": "string"
+        },
+        "recovery_action_id": {
+          "description": "Optional stable recovery action identifier selected from a previous error response. Removed before tool execution.",
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "recovery_of_operation_id": {
+          "description": "Optional recovery-chain correlation to a prior operation_id. The runtime hashes this identifier in telemetry and removes it before tool execution.",
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "retry_of_call_sequence": {
+          "description": "Optional telemetry correlation to the failed tool call_sequence being retried. Removed before tool execution and does not change tool semantics or dedupe identity.",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "workspace_folder_id": {
+          "description": "Optional one-call workspace selector. Routes only this tool call and does not change the conversation's selected folder.",
+          "minLength": 1,
+          "type": "string",
+          "x-mcp-header": "Workspace"
+        }
+      },
+      "required": [
+        "chat_id",
+        "attachment_id"
+      ],
+      "type": "object"
+    },
+    "name": "chat_close",
+    "title": "Chat close"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": false,
       "readOnlyHint": true,
@@ -5160,6 +5407,10 @@ export const rustCatalog: readonly ToolDefinition[] = [
 ];
 export const rustToolNamesByProfile: Readonly<Record<ToolProfile, readonly string[]>> = {
   "advanced": [
+    "chat_open",
+    "chat_wait",
+    "chat_reply",
+    "chat_close",
     "harness_status",
     "operation_log",
     "server_info",
@@ -5247,6 +5498,10 @@ export const rustToolNamesByProfile: Readonly<Record<ToolProfile, readonly strin
     "view_image"
   ],
   "compat-readonly-all": [
+    "chat_open",
+    "chat_wait",
+    "chat_reply",
+    "chat_close",
     "harness_status",
     "operation_log",
     "server_info",
@@ -5314,6 +5569,10 @@ export const rustToolNamesByProfile: Readonly<Record<ToolProfile, readonly strin
     "desktop_key"
   ],
   "guarded-core": [
+    "chat_open",
+    "chat_wait",
+    "chat_reply",
+    "chat_close",
     "server_info",
     "list_workspace_folders",
     "conversation_bootstrap",
@@ -5357,6 +5616,10 @@ export const rustToolNamesByProfile: Readonly<Record<ToolProfile, readonly strin
     "view_image"
   ],
   "trusted-core": [
+    "chat_open",
+    "chat_wait",
+    "chat_reply",
+    "chat_close",
     "server_info",
     "list_workspace_folders",
     "conversation_bootstrap",
@@ -5403,6 +5666,34 @@ export const rustToolAnnotationOverridesByProfile: Readonly<Record<ToolProfile, 
   "advanced": {},
   "read-only": {},
   "compat-readonly-all": {
+    "chat_open": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": "Chat open"
+    },
+    "chat_wait": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": "Chat wait"
+    },
+    "chat_reply": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": "Chat reply"
+    },
+    "chat_close": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": "Chat close"
+    },
     "conversation_bootstrap": {
       "destructiveHint": false,
       "idempotentHint": true,
@@ -5681,11 +5972,11 @@ export const rustToolAnnotationOverridesByProfile: Readonly<Record<ToolProfile, 
   "trusted-core": {}
 };
 export const rustToolsetRevisionByProfile: Readonly<Record<ToolProfile, string>> = {
-  "advanced": "ff4e16fa122a62c7",
+  "advanced": "72ca502b135af601",
   "read-only": "0a428588c2f8c57f",
-  "compat-readonly-all": "94543e8af430df45",
-  "guarded-core": "a976bac95532f6dd",
-  "trusted-core": "29b7a7e94428de72"
+  "compat-readonly-all": "c71a4f76878db40d",
+  "guarded-core": "b4abce8410db1d02",
+  "trusted-core": "a9e959ba34b0e6ad"
 };
 export const rustBehavioralParityFixtures: Readonly<Record<string, unknown>> = {
   "execution_limits": {
