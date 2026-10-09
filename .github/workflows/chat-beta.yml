@@ -34,7 +34,7 @@ jobs:
       - run: pnpm run version:check
       - run: pnpm run check
       - name: Test chat prompts
-        run: node --test tests/local-chat-prompt.test.mjs tests/chat-preview.test.mjs
+        run: node --test tests/local-chat-prompt.test.mjs tests/chat-preview.test.mjs tests/chat-status.test.mjs
       - name: Test chat storage on Windows
         run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib tools::chat::tests
       - name: Build production portable ZIP

@@ -6,8 +6,8 @@ import { redactSensitiveText } from '../redaction.js';
 
 // The on-disk v1 contract is shared with tools/chat.rs. Never persist waiting=true.
 export interface ChatFile { id: string; name: string; path: string; mime: string; size: number; sha256: string }
-export interface ToolEvent { name: string; status: 'running' | 'completed' | 'failed' }
-export interface ChatMessage { attachments?: ChatFile[]; tool_event?: ToolEvent; id: string; role: 'user' | 'assistant'; text: string; created_at: number; reply_to?: string; final?: boolean }
+export interface ToolEvent { name: string; status: 'running' | 'completed' | 'failed'; input?: string; output?: string; output_truncated?: boolean }
+export interface ChatMessage { awaiting_user?: boolean; received_at?: number; attachments?: ChatFile[]; tool_event?: ToolEvent; id: string; role: 'user' | 'assistant'; text: string; created_at: number; reply_to?: string; final?: boolean }
 export interface ChatSession { files?: ChatFile[]; version: 1; id: string; title: string; created_at: number; updated_at: number; closed: boolean; messages: ChatMessage[]; attachment_id: string; lease_until: number }
 const DIR = 'docs/chat-sessions';
 const MAX_BYTES = 2 * 1024 * 1024;
@@ -37,8 +37,19 @@ function load(root: string, id: string): ChatSession {
   if (s.version !== 1 || s.id !== id || !Array.isArray(s.messages)) throw new Error('Invalid chat archive');
   return s;
 }
+function userMessageState(s: ChatSession, message: ChatMessage): string {
+  const replies = s.messages.filter(reply => reply.role === 'assistant' && reply.reply_to === message.id);
+  const read = !!message.received_at || replies.length > 0;
+  const final = replies.find(reply => reply.final === true);
+  let status = s.closed ? '会话已结束' : read ? '正在处理' : '排队中';
+  if (final) {
+    const answered = s.messages.slice(s.messages.indexOf(final) + 1).some(next => next.role === 'user');
+    status = final.awaiting_user && !answered ? s.closed ? '会话已结束' : '待确认' : '已回复';
+  }
+  return `消息状态：${read ? '已读' : '未读'} · ${status}`;
+}
 export function chatMarkdown(s: ChatSession): string {
-  return `# ${s.title}\n\nSession: ${s.id}\n\n` + s.messages.map(m => `## ${m.role === 'user' ? '你' : m.final === false ? 'AI · 进度' : 'AI'} · ${m.created_at}\n\n${m.tool_event ? `Tool (AI reported): ${m.tool_event.name} · ${m.tool_event.status}\n\n` : ''}${m.text}\n${(m.attachments ?? []).map(f => `\nAttachment: ${f.name} (${f.size} bytes)\nPath: ${f.path}\n`).join('')}`).join('\n');
+  return `# ${s.title}\n\nSession: ${s.id}\n\n` + s.messages.map(m => `## ${m.role === 'user' ? '你' : m.final === false ? 'AI · 进度' : 'AI'} · ${m.created_at}\n\n${m.tool_event ? `Tool (AI reported): ${m.tool_event.name} · ${m.tool_event.status}\n\n` : ''}${m.text}\n${m.role === 'user' ? `\n${userMessageState(s, m)}\n` : ''}${m.role === 'assistant' ? `\nReply state: ${m.awaiting_user ? 'awaiting_user' : m.final === false ? 'supplementing' : 'complete'}\n` : ''}${m.tool_event?.input ? `\nInput:\n${m.tool_event.input}\n` : ''}${m.tool_event?.output ? `\nOutput:\n${m.tool_event.output}\n` : ''}${m.tool_event?.output_truncated ? '\nOutput truncated\n' : ''}${(m.attachments ?? []).map(f => `\nAttachment: ${f.name} (${f.size} bytes)\nPath: ${f.path}\n`).join('')}`).join('\n');
 }
 function save(root: string, s: ChatSession): void {
   const body = JSON.stringify(s, null, 2);
@@ -130,7 +141,14 @@ function toolEvent(value: unknown, final: boolean): ToolEvent | undefined {
   if (value === undefined) return undefined;
   const event = value as Record<string, unknown>;
   if (!event || typeof event !== 'object' || final || !['running','completed','failed'].includes(String(event.status))) throw new Error('Tool events require final=false and a valid status');
-  return { name: text(event.name, 120), status: event.status as ToolEvent['status'] };
+  const result: ToolEvent = { name: text(event.name, 120), status: event.status as ToolEvent['status'] };
+  if (event.input !== undefined) result.input = text(event.input, 8000);
+  if (event.output !== undefined) result.output = text(event.output, 16000);
+  if (event.output_truncated !== undefined) {
+    if (typeof event.output_truncated !== 'boolean') throw new Error('output_truncated must be a boolean');
+    if (event.output_truncated) result.output_truncated = true;
+  }
+  return result;
 }
 export function chatUi(root: string, args: Record<string, unknown>): Record<string, unknown> {
   return locked(root, () => {
@@ -178,26 +196,34 @@ export function chatTool(root: string, name: string, args: Record<string, unknow
       if (s.lease_until > Date.now() && args.attachment_id !== s.attachment_id) throw new Error('Conversation already attached; close it in the UI or wait for the lease to expire');
       if (s.lease_until <= Date.now()) s.attachment_id = randomUUID();
       s.lease_until = Date.now() + LEASE_MS; save(root, s);
-      return { ok: true, attachment_id: s.attachment_id, session: view(root, s), instruction: 'Call chat_wait. Publish progress and complete replies with chat_reply; final=true acknowledges reply_to. Then wait again until closed. Redelivered messages may have unfinished work: inspect before repeating side effects.' };
+      return { ok: true, attachment_id: s.attachment_id, session: view(root, s), instruction: 'Use chat_reply for all user-visible replies, questions, progress and deliverables. Call chat_wait now with the returned attachment_id. Use final=false for progress and tool_event with actual name/status/input/output for tool calls; report results only after execution, redact secrets and mark shortened output. Use final=true to acknowledge reply_to; add awaiting_user=true for a question, then wait for the next message. Keep unique reply IDs and identical retry payloads; require persisted=true. Inspect records before repeating side effects. Immediately call chat_wait after idle or a persisted final reply; never stop voluntarily for idle duration, task completion or cost. Stop only on user cancellation, closed session, actual host limits or a blocking chat configuration error. Renew via chat_open with the same attachment_id before the 10-minute lease expires.' };
     }
     owned(s, args.attachment_id);
     if (name === 'chat_reply') {
       const id = validId(args.message_id); const replyTo = validId(args.reply_to); const content = text(args.text);
       const final = args.final !== false; const tool_event = toolEvent(args.tool_event, final);
+      if (args.awaiting_user !== undefined && typeof args.awaiting_user !== 'boolean') throw new Error('awaiting_user must be a boolean');
+      const awaiting_user = args.awaiting_user === true;
+      if (awaiting_user && !final) throw new Error('awaiting_user requires final=true');
       const existing = s.messages.find(m => m.id === id);
       if (existing) {
-        if (existing.role !== 'assistant' || existing.text !== content || existing.reply_to !== replyTo || existing.final !== final || JSON.stringify(existing.tool_event ?? undefined) !== JSON.stringify(tool_event)) throw new Error('Message ID conflicts with an existing reply');
+        if (existing.role !== 'assistant' || existing.text !== content || existing.reply_to !== replyTo || existing.final !== final || (existing.awaiting_user === true) !== awaiting_user || JSON.stringify(existing.tool_event ?? undefined) !== JSON.stringify(tool_event)) throw new Error('Message ID conflicts with an existing reply');
       } else {
         if (pending(s)?.id !== replyTo) throw new Error('Reply must address the oldest unanswered user message');
-        s.messages.push({ id, role: 'assistant', text: content, reply_to: replyTo, final, tool_event, created_at: Date.now() }); s.updated_at = Date.now();
+        s.messages.push({ id, role: 'assistant', text: content, reply_to: replyTo, final, awaiting_user, tool_event, created_at: Date.now() }); s.updated_at = Date.now();
       }
       s.lease_until = Date.now() + LEASE_MS; save(root, s); return { ok: true, persisted: true, message_id: id };
     }
     if (name === 'chat_close') { s.closed = true; s.attachment_id = ''; s.lease_until = 0; save(root, s); return { ok: true, status: 'closed' }; }
     if (name === 'chat_wait') {
       s.lease_until = Date.now() + LEASE_MS;
+      const message = pending(s);
+      if (message && !message.received_at) {
+        message.received_at = Date.now();
+        s.updated_at = message.received_at;
+      }
       save(root, s);
-      return { ok: true, status: pending(s) ? 'message' : 'idle', message: pending(s) ?? null };
+      return { ok: true, status: message ? 'message' : 'idle', message: message ?? null };
     }
     throw new Error('Unknown chat tool');
   });
@@ -218,9 +244,9 @@ export async function chatWait(root: string, args: Record<string, unknown>, sign
       if (s.closed) return { ok: true, status: 'closed' };
       owned(s, args.attachment_id);
       const message = pending(s);
-      if (message) return { ok: true, status: 'message', message };
+      if (message) return chatTool(root, 'chat_wait', args);
       await sleep(Math.min(250, end - Date.now()), undefined, { signal });
     }
-    return { ok: true, status: 'idle', instruction: 'No message yet. Call chat_wait again unless the user ended the loop.' };
+    return { ok: true, status: 'idle', instruction: 'No message yet. Immediately call chat_wait again with the same session and attachment. Idle timeout does not end the conversation; do not stop for idle duration or cost.' };
   } finally { waiters.delete(k); }
 }

@@ -134,6 +134,11 @@ export const rustCatalog: readonly ToolDefinition[] = [
           "minLength": 1,
           "type": "string"
         },
+        "awaiting_user": {
+          "default": false,
+          "description": "Set true with final=true when asking the user a question or requesting confirmation; acknowledge this message and continue chat_wait.",
+          "type": "boolean"
+        },
         "chat_id": {
           "maxLength": 80,
           "minLength": 1,
@@ -177,12 +182,26 @@ export const rustCatalog: readonly ToolDefinition[] = [
         },
         "tool_event": {
           "additionalProperties": false,
-          "description": "AI-reported tool execution update; requires final=false. Not automatic server telemetry.",
+          "description": "AI-reported tool execution update; requires final=false. Report actual input/output after removing secrets; mark shortened output with output_truncated. Not automatic server telemetry.",
           "properties": {
+            "input": {
+              "maxLength": 8000,
+              "minLength": 1,
+              "type": "string"
+            },
             "name": {
               "maxLength": 120,
               "minLength": 1,
               "type": "string"
+            },
+            "output": {
+              "maxLength": 16000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "output_truncated": {
+              "default": false,
+              "type": "boolean"
             },
             "status": {
               "enum": [
@@ -5996,11 +6015,11 @@ export const rustToolAnnotationOverridesByProfile: Readonly<Record<ToolProfile, 
   "trusted-core": {}
 };
 export const rustToolsetRevisionByProfile: Readonly<Record<ToolProfile, string>> = {
-  "advanced": "45f52557f268301d",
+  "advanced": "5b61c6769550cc8b",
   "read-only": "0a428588c2f8c57f",
-  "compat-readonly-all": "9f1334bacdd97395",
-  "guarded-core": "23b9e256d129ce64",
-  "trusted-core": "71a3044cfafccae5"
+  "compat-readonly-all": "32440396573a4208",
+  "guarded-core": "8194fc8cc9a713df",
+  "trusted-core": "35a10e892d0f9597"
 };
 export const rustBehavioralParityFixtures: Readonly<Record<string, unknown>> = {
   "execution_limits": {

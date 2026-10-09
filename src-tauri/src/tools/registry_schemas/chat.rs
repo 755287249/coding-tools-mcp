@@ -23,7 +23,8 @@ pub(super) fn input_schema(name: &str) -> Option<Value> {
         properties["reply_to"] = json!({"type":"string","minLength":1,"maxLength":80});
         properties["text"] = json!({"type":"string","minLength":1,"maxLength":32000});
         properties["final"] = json!({"type":"boolean","default":true});
-        properties["tool_event"] = json!({"type":"object","description":"AI-reported tool execution update; requires final=false. Not automatic server telemetry.","properties":{"name":{"type":"string","minLength":1,"maxLength":120},"status":{"type":"string","enum":["running","completed","failed"]}},"required":["name","status"],"additionalProperties":false});
+        properties["awaiting_user"] = json!({"type":"boolean","default":false,"description":"Set true with final=true when asking the user a question or requesting confirmation; acknowledge this message and continue chat_wait."});
+        properties["tool_event"] = json!({"type":"object","description":"AI-reported tool execution update; requires final=false. Report actual input/output after removing secrets; mark shortened output with output_truncated. Not automatic server telemetry.","properties":{"name":{"type":"string","minLength":1,"maxLength":120},"status":{"type":"string","enum":["running","completed","failed"]},"input":{"type":"string","minLength":1,"maxLength":8000},"output":{"type":"string","minLength":1,"maxLength":16000},"output_truncated":{"type":"boolean","default":false}},"required":["name","status"],"additionalProperties":false});
         required.extend(["message_id", "reply_to", "text"]);
     }
     Some(

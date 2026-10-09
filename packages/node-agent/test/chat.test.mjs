@@ -12,6 +12,23 @@ function fixture(t) {
   const { attachment_id } = chatTool(root, 'chat_open', { chat_id: session.id });
   return { root, args: { chat_id: session.id, attachment_id } };
 }
+test('pickup receipts persist once for immediate and long-poll delivery', async t => {
+  const {root,args}=fixture(t);
+  const read=()=>chatUi(root,{action:'read',chat_id:args.chat_id}).session;
+  chatUi(root,{action:'send',chat_id:args.chat_id,message_id:'u1',text:'immediate'});
+  assert.equal(read().messages[0].received_at,undefined);
+  const first=await chatWait(root,{...args,timeout_ms:0});
+  assert.ok(first.message.received_at > 0);
+  assert.equal(read().messages[0].received_at,first.message.received_at);
+  assert.equal((await chatWait(root,{...args,timeout_ms:0})).message.received_at,first.message.received_at);
+  chatTool(root,'chat_reply',{...args,message_id:'a1',reply_to:'u1',text:'done',final:true});
+  const waiting=chatWait(root,{...args,timeout_ms:2000});
+  chatUi(root,{action:'send',chat_id:args.chat_id,message_id:'u2',text:'delayed'});
+  const delayed=await waiting;
+  assert.equal(delayed.message.id,'u2');
+  assert.ok(delayed.message.received_at > 0);
+  assert.equal(read().messages.at(-1).received_at,delayed.message.received_at);
+});
 test('chat persists replies, redacts secrets, deduplicates retries and redelivers unacknowledged messages', async t => {
   const {root,args}=fixture(t);
   const send={action:'send',chat_id:args.chat_id,message_id:'user-1',text:'请检查项目'};
@@ -64,11 +81,14 @@ test('real MCP catalog and explicit workspace routing complete the chat loop wit
     assert.equal(body.result?.structuredContent?.ok,true,JSON.stringify(body));return body.result.structuredContent;
   }
   const opened=await call('chat_open',{chat_id:session.id});
+  assert.match(opened.instruction,/awaiting_user=true/);
+  assert.match(opened.instruction,/never stop voluntarily/);
   const args={chat_id:session.id,attachment_id:opened.attachment_id};
   const waiting=call('chat_wait',{...args,timeout_ms:2000});
   chatUi(state.root,{action:'send',chat_id:session.id,message_id:'u1',text:'hello from local UI'});
   const incoming=await waiting;assert.equal(incoming.message.id,'u1');
-  await call('chat_reply',{...args,reply_to:'u1',message_id:'a1',text:'hello from MCP',final:true});
+  await call('chat_reply',{...args,reply_to:'u1',message_id:'p1',text:'tool result',final:false,tool_event:{name:'bash',status:'completed',input:'echo hello',output:'hello',output_truncated:false}});
+  await call('chat_reply',{...args,reply_to:'u1',message_id:'a1',text:'hello from MCP',final:true,awaiting_user:true});
   assert.equal(chatUi(state.root,{action:'read',chat_id:session.id}).session.messages.at(-1).text,'hello from MCP');
   assert.equal((await call('chat_wait',{...args,timeout_ms:0})).status,'idle');
   await call('chat_close',args);
@@ -141,4 +161,54 @@ test('tool cards are progress events, are deduplicated and do not acknowledge a 
   assert.throws(()=>chatTool(root,'chat_reply',{...event,tool_event:{name:'list_files',status:'failed'}}),/conflict/);
   const session=chatUi(root,{action:'read',chat_id:args.chat_id}).session;
   assert.equal(session.messages.filter(m=>m.tool_event).length,1);
+});
+
+test('confirmation replies acknowledge the message while preserving explicit waiting-for-user state', async t => {
+  const {root,args}=fixture(t);
+  chatUi(root,{action:'send',chat_id:args.chat_id,message_id:'u-question',text:'help me decide'});
+  const question={...args,message_id:'q1',reply_to:'u-question',text:'Which option?',awaiting_user:true,final:true};
+  assert.throws(()=>chatTool(root,'chat_reply',{...question,final:false}),/requires final=true/);
+  assert.throws(()=>chatTool(root,'chat_reply',{...question,awaiting_user:'yes'}),/boolean/);
+  assert.equal(chatTool(root,'chat_reply',question).persisted,true);
+  chatTool(root,'chat_reply',question);
+  assert.throws(()=>chatTool(root,'chat_reply',{...question,awaiting_user:false}),/conflict/);
+  assert.equal((await chatWait(root,{...args,timeout_ms:0})).status,'idle');
+  assert.equal(chatUi(root,{action:'read',chat_id:args.chat_id}).session.messages.at(-1).awaiting_user,true);
+  assert.match(readFileSync(path.join(root,`docs/chat-sessions/${args.chat_id}.md`),'utf8'),/Reply state: awaiting_user/);
+  chatUi(root,{action:'send',chat_id:args.chat_id,message_id:'u-answer',text:'Option A'});
+  assert.equal((await chatWait(root,{...args,timeout_ms:0})).message.id,'u-answer');
+});
+
+test('tool input and output persist with redaction, bounds, truncation and idempotency', t => {
+  const {root,args}=fixture(t);
+  chatUi(root,{action:'send',chat_id:args.chat_id,message_id:'u-detail',text:'run check'});
+  const reply={...args,message_id:'tool-detail',reply_to:'u-detail',text:'Command finished',final:false,tool_event:{name:'bash',status:'completed',input:'echo password=secret123',output:'token=secret456\n<script>untrusted text</script>',output_truncated:true}};
+  chatTool(root,'chat_reply',reply);chatTool(root,'chat_reply',reply);
+  const session=chatUi(root,{action:'read',chat_id:args.chat_id}).session;
+  assert.equal(session.messages.length,2);
+  const event=session.messages[1].tool_event;
+  assert.doesNotMatch(event.input,/secret123/);assert.doesNotMatch(event.output,/secret456/);
+  assert.equal(event.output_truncated,true);
+  const markdown=readFileSync(path.join(root,session.archive_path),'utf8');
+  assert.match(markdown,/Input:/);assert.match(markdown,/Output:/);assert.match(markdown,/Output truncated/);
+  assert.doesNotMatch(markdown,/secret123|secret456/);
+  assert.throws(()=>chatTool(root,'chat_reply',{...reply,tool_event:{...reply.tool_event,output:'different'}}),/conflict/);
+  assert.throws(()=>chatTool(root,'chat_reply',{...reply,message_id:'large',tool_event:{...reply.tool_event,output:'x'.repeat(16001)}}),/16000/);
+  assert.throws(()=>chatTool(root,'chat_reply',{...reply,message_id:'bad-bool',tool_event:{...reply.tool_event,output_truncated:'yes'}}),/boolean/);
+});
+
+test('Markdown tracks unread queue, actual pickup, confirmation and closure per user message', async t => {
+  const {root,args}=fixture(t);
+  const send=id=>chatUi(root,{action:'send',chat_id:args.chat_id,message_id:id,text:id});
+  const states=()=>readFileSync(path.join(root,`docs/chat-sessions/${args.chat_id}.md`),'utf8').split('\n').filter(line=>line.startsWith('消息状态：'));
+  send('u1');send('u2');
+  assert.deepEqual(states(),['消息状态：未读 · 排队中','消息状态：未读 · 排队中']);
+  await chatWait(root,{...args,timeout_ms:0});
+  assert.deepEqual(states(),['消息状态：已读 · 正在处理','消息状态：未读 · 排队中']);
+  chatTool(root,'chat_reply',{...args,message_id:'q1',reply_to:'u1',text:'Which option?',final:true,awaiting_user:true});
+  assert.deepEqual(states(),['消息状态：已读 · 待确认','消息状态：未读 · 排队中']);
+  send('u3');
+  assert.equal(states()[0],'消息状态：已读 · 已回复');
+  chatUi(root,{action:'close',chat_id:args.chat_id});
+  assert.equal(states()[1],'消息状态：未读 · 会话已结束');
 });

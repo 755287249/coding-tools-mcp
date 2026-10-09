@@ -75,6 +75,42 @@ fn load(root: &Path, chat_id: &str) -> Result<Value> {
     }
     Ok(s)
 }
+fn user_message_state(s: &Value, message: &Value) -> String {
+    let messages = s["messages"].as_array().unwrap();
+    let replies: Vec<_> = messages
+        .iter()
+        .filter(|reply| reply["role"] == "assistant" && reply["reply_to"] == message["id"])
+        .collect();
+    let read = message["received_at"].as_u64().is_some_and(|n| n > 0) || !replies.is_empty();
+    let closed = s["closed"] == true;
+    let mut status = if closed {
+        "会话已结束"
+    } else if read {
+        "正在处理"
+    } else {
+        "排队中"
+    };
+    if let Some(reply) = replies.iter().find(|reply| reply["final"] == true) {
+        let index = messages
+            .iter()
+            .position(|m| m["id"] == reply["id"])
+            .unwrap();
+        let answered = messages[index + 1..].iter().any(|m| m["role"] == "user");
+        status = if reply["awaiting_user"] == true && !answered {
+            if closed {
+                "会话已结束"
+            } else {
+                "待确认"
+            }
+        } else {
+            "已回复"
+        };
+    }
+    format!(
+        "消息状态：{} · {status}",
+        if read { "已读" } else { "未读" }
+    )
+}
 pub fn markdown(s: &Value) -> String {
     let mut out = format!(
         "# {}\n\nSession: {}\n\n",
@@ -102,6 +138,27 @@ pub fn markdown(s: &Value) -> String {
                 m["created_at"],
                 m["text"].as_str().unwrap_or("")
             ));
+            if m["role"] == "user" {
+                out.push_str(&format!("{}\n\n", user_message_state(s, m)));
+            }
+            if m["role"] == "assistant" {
+                let state = if m["awaiting_user"] == true {
+                    "awaiting_user"
+                } else if m["final"] == false {
+                    "supplementing"
+                } else {
+                    "complete"
+                };
+                out.push_str(&format!("Reply state: {state}\n\n"));
+            }
+            for (field, label) in [("input", "Input"), ("output", "Output")] {
+                if let Some(detail) = m["tool_event"][field].as_str() {
+                    out.push_str(&format!("{label}:\n{detail}\n\n"));
+                }
+            }
+            if m["tool_event"]["output_truncated"] == true {
+                out.push_str("Output truncated\n\n");
+            }
             if let Some(files) = m["attachments"].as_array() {
                 for f in files {
                     out.push_str(&format!(
@@ -353,7 +410,21 @@ fn tool_event(value: Option<&Value>, final_reply: bool) -> Result<Value> {
     {
         return Err(err("Tool events require final=false and a valid status"));
     }
-    Ok(json!({"name":text(&value["name"],120)?,"status":value["status"]}))
+    let mut event = json!({"name":text(&value["name"],120)?,"status":value["status"]});
+    for (field, limit) in [("input", 8000), ("output", 16000)] {
+        if let Some(detail) = value.get(field) {
+            event[field] = json!(text(detail, limit)?);
+        }
+    }
+    if let Some(truncated) = value.get("output_truncated") {
+        if !truncated.is_boolean() {
+            return Err(err("output_truncated must be a boolean"));
+        }
+        if truncated == true {
+            event["output_truncated"] = json!(true);
+        }
+    }
+    Ok(event)
 }
 pub fn ui(root: &Path, args: &Value) -> Result<Value> {
     let _lock = lock(root)?;
@@ -482,7 +553,7 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
         s["lease_until"] = json!(now() + LEASE_MS);
         save(root, &s)?;
         return Ok(
-            json!({"ok":true,"attachment_id":s["attachment_id"],"session":view(root,&s)?,"instruction":"Call chat_wait. Publish progress and complete replies with chat_reply; final=true acknowledges reply_to. Then wait again until closed. Redelivered messages may have unfinished work: inspect before repeating side effects."}),
+            json!({"ok":true,"attachment_id":s["attachment_id"],"session":view(root,&s)?,"instruction":"Use chat_reply for all user-visible replies, questions, progress and deliverables. Call chat_wait now with the returned attachment_id. Use final=false for progress and tool_event with actual name/status/input/output for tool calls; report results only after execution, redact secrets and mark shortened output. Use final=true to acknowledge reply_to; add awaiting_user=true for a question, then wait for the next message. Keep unique reply IDs and identical retry payloads; require persisted=true. Inspect records before repeating side effects. Immediately call chat_wait after idle or a persisted final reply; never stop voluntarily for idle duration, task completion or cost. Stop only on user cancellation, closed session, actual host limits or a blocking chat configuration error. Renew via chat_open with the same attachment_id before the 10-minute lease expires."}),
         );
     }
     owned(&s, args)?;
@@ -492,6 +563,13 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
             let reply_to = id(&args["reply_to"])?;
             let content = text(&args["text"], 32000)?;
             let final_reply = args["final"] != false;
+            if args.get("awaiting_user").is_some_and(|v| !v.is_boolean()) {
+                return Err(err("awaiting_user must be a boolean"));
+            }
+            let awaiting_user = args["awaiting_user"] == true;
+            if awaiting_user && !final_reply {
+                return Err(err("awaiting_user requires final=true"));
+            }
             let event = tool_event(args.get("tool_event"), final_reply)?;
             if let Some(m) = s["messages"]
                 .as_array()
@@ -503,6 +581,7 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
                     || m["text"] != content
                     || m["reply_to"] != reply_to
                     || m["final"] != final_reply
+                    || (m["awaiting_user"] == true) != awaiting_user
                     || m["tool_event"] != event
                 {
                     return Err(err("Message ID conflicts with an existing reply"));
@@ -511,7 +590,7 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
                 if pending(&s).map(|m| m["id"].clone()) != Some(json!(reply_to)) {
                     return Err(err("Reply must address the oldest unanswered user message"));
                 }
-                s["messages"].as_array_mut().unwrap().push(json!({"id":message_id,"role":"assistant","text":content,"reply_to":reply_to,"final":final_reply,"tool_event":event,"created_at":now()}));
+                s["messages"].as_array_mut().unwrap().push(json!({"id":message_id,"role":"assistant","text":content,"reply_to":reply_to,"final":final_reply,"awaiting_user":awaiting_user,"tool_event":event,"created_at":now()}));
                 s["updated_at"] = json!(now());
             }
             s["lease_until"] = json!(now() + LEASE_MS);
@@ -527,6 +606,19 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
         }
         "chat_wait" => {
             s["lease_until"] = json!(now() + LEASE_MS);
+            if let Some(message) = pending(&s) {
+                if message["received_at"].is_null() {
+                    let received_at = now();
+                    let stored = s["messages"]
+                        .as_array_mut()
+                        .unwrap()
+                        .iter_mut()
+                        .find(|m| m["id"] == message["id"])
+                        .unwrap();
+                    stored["received_at"] = json!(received_at);
+                    s["updated_at"] = json!(received_at);
+                }
+            }
             save(root, &s)?;
             let message = pending(&s);
             Ok(
@@ -576,8 +668,8 @@ pub async fn wait(root: &Path, args: &Value) -> Result<Value> {
             return Ok(json!({"ok":true,"status":"closed"}));
         }
         owned(&s, args)?;
-        if let Some(message) = pending(&s) {
-            return Ok(json!({"ok":true,"status":"message","message":message}));
+        if pending(&s).is_some() {
+            return tool(root, "chat_wait", args);
         }
         tokio::time::sleep_until(std::cmp::min(
             deadline,
@@ -586,13 +678,145 @@ pub async fn wait(root: &Path, args: &Value) -> Result<Value> {
         .await;
     }
     Ok(
-        json!({"ok":true,"status":"idle","instruction":"No message yet. Call chat_wait again unless the user ended the loop."}),
+        json!({"ok":true,"status":"idle","instruction":"No message yet. Immediately call chat_wait again with the same session and attachment. Idle timeout does not end the conversation; do not stop for idle duration or cost."}),
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn markdown_receipts_keep_unread_queue_distinct() {
+        let mut session = json!({"id":"test","title":"Test","closed":false,"messages":[{"id":"u1","role":"user","text":"first"},{"id":"u2","role":"user","text":"second"}]});
+        assert_eq!(
+            markdown(&session)
+                .matches("消息状态：未读 · 排队中")
+                .count(),
+            2
+        );
+        session["messages"][0]["received_at"] = json!(10);
+        assert!(markdown(&session).contains("消息状态：已读 · 正在处理"));
+        assert_eq!(
+            markdown(&session)
+                .matches("消息状态：未读 · 排队中")
+                .count(),
+            1
+        );
+        session["messages"].as_array_mut().unwrap().push(json!({"id":"q1","role":"assistant","reply_to":"u1","final":true,"awaiting_user":true,"text":"Which?"}));
+        assert!(markdown(&session).contains("消息状态：已读 · 待确认"));
+        session["messages"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("received_at");
+        assert!(markdown(&session).contains("消息状态：已读 · 待确认"));
+        session["messages"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id":"u3","role":"user","text":"answer"}));
+        assert!(markdown(&session).contains("消息状态：已读 · 已回复"));
+        session["closed"] = json!(true);
+        assert_eq!(
+            markdown(&session)
+                .matches("消息状态：未读 · 会话已结束")
+                .count(),
+            2
+        );
+    }
+    #[tokio::test]
+    async fn confirmation_and_tool_details_are_durable_and_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let cid = ui(root, &json!({"action":"create"})).unwrap()["session"]["id"].clone();
+        let opened = tool(root, "chat_open", &json!({"chat_id":cid})).unwrap();
+        ui(
+            root,
+            &json!({"action":"send","chat_id":cid,"message_id":"u1","text":"help"}),
+        )
+        .unwrap();
+        let event = json!({"chat_id":cid,"attachment_id":opened["attachment_id"],"message_id":"p1","reply_to":"u1","text":"tool result","final":false,"tool_event":{"name":"bash","status":"completed","input":"echo password=secret123","output":"token=secret456\n<script>untrusted text</script>","output_truncated":true}});
+        tool(root, "chat_reply", &event).unwrap();
+        tool(root, "chat_reply", &event).unwrap();
+        let mut changed = event.clone();
+        changed["tool_event"]["output"] = json!("different");
+        assert!(tool(root, "chat_reply", &changed).is_err());
+        changed["message_id"] = json!("oversize");
+        changed["tool_event"]["output"] = json!("x".repeat(16001));
+        assert!(tool(root, "chat_reply", &changed).is_err());
+        changed["tool_event"]["output"] = json!("ok");
+        changed["tool_event"]["output_truncated"] = json!("yes");
+        assert!(tool(root, "chat_reply", &changed).is_err());
+        let question = json!({"chat_id":cid,"attachment_id":opened["attachment_id"],"message_id":"q1","reply_to":"u1","text":"Which option?","final":true,"awaiting_user":true});
+        let mut invalid = question.clone();
+        invalid["final"] = json!(false);
+        assert!(tool(root, "chat_reply", &invalid).is_err());
+        tool(root, "chat_reply", &question).unwrap();
+        tool(root, "chat_reply", &question).unwrap();
+        invalid = question.clone();
+        invalid["awaiting_user"] = json!(false);
+        assert!(tool(root, "chat_reply", &invalid).is_err());
+        let session = load(root, cid.as_str().unwrap()).unwrap();
+        assert_eq!(session["messages"].as_array().unwrap().len(), 3);
+        assert_eq!(session["messages"][2]["awaiting_user"], true);
+        let md = fs::read_to_string(root.join(DIR).join(format!("{}.md", cid.as_str().unwrap())))
+            .unwrap();
+        assert!(
+            md.contains("Input:")
+                && md.contains("Output:")
+                && md.contains("Output truncated")
+                && md.contains("Reply state: awaiting_user")
+        );
+        assert!(!md.contains("secret123") && !md.contains("secret456"));
+        let args = json!({"chat_id":cid,"attachment_id":opened["attachment_id"],"timeout_ms":0});
+        assert_eq!(wait(root, &args).await.unwrap()["status"], "idle");
+        ui(
+            root,
+            &json!({"action":"send","chat_id":cid,"message_id":"u2","text":"Option A"}),
+        )
+        .unwrap();
+        assert_eq!(wait(root, &args).await.unwrap()["message"]["id"], "u2");
+    }
+    #[tokio::test]
+    async fn pickup_receipts_persist_for_immediate_and_delayed_delivery() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let cid = ui(root, &json!({"action":"create"})).unwrap()["session"]["id"].clone();
+        let opened = tool(root, "chat_open", &json!({"chat_id":cid})).unwrap();
+        let args = json!({"chat_id":cid,"attachment_id":opened["attachment_id"],"timeout_ms":0});
+        ui(
+            root,
+            &json!({"action":"send","chat_id":cid,"message_id":"u1","text":"immediate"}),
+        )
+        .unwrap();
+        assert!(load(root, cid.as_str().unwrap()).unwrap()["messages"][0]["received_at"].is_null());
+        let first = wait(root, &args).await.unwrap();
+        assert!(first["message"]["received_at"].as_u64().unwrap() > 0);
+        assert_eq!(
+            load(root, cid.as_str().unwrap()).unwrap()["messages"][0]["received_at"],
+            first["message"]["received_at"]
+        );
+        assert_eq!(
+            wait(root, &args).await.unwrap()["message"]["received_at"],
+            first["message"]["received_at"]
+        );
+        tool(root, "chat_reply", &json!({"chat_id":cid,"attachment_id":opened["attachment_id"],"message_id":"a1","reply_to":"u1","text":"done"})).unwrap();
+        let delayed_args =
+            json!({"chat_id":cid,"attachment_id":opened["attachment_id"],"timeout_ms":2000});
+        let (delayed, _) = tokio::join!(wait(root, &delayed_args), async {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            ui(
+                root,
+                &json!({"action":"send","chat_id":cid,"message_id":"u2","text":"delayed"}),
+            )
+            .unwrap();
+        });
+        let delayed = delayed.unwrap();
+        assert_eq!(delayed["message"]["id"], "u2");
+        assert!(delayed["message"]["received_at"].as_u64().unwrap() > 0);
+        assert_eq!(
+            load(root, cid.as_str().unwrap()).unwrap()["messages"][2]["received_at"],
+            delayed["message"]["received_at"]
+        );
+    }
     #[tokio::test]
     async fn durable_chat_loop_deduplicates_and_cancels_wait() {
         let dir = tempfile::tempdir().unwrap();

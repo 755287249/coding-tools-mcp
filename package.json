@@ -1,6 +1,6 @@
 {
   "name": "coding-tools-mcp-desktop",
-  "version": "0.1.61",
+  "version": "0.1.62",
   "description": "Coding Tools MCP desktop client",
   "type": "module",
   "packageManager": "pnpm@12.0.0",
