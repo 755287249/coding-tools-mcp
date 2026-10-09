@@ -45,3 +45,5 @@ jobs:
           mcp::activity::
           commands::activity::
           tools::patch::
+          tools::chat::tests
+          platform::open
