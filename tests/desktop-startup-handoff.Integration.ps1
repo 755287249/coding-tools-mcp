@@ -60,3 +60,6 @@ try {
     }
     Remove-Item -LiteralPath $fixture -Recurse -Force -ErrorAction SilentlyContinue
 }
+# The rollback scenario intentionally leaves the child process exit code at 1.
+# Only reaching this point means every assertion and cleanup completed.
+exit 0
