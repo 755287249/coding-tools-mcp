@@ -377,6 +377,7 @@ export const MESSAGES = {
   'chat.106': ['Main navigation', '主導覽', '主导航', 'メインナビゲーション'],
   'chat.107': ['Home', '首頁', '首页', 'ホーム'],
   'chat.108': ['Resize navigation', '調整導覽寬度', '调整导航宽度', 'ナビゲーションの幅を変更'],
+  'chat.selectFolder': ['Please select a working folder', '請選擇工作目錄', '请选择工作目录', '作業フォルダーを選択してください'],
   'chat.selectWorkspace': ['Please select a workspace', '請選擇工作空間', '请选择工作空间', 'ワークスペースを選択してください'],
   'chat.109': ['Select a project', '選擇專案', '选择项目', 'プロジェクトを選択'],
   'chat.110': ['Choose a local project to start a conversation.', '選擇本機專案，開始對話。', '选择本地项目，开始对话。', 'ローカルプロジェクトを選んで会話を始めましょう。'],
