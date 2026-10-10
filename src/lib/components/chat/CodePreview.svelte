@@ -1,6 +1,6 @@
 <script lang="ts">
   import { t } from '$lib/i18n';
-  import { getBackend } from '$lib/backend';
+  import { isDesktopWindow } from '$lib/stores/glass';
   import { appUrl } from '$lib/app-path';
   import { buildPreviewDocument, previewLanguage, MAX_PREVIEW_BYTES } from '$lib/chat/preview';
   let { code, language = '' }: { code: string; language?: string } = $props();
@@ -14,7 +14,7 @@
   function run() {
     if (!kind || !canRun) return;
     document = buildPreviewDocument(code, kind);
-    runner = getBackend().capabilities.host === 'node' || !("__TAURI_INTERNALS__" in window) ? appUrl('/chat-preview.html') : /Windows|Android/.test(navigator.userAgent) ? 'http://chatpreview.localhost/index.html' : 'chatpreview://localhost/index.html';
+    runner = !isDesktopWindow() ? appUrl('/chat-preview.html') : /Windows|Android/.test(navigator.userAgent) ? 'http://chatpreview.localhost/index.html' : 'chatpreview://localhost/index.html';
     revision++; mode = 'run';
   }
   function ready(event: MessageEvent) {

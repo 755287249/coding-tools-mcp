@@ -18,14 +18,15 @@
   $effect(()=>{const id=selected?.id;endpoint='';let stopped=false;if(id)void getRuntimeStatus(id).then(runtime=>{if(!stopped)endpoint=runtime.publicEndpoint||runtime.localEndpoint}).catch(()=>{});return()=>{stopped=true}});
 </script>
 <div class="chat-home">
-  {#if selected}
-    <div class="project-picker"><Folder size={15}/><select aria-label={$t('chat.109')} bind:value={projectId}><option value="">{$t('chat.109')}</option>{#each $workspaces as workspace (workspace.id)}<option value={workspace.id}>{workspace.name}</option>{/each}</select></div>
-    {#key selected.id}<ChatPanel externalNavigation startNew workspaceId={selected.id} folders={workspaceFolders(selected)} activeFolderId={selected.active_folder_id} {endpoint} auth={selected.auth} onNavigate={(folder,chat)=>void goto(appUrl(chatLocation(selected!.id,folder,chat)),{noScroll:true})}/>{/key}
-  {:else}
-    <div class="home-welcome"><div class="home-mark"><Folder size={32}/></div><h1>{$t('chat.102')}</h1><p>{$t('chat.110')}</p></div>
-    <div class="home-projects"><label><Folder size={16}/><select aria-label={$t('chat.109')} bind:value={projectId}><option value="">{$t('chat.109')}</option>{#each $workspaces as workspace (workspace.id)}<option value={workspace.id}>{workspace.name}</option>{/each}</select></label>{#if canCreate}<button onclick={()=>connectionActions.newConnection?.()}><Plus size={15}/>{$t('Choose a project folder')}</button>{/if}</div>
-  {/if}
+  {#key selected?.id ?? ''}
+    <ChatPanel externalNavigation startNew workspaceId={selected?.id??''} folders={selected?workspaceFolders(selected):[]} activeFolderId={selected?.active_folder_id} {endpoint} auth={selected?.auth??{type:'none',oauth_client_id:''}} onNavigate={(folder,chat)=>{if(selected)void goto(appUrl(chatLocation(selected.id,folder,chat)),{noScroll:true})}}>
+      {#snippet workspacePicker()}
+        <label class="workspace-choice"><Folder size={14}/><select required aria-label={$t('chat.selectWorkspace')} bind:value={projectId}><option value="" disabled>{$t('chat.selectWorkspace')}</option>{#each $workspaces as workspace (workspace.id)}<option value={workspace.id}>{workspace.name}</option>{/each}</select></label>
+        {#if canCreate && !selected}<button class="create-workspace" type="button" onclick={()=>connectionActions.newConnection?.()}><Plus size={14}/>{$t('Choose a project folder')}</button>{/if}
+      {/snippet}
+    </ChatPanel>
+  {/key}
 </div>
 <style>
-.chat-home{position:relative;display:flex;flex:1;flex-direction:column;min-height:0;background:var(--card-bg)}.chat-home :global(.chat-shell){flex:1;min-height:0}.home-welcome{flex:1;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:17px;padding:30px}.home-mark{color:var(--color-text-muted)}h1{font-size:clamp(23px,3vw,32px);font-weight:550;letter-spacing:-.5px}p{font-size:12px;color:var(--color-text-muted);text-align:center}.home-projects{width:min(740px,calc(100% - 48px));margin:0 auto 30px;display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:22px;border:1px solid var(--color-border);border-radius:20px;background:var(--surface-hover)}label,.project-picker{display:flex;align-items:center;gap:8px;color:var(--color-text-muted)}select{max-width:100%;min-width:150px;border:0;background:var(--card-bg);padding:9px;border-radius:7px;color:var(--color-text);font-size:12px}button{display:flex;align-items:center;gap:7px;margin-left:auto;cursor:pointer;font-size:11px;color:var(--color-text-muted)}.project-picker{padding:10px 25px;border-bottom:1px solid var(--color-border);flex:none}button:focus-visible,select:focus-visible{outline:2px solid var(--primary);outline-offset:2px}@media(max-width:700px){.home-projects{padding:15px;width:calc(100% - 24px)}.project-picker{padding:8px 12px}}
+.chat-home{position:relative;display:flex;flex:1;flex-direction:column;min-height:0;background:var(--card-bg)}.chat-home :global(.chat-shell){flex:1;min-height:0}.workspace-choice,.create-workspace{display:flex;align-items:center;gap:6px;min-width:0;color:var(--color-text-muted);font-size:11px}.workspace-choice select{min-width:0;max-width:200px;background:var(--card-bg);color:var(--color-text);border:1px solid var(--color-border);border-radius:7px;padding:5px 7px;font-size:11px}.create-workspace{cursor:pointer}.workspace-choice select:focus-visible,.create-workspace:focus-visible{outline:2px solid var(--primary);outline-offset:2px}
 </style>

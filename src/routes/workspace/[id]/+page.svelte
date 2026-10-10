@@ -51,6 +51,8 @@
   import { chatLocation } from '$lib/chat/location';
   import Settings from '@lucide/svelte/icons/settings';
   import MessageSquare from '@lucide/svelte/icons/message-square';
+  import ArrowLeft from '@lucide/svelte/icons/arrow-left';
+  import Trash2 from '@lucide/svelte/icons/trash-2';
   import ListChecks from '@lucide/svelte/icons/list-checks';
   import { activityPanelExpanded, activityPanelOpen } from '$lib/stores/activity-panel';
   import ChatPanel from "$lib/components/chat/ChatPanel.svelte";
@@ -789,15 +791,7 @@
           <p class="page-kicker">{$t("Workspaces")}</p>
           <h2 class="page-title">{profile.name}</h2>
         </div>
-        {#if capabilities.workspaceLifecycle}
-          <button
-            type="button"
-            class="tx-btn-ghost text-[var(--danger)]"
-            onclick={() => void removeWorkspace()}
-          >
-            {$t("Delete workspace")}
-          </button>
-        {/if}
+          <button type="button" class="tx-btn-ghost workspace-return" onclick={() => navigateWorkspace('chat')}><ArrowLeft size={16}/>{$t('chat.backConversation')}</button>
       </div>
 
       <div class="mt-5">
@@ -897,6 +891,9 @@
               onSaveSandbox={saveSandbox}
               {sandboxLocked}
             />
+            {#if capabilities.workspaceLifecycle}
+              <section class="workspace-delete"><button type="button" onclick={() => void removeWorkspace()}><Trash2 size={16}/>{$t('Delete workspace')}</button></section>
+            {/if}
           {:catch cause}
             <div class="tx-card p-5 text-sm text-[var(--color-danger)]">
               {$t("Workspace settings could not be loaded.")} {String(cause)}
@@ -961,5 +958,6 @@
 {/if}
 
 <style>
+.workspace-return{display:flex;align-items:center;gap:7px;flex:none}.workspace-delete{margin-top:28px;padding-top:20px;border-top:1px solid var(--color-border)}.workspace-delete button{display:flex;align-items:center;gap:8px;border:1px solid #d65b62;color:#e5787e;border-radius:8px;padding:10px 14px;font-size:13px;cursor:pointer}.workspace-delete button:hover{background:#d65b6218}
 .workspace-chat-bar{display:flex;align-items:center;justify-content:space-between;flex:none;gap:12px;border-bottom:1px solid var(--color-border);padding:8px 18px}.workspace-chat-tab{display:flex;gap:7px;align-items:center;padding:6px 9px;border-radius:7px;font-size:12px;color:var(--color-text-muted);cursor:pointer}.workspace-icon{display:grid;place-items:center;width:30px;height:30px;border-radius:7px;color:var(--color-text-muted);cursor:pointer}.workspace-icon:hover,.workspace-icon.active{background:var(--surface-hover);color:var(--color-text)}button:focus-visible{outline:2px solid var(--primary);outline-offset:2px}.chat-workspace-main{flex:1;min-width:0;min-height:0;padding:0}.chat-workspace :global(.ad-drawer){max-width:calc(100% - 20px)}@media(max-width:560px){.workspace-chat-bar{padding:6px 10px}.chat-workspace-main{padding:5px}}
 </style>

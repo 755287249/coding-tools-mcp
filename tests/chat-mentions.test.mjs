@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { appendAttachmentMention,mentionParts,mentionQuery,mentionChoices,referencedAttachments } from '../src/lib/chat/mentions.ts';
+import { groupedMentionChoices,appendAttachmentMention,mentionParts,mentionQuery,mentionChoices,referencedAttachments } from '../src/lib/chat/mentions.ts';
 import { innerPopover } from '../src/lib/chat/popover.ts';
 import { uploadLocalFile,TRANSFER_CHUNK_BYTES,readChatFile } from '../src/lib/chat/attachment-transfer.ts';
 import { createHash } from 'node:crypto';
@@ -41,4 +41,13 @@ test('range preview verifies full-file digest and rejects same-sized tampering',
  const request=async()=>({attachment:file,next_offset:bytes.length,data_base64:bytes.toString('base64')});
  assert.equal(Buffer.from(await readChatFile(request,'chat',file)).toString(),'test preview');
  await assert.rejects(readChatFile(async()=>({...await request(),data_base64:Buffer.alloc(bytes.length).toString('base64')}),'chat',file),/changed/);
+});
+
+test('draft mention choices precede history without duplicates and preserve search boundaries',()=>{
+ const current={...files[1],name:'current.png'};
+ const history=[files[0],files[1],files[2],files[0]];
+ assert.deepEqual(groupedMentionChoices([current],history,''),{current:[current],history:[files[0],files[2]]});
+ assert.deepEqual(groupedMentionChoices([current],history,'CURRENT'),{current:[current],history:[]});
+ assert.deepEqual(groupedMentionChoices([],history,'report'),{current:[],history:[files[2]]});
+ assert.deepEqual(groupedMentionChoices([current],history,'missing'),{current:[],history:[]});
 });

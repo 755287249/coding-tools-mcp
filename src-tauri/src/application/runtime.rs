@@ -69,7 +69,16 @@ async fn sync_tunnel_routes_from_runtime(state: &AppState) -> AppResult<()> {
 }
 
 #[allow(clippy::collapsible_if)]
-async fn ensure_port_available(port: u16, service_label: &str) -> AppResult<()> {
+async fn ensure_port_available(
+    port: u16,
+    service_label: &str,
+    managed_running: bool,
+) -> AppResult<()> {
+    // Only the supervisor entry for this workspace/service may reuse its port.
+    // PID ownership alone could also refer to a different service in this app.
+    if managed_running {
+        return Ok(());
+    }
     let Some(pid) = platform().find_pid_listening_on_port(port)? else {
         return Ok(());
     };
@@ -99,7 +108,8 @@ pub async fn start_mcp_runtime(state: &AppState, id: &str) -> AppResult<RuntimeS
     validate_start_resources(state, id, WorkspaceService::Mcp)?;
     let profile = profile_by_id(state, id)?;
 
-    ensure_port_available(profile.runtime.local_port, "本地 MCP").await?;
+    let running = state.with_runtime(|runtime| Ok(runtime.is_running(id, ServiceKind::Mcp)))?;
+    ensure_port_available(profile.runtime.local_port, "本地 MCP", running).await?;
 
     state.with_runtime(|runtime| runtime.start_mcp(&profile))?;
     // The local listener is already running even if tunnel startup below fails,
@@ -157,7 +167,8 @@ pub async fn start_actions_runtime(state: &AppState, id: &str) -> AppResult<Runt
     validate_start_resources(state, id, WorkspaceService::Actions)?;
     let profile = profile_by_id(state, id)?;
 
-    ensure_port_available(profile.actions.local_port, "本地 Actions").await?;
+    let running = state.with_runtime(|runtime| Ok(runtime.is_running(id, ServiceKind::Actions)))?;
+    ensure_port_available(profile.actions.local_port, "本地 Actions", running).await?;
 
     state.with_runtime(|runtime| runtime.start_actions(&profile))?;
     persist_actions_runtime_enabled(state, id, true)?;
@@ -221,4 +232,24 @@ pub fn restart_actions_runtime(state: &AppState, id: &str) -> AppResult<RuntimeS
     let status = state.with_runtime(|runtime| runtime.restart_actions(&profile))?;
     persist_actions_runtime_enabled(state, id, true)?;
     Ok(status)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn running_managed_service_reuses_its_occupied_port() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert_eq!(
+            platform().find_pid_listening_on_port(port).unwrap(),
+            Some(std::process::id())
+        );
+        ensure_port_available(port, "test MCP", true).await.unwrap();
+        assert!(ensure_port_available(port, "test MCP", false)
+            .await
+            .is_err());
+        assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_ok());
+    }
 }

@@ -19,3 +19,8 @@ export function isPristineConversation(session: ChatSession | null): boolean {
     && !(session.members?.length) && !session.connection_id && !session.agent_name
     && session.status !== 'connected' && session.status !== 'waiting';
 }
+
+/** Greeting/control traffic does not lock the choice; the first actual user message does. */
+export function canChooseConversationMode(session: ChatSession | null): boolean {
+  return !!session && !session.closed && ![...session.messages??[],...session.queued_messages??[]].some(message=>message.role==='user'&&message.kind!=='connection_request');
+}

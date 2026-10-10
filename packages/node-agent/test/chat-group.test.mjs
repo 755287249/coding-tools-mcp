@@ -22,7 +22,7 @@ test('independent group waits, addressed delivery, per-member acknowledgement an
  const md=readFileSync(path.join(root,read().archive_path),'utf8');assert.match(md,/Agent: 前端/);assert.match(md,/Coordinate/);assert.match(md,/Implement/);
  for(const aid of [a.attachment_id,b.attachment_id]){assert.ok(!md.includes(aid));assert.ok(!JSON.stringify(read()).includes(aid));}
  assert.equal(JSON.parse(readFileSync(path.join(root,'docs/chat-sessions',a.chat_id+'.json'))).version,2);
- assert.throws(()=>chatUi(root,{action:'set_mode',chat_id:a.chat_id,mode:'work'}),/Disconnect/);
+ assert.throws(()=>chatUi(root,{action:'set_mode',chat_id:a.chat_id,mode:'work'}),/fixed after/);
  chatUi(root,{action:'detach_member',chat_id:a.chat_id,member_id:b.agent_id});assert.throws(()=>chatTool(root,'chat_open',b),/paused/);
  chatUi(root,{action:'resume_member',chat_id:a.chat_id,member_id:b.agent_id});assert.equal(chatTool(root,'chat_open',b).agent_id,b.agent_id);
 });
@@ -52,12 +52,13 @@ test('legacy attachment becomes coordinator, group queue preserves recipients an
  assert.equal(chatTool(root,'chat_wait',b).message.id,'two');reply(b,'two-b','two');reply(a,'two-a','two');
  assert.equal(chatTool(root,'chat_wait',a).message.id,'three');assert.equal(chatTool(root,'chat_wait',b).status,'idle');reply(a,'three-done','three');
  chatUi(root,{action:'detach_member',chat_id:a.chat_id,member_id:b.agent_id});
- assert.equal(chatUi(root,{action:'set_mode',chat_id:a.chat_id,mode:'work'}).session.mode,'work');
+ assert.throws(()=>chatUi(root,{action:'set_mode',chat_id:a.chat_id,mode:'work'}),/fixed after/);
  assert.equal(chatTool(root,'chat_open',a).attachment_id,a.attachment_id);
  const legacy=chatUi(root,{action:'create'}).session.id;const old=chatTool(root,'chat_open',{chat_id:legacy,agent_name:'Existing'});
+ chatUi(root,{action:'set_mode',chat_id:legacy,mode:'group'});
  chatUi(root,{action:'send',chat_id:legacy,message_id:'old-u',text:'Existing task'});
  chatTool(root,'chat_reply',{chat_id:legacy,attachment_id:old.attachment_id,message_id:'progress',reply_to:'old-u',text:'working',final:false});
- chatUi(root,{action:'set_mode',chat_id:legacy,mode:'group'});const resumed=chatTool(root,'chat_open',{chat_id:legacy,attachment_id:old.attachment_id});
+ assert.throws(()=>chatUi(root,{action:'set_mode',chat_id:legacy,mode:'work'}),/fixed after/);const resumed=chatTool(root,'chat_open',{chat_id:legacy,attachment_id:old.attachment_id});
  assert.equal(resumed.role,'coordinator');assert.equal(resumed.session.members[0].name,'Existing');
  assert.equal(chatTool(root,'chat_reply',{chat_id:legacy,attachment_id:old.attachment_id,message_id:'progress',reply_to:'old-u',text:'working',final:false}).persisted,true);
 });
@@ -108,7 +109,7 @@ test('disconnect all pauses members and switching mode cannot revive a paused id
  const fresh=chatTool(root,'chat_open',{chat_id:a.chat_id});assert.notEqual(fresh.attachment_id,a.attachment_id);
 });
 
-test('pending greeting and queued work survive repeated mode roundtrips with the same AI',t=>{
+test('greeting permits roundtrips but sent and queued work lock mode while retaining the same AI',t=>{
  const root=mkdtempSync(path.join(tmpdir(),'chat-roundtrip-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
  const chat_id=chatUi(root,{action:'create'}).session.id;
  const a={chat_id,attachment_id:chatTool(root,'chat_open',{chat_id,agent_name:'Roundtrip'}).attachment_id};
@@ -121,21 +122,21 @@ test('pending greeting and queued work survive repeated mode roundtrips with the
  chatUi(root,{action:'send',chat_id,message_id:'one',text:'one'});
  chatTool(root,'chat_reply',{...a,message_id:'progress',reply_to:'one',text:'working',final:false});
  chatUi(root,{action:'send',chat_id,message_id:'two',text:'two'});
- mode('work');mode('group');
+ assert.throws(()=>mode('work'),/fixed after/);mode('group');
  assert.equal(chatTool(root,'chat_reply',{...a,message_id:'progress',reply_to:'one',text:'working',final:false}).persisted,true);
  assert.equal(chatTool(root,'chat_wait',a).message.id,'one');reply('one-done','one');
  assert.equal(chatTool(root,'chat_wait',a).message.id,'two');reply('two-done','two');
  assert.equal(chatTool(root,'chat_wait',a).status,'idle');
- const before=mode('work').messages;assert.deepEqual(mode('group').messages,before);
+ const before=mode('group').messages;assert.throws(()=>mode('work'),/fixed after/);assert.deepEqual(mode('group').messages,before);
 });
 test('mode rollback cannot discard paused collaborators unfinished assignments or queued mentions',t=>{
  const {root,chat_id,a,b,send,reply}=fixture(t);
  send('one','one');reply(a,'assignment','one',{final:false,recipient_ids:[b.agent_id]});
  chatUi(root,{action:'detach_member',chat_id,member_id:b.agent_id});
- assert.throws(()=>chatUi(root,{action:'set_mode',chat_id,mode:'work'}),/assigned member/);
+ assert.throws(()=>chatUi(root,{action:'set_mode',chat_id,mode:'work'}),/fixed after/);
  chatUi(root,{action:'resume_member',chat_id,member_id:b.agent_id});reply(b,'assigned-done','assignment');
  send('two','@前端 later');chatUi(root,{action:'detach_member',chat_id,member_id:b.agent_id});
- assert.throws(()=>chatUi(root,{action:'set_mode',chat_id,mode:'work'}),/queued member/);
+ assert.throws(()=>chatUi(root,{action:'set_mode',chat_id,mode:'work'}),/fixed after/);
 });
 
 test('group outbox merge/split is reversible and merged delivery preserves saved targets and receipts',t=>{
@@ -168,4 +169,16 @@ test('group outbox merge/split is reversible and merged delivery preserves saved
  assert.deepEqual(read().queued_messages,[]);assert.equal(chatTool(root,'chat_wait',a).status,'idle');
  assert.throws(()=>enqueue('q3','Changed'),/conflicts/);
  for(const mode of ['split','merge'])assert.equal(chatUi(root,{action:'set_queue_mode',chat_id,mode}).session.queue_mode,mode);
+});
+
+test('first queued user message locks mode in both directions without changing persisted state',t=>{
+ const root=mkdtempSync(path.join(tmpdir(),'chat-mode-lock-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
+ for(const mode of ['work','group']){
+  const chat_id=chatUi(root,{action:'create',mode}).session.id;
+  chatUi(root,{action:'request_connection',chat_id,message_id:'greeting'});
+  chatUi(root,{action:'send',chat_id,message_id:'first-user',text:'Real user task'});
+  const file=path.join(root,'docs/chat-sessions',chat_id+'.json');const before=readFileSync(file,'utf8');
+  assert.throws(()=>chatUi(root,{action:'set_mode',chat_id,mode:mode==='work'?'group':'work'}),/fixed after/);
+  assert.equal(readFileSync(file,'utf8'),before);
+ }
 });

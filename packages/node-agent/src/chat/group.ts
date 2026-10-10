@@ -76,6 +76,7 @@ export function setMode(s:ChatSession,value:unknown):void {
  if(value!=='group'&&value!=='work')throw new Error('Invalid conversation mode');
  if((s.mode??'work')===value)return;
  if(s.closed)throw new Error('Conversation is closed');
+ if([...s.messages,...s.queue??[]].some(m=>m.role==='user'&&m.kind!=='connection_request'))throw new Error('Conversation mode is fixed after the first user message');
  if(value==='group'){
   s.version=2;s.mode='group';s.members=[];
   if(s.attachment_id){s.members.push({id:s.work_member?.attachment_id===s.attachment_id?s.work_member.id:randomUUID(),name:s.agent_name??'AI',role:'coordinator',attachment_id:s.attachment_id,lease_until:s.lease_until});}

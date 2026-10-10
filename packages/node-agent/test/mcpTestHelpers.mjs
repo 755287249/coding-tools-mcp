@@ -28,7 +28,7 @@ let mcpPortSequence = 0;
 async function listenOnFetchSafePort(server, host) {
   let lastError;
   for (let attempt = 0; attempt < 32; attempt += 1) {
-    const port = 48_000 + ((process.pid + mcpPortSequence++) % 8_000);
+    const port = 48_000 + ((process.pid + mcpPortSequence++ * 997) % 8_000);
     try {
       await new Promise((resolve, reject) => {
         const onError = error => {
@@ -46,7 +46,8 @@ async function listenOnFetchSafePort(server, host) {
       return;
     } catch (error) {
       lastError = error;
-      if (error?.code !== 'EADDRINUSE') throw error;
+      // Windows reserves port ranges; retry a different range without changing host policy.
+      if (error?.code !== 'EADDRINUSE' && !(process.platform === 'win32' && error?.code === 'EACCES')) throw error;
     }
   }
   throw lastError ?? new Error('unable to allocate a fetch-safe MCP test port');

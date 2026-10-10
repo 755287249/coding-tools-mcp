@@ -287,7 +287,7 @@ The docked chat task panel retains the complete desktop ActivityDrawer under Pro
 
 Desktop settings now include Browser sharing and Application updates. Browser sharing is opt-in and uses the existing MCP HTTP listener and embedded desktop assets. A hostname must route all paths, including `/`, `/_app` and `/browser`, to that listener. LAN access requires a non-loopback bind and firewall access. Existing Cloudflare quick/named tunnels can be reused. Built-in/path-prefixed MCP-only relays do not automatically provide a root browser route.
 
-Sharing grants the owner-level desktop command allowlist to anyone holding the independent sharing password. Password hashes, origin-bound 12-hour sessions and attempt limits are held in memory. Sharing starts disabled on every application launch. Password rotation and disable revoke all sessions. Only the local desktop can enable sharing or install an update; browser-only window controls and native directory selection are unavailable. No MCP credentials are injected into public HTML or URLs.
+Sharing grants the owner-level desktop command allowlist to anyone holding the independent sharing password. Password hashes, the password displayed only through the native desktop status command, origin-bound 12-hour sessions and attempt limits are held in memory. Returning to sharing settings restores the active password, listener workspace, LAN option and public origin without rotating the password. The browser command allowlist does not expose sharing status or configuration. Sharing starts disabled on every application launch. Password rotation and disable revoke all sessions. Only the local desktop can enable sharing or install an update; browser-only window controls and native directory selection are unavailable. No MCP credentials are injected into public HTML or URLs.
 
 The Node Agent has a separate local management transport; this desktop command bridge and Windows EXE installation are intentionally not exposed through it. Shared composer growth, full draft retention and private-network UUID/copy compatibility apply to both hosts. Existing Node local-only checks remain intact.
 
@@ -306,3 +306,50 @@ Long text grows the composer on input, restored drafts, mode changes and resizin
 浏览器分享：非JSON的401也会清除失效登录；退出立即清除本地状态，旧请求、旧登录和迟到的退出响应不会覆盖新会话。成功响应必须符合登录/命令协议，避免代理错误页被误当作成功。
 
 桌面GitHub更新：下载与安装均绑定用户检查过的版本和SHA-256，检查后latest变化或暂存包被其他操作替换时要求重新检查。修改发布仓库会清除旧检查结果；安装确认期间锁定按钮。Node包更新流程不适用该原生桌面命令变更。
+
+## Sharing listener reuse
+
+Enabling browser sharing and reusing a tunnel reuse an already running desktop MCP listener. LAN sharing confirms exposure and restarts an active listener to apply the wildcard bind, including recovery after an older attempt saved the address but failed to restart. Cancelling leaves the profile and listener unchanged. A failed/transitional runtime cannot be reported as enabled. Repeated native MCP/Actions start requests skip port-availability preflight only for the matching supervisor-managed running service; unrelated occupied ports remain errors. Node runtime supervision is unsupported (`runtimeSupervisor=false`), so these native lifecycle changes do not apply to its separate management server.
+
+
+## Conversation mode and composer tools
+
+Desktop and Node reject changing work/group mode after the first non-control user message, including queued or already answered messages. Setting the current mode remains idempotent. Connection requests and greetings do not lock mode. The mode pill remains available before that boundary; the historical mode-settings button is removed. Hovering a sidebar chat displays its mode. Composer project/file/plugin buttons open searchable top-layer menus; file selection reuses validated attachment reads and bounded uploads for another conversation, or references allowed artifact paths. Plugin toggles use the existing workspace-level extension controls. The composer tongue retracts one second after pointer/focus leaves when no menu is open.
+
+### Recent navigation and draft attachment mentions
+
+The shared desktop/Node UI shows a Recent section below projects, with All/Work/Group filters, project-name display option, collapse, and new conversation action. Pinned icons are upright/filled; available pin actions are tilted/outlined.
+
+Type `@` after adding a draft attachment: only matching current draft attachments appear initially, with a More row for matching conversation history. Expand More by pointer or keyboard, select a historical attachment, and confirm it is added to the draft. Duplicate IDs must appear only in the draft group. Switching conversations or starting a fresh mention resets expansion. Desktop executable icon resources use the provided white mark with transparency; this packaging change does not alter the Node executable.
+
+### Conversation search dialog
+
+Click the sidebar search icon or press Ctrl+K: a centered modal opens without expanding a collapsed sidebar. Search uses summary titles/project/folder names across Work and Group; no transcripts or connection secrets are loaded. Empty search lists9recent active conversations; typed queries can find archived conversations and show up to40matches. Keyboard arrows/Enter, Alt+1–9 and Escape work; quick actions New conversation/Open workspace/Search files use Ctrl+N/O/P within the modal. Search files opens the existing workspace file library and focuses its input. Verify partial folder failures, close/reopen cancellation, pointer dismissal, focus return, and narrow layout. Shared Svelte implementation applies to desktop and Node UI.
+
+### Plugin and skill catalog
+
+The Customize rail entry opens a dedicated sidebar (Plugins/Skills/configured MCP servers) and a two-column searchable catalog. Project/Personal filters use actual discovery scope; Selected and Available reflect saved selection separately from effective enablement. Turning the master switch off preserves selections. Details have a persistent feature URL, copyable link, source/scope/path and real connection/tool-count metadata. Add provides copyable local configuration/SKILL.md examples and refresh discovery; no public marketplace or remote installation is implied. Settings retain all master toggles, diagnostics and Hooks management. Workspace changes clear stale inventories, and in-flight mutations stay scoped to their original workspace. The advanced workspace settings retain the existing tabbed controls. Shared Svelte UI supplies desktop and Node surfaces.
+
+### Mobile chat layout
+
+At700px and below, a compact mobile header replaces the desktop menu/rail. Navigation opens a dismissible focus-contained drawer; conversation actions expand separately, and the attachment plus opens a sheet with photos/files/project/library/plugins. Chat uses full width,13px prose, reduced line spacing, a compact growing composer and theme-aware colors. New conversations keep the composer at the bottom. VisualViewport sizes the shell for browser keyboards; viewport zoom stays enabled. Search uses a full-height mobile layout with bottom input; desktop keeps its existing modal. Test375/390px, short keyboard-sized viewport, long drafts, queue cards, drawer/backdrop/Escape/navigation/focus return, actions and attachment submenus, deep links, themes, and desktop regressions. Shared Svelte covers desktop browser sharing and Node UI.
+
+### Compact message images
+
+Sent image attachments appear in a separate horizontal strip above message text:112px square on desktop,96px on mobile, cropped previews with full-image viewer on click. User images/text align right; multiple images scroll within the strip instead of stacking tall cards. Download remains on the thumbnail; source navigation is available in the viewer. Non-image files retain their existing controls. Test mixed attachments,9portrait images, image-only messages, loading/failure/retry, oversized local-only files, integrity checks, original-image preview, download and navigation during in-flight loading. Shared desktop/Node Svelte rendering.
+
+### Unified mobile conversation header
+
+Mobile chat publishes its title/status to a shell-local Svelte context store; the shell displays title on line1 and live status on line2, with navigation left and a single More button right. The redundant chat header is hidden. More opens a labelled action list including new chat, rename, connect/disconnect, export and workspace tools. Rename uses the existing guarded API flow. Context ownership cleanup prevents an older chat from clearing a newer header; nonchat routes show their own title and generic actions. Verify live rename/status, empty/new chat, folder transitions, nonchat navigation, menu dispatch/focus, and desktop header preservation.
+
+### 手机顶部对话信息（0.1.85）
+
+- 手机顶栏第一行显示当前备注，第二行显示实时状态；不再重复显示正文上方的标题栏。
+- 右侧三个点打开操作列表：新聊天、重命名、接入/断开、导出及工作区工具。重命名失败保留输入并支持重试。
+- 验证切换页面、新对话及桌面布局，确保备注和状态不会残留到其他页面。
+
+### 图标统一（0.1.86）
+
+Desktop titlebar and Node PWA SVGs embed the same transparent white mark as `src-tauri/icons/icon.png`; web icons retain a dark rounded tile for contrast in both themes. The browser favicon is rendered from the same source. Verify titlebar, favicon, PWA and native ICO resources together when changing branding.
+
+The code-preview runner uses the shared desktop-window capability: native desktop keeps its isolated custom protocol; desktop browser sharing and Node UI use the local `chat-preview.html` runner. The Node UI artifact must contain no Tauri global references.

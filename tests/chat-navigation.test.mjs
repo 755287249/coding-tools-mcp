@@ -6,7 +6,7 @@ const compile = source => ts.transpileModule(source, {compilerOptions:{module:ts
 const moduleUrl = source => 'data:text/javascript;base64,' + Buffer.from(compile(source)).toString('base64');
 const statusUrl = moduleUrl(readFileSync(new URL('../src/lib/chat/status.ts', import.meta.url), 'utf8'));
 const source = readFileSync(new URL('../src/lib/chat/navigation.ts', import.meta.url), 'utf8').replace("'./status'", JSON.stringify(statusUrl));
-const { sessionPresence, messageOutline } = await import(moduleUrl(source));
+const { sessionPresence, messageOutline, isConnectedConversation } = await import(moduleUrl(source));
 
 test('polling transport transitions keep online presence stable; work and interruption are distinct', () => {
   const session = {closed:false, status:'waiting', work_state:null};
@@ -64,4 +64,9 @@ test('navigation preference tolerates invalid storage and bounds resizing', asyn
   assert.equal(navigationWidth(1000), 420);
   assert.equal(navigationWidth(20), 220);
   assert.equal(navigationWidth('340'), 340);
+});
+
+ test('compact conversation switcher includes live busy and idle AI, excludes empty, detached and archived chats',()=>{
+  for(const status of ['connected','waiting'])for(const work_state of [null,'processing','queued'])assert.equal(isConnectedConversation({status,work_state,closed:false}),true);
+  for(const session of [{status:'offline'},{status:'offline',work_state:'processing'},{status:'closed'},{status:'connected',closed:true},{status:'waiting',archived:true}])assert.equal(isConnectedConversation(session),false);
 });

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { MOBILE_CHAT_HEADER, type MobileHeaderContext } from '$lib/chat/mobile-header';
+  import SquarePen from '@lucide/svelte/icons/square-pen';
   import { randomId, copyText } from "$lib/browser-tools";
   import { autoGrow, messageBytes } from '$lib/chat/autogrow';
   import ChatMembers from './ChatMembers.svelte';
@@ -6,12 +8,16 @@
   import { taskPlanMarkdown } from '$lib/chat/task-state';
   import DraftAttachment from './DraftAttachment.svelte';
   import { uploadLocalFile } from '$lib/chat/attachment-transfer';
-  import { appendAttachmentMention, attachmentCandidates, mentionQuery, mentionChoices, mentionParts, referencedAttachments } from '$lib/chat/mentions';
+  import { appendAttachmentMention, attachmentCandidates, mentionQuery, groupedMentionChoices, mentionParts, referencedAttachments } from '$lib/chat/mentions';
   import type { Snippet } from 'svelte';
-  import { connectionResult, visibleChatMessages, isPristineConversation } from '$lib/chat/connection';
+  import { connectionResult, visibleChatMessages, canChooseConversationMode } from '$lib/chat/connection';
   import { t, locale } from '$lib/i18n';
-  import { tick, untrack, onDestroy } from 'svelte';
+  import { tick, untrack, onDestroy, getContext } from 'svelte';
   import Plus from '@lucide/svelte/icons/plus';
+  import Ellipsis from '@lucide/svelte/icons/ellipsis';
+  import FileImage from '@lucide/svelte/icons/file-image';
+  import FileIcon from '@lucide/svelte/icons/file';
+  import MobileSheet from '../MobileSheet.svelte';
   import Folder from '@lucide/svelte/icons/folder';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import ArrowDown from '@lucide/svelte/icons/arrow-down';
@@ -24,7 +30,8 @@
   import Check from '@lucide/svelte/icons/check';
   import Pencil from '@lucide/svelte/icons/pencil';
   import X from '@lucide/svelte/icons/x';
-  import Settings from '@lucide/svelte/icons/settings';
+  import ComposerTools from './ComposerTools.svelte';
+  import { readChatFile } from '$lib/chat/attachment-transfer';
   import ChatToolActivity from './ChatToolActivity.svelte';
   import { chatDrafts, chatDraftKey, conversationAccent } from '$lib/chat/drafts';
   import { createSessionCache, sessionCacheKey } from '$lib/chat/session-cache';
@@ -40,26 +47,33 @@
   import { buildChatPrompt } from '$lib/connect/chat-prompt';
   import { pendingChatState, chatReplyState, chatUserState, USER_MESSAGE_STATUS_KEYS } from '$lib/chat/status';
   import type { AuthConfig, WorkspaceFolder } from '$lib/types';
-  let { onPlugins, tasksOpen=false, tasksExpanded=false, onCloseTasks=()=>{}, onToggleTasksExpanded=()=>{}, workspaceId, folders, activeFolderId = '', endpoint = '', auth, externalNavigation = false, requestedChatId = '', requestedFolderId = '', startNew = false, connectRequested = false, headerActions, onNavigate }: { onPlugins?:(folderId:string)=>void;tasksOpen?:boolean;tasksExpanded?:boolean;onCloseTasks?:()=>void;onToggleTasksExpanded?:()=>void; workspaceId: string; folders: WorkspaceFolder[]; activeFolderId?: string; endpoint?: string; auth: AuthConfig; externalNavigation?: boolean; requestedChatId?: string; requestedFolderId?: string; startNew?: boolean; connectRequested?: boolean; headerActions?: Snippet; onNavigate?: (folderId: string, chatId: string) => void } = $props();
+  let { onPlugins, tasksOpen=false, tasksExpanded=false, onCloseTasks=()=>{}, onToggleTasksExpanded=()=>{}, workspaceId, folders, activeFolderId = '', endpoint = '', auth, externalNavigation = false, requestedChatId = '', requestedFolderId = '', startNew = false, connectRequested = false, workspacePicker, headerActions, onNavigate }: { onPlugins?:(folderId:string)=>void;tasksOpen?:boolean;tasksExpanded?:boolean;onCloseTasks?:()=>void;onToggleTasksExpanded?:()=>void; workspaceId: string; workspacePicker?: Snippet; folders: WorkspaceFolder[]; activeFolderId?: string; endpoint?: string; auth: AuthConfig; externalNavigation?: boolean; requestedChatId?: string; requestedFolderId?: string; startNew?: boolean; connectRequested?: boolean; headerActions?: Snippet; onNavigate?: (folderId: string, chatId: string) => void } = $props();
+  const mobileHeader=getContext<MobileHeaderContext|undefined>(MOBILE_CHAT_HEADER);
+  const mobileHeaderOwner=Symbol('chat-header');
   let newMode=$state<'work'|'group'>('work');
   let memberBusy=$state(false);
-  let projectOpen=$state(false);
+  let toolsOpen=$state(false);
+  let mobileAttach=$state(false), mobileActions=$state(false);
+  let photoInput:HTMLInputElement;
+  $effect(()=>{const scope=[workspaceId,requestedChatId,requestedFolderId];mobileAttach=false;mobileActions=false;});
+  function attachClick(){if(matchMedia('(max-width:700px)').matches)mobileAttach=true;else fileInput.click();}
   async function memberAction(args:ChatAction){
     if(!selected||memberBusy)return false;const scope=currentScope;memberBusy=true;error='';
     try{const result=await localChat(workspaceId,folderId,{...args,chat_id:selected});if(scope===currentScope&&result.session){readSequence++;detail=result.session;return true;}return false;}
     catch(e){if(scope===currentScope)error=String(e);return false;}finally{memberBusy=false}
   }
   async function changeMode(next:'work'|'group'){
+    if(!isNewConversation)return;
     if(!selected){newMode=next;return;}await memberAction({action:'set_mode',mode:next});
   }
   function mentionAgent(name:string){const at=composer?.selectionStart??draft.length;draft=draft.slice(0,at)+(at&&!/\s/.test(draft[at-1])?' ':'')+'@'+name+' '+draft.slice(at);persistDraft();void tick().then(()=>composer?.focus());}
-  function selectProject(id:string){persistDraft();projectOpen=false;onNavigate?.(id,'');folderId=id;}
+  function selectProject(id:string){persistDraft();onNavigate?.(id,'');folderId=id;}
   let tasksWidth=$state(350);
   let folderId = $state('');
   let sessions = $state<ChatSession[]>([]);
   let selected = $state('');
   let detail = $state<ChatSession | null>(null);
-  const isNewConversation=$derived(!selected || isPristineConversation(detail));
+  const isNewConversation=$derived(!selected || canChooseConversationMode(detail));
   /** No AI attached yet: highlight the connect button with a red dot. */
   const needsAi=$derived(!!folderId && !detail?.closed && !(detail?.status==='connected'||detail?.status==='waiting'));
   const mode=$derived(detail?.mode??newMode);
@@ -86,7 +100,12 @@
   let mentionIndex = $state(0);
   const mentionFiles = $derived(attachmentCandidates([...(detail?.messages ?? []).flatMap(message=>message.attachments ?? []),...attachments]));
   const mention = $derived(mentionFocused ? mentionQuery(draft,caret) : null);
-  const choices = $derived(mention ? mentionChoices(mentionFiles,mention.query) : []);
+  let mentionHistoryExpanded = $state(false);
+  const mentionGroups = $derived(groupedMentionChoices(attachments,(detail?.messages??[]).flatMap(message=>message.attachments??[]),mention?.query??''));
+  const choices = $derived(mention ? [...mentionGroups.current,...(mentionHistoryExpanded?mentionGroups.history:[])] : []);
+  const hasMoreMentions = $derived(!mentionHistoryExpanded && mentionGroups.history.length>0);
+  const mentionContext = $derived(mention ? JSON.stringify([workspaceId,folderId,selected,mention.start]) : '');
+  $effect(()=>{const context=mentionContext;mentionHistoryExpanded=false;});
   const highlightedDraft = $derived(mentionParts(draft,mentionFiles));
   $effect(()=>{const query=mention?.query;mentionIndex=0;});
   function updateCaret() { caret=composer?.selectionStart ?? 0; }
@@ -100,9 +119,9 @@
   }
   function composerKeys(event: KeyboardEvent) {
     if(event.isComposing)return;
-    if(mention && choices.length){
-      if(event.key==='ArrowDown'||event.key==='ArrowUp'){event.preventDefault();mentionIndex=(mentionIndex+(event.key==='ArrowDown'?1:-1)+choices.length)%choices.length;return;}
-      if(event.key==='Enter'||event.key==='Tab'){event.preventDefault();insertMention(choices[mentionIndex] ?? choices[0]);return;}
+    if(mention && (choices.length || hasMoreMentions)){
+      if(event.key==='ArrowDown'||event.key==='ArrowUp'){event.preventDefault();mentionIndex=(mentionIndex+(event.key==='ArrowDown'?1:-1)+choices.length+Number(hasMoreMentions))%(choices.length+Number(hasMoreMentions));return;}
+      if(event.key==='Enter'||event.key==='Tab'){event.preventDefault();if(hasMoreMentions && mentionIndex===choices.length){mentionHistoryExpanded=true;}else{insertMention(choices[mentionIndex] ?? choices[0]);}return;}
       if(event.key==='Escape'){event.preventDefault();mentionFocused=false;return;}
     }
     if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();void send();}
@@ -226,17 +245,17 @@
   let tongueRevealed = $state(false);
   let tonguePointer = $state(false);
   let tongueFocused = $state(false);
-  const tongueVisible = $derived(emptyComposer || tongueRevealed || projectOpen || referenceOpen);
+  const tongueVisible = $derived(emptyComposer || tongueRevealed || toolsOpen || referenceOpen);
   $effect(() => {
     const scope = currentScope;
-    tongueRevealed = false; tonguePointer = false; tongueFocused = false; projectOpen = false;
+    tongueRevealed = false; tonguePointer = false; tongueFocused = false; toolsOpen = false;
   });
   $effect(() => {
-    if (emptyComposer || tonguePointer || tongueFocused || projectOpen || referenceOpen) {
+    if (emptyComposer || tonguePointer || tongueFocused || toolsOpen || referenceOpen) {
       if (tonguePointer || tongueFocused) tongueRevealed = true;
       return;
     }
-    const timer = setTimeout(() => tongueRevealed = false, 3000);
+    const timer = setTimeout(() => tongueRevealed = false, 1000);
     return () => clearTimeout(timer);
   });
   const feedItems = $derived(groupChatMessages(messages, detail?.closed ?? false));
@@ -472,6 +491,19 @@
     } catch (e) { if (gen === generation) { error = String(e); referenceInput = source; referenceOpen = true; } }
     finally { busy = false; uploading = false; }
   }
+  async function attachLibraryFile(file:ChatFile, sourceChat:string) {
+    if(busy||!folderId||detail?.closed)return;
+    if(file.path.startsWith('mcp-assistant/artifacts/')){referenceInput=file.path;await attachReference();return;}
+    if(sourceChat===selected){if(!attachments.some(item=>item.id===file.id))attachments=[...attachments,file];persistDraft();return;}
+    const gen=generation,ws=workspaceId,folder=folderId;
+    busy=true;uploading=true;error='';
+    try {
+      const bytes=await readChatFile(args=>localChat(ws,folder,args),sourceChat,file);
+      if(gen!==generation)return;
+      busy=false;
+      await uploadFiles([new File([bytes as BlobPart],file.name,{type:file.mime})]);
+    }catch(e){if(gen===generation)error=String(e)}finally{busy=false;uploading=false}
+  }
   function pasteImages(event: ClipboardEvent) {
     const files = Array.from(event.clipboardData?.files ?? []).filter(file => file.type.startsWith('image/'));
     if (!files.length || busy || detail?.closed) return;
@@ -526,6 +558,11 @@
     const url = URL.createObjectURL(new Blob([text], {type:'text/markdown;charset=utf-8'}));
     const a = document.createElement('a'); a.href=url; a.download=`chat-${detail.id}.md`; a.click(); setTimeout(() => URL.revokeObjectURL(url),1000);
   }
+  $effect(()=>{
+    if(!externalNavigation||!mobileHeader)return;
+    mobileHeader.header.set({owner:mobileHeaderOwner,title:detail?.title??selectedFolder?.name??$t('chat.23'),status:statusLabel,online:detail?.status==='waiting'||detail?.status==='connected',openMenu:()=>mobileActions=true});
+    return()=>mobileHeader.header.update(current=>current?.owner===mobileHeaderOwner?null:current);
+  });
 </script>
 
 <svelte:document onvisibilitychange={markRead}/>
@@ -556,13 +593,14 @@
     <div class="local-note"><span class="dot"></span>{$t("chat.5")}</div>
   </aside>{/if}
   <div class="conversation" style:--conversation-accent={conversationAccent(selected)}>
-    <header class="chat-header">
+    <header class="chat-header" class:mobile-header-shared={externalNavigation&&!!mobileHeader}>
       <div class="chat-heading"><strong title={detail?.title}>{detail?.title ?? selectedFolder?.name ?? $t('chat.23')}</strong><span class="status"><i class:online={detail?.status === 'waiting' || detail?.status === 'connected'}></i>{statusLabel}</span></div>
+      <button class="mobile-chat-actions" aria-label={$t('mobile.chatActions')} aria-expanded={mobileActions} onclick={()=>mobileActions=!mobileActions}><Ellipsis size={20}/></button>
       <div class="header-actions">
         {#if unreadTotal}<button class="unread-total" onclick={showUnread} aria-label={`${$t('chat.90')}: ${unreadTotal}`}>{unreadTotal}</button>{/if}
         <div class="connection-actions"><button disabled={busy || !selected || !(detail?.status === 'connected' || detail?.status === 'waiting')} onclick={requestDisconnect}>{$t('chat.disconnect')}</button><button class="connect-button" class:needs-ai={needsAi} title={needsAi?$t('chat.connectHint'):undefined} disabled={busy || !folderId || detail?.closed} onclick={openConnection}>{$t('chat.connect')}{#if needsAi}<i class="attention-dot" aria-hidden="true"></i>{/if}</button></div>
         {#if selected}<button title={$t('chat.36')} aria-label={$t('chat.36')} onclick={download}><Download size={16}/></button>{/if}
-        {#if selected && detail && !detail.closed && !isNewConversation}<button type="button" title={$t('chat.mode')} aria-label={$t('chat.mode')} popovertarget="conversation-mode"><Settings size={16}/></button><div id="conversation-mode" class="mode-menu" popover="auto"><strong>{$t('chat.mode')}</strong><div class="mode-switch"><button type="button" aria-pressed={mode==='work'} disabled={busy||memberBusy} onclick={()=>changeMode('work')}>{$t('chat.work')}</button><button type="button" aria-pressed={mode==='group'} disabled={busy||memberBusy} onclick={()=>changeMode('group')}>{$t('chat.group')}</button></div><p>{$t('chat.modeReturnHint')}</p>{#if error}<p role="alert">{error}</p>{/if}<button type="button" popovertarget="conversation-mode" popovertargetaction="hide">{$t('Close')}</button></div>{/if}
+
         {#if headerActions}{@render headerActions()}{/if}
       </div>
     </header>
@@ -573,7 +611,7 @@
     <div class="message-feed" bind:this={feed} onscroll={updateScroll} aria-busy={loadingDetail}>
       {#if selected && !detail}<div class="chat-loading" role="status">{loadingDetail ? $t("Loading…") : error}</div>
       {:else if !messages.length}<div class="empty-state"><h2>{$t('chat.102')}</h2></div>
-      {:else}<div class="message-column" bind:this={column}>{#each feedItems as item (item.id)}{#if item.kind === 'tools'}<article class="assistant grouped-tools"><div class="message-meta">{item.messages[0]?.agent_name ?? 'AI'} · {$t("chat.54")}</div><div class="message-body"><ChatToolActivity messages={item.messages} settled={item.settled} {workspaceId} {folderId} chatId={selected}/></div></article>{:else}{@const m = item.message}<article data-user-message={m.role === 'user' ? m.id : undefined} tabindex="-1" class:user={m.role === 'user'} class:assistant={m.role === 'assistant'}><div class="message-meta">{m.role === 'user' ? $t('chat.26') : m.agent_name ?? detail?.agent_name ?? (m.final === false ? $t('chat.27') : 'AI')}<time>{new Date(m.created_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</time></div><div class="message-body"><ChatMarkdown text={m.text} attachments={m.attachments ?? []} {workspaceId} {folderId} chatId={selected}/>{#each m.attachments ?? [] as file (workspaceId + ":" + folderId + ":" + selected + ":" + file.id)}<ChatAttachment {workspaceId} {folderId} chatId={selected} {file}/>{/each}<ChatReplyState state={chatReplyState(detail, m.id)}/><ChatUserState state={chatUserState(detail, m.id)}/></div></article>{/if}{/each}{#if pendingState}<div class="pending" class:processing={pendingState === 'processing'} role="status" aria-live="polite"><ChatStatusIcon state={pendingState} label={pendingState === 'awaiting_user' ? $t('chat.73') : pendingState === 'processing' ? $t('chat.70') : pendingState === 'interrupted' ? $t('chat.71') : $t('chat.29')}/>{pendingState === 'awaiting_user' ? $t('chat.73') : pendingState === 'processing' ? $t('chat.70') : pendingState === 'interrupted' ? $t('chat.71') : $t('chat.29')}</div>{/if}</div>{/if}
+      {:else}<div class="message-column" bind:this={column}>{#each feedItems as item (item.id)}{#if item.kind === 'tools'}<article class="assistant grouped-tools"><div class="message-meta">{item.messages[0]?.agent_name ?? 'AI'} · {$t("chat.54")}</div><div class="message-body"><ChatToolActivity messages={item.messages} settled={item.settled} {workspaceId} {folderId} chatId={selected}/></div></article>{:else}{@const m = item.message}<article data-user-message={m.role === 'user' ? m.id : undefined} tabindex="-1" class:user={m.role === 'user'} class:assistant={m.role === 'assistant'}><div class="message-meta">{m.role === 'user' ? $t('chat.26') : m.agent_name ?? detail?.agent_name ?? (m.final === false ? $t('chat.27') : 'AI')}<time>{new Date(m.created_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</time></div>{#if (m.attachments??[]).some(file=>file.mime.startsWith('image/'))}<div class="message-images"><div class="image-strip">{#each (m.attachments??[]).filter(file=>file.mime.startsWith('image/')) as file (workspaceId+":"+folderId+":"+selected+":"+file.id+":"+file.sha256)}<ChatAttachment {workspaceId} {folderId} chatId={selected} {file}/>{/each}</div></div>{/if}<div class="message-body" class:image-only={!m.text.trim()&&!(m.attachments??[]).some(file=>!file.mime.startsWith('image/'))}><ChatMarkdown text={m.text} attachments={m.attachments ?? []} {workspaceId} {folderId} chatId={selected}/>{#each (m.attachments??[]).filter(file=>!file.mime.startsWith('image/')) as file (workspaceId + ":" + folderId + ":" + selected + ":" + file.id)}<ChatAttachment {workspaceId} {folderId} chatId={selected} {file}/>{/each}<ChatReplyState state={chatReplyState(detail, m.id)}/><ChatUserState state={chatUserState(detail, m.id)}/></div></article>{/if}{/each}{#if pendingState}<div class="pending" class:processing={pendingState === 'processing'} role="status" aria-live="polite"><ChatStatusIcon state={pendingState} label={pendingState === 'awaiting_user' ? $t('chat.73') : pendingState === 'processing' ? $t('chat.70') : pendingState === 'interrupted' ? $t('chat.71') : $t('chat.29')}/>{pendingState === 'awaiting_user' ? $t('chat.73') : pendingState === 'processing' ? $t('chat.70') : pendingState === 'interrupted' ? $t('chat.71') : $t('chat.29')}</div>{/if}</div>{/if}
     </div>
     <ChatOutline {messages} activeId={activeMessage} onSelect={jumpToMessage}/>
     </div>
@@ -589,16 +627,42 @@
             {#each detail.queued_messages as item,i (item.id)}<details class="queued-card"><summary><span>{$t('chat.queueItem')} {i+1}</span><span>{item.text}</span></summary><div><p>{item.text}</p>{#if item.attachments?.length}<small>{item.attachments.map(f=>f.label??f.name).join(' · ')}</small>{/if}</div></details>{/each}
           {/if}
         </div>
-      </div>{/if}{#if referenceOpen}<div class="reference-input"><input aria-label={$t('chat.123')} placeholder="mcp-assistant/artifacts/file.png" bind:value={referenceInput} disabled={busy} onkeydown={event=>{if(event.key==='Enter'){event.preventDefault();void attachReference()}}}/><button type="button" onclick={attachReference} disabled={busy||!referenceInput.trim()}>{$t('chat.122')}</button></div>{/if}<div class="bottom-control"><button type="button" class="jump-bottom" onclick={toBottom} title={$t('chat.96')} aria-label={$t('chat.96')} aria-pressed={following}><ArrowDown size={16}/></button></div><form onsubmit={(e) => { e.preventDefault(); void send(); }}>{#if attachments.length}<div class="draft-files">{#each attachments as file (file.id)}<DraftAttachment {file} {workspaceId} {folderId} chatId={selected} disabled={busy} onRemove={()=>removeAttachment(file)}/>{/each}</div>{/if}<div class="composer-input"><div class="mention-input"><div class="draft-highlight" bind:this={draftHighlight} aria-hidden="true">{#each highlightedDraft as part}{#if part.file}<span class="attachment-mention">{part.text}</span>{:else}{part.text}{/if}{/each}{'\n'}</div><textarea use:autoGrow={[draft, mode]} bind:this={composer} aria-label={$t("chat.39")} bind:value={draft} oninput={(event) => { draft = event.currentTarget.value; updateCaret(); mentionFocused=true; persistDraft(); }} onfocus={()=>{mentionFocused=true;updateCaret()}} onblur={()=>mentionFocused=false} onclick={()=>{mentionFocused=true;updateCaret()}} onkeyup={updateCaret} onscroll={()=>{if(draftHighlight){draftHighlight.scrollTop=composer.scrollTop;draftHighlight.scrollLeft=composer.scrollLeft}}} onpaste={pasteImages} placeholder={detail?.closed ? $t('chat.30') : $t('chat.31')} disabled={!folderId || detail?.closed || (busy && !uploading)} onkeydown={composerKeys} rows={mode==='group'?1:3} aria-autocomplete="list" aria-controls="attachment-choices"></textarea></div>{#if mention && choices.length}<div class="mention-choices" id="attachment-choices" role="listbox" aria-label={$t('chat.attachmentChoices')}>{#each choices as file,i (file.id)}<button type="button" role="option" aria-selected={i===mentionIndex} class:active={i===mentionIndex} onpointerdown={event=>event.preventDefault()} onclick={()=>insertMention(file)}><strong>@{file.label}</strong><span>{file.name}</span></button>{/each}</div>{/if}</div><input class="file-input" type="file" multiple bind:this={fileInput} onchange={() => uploadFiles(fileInput.files)} aria-label={$t('chat.50')}/><div class="composer-toolbar"><span class="attach-trigger" role="group" onpointerenter={()=>tonguePointer=true} onpointerleave={()=>tonguePointer=false} onfocusin={()=>tongueFocused=true} onfocusout={()=>tongueFocused=false}><button class="attach-button" type="button" disabled={busy || !folderId || detail?.closed} title={$t('chat.51')} aria-label={$t('chat.50')} onclick={() => fileInput.click()}><Plus size={19}/></button></span><div><button class="send-button" aria-label={$t("chat.41")} disabled={messageBytes(draft)>32000 || busy || (!!selected && !detail) || (!draft.trim() && !attachments.length) || !folderId || detail?.closed}><ArrowUp size={18}/></button></div></div></form><div class="composer-tongue" class:revealed={tongueVisible} inert={!tongueVisible} role="group" aria-label={$t('chat.project')} onpointerenter={()=>tonguePointer=true} onpointerleave={()=>tonguePointer=false} onfocusin={()=>tongueFocused=true} onfocusout={()=>tongueFocused=false}>
-      <div class="project-picker"><button type="button" disabled={busy||detail?.closed} aria-expanded={projectOpen} onclick={()=>projectOpen=!projectOpen}><Folder size={14}/><span>{selectedFolder?.name??$t('chat.project')}</span><ChevronDown size={12}/></button>{#if projectOpen}<div class="project-options">{#each folders as folder}<button type="button" onclick={()=>selectProject(folder.id)} class:chosen={folder.id===folderId}>{folder.name}</button>{/each}</div>{/if}</div>
-      <button type="button" disabled={busy||!folderId||detail?.closed} onclick={()=>fileInput.click()}>{$t('chat.files')}</button>
-      <button type="button" disabled={busy||!onPlugins||detail?.closed} onclick={()=>{persistDraft();onPlugins?.(folderId)}}>{$t('chat.plugins')}</button>
-      <button type="button" onclick={()=>referenceOpen=!referenceOpen} disabled={busy||detail?.closed}>{$t("chat.122")}</button>
+      </div>{/if}{#if referenceOpen}<div class="reference-input"><input aria-label={$t('chat.123')} placeholder="mcp-assistant/artifacts/file.png" bind:value={referenceInput} disabled={busy} onkeydown={event=>{if(event.key==='Enter'){event.preventDefault();void attachReference()}}}/><button type="button" onclick={attachReference} disabled={busy||!referenceInput.trim()}>{$t('chat.122')}</button></div>{/if}<div class="bottom-control" class:at-bottom={following}><button type="button" class="jump-bottom" onclick={toBottom} title={$t('chat.96')} aria-label={$t('chat.96')} aria-pressed={following}><ArrowDown size={16}/></button></div><form onsubmit={(e) => { e.preventDefault(); void send(); }}>{#if attachments.length}<div class="draft-files">{#each attachments as file (file.id)}<DraftAttachment {file} {workspaceId} {folderId} chatId={selected} disabled={busy} onRemove={()=>removeAttachment(file)}/>{/each}</div>{/if}<div class="composer-input"><div class="mention-input"><div class="draft-highlight" bind:this={draftHighlight} aria-hidden="true">{#each highlightedDraft as part}{#if part.file}<span class="attachment-mention">{part.text}</span>{:else}{part.text}{/if}{/each}{'\n'}</div><textarea use:autoGrow={[draft, mode]} bind:this={composer} aria-label={$t("chat.39")} bind:value={draft} oninput={(event) => { draft = event.currentTarget.value; updateCaret(); mentionFocused=true; persistDraft(); }} onfocus={()=>{mentionFocused=true;updateCaret()}} onblur={()=>mentionFocused=false} onclick={()=>{mentionFocused=true;updateCaret()}} onkeyup={updateCaret} onscroll={()=>{if(draftHighlight){draftHighlight.scrollTop=composer.scrollTop;draftHighlight.scrollLeft=composer.scrollLeft}}} onpaste={pasteImages} placeholder={!workspaceId ? $t('chat.selectWorkspace') : detail?.closed ? $t('chat.30') : $t('chat.31')} disabled={!folderId || detail?.closed || (busy && !uploading)} onkeydown={composerKeys} rows={mode==='group'?1:3} aria-autocomplete="list" aria-controls="attachment-choices"></textarea></div>{#if mention && (choices.length || hasMoreMentions)}<div class="mention-choices" id="attachment-choices" role="listbox" aria-label={$t('chat.attachmentChoices')}>
+  <div role="group" aria-label={$t('chat.currentAttachments')}>
+    <p class="mention-section-title">{$t('chat.currentAttachments')}</p>
+    {#each mentionGroups.current as file,i (file.id)}{@render mentionOption(file,i)}{:else}<p class="mention-empty">{$t('chat.noCurrentAttachments')}</p>{/each}
+  </div>
+  {#if mentionHistoryExpanded && mentionGroups.history.length}<div role="group" aria-label={$t('chat.historyAttachments')}><p class="mention-section-title">{$t('chat.historyAttachments')}</p>{#each mentionGroups.history as file,i (file.id)}{@render mentionOption(file,mentionGroups.current.length+i)}{/each}</div>
+  {:else if hasMoreMentions}<button type="button" class="mention-more" role="option" aria-selected={mentionIndex===choices.length} class:active={mentionIndex===choices.length} onpointerdown={event=>event.preventDefault()} onclick={()=>mentionHistoryExpanded=true}>{$t('chat.moreAttachments')} ({mentionGroups.history.length})<ChevronDown size={14}/></button>{/if}
+</div>{/if}</div><input class="file-input" type="file" multiple bind:this={fileInput} onchange={() => uploadFiles(fileInput.files)} aria-label={$t('chat.50')}/><div class="composer-toolbar"><span class="attach-trigger" role="group" onpointerenter={()=>tonguePointer=true} onpointerleave={()=>tonguePointer=false} onfocusin={()=>tongueFocused=true} onfocusout={()=>tongueFocused=false}><button class="attach-button" type="button" disabled={busy || !folderId || detail?.closed} title={$t('chat.51')} aria-label={$t('chat.50')} onclick={attachClick}><Plus size={19}/></button></span><div><button class="send-button" aria-label={$t("chat.41")} disabled={messageBytes(draft)>32000 || busy || (!!selected && !detail) || (!draft.trim() && !attachments.length) || !folderId || detail?.closed}><ArrowUp size={18}/></button></div></div></form><div class="composer-tongue" class:revealed={tongueVisible} inert={!tongueVisible} role="group" aria-label={$t('chat.project')} onpointerenter={()=>tonguePointer=true} onpointerleave={()=>tonguePointer=false} onfocusin={()=>tongueFocused=true} onfocusout={()=>tongueFocused=false}>
+      {#if workspacePicker}{@render workspacePicker()}{/if}
+      <ComposerTools {workspaceId} {folderId} disabled={busy||!!detail?.closed} selectedFolderName={selectedFolder?.name??''} onOpenChange={value=>toolsOpen=value} onBeforeNavigate={persistDraft} onSelectFolder={selectProject} onAttach={attachLibraryFile} onChooseLocal={()=>fileInput.click()} onReference={()=>referenceOpen=!referenceOpen} {onPlugins}/>
+
     </div>{#if mode==='group'}<ChatMembers members={detail?.members??[]} busy={busy||memberBusy||!!detail?.closed} onMention={mentionAgent} onConnect={openConnection} onChange={memberAction}/>{/if}{#if draftStorageError}<p class="draft-warning" role="status">{$t("chat.94")}</p>{/if}{#if messageBytes(draft)>32000}<p class="draft-warning" role="alert">{$t('chat.tooLong')} ({messageBytes(draft)} / 32000)</p>{/if}<div class="composer-hint">{$t("chat.18")} <span>{detail?.archive_path ?? $t('chat.34')}</span></div></footer>
     </div>
   </div>
   {#if tasksOpen}<ChatTaskPanel {workspaceId} bind:width={tasksWidth} session={detail} expanded={tasksExpanded} onClose={onCloseTasks} onToggleExpanded={onToggleTasksExpanded}/>{/if}
 </section>
+{#if mobileActions}<MobileSheet title={$t(renameId?'chat.85':'mobile.chatActions')} onClose={()=>{mobileActions=false;cancelRename()}}>
+  {#if renameId}<form class="mobile-rename" onsubmit={async(event)=>{event.preventDefault();await saveRename();if(!renameId)mobileActions=false}}><input bind:this={renameInput} bind:value={renameTitle} aria-label={$t('chat.86')} maxlength="240" disabled={busy} onkeydown={event=>{if(event.key==='Enter'&&event.isComposing)event.preventDefault()}}/><div><button type="button" disabled={busy} onclick={cancelRename}>{$t('Cancel')}</button><button type="submit" disabled={busy||!renameTitle.trim()}>{$t('Save')}</button></div>{#if error}<p role="alert">{error}</p>{/if}</form>
+  {:else}<div class="mobile-action-list">
+    {#if mobileHeader}<button disabled={busy} onclick={()=>{mobileActions=false;void mobileHeader.newChat()}}><SquarePen size={18}/>{$t('shell.newChat')}</button>{/if}
+    {#if detail}<button disabled={busy} onclick={()=>startRename(detail!)}><Pencil size={18}/>{$t('chat.85')}</button>{/if}
+    <button disabled={busy||!folderId||detail?.closed} onclick={()=>{mobileActions=false;void openConnection()}}><Plus size={18}/>{$t('chat.connect')}</button>
+    <button disabled={busy||!selected||!(detail?.status==='connected'||detail?.status==='waiting')} onclick={()=>{mobileActions=false;requestDisconnect()}}><X size={18}/>{$t('chat.disconnect')}</button>
+    {#if selected}<button onclick={()=>{mobileActions=false;download()}}><Download size={18}/>{$t('chat.36')}</button>{/if}
+    {#if unreadTotal}<button onclick={()=>{mobileActions=false;showUnread()}}>{$t('chat.90')} ({unreadTotal})</button>{/if}
+    {#if headerActions}<div class="mobile-extra-actions" role="presentation" onclick={event=>{if((event.target as Element).closest('button'))mobileActions=false}}>{@render headerActions()}</div>{/if}
+  </div>{/if}
+</MobileSheet>{/if}
+{#if mobileAttach}<MobileSheet title={$t('mobile.addToChat')} onClose={()=>mobileAttach=false}>
+  <div class="mobile-attach-options">
+    <button onclick={()=>{mobileAttach=false;photoInput.click()}}><FileImage size={22}/>{$t('mobile.photos')}</button>
+    <button onclick={()=>{mobileAttach=false;fileInput.click()}}><FileIcon size={22}/>{$t('chat.chooseLocalFile')}</button>
+    <ComposerTools {workspaceId} {folderId} disabled={busy||!!detail?.closed} selectedFolderName={selectedFolder?.name??''} onOpenChange={()=>{}} onBeforeNavigate={()=>{mobileAttach=false;persistDraft()}} onSelectFolder={selectProject} onAttach={async(file,chat)=>{mobileAttach=false;await attachLibraryFile(file,chat)}} onChooseLocal={()=>{mobileAttach=false;fileInput.click()}} onReference={()=>{mobileAttach=false;referenceOpen=true}} {onPlugins}/>
+  </div>
+</MobileSheet>{/if}
+<input class="file-input" type="file" accept="image/*" multiple bind:this={photoInput} onchange={()=>{const files=Array.from(photoInput.files??[]);photoInput.value='';void uploadFiles(files)}} aria-label={$t('mobile.photos')}/>
 <dialog class="connect-dialog" bind:this={connectDialog} onclose={() => { guide = false; connectionPrompt = ''; }}>
   <header><h2>{$t('chat.connect')}</h2><button aria-label={$t('Close')} onclick={()=>guide=false}><X size={18}/></button></header>
   {#if connectionPeer || connectionComplete}
@@ -624,8 +688,14 @@
   <h2>{$t('chat.88')}</h2><p>{$t('shell.disconnectNotice')}</p>
   <div><button onclick={()=>disconnectDialog?.close()}>{$t('Cancel')}</button><button class="confirm-disconnect" disabled={disconnectSeconds>0 || busy} onclick={confirmDisconnect}>{$t('chat.88')}{disconnectSeconds>0 ? ` (${disconnectSeconds})` : ''}</button></div>
 </dialog>
+{#snippet mentionOption(file:ChatFile,index:number)}
+  <button type="button" role="option" aria-selected={index===mentionIndex} class:active={index===mentionIndex} onpointerdown={event=>event.preventDefault()} onclick={()=>insertMention(file)}><strong>@{file.label}</strong><span>{file.name}</span></button>
+{/snippet}
+
 <style>
-.mode-menu{margin:auto;max-width:340px;padding:20px;background:#252525;color:#ddd;border:1px solid #ffffff25;border-radius:12px}.mode-menu::backdrop{background:#0005}.mode-menu p{font-size:12px;line-height:1.6;color:#aaa}.mode-menu>button{padding:6px 12px;border:1px solid #ffffff25;border-radius:6px}
+.mention-section-title{padding:7px 9px 4px;font-size:11px;font-weight:600;color:var(--color-text-muted)}.mention-empty{padding:7px 9px;font-size:12px;color:var(--color-text-muted)}.mention-choices .mention-more{border-top:1px solid var(--color-border);justify-content:space-between;margin-top:4px;color:var(--color-text-muted)}
+
+
 .chat-loading{padding:32px 40px;color:var(--color-text-muted);font-size:12px}
 .reference-input{display:flex;gap:8px;max-width:760px;margin:0 auto 10px;font-size:11px}.reference-input input{min-width:0;flex:1;padding:8px;border:1px solid var(--color-border);border-radius:7px;background:var(--card-bg)}.reference-input button{padding:8px;border:1px solid var(--color-border);border-radius:7px}
 
@@ -660,14 +730,10 @@
 .outbox{display:flex;align-items:flex-start;gap:10px;max-width:760px;margin:0 auto 10px;color:#ddd}.queue-mode{display:grid;place-items:center;flex:none;width:29px;height:29px;border:1px solid #ffffff30;border-radius:50%;font-size:12px;background:#292929}.queue-mode:hover{background:#3b3b3b}.queue-mode:disabled{opacity:.5;cursor:wait}.queue-mode[aria-pressed=true]{border-color:#91b9f5;background:#24364c}.merged-queue section+section{border-top:1px solid #ffffff20;margin-top:10px;padding-top:10px}.queued-items{flex:1;min-width:0;max-height:160px;overflow:auto;display:flex;flex-direction:column;gap:5px}.queued-card{border:1px solid #ffffff20;border-radius:10px;background:#262626;font-size:12px}.queued-card summary{display:flex;gap:10px;padding:7px 10px;cursor:pointer;list-style:none}.queued-card summary::-webkit-details-marker{display:none}.queued-card summary span:first-child{flex:none;color:#91b9f5}.queued-card summary span:last-child{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#bbb}.queued-card>div{padding:2px 10px 10px;white-space:pre-wrap;overflow-wrap:anywhere}.queued-card small{color:#aaa}.landing:has(.outbox) .composer-area{padding-bottom:35px}
 /* connect button attention dot */.connect-button{position:relative}.attention-dot{position:absolute;top:3px;right:3px;width:7px;height:7px;border-radius:50%;background:#ef4b4b;box-shadow:0 0 0 2px var(--card-bg);pointer-events:none}@media(prefers-reduced-motion:no-preference){.attention-dot{animation:attention-pulse 1.6s ease-in-out infinite}}@keyframes attention-pulse{50%{opacity:.45}}
 @container (min-width:800px){.tasks-visible .conversation{margin-right:var(--chat-task-width)}}
-.mode-switch{display:flex;justify-content:center;align-self:center;gap:3px;margin:20px 0 0;padding:4px;background:#252525;border:1px solid #ffffff0c;border-radius:22px;font-size:12px}.mode-switch button{padding:7px 22px;border-radius:18px;color:#969696}.mode-switch button[aria-pressed=true]{background:#414141;color:#eee;box-shadow:0 2px 4px #0003}.group-mode .composer-area form{position:relative;display:flex;flex-wrap:wrap;align-items:center;gap:8px;border-radius:28px;padding:10px 12px 10px 20px}.group-mode .composer-input{flex:1;min-width:100px;margin-left:26px}.group-mode .mention-input textarea,.group-mode .draft-highlight{min-height:28px;line-height:28px}.group-mode .composer-toolbar{margin:0;gap:8px}.group-mode .composer-toolbar>span{position:absolute;left:12px}.group-mode .composer-toolbar>span>button:not(.attach-button){display:none}.group-mode .draft-files{width:100%;margin:0}.project-picker{position:relative}.project-picker>button{padding:5px}.project-options{position:absolute;left:0;bottom:calc(100% + 12px);z-index:25;min-width:190px;max-width:300px;max-height:250px;overflow:auto;padding:6px;background:#282828;border:1px solid #ffffff25;border-radius:12px;box-shadow:0 12px 25px #0008}.project-options button{display:block;width:100%;padding:10px;text-align:left;border-radius:7px;overflow-wrap:anywhere}.project-options button:hover,.project-options button.chosen{background:#ffffff0e}.composer-toolbar>span>button{padding:4px 6px}.group-mode.landing .composer-area{padding-bottom:35px}
+.mode-switch{display:flex;justify-content:center;align-self:center;gap:3px;margin:20px 0 0;padding:4px;background:#252525;border:1px solid #ffffff0c;border-radius:22px;font-size:12px}.mode-switch button{padding:7px 22px;border-radius:18px;color:#969696}.mode-switch button[aria-pressed=true]{background:#414141;color:#eee;box-shadow:0 2px 4px #0003}.group-mode .composer-area form{position:relative;display:flex;flex-wrap:wrap;align-items:center;gap:8px;border-radius:28px;padding:10px 12px 10px 20px}.group-mode .composer-input{flex:1;min-width:100px;margin-left:26px}.group-mode .mention-input textarea,.group-mode .draft-highlight{min-height:28px;line-height:28px}.group-mode .composer-toolbar{margin:0;gap:8px}.group-mode .composer-toolbar>span{position:absolute;left:12px}.group-mode .composer-toolbar>span>button:not(.attach-button){display:none}.group-mode .draft-files{width:100%;margin:0}.composer-toolbar>span>button{padding:4px 6px}.group-mode.landing .composer-area{padding-bottom:35px}
 .mention-input textarea::placeholder{color:#aaa;opacity:1}
 .composer-area form{position:relative;z-index:1}
 .composer-tongue{display:flex;align-items:center;flex-wrap:wrap;gap:4px;max-width:736px;width:calc(100% - 24px);margin:-10px auto 0;padding:16px 10px 7px;border-radius:0 0 15px 15px;background:#272727;color:#ddd;font-size:11px;box-sizing:border-box}
-.composer-tongue>button,.composer-tongue .project-picker>button{display:flex;align-items:center;gap:6px;padding:5px 8px;border-radius:6px;min-height:28px}
-.composer-tongue button:hover:enabled{background:#ffffff12;color:#fff}.composer-tongue button:disabled{opacity:.45}
-.composer-tongue .project-picker{min-width:0;max-width:45%}.composer-tongue .project-picker>button{max-width:100%}.composer-tongue .project-picker span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.composer-tongue .project-options{z-index:40}
 @container (max-width:799px){.tasks-visible .conversation{margin-right:0;display:none}.tasks-visible :global(.chat-task-panel){width:100%!important}}
 .conversation-body{display:flex;flex:1;flex-direction:column;min-height:0}
 .landing .conversation-body{justify-content:center;overflow:auto}
@@ -678,4 +744,28 @@
 .composer-tongue.revealed{max-height:160px;padding-top:16px;padding-bottom:7px;margin-top:-10px;opacity:1;visibility:visible;transform:translateY(0);pointer-events:auto;overflow:visible}
 @media(prefers-reduced-motion:reduce){.composer-tongue{transition:none}}
 .mention-input{max-height:50dvh;overflow-y:auto;scrollbar-gutter:stable}.mention-input textarea{overflow:hidden;max-height:none}.draft-highlight{bottom:auto;height:auto;max-height:none;min-height:100%}.composer-area{flex-shrink:0}.composer-area form{max-height:70dvh;overflow-y:auto}
+
+.mobile-chat-actions{display:none}.mobile-attach-options{padding:0 16px 20px;display:grid;gap:4px}.mobile-attach-options>button{display:flex;align-items:center;gap:15px;min-height:48px;padding:9px 12px;font-size:14px;border-radius:13px;text-align:left;color:var(--color-text)}.mobile-attach-options>button:hover{background:var(--surface-hover)}
+@media(max-width:700px){
+ .conversation,.external-navigation .conversation,.message-feed,.composer-area{background:var(--color-bg);color:var(--color-text)}
+ .chat-header,.external-navigation .chat-header{position:relative;min-height:46px;padding:4px 16px 10px;border-bottom:0;gap:8px}.chat-header>.chat-heading:first-child{align-items:flex-start;gap:3px}.chat-heading strong{font-size:13px;font-weight:550}.status{font-size:10px;max-width:100%;overflow:hidden;text-overflow:ellipsis}.mobile-chat-actions{display:grid;place-items:center;width:36px;height:36px;border-radius:50%;background:var(--surface-hover);flex:none}
+ .header-actions{display:none}.connection-actions{border-color:var(--color-border)}.connection-actions button+button{border-color:var(--color-border)}
+ .message-feed{padding:0}.message-feed :global(.markdown){font-size:13px;line-height:1.7;font-weight:400}.message-feed :global(.markdown h3){font-size:14px;line-height:1.55;margin:14px 0 7px}.message-feed :global(.markdown strong){font-weight:600}.message-feed :global(.markdown a){color:var(--primary)}.feed-frame :global(.chat-outline),.feed-frame :global(.outline-preview){display:none}
+ .message-column{padding:14px 18px 18px}.message-column article{margin-bottom:22px}.message-meta{font-size:10px;margin-bottom:7px}.message-meta time{font-size:9px}.user{margin-left:12%}.user .message-body,.external-navigation .user .message-body{padding:10px 13px;border-radius:16px;background:var(--surface-hover);color:var(--color-text)}
+ .composer-area,.external-navigation .composer-area,.landing .composer-area,.group-mode.landing .composer-area{position:relative;padding:8px 12px max(12px,env(safe-area-inset-bottom));flex:none;margin:0}
+ .composer-area form,.external-navigation .composer-area form,.group-mode .composer-area form{display:grid;grid-template-columns:32px minmax(0,1fr) 34px;align-items:center;column-gap:8px;row-gap:6px;min-height:54px;padding:10px;border-radius:28px;background:var(--surface-2);border:1px solid var(--color-border);box-shadow:none;overflow:visible;max-height:none;color:var(--color-text)}
+ .composer-input,.group-mode .composer-input{grid-column:2;grid-row:2;margin:0;min-width:0;width:100%;align-self:center}.composer-toolbar,.group-mode .composer-toolbar,.composer-toolbar>div{display:contents}.composer-toolbar>span,.group-mode .composer-toolbar>span{position:static;grid-column:1;grid-row:2;margin:0;padding:0;display:grid;place-items:center}.composer-toolbar>div>.send-button{grid-column:3;grid-row:2}.attach-button{width:32px;height:34px;color:var(--color-text)}.send-button{width:34px;height:34px}
+ .mention-input{max-height:min(160px,calc(var(--mobile-viewport-height,100dvh) * .25));scrollbar-gutter:auto}.mention-input textarea,.draft-highlight,.group-mode .mention-input textarea,.group-mode .draft-highlight{font:16px/24px system-ui;min-height:24px;color:var(--color-text);caret-color:var(--color-text)}.mention-input textarea{padding:0}.draft-files,.group-mode .draft-files{grid-column:1/-1;grid-row:1;width:100%;max-height:88px;margin:0}.draft-files:empty{display:none}.composer-tongue,.composer-tongue.revealed{display:none}.composer-hint{display:none}
+ .bottom-control{position:absolute;top:-38px;left:0;right:0;margin:0;pointer-events:none}.bottom-control.at-bottom{display:none}.jump-bottom{pointer-events:auto;background:var(--surface-2);width:30px;height:30px}.pending{font-size:10px;line-height:1.6}.outbox{margin:0 0 8px;gap:7px;color:var(--color-text)}.queued-items{max-height:92px}.queued-card{font-size:11px;background:var(--surface-2);border-color:var(--color-border)}.queued-card summary{gap:6px;padding:7px 9px}.queued-card summary span:last-child{color:var(--color-text-muted)}.queue-mode{background:var(--surface-2);color:var(--color-text);border-color:var(--color-border)}
+ .queue-mode[aria-pressed=true]{background:color-mix(in srgb,var(--primary) 12%,var(--surface-2));border-color:var(--primary);color:var(--primary)}.queued-card summary span:first-child{color:var(--primary)}.mention-input textarea::placeholder{color:var(--color-text-muted)}
+ .composer-area :global(.members){margin-top:8px;font-size:11px;color:var(--color-text-muted)}.composer-area :global(.chips){gap:5px}.composer-area :global(.chips button){padding:5px 8px;font-size:11px;color:var(--color-text);border-color:var(--color-border)}
+ .mode-switch{margin:8px 0 4px;font-size:11px;background:var(--surface-2);border-color:var(--color-border)}.mode-switch button{padding:6px 18px;color:var(--color-text-muted)}.mode-switch button[aria-pressed=true]{background:var(--surface-hover);color:var(--color-text)}
+ .landing .conversation-body{justify-content:flex-start;overflow:hidden}.landing .feed-frame{flex:1;min-height:0;align-items:center;justify-content:center}.landing .message-feed{flex:1;overflow:auto}.landing .empty-state,.external-navigation.landing .empty-state{padding:24px 20px}.landing .empty-state h2,.external-navigation.landing .empty-state h2{font-size:21px;line-height:1.5;letter-spacing:0}.chat-error{margin:0 12px 8px;font-size:12px}.reference-input input{font-size:16px}.connect-dialog{padding:18px;border-radius:22px}.connection-prompt{height:min(220px,35dvh)}
+ .mention-choices{background:var(--surface-2);color:var(--color-text);border-color:var(--color-border);max-height:calc(var(--mobile-viewport-height,100dvh) * .28);bottom:calc(100% + 16px);width:min(320px,calc(100vw - 90px))}.mention-choices span{color:var(--color-text-muted)}
+}
+
+.message-images{width:100%;max-width:100%;overflow-x:auto;padding:0 0 4px;margin:0 0 6px;scrollbar-width:thin}.image-strip{display:flex;align-items:flex-start;gap:8px;width:max-content}.user .image-strip{margin-left:auto}.user .message-body{width:fit-content;max-width:100%;margin-left:auto}.user .message-body.image-only{padding:0;background:transparent;border:0}.image-only :global(.markdown:empty){display:none}
+
+.mobile-action-list{display:grid;gap:3px;padding:0 16px 16px}.mobile-action-list>button,.mobile-extra-actions :global(button){display:flex;align-items:center;justify-content:flex-start;gap:13px;width:100%;min-height:44px;height:auto;padding:10px 12px;border-radius:12px;color:var(--color-text);font-size:13px;text-align:left}.mobile-action-list>button:hover:enabled,.mobile-extra-actions :global(button:hover){background:var(--surface-hover)}.mobile-extra-actions :global(button[aria-label])::after{content:attr(aria-label)}.mobile-extra-actions{display:grid;gap:3px;border-top:1px solid var(--color-border);margin-top:5px;padding-top:5px}.mobile-rename{padding:4px 22px 22px}.mobile-rename input{width:100%;padding:12px;border:1px solid var(--color-border);border-radius:10px;background:var(--surface-2);font-size:16px;color:var(--color-text)}.mobile-rename>div{display:flex;justify-content:flex-end;gap:12px;margin-top:16px}.mobile-rename button{padding:8px 15px;border-radius:9px;background:var(--surface-hover);font-size:13px}.mobile-rename p{font-size:12px;color:var(--danger);padding-top:10px}
+@media(max-width:700px){.chat-header.mobile-header-shared{display:none}}
 </style>

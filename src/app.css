@@ -4190,3 +4190,12 @@ html.is-glass .connect-dialog{background:rgb(var(--glass-base) / .96)}
 
 /* Floating text must remain legible above the native wallpaper and transcript. */
 html.is-glass .project-info-card,html.is-glass .conversation-picker,html.is-glass .outline-preview{background:rgb(var(--glass-base) / .97);backdrop-filter:blur(20px)}
+
+/* Keep mobile browser text sizing stable without disabling user zoom. */
+html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
+
+@media(max-width:700px){
+ .sx-main .chat-workspace .chat-workspace-main{padding:0}
+ .chat-workspace,html.is-glass .chat-shell,html.is-glass .message-feed{background:var(--color-bg)}
+ .gc-pill{display:none}
+}

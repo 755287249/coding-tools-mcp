@@ -22,3 +22,13 @@ export function mentionParts(text: string, files: ChatFile[]) {
 export function referencedAttachments(text: string, files: ChatFile[]): ChatFile[] {
   return attachmentCandidates(mentionParts(text,files).flatMap(part=>part.file?[part.file]:[]));
 }
+
+/** Draft attachments win by identity; history is opt-in in the composer. */
+export function groupedMentionChoices(draft: ChatFile[], history: ChatFile[], query: string) {
+  const current = attachmentCandidates(draft);
+  const ids = new Set(current.map(file => file.id));
+  return {
+    current: mentionChoices(current, query),
+    history: mentionChoices(history.filter(file => !ids.has(file.id)), query),
+  };
+}

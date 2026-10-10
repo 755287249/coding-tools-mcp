@@ -1,4 +1,6 @@
 <script lang="ts">
+  import FeatureCatalog from "./FeatureCatalog.svelte";
+  import type { Snippet } from "svelte";
   import Tabs from "$lib/components/Tabs.svelte";
   import { getBackend, type ExtensionInventoryPayload, type ExtensionKind, type SkillInventoryPayload } from "$lib/backend";
   import { t } from "$lib/i18n";
@@ -8,9 +10,12 @@
   interface Props {
     workspaceId: string;
     initialTab?: FeatureTab;
+    catalog?: boolean;
+    onCatalogTab?: (tab:FeatureTab)=>void;
+    workspacePicker?: Snippet;
   }
 
-  let { workspaceId, initialTab = "skills" }: Props = $props();
+  let { workspaceId, initialTab = "skills", catalog=false, onCatalogTab, workspacePicker }: Props = $props();
 
   const backend = getBackend().workspaceFeatures;
   let skills = $state<SkillInventoryPayload | null>(null);
@@ -34,10 +39,11 @@
   ]);
 
   function isBusy(key: string): boolean {
-    return busy.has(key);
+    return busy.has(JSON.stringify([workspaceId,key]));
   }
 
-  function setBusy(key: string, value: boolean) {
+  function setBusy(key: string, value: boolean, id=workspaceId) {
+    key=JSON.stringify([id,key]);
     const next = new Set(busy);
     if (value) next.add(key);
     else next.delete(key);
@@ -45,6 +51,7 @@
   }
 
   async function refresh(id = workspaceId) {
+    if(id!==workspaceId)return;
     const generation = ++loadGeneration;
     loading = true;
     error = "";
@@ -67,13 +74,14 @@
   async function toggleSkillsActive(active: boolean) {
     if (!skills || isBusy("skills:master")) return;
     setBusy("skills:master", true);
+    const id=workspaceId;
     try {
-      await backend.setSkillsActive(workspaceId, active);
-      await refresh();
+      await backend.setSkillsActive(id, active);
+      await refresh(id);
     } catch (cause) {
-      error = cause instanceof Error ? cause.message : String(cause);
+      if(id===workspaceId)error = cause instanceof Error ? cause.message : String(cause);
     } finally {
-      setBusy("skills:master", false);
+      setBusy("skills:master", false,id);
     }
   }
 
@@ -81,13 +89,14 @@
     const busyKey = `skill:${key}`;
     if (isBusy(busyKey)) return;
     setBusy(busyKey, true);
+    const id=workspaceId;
     try {
-      await backend.setSkillEnabled(workspaceId, key, enabled);
-      await refresh();
+      await backend.setSkillEnabled(id, key, enabled);
+      await refresh(id);
     } catch (cause) {
-      error = cause instanceof Error ? cause.message : String(cause);
+      if(id===workspaceId)error = cause instanceof Error ? cause.message : String(cause);
     } finally {
-      setBusy(busyKey, false);
+      setBusy(busyKey, false,id);
     }
   }
 
@@ -95,13 +104,14 @@
     const busyKey = `${kind}:master`;
     if (isBusy(busyKey)) return;
     setBusy(busyKey, true);
+    const id=workspaceId;
     try {
-      await backend.setExtensionActive(workspaceId, kind, active);
-      await refresh();
+      await backend.setExtensionActive(id, kind, active);
+      await refresh(id);
     } catch (cause) {
-      error = cause instanceof Error ? cause.message : String(cause);
+      if(id===workspaceId)error = cause instanceof Error ? cause.message : String(cause);
     } finally {
-      setBusy(busyKey, false);
+      setBusy(busyKey, false,id);
     }
   }
 
@@ -109,18 +119,20 @@
     const busyKey = `${kind}:${key}`;
     if (isBusy(busyKey)) return;
     setBusy(busyKey, true);
+    const id=workspaceId;
     try {
-      await backend.setExtensionEnabled(workspaceId, kind, key, enabled);
-      await refresh();
+      await backend.setExtensionEnabled(id, kind, key, enabled);
+      await refresh(id);
     } catch (cause) {
-      error = cause instanceof Error ? cause.message : String(cause);
+      if(id===workspaceId)error = cause instanceof Error ? cause.message : String(cause);
     } finally {
-      setBusy(busyKey, false);
+      setBusy(busyKey, false,id);
     }
   }
 
   $effect(() => {
     const id = workspaceId;
+    skills=null;extensions=null;busy=new Set();error="";
     void refresh(id);
     return () => {
       loadGeneration += 1;
@@ -128,6 +140,9 @@
   });
 </script>
 
+{#if catalog}
+  <FeatureCatalog {workspaceId} {activeTab} {skills} {extensions} {loading} {error} {isBusy} {workspacePicker} onRefresh={()=>void refresh()} onTab={tab=>{activeTab=tab;onCatalogTab?.(tab)}} onSkill={toggleSkill} onExtension={toggleExtension} onSkillsActive={toggleSkillsActive} onExtensionActive={toggleExtensionActive}/>
+{:else}
 <div class="grid gap-4">
   <div class="flex flex-wrap items-start justify-between gap-3">
     <div>
@@ -338,3 +353,5 @@
     {/if}
   </div>
 </div>
+
+{/if}

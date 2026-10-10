@@ -56,3 +56,11 @@ test('bounded sidecar does not consume chat messages and preserves unsupported/c
  const events=readChatOperations(root,a.chat_id).operations;assert.ok(events.length<=240);assert.ok(Buffer.byteLength(JSON.stringify(events))<=512000);assert.equal(events.at(-1).id,'249');assert.equal(chatUi(root,{action:'read',chat_id:a.chat_id}).session.messages.length,1);
  const target=path.join(root,`docs/chat-sessions/${a.chat_id}.operations.json`);writeFileSync(target,'broken');assert.ok(readChatOperations(root,a.chat_id).operations_error);assert.throws(()=>writeChatOperation(root,a.chat_id,seed));assert.equal(readFileSync(target,'utf8'),'broken');
 });
+
+
+test('operation storage depends on a pure operation contract without a reverse runtime import', () => {
+ const source = file => readFileSync(new URL('../src/chat/' + file, import.meta.url), 'utf8');
+ assert.match(source('store.ts'), /from ['"]\.\/operation-contract\.js['"]/);
+ assert.doesNotMatch(source('store.ts'), /from ['"]\.\/operations\.js['"]/);
+ assert.doesNotMatch(source('operation-contract.ts'), /\bimport\b/);
+});

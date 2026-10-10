@@ -10,6 +10,11 @@ export function sessionPresence(session: ChatSession): 'online' | 'offline' | 'w
   return session.status === 'waiting' || session.status === 'connected' ? 'online' : 'offline';
 }
 
+/** Only live attached conversations belong in the compact switcher. */
+export function isConnectedConversation(session: ChatSession): boolean {
+  return !session.closed && !session.archived && (session.status === 'connected' || session.status === 'waiting');
+}
+
 export function messageOutline(messages: ChatMessage[]) {
   const replies = new Map<string, string>();
   for (const message of messages) {

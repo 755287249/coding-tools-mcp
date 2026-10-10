@@ -24,6 +24,7 @@ import {
 import { runtimeForFolderId } from '../dist/folderRuntime.js';
 import { createAgentRuntime, createToolContext } from '../dist/server.js';
 import { callTool } from '../dist/tools.js';
+import { sandboxBackend } from '../dist/sandbox.js';
 import {
   managedWslcSessionStorage,
   wslcHostAvailable
@@ -584,7 +585,7 @@ test('restart-persistent managed jobs reject interactive and protected credentia
   assert.equal([...runtime.sessions.values()].filter(session => session.timeoutContract?.executionMode === 'job').length, 0);
 });
 
-test('Docker Linux sandbox rejects a Windows host executable before any host process session is created', {
+test('Docker Linux sandbox never launches a Windows host executable', {
   skip: process.platform !== 'win32'
 }, async t => {
   const state = await fixture(t);
@@ -600,8 +601,10 @@ test('Docker Linux sandbox rejects a Windows host executable before any host pro
     timeout_ms: 5_000
   }, state.meta);
   assert.equal(result.ok, false, JSON.stringify(result));
-  assert.equal(result.error.code, 'SANDBOX_COMMAND_UNSUPPORTED');
-  assert.equal(result.error.category, 'policy');
+  // Host availability is checked before command compatibility. Both paths must fail closed.
+  const supported = sandboxBackend('docker_sbx').hostSupported;
+  assert.equal(result.error.code, supported ? 'SANDBOX_COMMAND_UNSUPPORTED' : 'SANDBOX_BACKEND_UNSUPPORTED');
+  assert.equal(result.error.category, supported ? 'policy' : 'security');
   assert.equal(result.error.retryable, false);
   assert.equal(repoRuntime(state.ctx).sessions.size, 0);
 });

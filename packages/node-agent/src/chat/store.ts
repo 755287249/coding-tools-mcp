@@ -1,4 +1,4 @@
-import {operationsMarkdown, type ChatOperation} from './operations.js';
+import {operationsMarkdown, type ChatOperation} from './operation-contract.js';
 import * as group from './group.js';
 import type {ChatMember} from './group.js';
 import {reduceChatPlan, chatPlanSummary, chatPlanMarkdown, type ChatTaskPlan} from './plan.js';
