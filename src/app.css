@@ -24,6 +24,7 @@
   --chat-bg: #181818;
   --chat-link: #79b5ff;
   --chat-user-bg: #173e76;
+  --chat-user-text: #fff;
   --chat-selection: #24364c;
   --page-bg: #0b0b0c;
   --main-content-bg: #111112;
@@ -112,7 +113,8 @@
   --app-icon-filter: invert(1);
   --chat-bg: #ffffff;
   --chat-link: #2463a8;
-  --chat-user-bg: #235ca3;
+  --chat-user-bg: #e8f3fe;
+  --chat-user-text: #0c274a;
   --chat-selection: #e3edfa;
   --page-bg: #ffffff;
   --main-content-bg: #ffffff;

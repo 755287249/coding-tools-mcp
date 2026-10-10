@@ -95,7 +95,7 @@ test("handleManagementUiRequest serves the built Node Svelte artifact under /ui/
     assert.match(html, /data-ui-framework="svelte"/);
     assert.match(html, /\/ui\/_app\//);
     assert.doesNotMatch(html, /<script(?![^>]*\bsrc=)/);
-    const js = html.match(/src="(\/ui\/[^"]+\.js)"/)?.[1];
+    const js = html.match(/src="(\/ui\/_app\/[^"]+\.js)"/)?.[1];
     assert.ok(js);
     const asset = await fetch(`${base}${js}`);
     assert.equal(asset.status, 200);

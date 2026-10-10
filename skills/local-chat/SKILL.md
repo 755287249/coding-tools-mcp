@@ -38,6 +38,16 @@ description: 通过 Coding Tools MCP 接入指定本地会话，持续接收消�
 - 成果写回指定本地目录，沙箱路径不算本地交付。图片/文件写到 `mcp-assistant/artifacts/` 后 `chat_upload(source_path:...)`；小文件也可上传不超过 512 KiB 的字节。上传重试保持同一 `upload_id`，然后在 `chat_reply.attachment_ids` 引用返回的 `attachment.id`。
 - 未经用户明确同意，不转交其他模型生成图片或语音；代码绘图先说明。凭据不写项目文件、Markdown 记录或回复。
 
+## 重点与交互问题
+
+- 正文支持 Markdown 的 `**重点**`：仅加粗结论、关键数值、待办或需要用户决定的短语，避免整段加粗。不要输出 HTML 或把整条回复包进代码块。
+- 用户需要选择或补充信息时，在 `chat_reply` 传 `questions`，并明确 `final:true, awaiting_user:true`。这是所有 MCP 客户端共用的结构化接口，不依赖宿主自带问答工具；文本列表不会自动变成按钮。
+- 一次 1–3 个问题；每题提供唯一 `id`、完整 `prompt` 和 `options`（0–6 个，空数组表示自由回答）。选项包含题内唯一 `id`、`label`，可带 `description`。ID 使用 1–80 位字母、数字、下划线或连字符；prompt/label/description 分别最多 1000/200/500 UTF-8 字节。每题始终支持自定义回答，不需要添加“其他”选项，不预先代替用户提交。
+- 例如：`questions:[{"id":"scope","prompt":"这次要更新哪个范围？","options":[{"id":"page","label":"当前页面","description":"只修改当前页面"},{"id":"app","label":"整个应用","description":"统一所有页面"}]}]`。仍提供简短 `text`、实际 `reply_to` 和稳定 `message_id`；不与 tool_event 或 recipient_ids 混用。
+- 写入确认后继续 `chat_wait`。用户提交后收到新的用户消息，其 `question_response` 包含原卡片的 `message_id` 和 `answers`；每个答案是 `{question_id,option_id}` 或 `{question_id,custom_text}`。同时提供可阅读的正文。用新用户消息 ID 回复，不能再次回复已确认的旧问题。只把实际到达的回答当作用户选择；空闲、默认选项、AI 自己的建议都不代表回答。
+- 单 AI 会话都可用；直接接入的群聊由总管向用户提问，成员先向总管汇报。跨会话讨论任务目前通过群聊正文提问并等待群里实际回复，不发送 questions，以免问题藏在后台控制会话。服务端会明确拒绝不支持的投递位置。
+- 重复提交会保留一份回答；已答或被新用户消息/最终回复取代的旧卡片不能重新提交，可用输入框继续说明。队列在提问时暂停，回答优先送达，待当前回答处理完再按原设置投递队列。
+
 ## 目录、链接与文件定位
 
 - 首次接入记录 `list_workspace_folders` 返回的实际目录路径，读取其根目录及适用的项目说明，确认仓库是否在子目录。区分 **MCP 工作区根目录、仓库根目录、命令 workdir、AI 宿主沙箱目录**；命令切换到仓库目录不会改变聊天中文件链接的基准。

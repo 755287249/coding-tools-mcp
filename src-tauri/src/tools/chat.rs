@@ -1,4 +1,6 @@
 //! Local chat. JSON manifests and immutable pages are authoritative; Markdown is a projection.
+#[path = "chat_questions.rs"]
+mod questions;
 #[path = "chat_history.rs"]
 mod history;
 #[path = "chat_operations.rs"]
@@ -190,6 +192,7 @@ pub fn markdown(s: &Value) -> String {
                 m["created_at"],
                 m["text"].as_str().unwrap_or("")
             ));
+            out.push_str(&questions::markdown(m));
             out.push_str(&group::markdown(s,Some(m)));
             out.push_str(&super::chat_plan::markdown(&m["task_plan"]));
             if m["role"] == "user" {
@@ -640,6 +643,7 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
             save(root, &s)?;
             return Ok(json!({"session":local_view(root, &s)?,"connection_request_id":request_id}));
         }
+        "answer_question" => { questions::answer(&mut s,args)?; save(root,&s)?; }
         "send" => {
             if s["closed"] == true {
                 return Err(err("Conversation is closed"));
@@ -865,6 +869,8 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
             if awaiting_user && !final_reply {
                 return Err(err("awaiting_user requires final=true"));
             }
+            let questions = questions::parse(args.get("questions"))?;
+            if !questions.is_null() {questions::validate_context(&s,reply_to,final_reply,awaiting_user)?;}
             let event = tool_event(args.get("tool_event"), final_reply)?;
             let identity=group::reply_identity(&s,args,final_reply)?;
             if let Some(m) = s["messages"]
@@ -878,6 +884,7 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
                     || m["reply_to"] != reply_to
                     || m["final"] != final_reply
                     || (m["awaiting_user"] == true) != awaiting_user
+                    || m["questions"] != questions
                     || m["tool_event"] != event
                     || m.get("attachments").cloned().unwrap_or(json!([])) != json!(attachments)
                 {
@@ -888,7 +895,7 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
                 if delivery(&s,args,false)?.map(|m| m["id"].clone()) != Some(json!(reply_to)) {
                     return Err(err("Reply must address the oldest unanswered user message"));
                 }
-                let mut reply=json!({"id":message_id,"role":"assistant","text":content,"reply_to":reply_to,"final":final_reply,"awaiting_user":awaiting_user,"tool_event":event,"attachments":attachments,"created_at":now()});reply.as_object_mut().unwrap().extend(identity.as_object().unwrap().clone());s["messages"].as_array_mut().unwrap().push(reply);
+                let mut reply=json!({"id":message_id,"role":"assistant","text":content,"reply_to":reply_to,"final":final_reply,"awaiting_user":awaiting_user,"tool_event":event,"attachments":attachments,"created_at":now()});reply.as_object_mut().unwrap().extend(identity.as_object().unwrap().clone());if !questions.is_null(){reply["questions"]=questions;}s["messages"].as_array_mut().unwrap().push(reply);
                 s["updated_at"] = json!(now());
             }
             group::renew(&mut s,args)?;
@@ -1085,6 +1092,8 @@ fn queued_fingerprint(content: &str, attachments: &[Value]) -> String {
 fn local_view(root: &Path,s: &Value)->Result<Value>{
     let visible=collaboration::visible(s);let s=&visible;
     let mut result=view(root,s)?;
+    let active_question=questions::active_id(s);
+    if let Some(messages)=result["messages"].as_array_mut(){for message in messages{if message["questions"].is_array(){message["questions_active"]=json!(message["id"].as_str()==active_question.as_deref());}}}
     result["pairing"]=pairing::status(root,id(&s["id"])?);
     if let Some(attachment)=s["attachment_id"].as_str().filter(|id|!id.is_empty()) {
         result["connection_id"]=json!(format!("{:x}",Sha256::digest(attachment.as_bytes()))[..12].to_string());

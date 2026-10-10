@@ -1,4 +1,12 @@
 export const MESSAGES = {
+  "chat.questionCustom": ["Custom answer", "自訂回答", "自定义回答", "自由回答"],
+  "chat.questionSubmit": ["Submit answers", "提交回答", "提交回答", "回答を送信"],
+  "chat.questionSending": ["Sending…", "傳送中…", "发送中…", "送信中…"],
+  "chat.questionRetry": ["Retry submission", "重試提交", "重试提交", "再送信"],
+  "chat.questionAnswered": ["Answered", "已回答", "已回答", "回答済み"],
+  "chat.questionExpired": ["This question is no longer active. Reply in the composer.", "此問題已失效，請在輸入框回覆。", "此问题已失效，请在输入框回复。", "この質問は終了しました。入力欄から返信できます。"],
+  "chat.questionFailed": ["Could not confirm submission. Your answers are retained; retry or refresh.", "無法確認提交。回答已保留，可重試或重新整理。", "无法确认提交。回答已保留，可重试或刷新。", "送信を確認できません。回答は保持されています。再送信または再読み込みしてください。"],
+
   "workspace.remove": ["Remove workspace", "移除工作區", "移除工作区", "ワークスペースを削除"],
   "workspace.removeConfirm": ["Remove workspace “{name}” from this client?", "從此用戶端移除工作區「{name}」？", "从此客户端移除工作区“{name}”？", "このクライアントから「{name}」を削除しますか？"],
   "workspace.removeHint": ["Workspace services and connections will stop. Project files and saved conversations on disk will remain.", "工作區服務與連線將停止。磁碟上的專案檔案與已儲存對話會保留。", "工作区服务和连接将停止。磁盘上的项目文件和已保存对话会保留。", "サービスと接続を停止します。ディスク上のファイルと保存済み会話は保持されます。"],

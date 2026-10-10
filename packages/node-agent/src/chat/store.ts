@@ -1,3 +1,4 @@
+import {parseQuestions,validateQuestionContext,answerQuestions,activeQuestionId,questionsMarkdown,type ChatQuestion,type QuestionResponse} from './questions.js';
 import {packHistory, unpackHistory, agentContext, HISTORY_PAGE_BYTES} from './history.js';
 import {visibleSession} from './collaboration.js';
 import {operationsMarkdown, type ChatOperation} from './operation-contract.js';
@@ -17,7 +18,7 @@ import { resolveChatPath } from './reveal.js';
 // The on-disk v1 contract is shared with tools/chat.rs. Never persist waiting=true.
 export interface ChatFile { label?: string; local_reference?: boolean; id: string; name: string; path: string; mime: string; size: number; sha256: string }
 export interface ToolEvent { name: string; status: 'running' | 'completed' | 'failed'; input?: string; output?: string; output_truncated?: boolean }
-export interface ChatMessage { discussion?:{hidden?:boolean;id:string;post_id:string;source_chat_id:string;purpose:string}; received_by?:string[]; agent_id?:string;agent_name?:string;recipient_ids?:string[];agent_plans?:{agent_id:string;plan:ChatTaskPlan}[]; task_plan?:ChatTaskPlan; kind?: 'connection_request' | 'assignment'; awaiting_user?: boolean; received_at?: number; attachments?: ChatFile[]; tool_event?: ToolEvent; id: string; role: 'user' | 'assistant'; text: string; created_at: number; reply_to?: string; final?: boolean }
+export interface ChatMessage { questions?:ChatQuestion[];question_answer?:QuestionResponse;question_response?:QuestionResponse;questions_active?:boolean; discussion?:{hidden?:boolean;id:string;post_id:string;source_chat_id:string;purpose:string}; received_by?:string[]; agent_id?:string;agent_name?:string;recipient_ids?:string[];agent_plans?:{agent_id:string;plan:ChatTaskPlan}[]; task_plan?:ChatTaskPlan; kind?: 'connection_request' | 'assignment'; awaiting_user?: boolean; received_at?: number; attachments?: ChatFile[]; tool_event?: ToolEvent; id: string; role: 'user' | 'assistant'; text: string; created_at: number; reply_to?: string; final?: boolean }
 export interface ChatSession {pending_pairing?:string; note?:string; title_agent_name?:string; work_member?:ChatMember; mode?:'work'|'group';members?:ChatMember[];agent_name?:string; pinned?: boolean; archived?: boolean; queue?: ChatMessage[]; queue_mode?: 'merge' | 'split'; queue_receipts?: Record<string,string>; title_custom?: boolean; files?: ChatFile[]; version: 1|2; id: string; title: string; created_at: number; updated_at: number; closed: boolean; messages: ChatMessage[]; attachment_id: string; lease_until: number }
 const DIR = 'docs/chat-sessions';
 const ASSET_DIR = 'mcp-assistant/chat-assets';
@@ -93,7 +94,7 @@ function userMessageState(s: ChatSession, message: ChatMessage): string {
 }
 export function chatMarkdown(session: ChatSession): string {
   const s=visibleSession(session);
-  return `# ${s.title}\n\nSession: ${s.id}\n\n${s.note ? `备注：${s.note}\n\n` : ''}` + group.groupMarkdown(s) + s.messages.map(m => `## ${m.kind === 'connection_request' ? '接入请求' : m.role === 'user' ? '你' : m.final === false ? 'AI · 进度' : 'AI'} · ${m.created_at}\n\n${m.tool_event ? `Tool (AI reported): ${m.tool_event.name} · ${m.tool_event.status}\n\n` : ''}${m.text}\n${group.groupMarkdown(s,m)}${chatPlanMarkdown(m.task_plan)}${m.role === 'user' ? `\n${userMessageState(s, m)}\n` : ''}${m.role === 'assistant' ? `\nReply state: ${m.awaiting_user ? 'awaiting_user' : m.final === false ? 'supplementing' : 'complete'}\n` : ''}${m.tool_event?.input ? `\nInput:\n${m.tool_event.input}\n` : ''}${m.tool_event?.output ? `\nOutput:\n${m.tool_event.output}\n` : ''}${m.tool_event?.output_truncated ? '\nOutput truncated\n' : ''}${(m.attachments ?? []).map(f => `\nAttachment: ${f.name} (${f.size} bytes)\nPath: ${f.path}\n${f.label ? `Reference: @${f.label}\n` : ''}`).join('')}`).join('\n') + queuedMarkdown(s);
+  return `# ${s.title}\n\nSession: ${s.id}\n\n${s.note ? `备注：${s.note}\n\n` : ''}` + group.groupMarkdown(s) + s.messages.map(m => `## ${m.kind === 'connection_request' ? '接入请求' : m.role === 'user' ? '你' : m.final === false ? 'AI · 进度' : 'AI'} · ${m.created_at}\n\n${m.tool_event ? `Tool (AI reported): ${m.tool_event.name} · ${m.tool_event.status}\n\n` : ''}${m.text}\n${questionsMarkdown(m)}${group.groupMarkdown(s,m)}${chatPlanMarkdown(m.task_plan)}${m.role === 'user' ? `\n${userMessageState(s, m)}\n` : ''}${m.role === 'assistant' ? `\nReply state: ${m.awaiting_user ? 'awaiting_user' : m.final === false ? 'supplementing' : 'complete'}\n` : ''}${m.tool_event?.input ? `\nInput:\n${m.tool_event.input}\n` : ''}${m.tool_event?.output ? `\nOutput:\n${m.tool_event.output}\n` : ''}${m.tool_event?.output_truncated ? '\nOutput truncated\n' : ''}${(m.attachments ?? []).map(f => `\nAttachment: ${f.name} (${f.size} bytes)\nPath: ${f.path}\n${f.label ? `Reference: @${f.label}\n` : ''}`).join('')}`).join('\n') + queuedMarkdown(s);
 }
 function save(root: string, s: ChatSession): void {
   const stored = packHistory(s, (digest, bytes) => writeHistoryPage(root, s.id, digest, bytes));
@@ -316,7 +317,8 @@ export function chatUi(root: string, args: Record<string, unknown>): Record<stri
       save(root, s);
       return {session:localView(root, s), connection_request_id:requestId};
     }
-    if (action === 'send') {
+    if(action==='answer_question'){answerQuestions(s,args);save(root,s);}
+    else if (action === 'send') {
       if (s.closed) throw new Error('Conversation is closed');
       const id = validId(args.message_id); const attachments = messageFiles(s, args.attachment_ids); const content = text(args.text || (attachments.length ? '📎' : ''),32000,true);
       const receipt=Object.hasOwn(s.queue_receipts??{},id)?s.queue_receipts![id]:undefined;
@@ -420,15 +422,17 @@ export function chatTool(root: string, name: string, args: Record<string, unknow
       if (Object.hasOwn(s.queue_receipts??{},id)) throw new Error('Message ID conflicts with a queued delivery');
       const awaiting_user = args.awaiting_user === true;
       if (awaiting_user && !final) throw new Error('awaiting_user requires final=true');
+      const questions=parseQuestions(args.questions);
+      if(questions)validateQuestionContext(s,replyTo,final,awaiting_user);
       const identity=group.replyIdentity(s,args,final);
       const existing = [...s.messages,...(s.queue??[])].find(m => m.id === id);
       if (existing) {
         if(existing.agent_id!==identity.agent_id||JSON.stringify(existing.recipient_ids)!==JSON.stringify(identity.recipient_ids))throw new Error('Message ID conflicts with another agent reply');
-        if (JSON.stringify(existing.attachments ?? []) !== JSON.stringify(attachments) || existing.role !== 'assistant' || existing.text !== content || existing.reply_to !== replyTo || existing.final !== final || (existing.awaiting_user === true) !== awaiting_user || JSON.stringify(existing.tool_event ?? undefined) !== JSON.stringify(tool_event)) throw new Error('Message ID conflicts with an existing reply');
+        if (JSON.stringify(parseQuestions(existing.questions))!==JSON.stringify(questions) || JSON.stringify(existing.attachments ?? []) !== JSON.stringify(attachments) || existing.role !== 'assistant' || existing.text !== content || existing.reply_to !== replyTo || existing.final !== final || (existing.awaiting_user === true) !== awaiting_user || JSON.stringify(existing.tool_event ?? undefined) !== JSON.stringify(tool_event)) throw new Error('Message ID conflicts with an existing reply');
       } else {
         group.validateFinal(s,args);
         if (pending(s,args.attachment_id)?.id !== replyTo) throw new Error('Reply must address the oldest unanswered user message');
-        s.messages.push({ ...identity, id, role: 'assistant', text: content, reply_to: replyTo, final, awaiting_user, tool_event, attachments, created_at: Date.now() }); s.updated_at = Date.now();
+        s.messages.push({ ...identity, id, role: 'assistant', text: content, reply_to: replyTo, final, awaiting_user, tool_event, attachments, questions, created_at: Date.now() }); s.updated_at = Date.now();
       }
       group.renew(s,args.attachment_id); save(root, s); return { ok: true, persisted: true, message_id: id };
     }
@@ -556,7 +560,7 @@ function awaitingConfirmation(session: ChatSession): boolean {
 function queuedFingerprint(content: string, attachments: ChatFile[]): string {
   return createHash('sha256').update(JSON.stringify([content,attachments.map(f=>f.id)])).digest('hex');
 }
-function localView(root: string, session: ChatSession) {const s=visibleSession(session);const ops=readChatOperations(root,s.id);const visibleIds=new Set(s.messages.map(m=>m.id));ops.operations=ops.operations?.filter(op=>visibleIds.has(op.reply_to));return {...view(root,s),pairing:pairingStatus(root,s.id),connection_id:s.attachment_id?createHash('sha256').update(s.attachment_id).digest('hex').slice(0,12):undefined,...ops,queued_messages:s.queue ?? [],queue_mode:s.queue_mode ?? (group.grouped(s)?'split':'merge')};}
+function localView(root: string, session: ChatSession) {const s=visibleSession(session);const ops=readChatOperations(root,s.id);const visibleIds=new Set(s.messages.map(m=>m.id));ops.operations=ops.operations?.filter(op=>visibleIds.has(op.reply_to));const activeQuestion=activeQuestionId(s);return {...view(root,s),messages:s.messages.map(m=>m.questions?{...m,questions_active:m.id===activeQuestion}:m),pairing:pairingStatus(root,s.id),connection_id:s.attachment_id?createHash('sha256').update(s.attachment_id).digest('hex').slice(0,12):undefined,...ops,queued_messages:s.queue ?? [],queue_mode:s.queue_mode ?? (group.grouped(s)?'split':'merge')};}
 function publishQueued(s: ChatSession): void {
   if(pending(s)||awaitingConfirmation(s)||!s.queue?.length)return;
   const boundary=s.queue.findIndex(m=>!!m.discussion);
