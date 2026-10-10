@@ -15,6 +15,7 @@ pub(super) fn input_schema(name: &str) -> Option<Value> {
         required.push("attachment_id");
     }
     if name == "chat_discuss" {
+        properties["attachment_ids"]=json!({"type":"array","uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":80},"description":"IDs from chat_upload in your own conversation to include with this group post."});
         properties["action"]=json!({"type":"string","enum":["list","read","post"],"default":"list"});
         properties["discussion_id"]=json!({"type":"string","minLength":1,"maxLength":80});
         properties["message_id"]=json!({"type":"string","minLength":1,"maxLength":80,"description":"Stable post/task ID. Reuse with identical payload after uncertain delivery."});

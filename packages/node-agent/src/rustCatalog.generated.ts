@@ -379,6 +379,16 @@ export const rustCatalog: readonly ToolDefinition[] = [
           "minLength": 1,
           "type": "string"
         },
+        "attachment_ids": {
+          "description": "IDs from chat_upload in your own conversation to include with this group post.",
+          "items": {
+            "maxLength": 80,
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
         "chat_id": {
           "maxLength": 80,
           "minLength": 1,
@@ -6333,11 +6343,11 @@ export const rustToolAnnotationOverridesByProfile: Readonly<Record<ToolProfile, 
   "trusted-core": {}
 };
 export const rustToolsetRevisionByProfile: Readonly<Record<ToolProfile, string>> = {
-  "advanced": "cbc7dd5bd2f44860",
+  "advanced": "5c0dcb9809549f8c",
   "read-only": "e291887e88e9af8c",
-  "compat-readonly-all": "c4ed3d0d968717e4",
-  "guarded-core": "48037df160093058",
-  "trusted-core": "6811ae0f3e6fe01e"
+  "compat-readonly-all": "af4eb655bda709a5",
+  "guarded-core": "82f3b5316e44ca05",
+  "trusted-core": "7cfa8841b415869d"
 };
 export const rustBehavioralParityFixtures: Readonly<Record<string, unknown>> = {
   "execution_limits": {

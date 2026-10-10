@@ -397,6 +397,9 @@ fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 fn upload(root: &Path, s: &mut Value, args: &Value) -> Result<Value> {
+    upload_with(root,s,args,&|value|save(root,value))
+}
+fn upload_with(root: &Path, s: &mut Value, args: &Value, persist:&dyn Fn(&Value)->Result<()>) -> Result<Value> {
     use base64::{engine::general_purpose::STANDARD, Engine};
     if s["closed"] == true {
         return Err(err("Conversation is closed"));
@@ -417,10 +420,10 @@ fn upload(root: &Path, s: &mut Value, args: &Value) -> Result<Value> {
         let files = s["files"].as_array().ok_or_else(|| err("Invalid attachment manifest"))?;
         if let Some(existing) = files.iter().find(|f| f["id"] == upload_id) {
             if existing["local_reference"] != true || existing["path"] != relative || existing["sha256"] != sha256 || existing["name"] != name { return Err(err("Attachment ID conflict")); }
-            save(root, s)?; return Ok(existing.clone());
+            persist(s)?; return Ok(existing.clone());
         }
         let f = json!({"label":next_label(s,mime),"id":upload_id,"name":name,"path":relative,"local_reference":true,"sha256":sha256,"size":size,"mime":mime});
-        s["files"].as_array_mut().unwrap().push(f.clone()); save(root, s)?; return Ok(f);
+        s["files"].as_array_mut().unwrap().push(f.clone()); persist(s)?; return Ok(f);
     }
     let encoded = args["data_base64"].as_str().unwrap_or("");
     if encoded.len() > 2796204 {
@@ -443,7 +446,7 @@ fn upload(root: &Path, s: &mut Value, args: &Value) -> Result<Value> {
         if existing["local_reference"] == true || existing["sha256"] != sha256 || existing["name"] != name {
             return Err(err("Attachment ID conflict"));
         }
-        save(root, s)?;
+        persist(s)?;
         return Ok(existing.clone());
     }
     let mut f = json!({"label":next_label(s,file_mime(&bytes)),"id":upload_id,"name":name,"mime":file_mime(&bytes),"size":bytes.len(),"sha256":sha256});
@@ -470,7 +473,7 @@ fn upload(root: &Path, s: &mut Value, args: &Value) -> Result<Value> {
         dest.sync_all().map_err(io)?;
     }
     s["files"].as_array_mut().unwrap().push(f.clone());
-    save(root, s)?;
+    persist(s)?;
     Ok(f)
 }
 fn message_files(s: &Value, ids: Option<&Value>) -> Result<Vec<Value>> {
@@ -578,6 +581,7 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
         save(root, &s)?;
         return Ok(json!({"session":local_view(root,&s)?}));
     }
+    if let Some(gid)=args["chat_id"].as_str().and_then(|v|v.strip_prefix("discussion:")){return discussion::attachment_action(root,gid,args);}
     let mut s = load(root, id(&args["chat_id"])?)?;
     match action {
         "prepare_pairing" => {
@@ -969,7 +973,7 @@ fn label_files(s: &mut Value) {
             f["label"] = json!(label); labels.insert(f["id"].as_str().unwrap_or("").to_owned(), label);
         }
     }
-    if let Some(messages) = s["messages"].as_array_mut() { for message in messages { if let Some(entries) = message["attachments"].as_array_mut() { for f in entries { if let Some(label) = labels.get(f["id"].as_str().unwrap_or("")) { f["label"] = json!(label); } } } } }
+    if let Some(messages) = s["messages"].as_array_mut() { for message in messages { if message["discussion"].is_object(){continue;} if let Some(entries) = message["attachments"].as_array_mut() { for f in entries { if let Some(label) = labels.get(f["id"].as_str().unwrap_or("")) { f["label"] = json!(label); } } } } }
 }
 fn next_label(s: &Value, mime: &str) -> String {
     let image = mime.starts_with("image/");
@@ -977,6 +981,9 @@ fn next_label(s: &Value, mime: &str) -> String {
     format!("{}{}", if image {"图片"} else {"文件"}, count + 1)
 }
 fn upload_chunk(root: &Path, s: &mut Value, args: &Value) -> Result<Value> {
+    upload_chunk_with(root,s,args,&|value|save(root,value))
+}
+fn upload_chunk_with(root: &Path, s: &mut Value, args: &Value, persist:&dyn Fn(&Value)->Result<()>) -> Result<Value> {
     use base64::{engine::general_purpose::STANDARD, Engine};
     use std::io::{Read, Seek, SeekFrom, Write};
     if s["closed"] == true { return Err(err("Conversation is closed")); }
@@ -1026,13 +1033,13 @@ fn upload_chunk(root: &Path, s: &mut Value, args: &Value) -> Result<Value> {
         file.write_all(&bytes[overlap..]).map_err(io)?; file.sync_all().map_err(io)?;
     }
     drop(file);
-    if let Some(existing) = existing { save(root,s)?; return Ok(json!({"attachment":existing,"next_offset":offset+bytes.len() as u64})); }
+    if let Some(existing) = existing { persist(s)?; return Ok(json!({"attachment":existing,"next_offset":offset+bytes.len() as u64})); }
     if fs::metadata(source).map_err(io)?.len() < total { return Ok(json!({"next_offset":offset+bytes.len() as u64})); }
     let (sha256,size,mime) = fingerprint(source)?;
     f["sha256"]=json!(sha256);f["size"]=json!(size);f["mime"]=json!(mime);f["label"]=json!(next_label(s,mime));
     if !completed {fs::rename(&part_path,&target).map_err(io)?;}
     if s["files"].is_null() {s["files"]=json!([]);}
-    s["files"].as_array_mut().unwrap().push(f.clone());save(root,s)?;fs::remove_file(meta_path).map_err(io)?;
+    s["files"].as_array_mut().unwrap().push(f.clone());persist(s)?;fs::remove_file(meta_path).map_err(io)?;
     Ok(json!({"attachment":f,"next_offset":offset+bytes.len() as u64}))
 }
 fn read_attachment_chunk(root: &Path, s: &Value, args: &Value) -> Result<Value> {

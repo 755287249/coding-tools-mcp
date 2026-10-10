@@ -1,6 +1,6 @@
 import {visibleSession} from './collaboration.js';
 import {operationsMarkdown, type ChatOperation} from './operation-contract.js';
-import {discussionAction,discussionInbox,type DiscussionStore} from './discussion.js';
+import {discussionAction,discussionInbox,discussionAttachmentStore,type DiscussionStore} from './discussion.js';
 import * as group from './group.js';
 import { preparePairing, pairingStatus } from './pairing.js';
 import type {ChatMember} from './group.js';
@@ -143,7 +143,7 @@ function filePath(s: ChatSession, f: ChatFile): string {
   if (f.path && f.path !== legacy && f.path !== current) throw new Error('Invalid attachment path');
   return f.path === legacy ? legacy : current;
 }
-function upload(root: string, s: ChatSession, args: Record<string, unknown>): ChatFile {
+function upload(root: string, s: ChatSession, args: Record<string, unknown>, persist: (session:ChatSession)=>void = session=>save(root,session)): ChatFile {
   if (s.closed) throw new Error('Conversation is closed');
   const id = validId(args.upload_id);
   const name = text(args.name, 240);
@@ -156,10 +156,10 @@ function upload(root: string, s: ChatSession, args: Record<string, unknown>): Ch
     const existing = files.find(f => f.id === id);
     if (existing) {
       if (!existing.local_reference || existing.path !== relative || existing.sha256 !== info.sha256 || existing.name !== name) throw new Error('Attachment ID conflict');
-      save(root, s); return existing;
+      persist(s); return existing;
     }
     const f: ChatFile = {id, name, path:relative, local_reference:true, ...info};
-    f.label = nextLabel(s,f.mime); files.push(f); save(root, s); return f;
+    f.label = nextLabel(s,f.mime); files.push(f); persist(s); return f;
   }
   const encoded = args.data_base64;
   if (typeof encoded !== 'string' || encoded.length > 2796204 || encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) throw new Error('Invalid attachment encoding or size');
@@ -171,7 +171,7 @@ function upload(root: string, s: ChatSession, args: Record<string, unknown>): Ch
   const existing = files.find(f => f.id === id);
   if (existing) {
     if (existing.local_reference || existing.sha256 !== sha256 || existing.name !== name) throw new Error('Attachment ID conflict');
-    save(root, s); return existing;
+    persist(s); return existing;
   }
   const f: ChatFile = {id,name,mime:fileMime(bytes),size:bytes.length,sha256,path:''};
   f.path = filePath(s, f);
@@ -181,7 +181,7 @@ function upload(root: string, s: ChatSession, args: Record<string, unknown>): Ch
   if (existsSync(target)) {
     if (statSync(target).size !== bytes.length || !readFileSync(target).equals(bytes)) throw new Error('Attachment ID conflict');
   } else writeFileSync(target, bytes, {mode:0o600,flag:'wx'});
-  f.label = nextLabel(s,f.mime); files.push(f); save(root, s); return f;
+  f.label = nextLabel(s,f.mime); files.push(f); persist(s); return f;
 }
 function messageFiles(s: ChatSession, ids: unknown): ChatFile[] {
   if (ids === undefined) return [];
@@ -250,14 +250,15 @@ export function chatUi(root: string, args: Record<string, unknown>): Record<stri
       const now = Date.now(); const s: ChatSession = { version: 1, id: randomUUID(), title: text(args.title ?? '新对话', 240), created_at: now, updated_at: now, closed: false, messages: [], attachment_id: '', lease_until: 0 };
       if(args.mode!==undefined)group.setMode(s,args.mode);save(root, s); return { session: localView(root, s) };
     }
-    const s = load(root, validId(args.chat_id));
+    const groupFiles=typeof args.chat_id==='string'&&args.chat_id.startsWith('discussion:')?discussionAttachmentStore(discussionStore(root),args):undefined;
+    const s = groupFiles?.session ?? load(root, validId(args.chat_id));
     if(action==='prepare_pairing'){if(s.closed)throw new Error('Conversation is closed');const attempt=validId(args.message_id);if(s.messages.some(m=>m.id===attempt))throw new Error('Pairing ID already used');if(group.grouped(s)){s.pending_pairing=attempt;save(root,s);}return {pairing:preparePairing(root,s.id,attempt)};}
     if(['set_mode','rename_member','detach_member','resume_member','set_coordinator'].includes(String(action))){group.groupUi(s,args);s.updated_at=Date.now();save(root,s);return {session:localView(root,s)};}
     if (action === 'reveal_path') return resolveChatPath(root, args.source_path);
     if (action === 'read_artifact') return readArtifact(root, args.source_path);
-    if (action === 'upload_chunk') return uploadChunk(root,s,args);
+    if (action === 'upload_chunk') return uploadChunk(root,s,args,groupFiles?.save);
     if (action === 'read_attachment_chunk') return readAttachmentChunk(root,s,args);
-    if (action === 'upload') return { attachment: upload(root, s, args) };
+    if (action === 'upload') return { attachment: upload(root, s, args,groupFiles?.save) };
     if (action === 'read_attachment') {
       const f = messageFiles(s, [args.upload_id])[0];
       const target = safe(root, filePath(s, f));
@@ -434,13 +435,13 @@ function labelFiles(s: ChatSession): void {
   let images = 0, files = 0;
   for (const file of s.files ?? []) file.label = file.mime.startsWith('image/') ? `图片${++images}` : `文件${++files}`;
   const labels = new Map((s.files ?? []).map(file => [file.id, file.label]));
-  for (const message of s.messages) for (const file of message.attachments ?? []) if (labels.has(file.id)) file.label = labels.get(file.id);
+  for (const message of s.messages.filter(m=>!m.discussion)) for (const file of message.attachments ?? []) if (labels.has(file.id)) file.label = labels.get(file.id);
 }
 function nextLabel(s: ChatSession, mime: string): string {
   const image = mime.startsWith('image/');
   return `${image ? '图片' : '文件'}${(s.files ?? []).filter(f => f.mime.startsWith('image/') === image).length + 1}`;
 }
-function uploadChunk(root: string, s: ChatSession, args: Record<string, unknown>): Record<string, unknown> {
+function uploadChunk(root: string, s: ChatSession, args: Record<string, unknown>, persist: (session:ChatSession)=>void = session=>save(root,session)): Record<string, unknown> {
   if (s.closed) throw new Error('Conversation is closed');
   const id = validId(args.upload_id), name = text(args.name, 240);
   if (/[\r\n\x00-\x1f\x7f\/\\]/.test(name)) throw new Error('Invalid attachment name');
@@ -485,11 +486,11 @@ function uploadChunk(root: string, s: ChatSession, args: Record<string, unknown>
       fsyncSync(fd);
     }
   } finally {closeSync(fd);}
-  if (existing) { save(root,s); return {attachment:existing, next_offset:offset+bytes.length}; }
+  if (existing) { persist(s); return {attachment:existing, next_offset:offset+bytes.length}; }
   if (statSync(source).size < total) return {next_offset:offset+bytes.length};
   Object.assign(f,fingerprint(source)); f.label = nextLabel(s,f.mime);
   if (!completed) renameSync(partPath,target);
-  (s.files ??= []).push(f); save(root,s); rmSync(metaPath,{force:true});
+  (s.files ??= []).push(f); persist(s); rmSync(metaPath,{force:true});
   return {attachment:f,next_offset:offset+bytes.length};
 }
 function readAttachmentChunk(root: string, s: ChatSession, args: Record<string, unknown>): Record<string, unknown> {

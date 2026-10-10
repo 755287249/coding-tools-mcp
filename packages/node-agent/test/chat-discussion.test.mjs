@@ -139,3 +139,38 @@ test('existing collaboration members may go offline without blocking group manag
  assert.equal(ui({action:'discussion_update',discussion_id:'offline-members',paused:false,member_chat_ids:[a,b]}).discussion.paused,false);
  assert.throws(()=>ui({action:'discussion_update',discussion_id:'offline-members',member_chat_ids:[a,b,c]}),/previously connected/);
 });
+test('group-owned attachments survive chunk retry, stay isolated, and reach recipients with original labels',t=>{
+ const {root,a,b,c,ui,wb}=fixture(t);const cid='discussion:owned';
+ ui({action:'discussion_create',discussion_id:'owned',title:'Owned files',member_chat_ids:[a,b],collaboration:true,coordinator_chat_id:a});
+ ui({action:'upload',chat_id:b,upload_id:'before',name:'before.txt',data_base64:'Yg=='});
+ ui({action:'upload',chat_id:b,upload_id:'shared',name:'different.txt',data_base64:'Yg=='});
+ const bytes=Buffer.alloc(512*1024+17,65),chunk=(offset)=>({action:'upload_chunk',chat_id:cid,upload_id:'shared',name:'large.txt',offset,total_size:bytes.length,data_base64:bytes.subarray(offset,offset+512*1024).toString('base64')});
+ assert.equal(ui(chunk(0)).next_offset,512*1024);assert.equal(ui(chunk(0)).next_offset,512*1024);
+ const file=ui(chunk(512*1024)).attachment;assert.equal(file.label,'文件1');assert.equal(ui(chunk(512*1024)).attachment.id,file.id);
+ assert.deepEqual(ui({action:'list'}).sessions.map(s=>s.id).sort(),[a,b,c].sort());
+ const args={action:'discussion_post',discussion_id:'owned',message_id:'attached',text:'',attachment_ids:[file.id],recipient_chat_ids:[b]};
+ const first=ui(args).discussion.posts[0];assert.equal(first.text,'📎');assert.deepEqual(ui(args).discussion.posts[0].attachments,[file]);
+ assert.throws(()=>ui({...args,text:'📎',attachment_ids:[]}),/conflicts/);
+ const received=wb().message;assert.deepEqual(received.attachments,[file]);assert.deepEqual(wb().message.attachments,[file]);assert.equal(readFileSync(path.join(root,file.path)).length,bytes.length);
+ assert.equal(Buffer.from(ui({action:'read_attachment_chunk',chat_id:cid,upload_id:file.id,offset:512*1024}).data_base64,'base64').length,17);
+ assert.equal(ui({action:'read_attachment',chat_id:cid,upload_id:file.id}).attachment.sha256,file.sha256);
+ assert.equal(ui({action:'discussion_read',discussion_id:'owned'}).discussion.files,undefined);
+ assert.match(readFileSync(path.join(root,'docs/chat-sessions/discussions/owned.md'),'utf8'),/large.txt/);
+ ui({action:'discussion_create',discussion_id:'other',title:'Other',member_chat_ids:[a,b]});
+ assert.throws(()=>ui({action:'read_attachment_chunk',chat_id:'discussion:other',upload_id:file.id,offset:0}),/not found/);
+ assert.throws(()=>ui({...args,discussion_id:'other'}),/does not belong/);
+ assert.throws(()=>ui({action:'send',chat_id:cid,message_id:'bad',text:'x'}),/Unsupported/);
+ ui({action:'discussion_update',discussion_id:'owned',paused:true});
+ assert.throws(()=>ui({...chunk(0),upload_id:'blocked'}),/closed/);assert.equal(ui({action:'read_attachment_chunk',chat_id:cid,upload_id:file.id,offset:0}).attachment.id,file.id);
+});
+test('robot group posts and task result inboxes preserve their own uploaded attachments',t=>{
+ const {a,b,aa,bb,ui,tool,wa,wb}=fixture(t);
+ const upload=(chat,id)=>ui({action:'upload',chat_id:chat,upload_id:id,name:id+'.txt',data_base64:'YQ=='}).attachment;
+ const source=upload(a,'task-file'),result=upload(b,'result-file');
+ const args={action:'post',discussion_id:'group1',message_id:'file-task',text:'Check',purpose:'task',recipient_chat_ids:[b],attachment_ids:[source.id]};
+ const p=tool(a,aa.attachment_id,'chat_discuss',args).discussion.posts[0];assert.equal(p.attachment_chat_id,a);
+ assert.throws(()=>tool(a,aa.attachment_id,'chat_discuss',{...args,message_id:'bad',attachment_ids:[result.id]}),/does not belong/);
+ const received=wb().message;assert.deepEqual(received.attachments,[source]);
+ tool(b,bb.attachment_id,'chat_reply',{message_id:'result',reply_to:received.id,text:'Done',final:true,attachment_ids:[result.id]});
+ assert.deepEqual(wa().message.attachments,[result]);
+});

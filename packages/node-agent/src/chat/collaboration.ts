@@ -32,7 +32,7 @@ export function collaborationContext(d:Discussion,p:DiscussionPost):string {
 }
 export function collaborationMarkdown(d:Discussion):string {
  const rows=d.posts.flatMap(p=>[
-  {id:p.id,name:p.name,at:p.created_at,text:p.text,files:[] as ChatMessage['attachments']},
+  {id:p.id,name:p.name,at:p.created_at,text:p.text,files:p.attachments},
   ...p.deliveries.flatMap(v=>v.replies.map(r=>({id:r.id,name:d.aliases?.[v.chat_id]??v.title,at:r.created_at,text:r.text,files:r.attachments}))),
   ...(p.summaries??[]).map(r=>({id:r.id,name:d.aliases?.[p.from]??p.name,at:r.created_at,text:r.text,files:r.attachments}))
  ]).sort((a,b)=>a.at-b.at);
