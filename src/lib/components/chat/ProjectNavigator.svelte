@@ -46,12 +46,13 @@
   }
   $effect(()=>{const route=$page.url.href;projectMenu?.hidePopover();});
   let chatMenu = $state<HTMLDivElement>();
-  let chatMenuTarget = $state<{workspace:string;folder:string;chat:ChatSession} | null>(null);
+  let chatMenuTarget = $state<{workspace:string;folder:string;chat:ChatSession;source:RowSource} | null>(null);
   let chatMenuLeft=$state(0),chatMenuTop=$state(0);
   let chatMenuAnchor: HTMLElement | null=null;
   let pinSaving=$state('');
   function positionChatMenu(){if(!chatMenuAnchor||!chatMenu?.matches(':popover-open'))return;const pos=innerPopover(chatMenuAnchor.getBoundingClientRect(),{width:chatMenu.offsetWidth,height:chatMenu.offsetHeight},{width:innerWidth,height:innerHeight});chatMenuLeft=pos.left;chatMenuTop=pos.top;}
-  async function showChatMenu(workspace:string,folder:string,chat:ChatSession,event:MouseEvent){deleteArmed=false;chatMenuTarget={workspace,folder,chat};chatMenuAnchor=event.currentTarget as HTMLElement;await tick();chatMenu?.showPopover();positionChatMenu();}
+  type RowSource = 'project' | 'recent' | 'archived';
+  async function showChatMenu(workspace:string,folder:string,chat:ChatSession,source:RowSource,event:MouseEvent){deleteArmed=false;chatMenuTarget={workspace,folder,chat,source};chatMenuAnchor=event.currentTarget as HTMLElement;await tick();chatMenu?.showPopover();positionChatMenu();}
   async function updateConversation(workspace:string,folder:string,chat:ChatSession,changes:{pinned?:boolean;archived?:boolean;title?:string;note?:string}) {
     if(chat.discussionId){
       const result=await localDiscussion(workspace,folder,{action:'discussion_update',discussion_id:chat.discussionId,...changes});
@@ -175,7 +176,7 @@
 
 <svelte:window onresize={()=>{positionProjectMenu();positionChatMenu();positionPicker();positionRecentMenu()}} onscrollcapture={()=>{positionProjectMenu();positionChatMenu();positionPicker();positionRecentMenu()}}/>
 <div bind:this={chatMenu} class="chat-actions-menu" popover="auto" style:left={`${chatMenuLeft}px`} style:top={`${chatMenuTop}px`}>
-  {#if chatMenuTarget}{@const target=chatMenuTarget}<button onclick={()=>{editingNote=false;rename=scope(scope(target.workspace,target.folder),target.chat.id);title=target.chat.title;chatMenu?.hidePopover()}}><Pencil size={15}/>{$t('chat.85')}</button>{#if !target.chat.discussionId}<button onclick={()=>{editingNote=true;rename=scope(scope(target.workspace,target.folder),target.chat.id);title=target.chat.note??'';chatMenu?.hidePopover()}}><Pencil size={15}/>{$t('chat.editNote')}</button>{/if}<button disabled={!!pinSaving} onclick={()=>togglePin(target.workspace,target.folder,target.chat)}><Pin size={15} class={target.chat.pinned?'pin-icon is-pinned':'pin-icon'}/>{$t(target.chat.pinned?'chat.unpin':'chat.pin')}</button><button disabled={!!pinSaving} onclick={()=>toggleArchive(target.workspace,target.folder,target.chat)}>{#if target.chat.archived}<ArchiveRestore size={15}/>{$t('chat.unarchive')}{:else}<Archive size={15}/>{$t('chat.archive')}{/if}</button>{#if !target.chat.discussionId}<hr/><button class="danger" class:armed={deleteArmed} disabled={!!pinSaving} onclick={()=>deleteChat(target.workspace,target.folder,target.chat)}><Trash2 size={15}/>{deleteArmed?$t(target.chat.status==='connected'||target.chat.status==='waiting'?'chat.deleteConfirmConnected':'chat.deleteConfirm'):$t('chat.delete')}</button>{/if}{/if}
+  {#if chatMenuTarget}{@const target=chatMenuTarget}<button disabled={saving} onclick={()=>{editingNote=false;rename=JSON.stringify([target.source,target.workspace,target.folder,target.chat.id]);title=target.chat.title;chatMenu?.hidePopover()}}><Pencil size={15}/>{$t('chat.85')}</button>{#if !target.chat.discussionId}<button disabled={saving} onclick={()=>{editingNote=true;rename=JSON.stringify([target.source,target.workspace,target.folder,target.chat.id]);title=target.chat.note??'';chatMenu?.hidePopover()}}><Pencil size={15}/>{$t('chat.editNote')}</button>{/if}<button disabled={!!pinSaving} onclick={()=>togglePin(target.workspace,target.folder,target.chat)}><Pin size={15} class={target.chat.pinned?'pin-icon is-pinned':'pin-icon'}/>{$t(target.chat.pinned?'chat.unpin':'chat.pin')}</button><button disabled={!!pinSaving} onclick={()=>toggleArchive(target.workspace,target.folder,target.chat)}>{#if target.chat.archived}<ArchiveRestore size={15}/>{$t('chat.unarchive')}{:else}<Archive size={15}/>{$t('chat.archive')}{/if}</button>{#if !target.chat.discussionId}<hr/><button class="danger" class:armed={deleteArmed} disabled={!!pinSaving} onclick={()=>deleteChat(target.workspace,target.folder,target.chat)}><Trash2 size={15}/>{deleteArmed?$t(target.chat.status==='connected'||target.chat.status==='waiting'?'chat.deleteConfirmConnected':'chat.deleteConfirm'):$t('chat.delete')}</button>{/if}{/if}
 </div>
 {#if removingWorkspace}<WorkspaceRemoveDialog workspace={removingWorkspace} onClose={()=>removingWorkspace=null}/>{/if}
 <div bind:this={projectMenu} class="project-info-card" popover="auto" style:left={`${menuLeft}px`} style:top={`${menuTop}px`}>
@@ -212,12 +213,12 @@
                   {@const archived=archivedChats(workspace.id,group.folder.id)}
                   {#if projectGroups.length>1}<button class="folder-name" onclick={() => open(workspace.id,group.folder.id)}><Folder size={12}/>{group.folder.name}</button>{/if}
                   {#each visibleChats(workspace.id,group.folder.id) as chat (chat.id)}
-                    {@render chatRow(workspace.id,group.folder.id,chat,false)}
+                    {@render chatRow(workspace.id,group.folder.id,chat,false,'project')}
                   {:else}<button class="empty-project" onclick={() => open(workspace.id,group.folder.id)}>{$t('chat.104')}</button>{/each}
                   {#if activeCount>4}<button class="empty-project" onclick={()=>expandedChats={...expandedChats,[group.key]:!expandedChats[group.key]}}>{$t(expandedChats[group.key]?'chat.112':'chat.111')} ({activeCount})</button>{/if}
                   {#if archived.length}
                     <button class="empty-project archived-toggle" aria-expanded={!!showArchived[group.key]} onclick={()=>showArchived={...showArchived,[group.key]:!showArchived[group.key]}}><Archive size={12}/>{$t('chat.archived')} ({archived.length})<ChevronDown size={12}/></button>
-                    {#if showArchived[group.key]}{#each archived as chat (chat.id)}{@render chatRow(workspace.id,group.folder.id,chat,false)}{/each}{/if}
+                    {#if showArchived[group.key]}{#each archived as chat (chat.id)}{@render chatRow(workspace.id,group.folder.id,chat,false,'archived')}{/each}{/if}
                   {/if}
                   {#if errors[group.key]}<p class="load-error" role="status">{errors[group.key]}</p>{/if}
                 {/each}
@@ -237,7 +238,7 @@
       </div>
       {#if recentExpanded}
         {#each recentItems as {group,chat} (scope(group.key,chat.id))}
-          {@render chatRow(group.workspace.id,group.folder.id,chat,recentProjectNames)}
+          {@render chatRow(group.workspace.id,group.folder.id,chat,recentProjectNames,'recent')}
         {:else}<p class="muted">{$t('chat.noRecentMatches')}</p>{/each}
       {/if}
     </section>
@@ -254,17 +255,17 @@
   {/if}
 </div>
 
-{#snippet chatRow(ws:string,folder:string,chat:ChatSession,showProject:boolean)}
-  {@const key=scope(scope(ws,folder),chat.id)}
+{#snippet chatRow(ws:string,folder:string,chat:ChatSession,showProject:boolean,source:RowSource)}
+  {@const key=JSON.stringify([source,ws,folder,chat.id])}
   {@const active=$page.params.id===ws && $page.url.searchParams.get('folder')===folder && activeId===chat.id}
   {@const presence=sessionPresence(chat)}
   {@const newCount=unread(ws,folder,chat)}
-  <div class="tree-chat" class:active class:archived-row={chat.archived} data-presence={presence}>
+  <div class="tree-chat" class:active class:archived-row={chat.archived} data-presence={presence} data-row-source={source}>
     {#if rename===key}
       <form onsubmit={event=>{event.preventDefault();void renameChat(ws,folder,chat)}}><input bind:this={renameInput} aria-label={$t(editingNote?'chat.note':'chat.86')} bind:value={title} maxlength="240" disabled={saving} onkeydown={event=>{if(event.key==='Escape')rename=''}}/><button disabled={saving||(!editingNote&&!title.trim())}>{$t('Save')}</button></form>
     {:else}
       <button class="chat-link" onclick={()=>open(ws,folder,chat.id)} aria-current={active?'page':undefined} title={`${chat.title} · ${$t(presenceLabels[presence])}`}><i class:group-dot={chat.mode==='group'} title={$t(presenceLabels[presence])}></i><span>{chat.title}{#if chat.note}<span class="conversation-note" title={chat.note}>{chat.note}</span>{/if}{#if showProject}<small>{$workspaces.find(item=>item.id===ws)?.name}</small>{/if}</span><em class="chat-mode-tag">#{$t(chat.mode==='group'?'chat.group':'chat.work')}</em>{#if newCount}<b class="unread-count" aria-label={`${$t('chat.90')}: ${newCount}`}>{newCount>99?'99+':newCount}</b>{/if}</button>
-      <div class="chat-row-actions"><button title={$t('chat.conversationActions')} aria-label={`${$t('chat.conversationActions')}: ${chat.title}`} onclick={event=>showChatMenu(ws,folder,chat,event)}><Ellipsis size={15}/></button><button class:pinned={chat.pinned} disabled={!!pinSaving} title={$t(chat.pinned?'chat.unpin':'chat.pin')} aria-label={`${$t(chat.pinned?'chat.unpin':'chat.pin')}: ${chat.title}`} onclick={()=>togglePin(ws,folder,chat)}><Pin size={14} class={chat.pinned?'pin-icon is-pinned':'pin-icon'}/></button></div>
+      <div class="chat-row-actions"><button title={$t('chat.conversationActions')} aria-label={`${$t('chat.conversationActions')}: ${chat.title}`} onclick={event=>showChatMenu(ws,folder,chat,source,event)}><Ellipsis size={15}/></button><button class:pinned={chat.pinned} disabled={!!pinSaving} title={$t(chat.pinned?'chat.unpin':'chat.pin')} aria-label={`${$t(chat.pinned?'chat.unpin':'chat.pin')}: ${chat.title}`} onclick={()=>togglePin(ws,folder,chat)}><Pin size={14} class={chat.pinned?'pin-icon is-pinned':'pin-icon'}/></button></div>
     {/if}
   </div>
 {/snippet}

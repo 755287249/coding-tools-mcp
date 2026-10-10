@@ -15,6 +15,7 @@ mod data;
 mod error;
 pub mod harness;
 mod health;
+mod icon_theme;
 pub mod knowledge;
 mod mcp;
 mod platform;
@@ -193,7 +194,7 @@ pub fn run() {
                 .text("show", "顯示主視窗")
                 .text("quit", "結束程式")
                 .build()?;
-            let mut tray_builder = TrayIconBuilder::new()
+            let mut tray_builder = TrayIconBuilder::with_id(icon_theme::TRAY_ID)
                 .menu(&tray_menu)
                 .show_menu_on_left_click(false)
                 .tooltip("Coding Tools MCP")
@@ -214,10 +215,11 @@ pub fn run() {
                         show_main_window(tray.app_handle());
                     }
                 });
-            if let Some(icon) = app.default_window_icon() {
-                tray_builder = tray_builder.icon(icon.clone());
+            if let Some(icon) = icon_theme::icon(app.handle(), icon_theme::light_surface(app.handle())) {
+                tray_builder = tray_builder.icon(icon).icon_as_template(true);
             }
             tray_builder.build(app)?;
+            icon_theme::start(app.handle().clone());
 
             if let Some(window) = app.get_webview_window("main") {
                 window_corners::init(window);
