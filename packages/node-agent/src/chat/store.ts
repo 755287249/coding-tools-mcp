@@ -1,3 +1,4 @@
+import {packHistory, unpackHistory, agentContext, HISTORY_PAGE_BYTES} from './history.js';
 import {visibleSession} from './collaboration.js';
 import {operationsMarkdown, type ChatOperation} from './operation-contract.js';
 import {discussionAction,discussionInbox,discussionAttachmentStore,type DiscussionStore} from './discussion.js';
@@ -34,8 +35,12 @@ function safe(root: string, relative: string): string {
   let current = base;
   for (const part of relative.split('/')) {
     current = path.join(current, part);
-    if (existsSync(current) || (() => { try { return lstatSync(current).isSymbolicLink(); } catch { return false; } })()) {
+    try {
       if (lstatSync(current).isSymbolicLink()) throw new Error('Chat storage must not contain symlinks');
+    } catch (error) {
+      // A concurrent writer may remove .lock between path components. Missing
+      // paths are valid creation targets; permission errors and links still fail.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
   }
   return current;
@@ -44,10 +49,36 @@ function file(root: string, id: string): string { return safe(root, `${DIR}/${va
 function load(root: string, id: string): ChatSession {
   const target = file(root, id);
   if (statSync(target).size > MAX_BYTES) throw new Error('Chat archive exceeds size limit');
-  const s = JSON.parse(readFileSync(target, 'utf8')) as ChatSession;
+  const s = unpackHistory(JSON.parse(readFileSync(target, 'utf8')), digest => readHistoryPage(root, id, digest)) as unknown as ChatSession;
   if ((s.version !== 1 && s.version !== 2) || s.id !== id || !Array.isArray(s.messages)) throw new Error('Invalid chat archive');
   labelFiles(s);
   return s;
+}
+// Sidecars are immutable and scoped by both conversation ID and content hash.
+function readHistoryPage(root: string, chatId: string, digest: string): Buffer {
+  const fd = openSync(safe(root, `${DIR}/${chatId}.history.${digest}.json`), 'r');
+  try {
+    const size = fstatSync(fd).size;
+    if (size > HISTORY_PAGE_BYTES) throw new Error('Chat history page exceeds size limit');
+    const buffer = Buffer.alloc(size + 1); let total = 0, count: number;
+    while (total < buffer.length && (count = readSync(fd, buffer, total, buffer.length-total, null)) > 0) total += count;
+    if (total !== size) throw new Error('Chat history page changed while reading');
+    return buffer.subarray(0, total);
+  } finally { closeSync(fd); }
+}
+function writeHistoryPage(root: string, chatId: string, digest: string, bytes: Buffer): void {
+  const target = safe(root, `${DIR}/${chatId}.history.${digest}.json`);
+  if (existsSync(target)) {
+    if (!readHistoryPage(root, chatId, digest).equals(bytes)) throw new Error('Chat history page integrity check failed');
+    return;
+  }
+  const temporary = safe(root, `${DIR}/${chatId}.${randomUUID()}.tmp`);
+  const fd = openSync(temporary, 'wx', 0o600);
+  try { writeFileSync(fd, bytes); fsyncSync(fd); } finally { closeSync(fd); }
+  try { renameSync(temporary, target); } finally { rmSync(temporary, {force:true}); }
+}
+function agentView(root: string, s: ChatSession, args: Record<string, unknown>) {
+  return agentContext(view(root, s), pending(s, args.attachment_id)?.id);
 }
 function userMessageState(s: ChatSession, message: ChatMessage): string {
   const replies = s.messages.filter(reply => reply.role === 'assistant' && reply.reply_to === message.id);
@@ -65,8 +96,9 @@ export function chatMarkdown(session: ChatSession): string {
   return `# ${s.title}\n\nSession: ${s.id}\n\n${s.note ? `备注：${s.note}\n\n` : ''}` + group.groupMarkdown(s) + s.messages.map(m => `## ${m.kind === 'connection_request' ? '接入请求' : m.role === 'user' ? '你' : m.final === false ? 'AI · 进度' : 'AI'} · ${m.created_at}\n\n${m.tool_event ? `Tool (AI reported): ${m.tool_event.name} · ${m.tool_event.status}\n\n` : ''}${m.text}\n${group.groupMarkdown(s,m)}${chatPlanMarkdown(m.task_plan)}${m.role === 'user' ? `\n${userMessageState(s, m)}\n` : ''}${m.role === 'assistant' ? `\nReply state: ${m.awaiting_user ? 'awaiting_user' : m.final === false ? 'supplementing' : 'complete'}\n` : ''}${m.tool_event?.input ? `\nInput:\n${m.tool_event.input}\n` : ''}${m.tool_event?.output ? `\nOutput:\n${m.tool_event.output}\n` : ''}${m.tool_event?.output_truncated ? '\nOutput truncated\n' : ''}${(m.attachments ?? []).map(f => `\nAttachment: ${f.name} (${f.size} bytes)\nPath: ${f.path}\n${f.label ? `Reference: @${f.label}\n` : ''}`).join('')}`).join('\n') + queuedMarkdown(s);
 }
 function save(root: string, s: ChatSession): void {
-  const body = JSON.stringify(s, null, 2);
-  if (Buffer.byteLength(body) > MAX_BYTES || s.messages.length > 500) throw new Error('Session is full; start a new conversation');
+  const stored = packHistory(s, (digest, bytes) => writeHistoryPage(root, s.id, digest, bytes));
+  const body = JSON.stringify(stored, null, 2);
+  if (Buffer.byteLength(body) > MAX_BYTES) throw new Error('Chat metadata exceeds limit; preserve the archive and start a new conversation');
   const target = file(root, s.id);
   const temporary = safe(root, `${DIR}/${s.id}.${randomUUID()}.tmp`);
   writeFileSync(temporary, body, { mode: 0o600, flag: 'wx' });
@@ -293,6 +325,15 @@ export function chatUi(root: string, args: Record<string, unknown>): Record<stri
       if (existing && (existing.role !== 'user' || existing.kind === 'connection_request' || existing.text !== content || JSON.stringify(existing.attachments ?? []) !== JSON.stringify(attachments))) throw new Error('Message ID conflicts with an existing message');
       if (!existing) { if (!s.messages.some(m => m.role === 'user' && m.kind !== 'connection_request') && !s.title_custom && !s.title_agent_name) s.title = [...content.replace(/\s+/g, ' ')].slice(0, 36).join(''); const message:ChatMessage={ id, role: 'user', text: content, attachments, created_at: Date.now() };group.targetUser(s,message);if(!awaitingConfirmation(s)&&(pending(s)||s.queue?.length))(s.queue??=[]).push(message);else s.messages.push(message); s.updated_at = Date.now(); }
       save(root, s);
+    } else if(action==='cancel_queued'){
+      const id=validId(args.message_id),index=s.queue?.findIndex(message=>message.id===id)??-1;
+      if(index>=0){
+        const message=s.queue![index];
+        if(message.discussion)throw new Error('Collaboration deliveries cannot be cancelled from the outbox');
+        // Retain the send receipt so a delayed retry cannot resurrect cancelled work.
+        Object.defineProperty(s.queue_receipts??={},id,{value:queuedFingerprint(message.text,message.attachments??[]),enumerable:true,writable:true,configurable:true});
+        s.queue!.splice(index,1);s.updated_at=Date.now();save(root,s);
+      }
     } else if(action==='set_queue_mode'){if(args.mode!=='merge'&&args.mode!=='split')throw new Error('Invalid queue mode');s.queue_mode=args.mode;save(root,s);}
     else if(action==='pin'){if(typeof args.pinned!=='boolean')throw new Error('pinned must be a boolean');s.pinned=args.pinned;save(root,s);}
     else if(action==='archive'){if(typeof args.archived!=='boolean')throw new Error('archived must be a boolean');s.archived=args.archived;save(root,s);}
@@ -353,7 +394,7 @@ export function chatTool(root: string, name: string, args: Record<string, unknow
         const attempt=s.pending_pairing;
         if(!args.attachment_id&&attempt&&!s.messages.some(m=>m.id===attempt))s.messages.push({id:attempt,role:'user',kind:'connection_request',text:'请通过 chat_reply 回复“你好，有什么能帮到你？”（final=true），确认接入后继续 chat_wait。',created_at:Date.now(),recipient_ids:[member.id]});
         if(!args.attachment_id)delete s.pending_pairing;
-        if(member.role==='coordinator')assignAgentTitle(root,s,member.name);group.bindTargets(s);save(root,s);return {ok:true,attachment_id:member.attachment_id,agent_id:member.id,role:member.role,session:view(root,s),instruction: 'Read skill.text; reply only to your delivered message IDs. Call chat_wait.',skill:localChatSkill};}
+        if(member.role==='coordinator')assignAgentTitle(root,s,member.name);group.bindTargets(s);save(root,s);return {ok:true,attachment_id:member.attachment_id,agent_id:member.id,role:member.role,session:agentView(root,s,{attachment_id:member.attachment_id}),instruction: 'Read skill.text; reply only to your delivered message IDs. Call chat_wait.',skill:localChatSkill};}
       if(args.agent_name!==undefined)s.agent_name=group.memberName(args.agent_name);
       // Keepalive: the saved attachment_id resumes even after the lease lapsed, unless another AI attached meanwhile.
       const resuming = typeof args.attachment_id === 'string' && !!args.attachment_id && args.attachment_id === s.attachment_id;
@@ -362,7 +403,7 @@ export function chatTool(root: string, name: string, args: Record<string, unknow
       if (!resuming) s.attachment_id = randomUUID();
       assignAgentTitle(root,s,s.agent_name);
       group.renew(s,args.attachment_id); save(root, s);
-      return { ok: true, attachment_id: s.attachment_id, session: view(root, s), instruction: 'Read skill.text and follow it for this session; save attachment_id and call chat_wait now.', skill: localChatSkill };
+      return { ok: true, attachment_id: s.attachment_id, session: agentView(root, s, args), instruction: 'Read skill.text and follow it for this session; save attachment_id and call chat_wait now.', skill: localChatSkill };
     }
     owned(s, args.attachment_id);
     if (name === 'chat_upload') {
@@ -402,7 +443,7 @@ export function chatTool(root: string, name: string, args: Record<string, unknow
         s.updated_at = message.received_at;
       }
       save(root, s);
-      return { ok: true, status: message ? 'message' : 'idle', message: message ?? null,...(discussion_error?{discussion_error}:{}),...(group.grouped(s)?{session:view(root,s)}:{}) };
+      return { ok: true, status: message ? 'message' : 'idle', message: message ?? null,...(discussion_error?{discussion_error}:{}),...(group.grouped(s)?{session:agentView(root,s,args)}:{}) };
     }
     throw new Error('Unknown chat tool');
   });

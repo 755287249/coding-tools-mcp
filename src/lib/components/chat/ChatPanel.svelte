@@ -161,6 +161,7 @@
   let lastScrollTop = 0;
   let copied = $state(false);
   let queueChanging = $state(false);
+  let cancellingQueue = $state('');
   let queueElement=$state<HTMLDivElement>(),queueExpanded=$state(false);
   let runtimeState=$state('');
   $effect(()=>{const ws=workspaceId;runtimeState='';if(!ws)return;let stopped=false;const stop=startVisiblePolling(async()=>{try{const value=await getRuntimeStatus(ws);if(!stopped)runtimeState=value.state;}catch{if(!stopped)runtimeState='';}},()=>4000);return()=>{stopped=true;stop()}});
@@ -173,6 +174,16 @@
     const mode=detail.queue_mode==='split'?'merge':'split';queueChanging=true;
     try{const result=await localChat(ws,folder,{action:'set_queue_mode',chat_id:chat,mode});if(scope===currentScope&&result.session){readSequence++;detail=result.session;}}
     catch(e){if(scope===currentScope)error=String(e)}finally{queueChanging=false}
+  }
+  async function cancelQueued(messageId: string) {
+    if(cancellingQueue || !detail || !selected || loadingDetail)return;
+    const scope=currentScope,ws=workspaceId,folder=folderId,chat=selected;
+    cancellingQueue=messageId;
+    try {
+      const result=await localChat(ws,folder,{action:'cancel_queued',chat_id:chat,message_id:messageId});
+      if(scope===currentScope&&result.session){readSequence++;detail=result.session;}
+    } catch(e) { if(scope===currentScope)error=String(e); }
+    finally { cancellingQueue=''; }
   }
   let renameId = $state('');
   let renameTitle = $state('');
@@ -329,10 +340,26 @@
     else if (feed.scrollTop < lastScrollTop) following = false;
     lastScrollTop = feed.scrollTop;
     const top = feed.getBoundingClientRect().top + 40;
-    const rows = [...feed.querySelectorAll<HTMLElement>('[data-user-message]')];
-    activeMessage = rows.findLast(row => row.getBoundingClientRect().top <= top)?.dataset.userMessage ?? rows[0]?.dataset.userMessage ?? '';
+    const rows = feed.querySelectorAll<HTMLElement>('[data-user-message]');
+    // Rows are in document order: measure logarithmically instead of walking
+    // the entire transcript on every touch-scroll event.
+    let low = 0, high = rows.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (rows[middle].getBoundingClientRect().top <= top) low = middle + 1;
+      else high = middle;
+    }
+    activeMessage = rows[Math.max(0, low - 1)]?.dataset.userMessage ?? '';
     markRead();
   }
+  let scrollFrame = 0;
+  function scheduleScroll() {
+    // Stop following immediately when the user scrolls up, before a resize
+    // callback can snap them back to the newest message.
+    if (feed) { if (feed.scrollTop < lastScrollTop) following = false; lastScrollTop = feed.scrollTop; }
+    if (!scrollFrame) scrollFrame = requestAnimationFrame(() => { scrollFrame = 0; updateScroll(); });
+  }
+  onDestroy(() => cancelAnimationFrame(scrollFrame));
   function toBottom() {
     following = true;
     if (feed) { feed.scrollTop = feed.scrollHeight; lastScrollTop = feed.scrollTop; updateScroll(); }
@@ -672,7 +699,7 @@
     {#if isNewConversation}<div class="mode-switch" aria-label={$t('chat.mode')}><button type="button" aria-pressed={mode==='group'} disabled={busy||memberBusy||detail?.closed||!workspaceId||!folderId} onclick={()=>changeMode('group')}>{$t('chat.group')}</button><button type="button" aria-pressed={mode==='work'} disabled={busy||memberBusy||detail?.closed} onclick={()=>changeMode('work')}>{$t('chat.work')}</button></div>{/if}
     <div class="conversation-body">
     <div class="feed-frame">
-    <div class="message-feed" bind:this={feed} onscroll={updateScroll} aria-busy={loadingDetail}>
+    <div class="message-feed" bind:this={feed} onscroll={scheduleScroll} aria-busy={loadingDetail}>
       {#if selected && !detail}<div class="chat-loading" role="status">{loadingDetail ? $t("Loading…") : error}</div>
       {:else if !messages.length}<div class="empty-state"><h2>{$t(!workspaceId||!folderId?'chat.selectFolder':mode==='group'?'chat.inviteTitle':'chat.connectTitle')}</h2></div>
       {:else}<div class="message-column" bind:this={column}>{#each feedItems as item (item.id)}{#if item.kind === 'tools'}<article class="assistant grouped-tools"><div class="message-meta">{item.messages[0]?.agent_name ?? 'AI'} · {$t("chat.54")}</div><div class="message-body"><ChatToolActivity messages={item.messages} settled={item.settled} {workspaceId} {folderId} chatId={selected}/></div></article>{:else}{@const m = item.message}<article data-user-message={m.role === 'user' ? m.id : undefined} tabindex="-1" class:user={m.role === 'user'} class:assistant={m.role === 'assistant'}><div class="message-meta">{m.role === 'user' ? $t('chat.26') : m.agent_name ?? detail?.agent_name ?? (m.final === false ? $t('chat.27') : 'AI')}<time>{new Date(m.created_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</time></div>{#if (m.attachments??[]).some(file=>file.mime.startsWith('image/'))}<div class="message-images"><div class="image-strip">{#each (m.attachments??[]).filter(file=>file.mime.startsWith('image/')) as file (workspaceId+":"+folderId+":"+selected+":"+file.id+":"+file.sha256)}<ChatAttachment {workspaceId} {folderId} chatId={selected} {file}/>{/each}</div></div>{/if}<div class="message-body" class:image-only={!m.text.trim()&&!(m.attachments??[]).some(file=>!file.mime.startsWith('image/'))}>{#if editingMessage===m.id}<MessageEditor text={m.text} hasAttachments={!!m.attachments?.length} onSend={(text:string,id:string)=>resendMessage(m,text,id)} onCancel={()=>editingMessage=''}/>{:else}<MessageText text={m.text} attachments={m.attachments ?? []} {workspaceId} {folderId} chatId={selected} collapsible={m.role==='user'}/>{/if}{#each (m.attachments??[]).filter(file=>!file.mime.startsWith('image/')) as file (workspaceId + ":" + folderId + ":" + selected + ":" + file.id)}<ChatAttachment {workspaceId} {folderId} chatId={selected} {file}/>{/each}<ChatReplyState state={chatReplyState(detail, m.id)}/><ChatUserState state={chatUserState(detail, m.id)}/></div>{#if editingMessage!==m.id}<div class="message-actions"><button type="button" title={$t('chat.copyMessage')} aria-label={$t('chat.copyMessage')} onclick={()=>copyMessage(m)}>{#if copiedMessage===m.id}<Check size={15}/>{:else}<Copy size={15}/>{/if}</button>{#if m.role==='user'}<button type="button" title={$t('chat.editMessage')} aria-label={$t('chat.editMessage')} disabled={busy||!!detail?.closed} onclick={()=>editingMessage=m.id}><Pencil size={15}/></button>{:else}<button type="button" title={$t('chat.shareMessage')} aria-label={$t('chat.shareMessage')} onclick={()=>shareMessage=m}><Share2 size={15}/></button>{/if}</div>{/if}</article>{/if}{/each}{#if pendingState}<div class="pending" class:processing={pendingState === 'processing'} role="status" aria-live="polite"><ChatStatusIcon state={pendingState} label={pendingState === 'awaiting_user' ? $t('chat.73') : pendingState === 'processing' ? $t('chat.70') : pendingState === 'interrupted' ? $t('chat.71') : $t('chat.29')}/>{pendingState === 'awaiting_user' ? $t('chat.73') : pendingState === 'processing' ? $t('chat.70') : pendingState === 'interrupted' ? $t('chat.71') : $t('chat.29')}</div>{/if}</div>{/if}
@@ -685,13 +712,12 @@
         <button type="button" class="queue-mode" disabled={queueChanging||loadingDetail||detail.closed} aria-pressed={detail.queue_mode!=='split'} aria-busy={queueChanging} onclick={toggleQueueMode} title={$t(detail.queue_mode==='split'?'chat.queueSplitHint':'chat.queueMergeHint')} aria-label={$t(detail.queue_mode==='split'?'chat.queueSplitHint':'chat.queueMergeHint')}>{$t(detail.queue_mode==='split'?'chat.queueSplit':'chat.queueMerge')}</button>
         {#if queueExpanded}<button type="button" class="collapse-queue" onclick={collapseQueue} aria-label={$t('chat.collapseQueue')} title={$t('chat.collapseQueue')}>⌃</button>{/if}
         <div class="queued-items" bind:this={queueElement} aria-live="polite">
-          {#if detail.queue_mode !== 'split'}
-            <details class="queued-card merged-queue" ontoggle={()=>queueExpanded=!!queueElement?.querySelector("details[open]")}><summary><span>{$t('chat.queueItem')} · {$t('chat.queueMerge')} ({detail.queued_messages.length})</span><span>{detail.queued_messages.map(item=>item.text).join(' · ')}</span></summary>
-              <div>{#each detail.queued_messages as item,i (item.id)}<section><strong>{$t('chat.queueItem')} {i+1}</strong><p>{item.text}</p>{#if item.attachments?.length}<small>{item.attachments.map(f=>f.label??f.name).join(' · ')}</small>{/if}</section>{/each}</div>
-            </details>
-          {:else}
-            {#each detail.queued_messages as item,i (item.id)}<details class="queued-card" ontoggle={()=>queueExpanded=!!queueElement?.querySelector("details[open]")}><summary><span>{$t('chat.queueItem')} {i+1}</span><span>{item.text}</span></summary><div><p>{item.text}</p>{#if item.attachments?.length}<small>{item.attachments.map(f=>f.label??f.name).join(' · ')}</small>{/if}</div></details>{/each}
-          {/if}
+          {#each detail.queued_messages as item,i (item.id)}
+            <div class="queued-row">
+              <details class="queued-card" ontoggle={()=>queueExpanded=!!queueElement?.querySelector("details[open]")}><summary><span>{$t('chat.queueItem')} {i+1}</span><span>{item.text}</span></summary><div><p>{item.text}</p>{#if item.attachments?.length}<small>{item.attachments.map(f=>f.label??f.name).join(' · ')}</small>{/if}</div></details>
+              <button type="button" class="cancel-queue" disabled={!!cancellingQueue||loadingDetail} aria-busy={cancellingQueue===item.id} aria-label={`${$t('chat.cancelQueued')} ${i+1}`} title={$t('chat.cancelQueued')} onclick={()=>cancelQueued(item.id)}><X size={15}/></button>
+            </div>
+          {/each}
         </div>
       </div>{/if}{#if referenceOpen}<div class="reference-input"><input aria-label={$t('chat.123')} placeholder="mcp-assistant/artifacts/file.png" bind:value={referenceInput} disabled={busy} onkeydown={event=>{if(event.key==='Enter'){event.preventDefault();void attachReference()}}}/><button type="button" onclick={attachReference} disabled={busy||!referenceInput.trim()}>{$t('chat.122')}</button></div>{/if}<div class="bottom-control" class:at-bottom={following}><button type="button" class="jump-bottom" onclick={toBottom} title={$t('chat.96')} aria-label={$t('chat.96')} aria-pressed={following}><ArrowDown size={16}/></button></div><form onsubmit={(e) => { e.preventDefault(); void send(); }} class:file-drop-active={dropActive} use:fileDrop={{enabled:()=>!!folderId&&!busy&&!detail?.closed&&(!selected||!!detail),onFiles:files=>uploadFiles(files,true),onActive:value=>dropActive=value,onError:reason=>error=$t(reason==='directory'?'chat.dropDirectory':'chat.dropFailed')}}>{#if dropActive}<div class="file-drop-hint" aria-live="polite">{$t('chat.dropHint')}</div>{/if}{#if attachments.length}<div class="draft-files">{#each attachments as file (file.id)}<DraftAttachment {file} images={draftImages} {workspaceId} {folderId} chatId={selected} disabled={busy} onRemove={()=>removeAttachment(file)}/>{/each}</div>{/if}<div class="composer-input"><div class="mention-input"><div class="draft-highlight" bind:this={draftHighlight} aria-hidden="true">{#each highlightedDraft as part}{#if part.file}<span class="attachment-mention">{part.text}</span>{:else}{part.text}{/if}{/each}{'\n'}</div><textarea use:autoGrow={[draft, mode]} bind:this={composer} aria-label={$t("chat.39")} bind:value={draft} oninput={(event) => { draft = event.currentTarget.value; updateCaret(); mentionFocused=true; persistDraft(event instanceof InputEvent&&(event.inputType==='insertFromPaste'||event.inputType==='deleteByCut')?'action':'typing'); }} onbeforeinput={()=>{if(!composingDraft)draftHistory.record(draftSnapshot())}} oncompositionstart={()=>{draftHistory.record(draftSnapshot());composingDraft=true}} oncompositionend={()=>{composingDraft=false;persistDraft()}} onfocus={()=>{mentionFocused=true;updateCaret()}} onblur={()=>mentionFocused=false} onclick={()=>{mentionFocused=true;updateCaret()}} onkeyup={updateCaret} onscroll={()=>{if(draftHighlight){draftHighlight.scrollTop=composer.scrollTop;draftHighlight.scrollLeft=composer.scrollLeft}}} onpaste={pasteImages} placeholder={!workspaceId||!folderId ? $t('chat.selectFolder') : detail?.closed ? $t('chat.30') : $t('chat.31')} disabled={!folderId || detail?.closed || (busy && !uploading)} onkeydown={composerKeys} rows={mode==='group'?1:3} aria-autocomplete="list" aria-controls="attachment-choices"></textarea></div>{#if mention && (choices.length || hasMoreMentions)}<div class="mention-choices" popover="manual" use:anchoredChoices={()=>composer} id="attachment-choices" role="listbox" aria-label={$t('chat.attachmentChoices')}>
   <div role="group" aria-label={$t('chat.currentAttachments')}>
@@ -795,7 +821,7 @@
 
 .composer-input{position:relative}.mention-input{position:relative;min-width:0;flex:1;display:block}.mention-input textarea,.draft-highlight{grid-area:1/1;width:100%;box-sizing:border-box;padding:0;border:0;font:13px/1.7 system-ui;letter-spacing:normal;white-space:pre-wrap;overflow-wrap:break-word;tab-size:8}.draft-highlight{position:absolute;inset:0;height:100%;pointer-events:none;overflow:hidden;color:#eee;max-height:100%;min-height:62px}.mention-input textarea{position:relative;z-index:1;color:transparent!important;caret-color:#eee;background:transparent;resize:none}.attachment-mention{color:#79b5ff;background:#397ddd22;border-radius:3px}.mention-choices{position:absolute;bottom:calc(100% + 10px);left:0;z-index:15;width:min(340px,100%);max-height:220px;overflow:auto;border:1px solid #ffffff25;border-radius:12px;background:#262626;box-shadow:0 12px 32px #0007;padding:5px}.mention-choices button{display:flex;align-items:center;gap:12px;width:100%;text-align:left;padding:9px;border-radius:7px;font-size:12px}.mention-choices button.active,.mention-choices button:hover{background:#ffffff12}.mention-choices strong{color:#79b5ff;white-space:nowrap}.mention-choices span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#aaa}.draft-files{margin-bottom:10px;flex-wrap:nowrap;overflow-x:auto;padding:4px 2px;max-height:150px}
 
-.outbox{display:flex;align-items:flex-start;gap:10px;max-width:760px;margin:0 auto 10px;color:#ddd}.queue-mode{display:grid;place-items:center;flex:none;width:29px;height:29px;border:1px solid #ffffff30;border-radius:50%;font-size:12px;background:#292929}.queue-mode:hover{background:#3b3b3b}.queue-mode:disabled{opacity:.5;cursor:wait}.queue-mode[aria-pressed=true]{border-color:#91b9f5;background:#24364c}.merged-queue section+section{border-top:1px solid #ffffff20;margin-top:10px;padding-top:10px}.queued-items{flex:1;min-width:0;max-height:160px;overflow:auto;display:flex;flex-direction:column;gap:5px}.queued-card{border:1px solid #ffffff20;border-radius:10px;background:#262626;font-size:12px}.queued-card summary{display:flex;gap:10px;padding:7px 10px;cursor:pointer;list-style:none}.queued-card summary::-webkit-details-marker{display:none}.queued-card summary span:first-child{flex:none;color:#91b9f5}.queued-card summary span:last-child{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#bbb}.queued-card>div{padding:2px 10px 10px;white-space:pre-wrap;overflow-wrap:anywhere}.queued-card small{color:#aaa}.landing:has(.outbox) .composer-area{padding-bottom:35px}
+.outbox{display:flex;align-items:flex-start;gap:10px;max-width:760px;margin:0 auto 10px;color:#ddd}.queue-mode{display:grid;place-items:center;flex:none;width:29px;height:29px;border:1px solid #ffffff30;border-radius:50%;font-size:12px;background:#292929}.queue-mode:hover{background:#3b3b3b}.queue-mode:disabled{opacity:.5;cursor:wait}.queue-mode[aria-pressed=true]{border-color:#91b9f5;background:#24364c}.queued-row{display:flex;align-items:flex-start;gap:4px}.queued-row .queued-card{flex:1;min-width:0}.cancel-queue{display:grid;place-items:center;flex:none;width:32px;min-height:32px;border-radius:8px;color:var(--color-text-muted);cursor:pointer}.cancel-queue:hover{background:var(--surface-hover);color:var(--danger)}.cancel-queue:focus-visible{outline:2px solid var(--primary)}.cancel-queue:disabled{opacity:.5;cursor:wait}.queued-items{flex:1;min-width:0;max-height:160px;overflow:auto;display:flex;flex-direction:column;gap:5px}.queued-card{border:1px solid #ffffff20;border-radius:10px;background:#262626;font-size:12px}.queued-card summary{display:flex;gap:10px;padding:7px 10px;cursor:pointer;list-style:none}.queued-card summary::-webkit-details-marker{display:none}.queued-card summary span:first-child{flex:none;color:#91b9f5}.queued-card summary span:last-child{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#bbb}.queued-card>div{padding:2px 10px 10px;white-space:pre-wrap;overflow-wrap:anywhere}.queued-card small{color:#aaa}.landing:has(.outbox) .composer-area{padding-bottom:35px}
 @container (min-width:800px){.tasks-visible .conversation{margin-right:var(--chat-task-width)}}
 .mode-switch{display:flex;justify-content:center;align-self:center;gap:3px;margin:20px 0 0;padding:4px;background:#252525;border:1px solid #ffffff0c;border-radius:22px;font-size:12px}.mode-switch button{padding:7px 22px;border-radius:18px;color:#969696}.mode-switch button[aria-pressed=true]{background:#414141;color:#eee;box-shadow:0 2px 4px #0003}.group-mode .composer-area form{position:relative;display:flex;flex-wrap:wrap;align-items:center;gap:8px;border-radius:28px;padding:10px 12px 10px 20px}.group-mode .composer-input{flex:1;min-width:100px;margin-left:26px}.group-mode .mention-input textarea,.group-mode .draft-highlight{min-height:28px;line-height:28px}.group-mode .composer-toolbar{margin:0;gap:8px}.group-mode .composer-toolbar>span{position:absolute;left:12px}.group-mode .composer-toolbar>span>button:not(.attach-button){display:none}.group-mode .draft-files{width:100%;margin:0}.composer-toolbar>span>button{padding:4px 6px}.group-mode.landing .composer-area{padding-bottom:35px}
 .mention-input textarea::placeholder{color:#aaa;opacity:1}

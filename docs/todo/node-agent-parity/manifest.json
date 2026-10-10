@@ -2,12 +2,12 @@
   "schema_version": 2,
   "assertion_registry": "assertions.json",
   "baseline": {
-    "audited_at": "2026-09-14",
+    "audited_at": "2026-10-10",
     "repository_head": "f7ab8735dd61d1cc8fb5eeba7da8a980add2af90",
     "head_policy": "ancestor",
-    "desktop_client_version": "0.1.114",
+    "desktop_client_version": "0.1.115",
     "node_agent_version": "0.29.35",
-    "client_compatibility_version": "0.1.114"
+    "client_compatibility_version": "0.1.115"
   },
   "status_values": ["todo", "in_progress", "blocked", "done", "excluded"],
   "priority_values": ["P0", "P1", "P2"],

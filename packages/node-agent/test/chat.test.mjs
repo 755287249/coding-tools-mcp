@@ -12,6 +12,29 @@ function fixture(t) {
   const { attachment_id } = chatTool(root, 'chat_open', { chat_id: session.id });
   return { root, args: { chat_id: session.id, attachment_id } };
 }
+for(const grouped of [false,true])for(const mode of ['merge','split'])test(`cancel one queued message safely (${grouped?'group':'work'}, ${mode})`,t=>{
+  const {root,args}=fixture(t);
+  if(grouped)chatUi(root,{action:'set_mode',chat_id:args.chat_id,mode:'group'});
+  chatUi(root,{action:'set_queue_mode',chat_id:args.chat_id,mode});
+  const read=()=>chatUi(root,{action:'read',chat_id:args.chat_id}).session;
+  const send=(id,text)=>chatUi(root,{action:'send',chat_id:args.chat_id,message_id:id,text});
+  const cancel=id=>chatUi(root,{action:'cancel_queued',chat_id:args.chat_id,message_id:id});
+  send('active','Current work');
+  for(const id of ['q1','q2','q3'])send(id,`Queued ${id}`);
+  const before=read();
+  cancel('q2');cancel('q2');send('q2','Queued q2');
+  assert.deepEqual(read().queued_messages,before.queued_messages.filter(message=>message.id!=='q2'));
+  assert.deepEqual(read().messages,before.messages);
+  assert.throws(()=>send('q2','different'),/conflict/i);
+  cancel('active');cancel('missing');assert.deepEqual(read().messages,before.messages);
+  assert.ok(!readFileSync(path.join(root,read().archive_path),'utf8').includes('Queued q2'));
+  chatTool(root,'chat_reply',{...args,message_id:'done',reply_to:'active',text:'Done',final:true});
+  const delivered=chatTool(root,'chat_wait',args).message;
+  assert.ok(!delivered.text.includes('Queued q2'));
+  assert.ok(delivered.text.includes('Queued q1'));
+  const published=read().messages;cancel('q1');assert.deepEqual(read().messages,published,'already published work is never removed');
+  assert.equal(read().queued_messages.length,mode==='split'?1:0);
+});
 test('pickup receipts persist once for immediate and long-poll delivery', async t => {
   const {root,args}=fixture(t);
   const read=()=>chatUi(root,{action:'read',chat_id:args.chat_id}).session;

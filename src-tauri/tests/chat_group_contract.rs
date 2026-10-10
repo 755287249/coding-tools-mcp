@@ -40,7 +40,8 @@ async fn group_waits_assignments_plans_and_archives_are_isolated_by_member(){
  for who in [&a,&b]{assert!(!md.contains(who["attachment_id"].as_str().unwrap()));assert!(!read().to_string().contains(who["attachment_id"].as_str().unwrap()));}
  assert!(chat::ui(root.path(),&json!({"action":"set_mode","chat_id":cid,"mode":"work"})).is_err());
  chat::ui(root.path(),&json!({"action":"detach_member","chat_id":cid,"member_id":b["agent_id"]})).unwrap();assert!(chat::tool(root.path(),"chat_open",&bb).is_err());
- assert_eq!(chat::ui(root.path(),&json!({"action":"set_mode","chat_id":cid,"mode":"work"})).unwrap()["session"]["mode"],"work");
+ assert!(chat::ui(root.path(),&json!({"action":"set_mode","chat_id":cid,"mode":"work"})).unwrap_err().to_string().contains("fixed after"));
+ assert_eq!(read()["mode"],"group");
  assert_eq!(chat::tool(root.path(),"chat_open",&aa).unwrap()["attachment_id"],a["attachment_id"]);
 }
 #[test]
@@ -48,9 +49,13 @@ fn legacy_upgrade_keeps_attachment_and_queue_targets(){
  let root=tempfile::tempdir().unwrap();let r=root.path();
  let cid=chat::ui(r,&json!({"action":"create"})).unwrap()["session"]["id"].clone();
  let a=chat::tool(r,"chat_open",&json!({"chat_id":cid,"agent_name":"Chief"})).unwrap();let aa=json!({"chat_id":cid,"attachment_id":a["attachment_id"]});
+ chat::ui(r,&json!({"action":"set_mode","chat_id":cid,"mode":"group"})).unwrap();
+ assert_eq!(chat::tool(r,"chat_open",&aa).unwrap()["attachment_id"],a["attachment_id"]);
+ assert_eq!(chat::tool(r,"chat_open",&aa).unwrap()["role"],"coordinator");
  chat::ui(r,&json!({"action":"send","chat_id":cid,"message_id":"u","text":"Work"})).unwrap();
  let progress=json!({"chat_id":cid,"attachment_id":a["attachment_id"],"message_id":"progress","reply_to":"u","text":"Working","final":false});chat::tool(r,"chat_reply",&progress).unwrap();
- chat::ui(r,&json!({"action":"set_mode","chat_id":cid,"mode":"group"})).unwrap();assert_eq!(chat::tool(r,"chat_open",&aa).unwrap()["role"],"coordinator");chat::tool(r,"chat_reply",&progress).unwrap();
+ assert!(chat::ui(r,&json!({"action":"set_mode","chat_id":cid,"mode":"work"})).unwrap_err().to_string().contains("fixed after"));
+ chat::tool(r,"chat_reply",&progress).unwrap();
  let b=chat::tool(r,"chat_open",&json!({"chat_id":cid,"agent_name":"Builder"})).unwrap();let bb=json!({"chat_id":cid,"attachment_id":b["attachment_id"]});
  chat::ui(r,&json!({"action":"send","chat_id":cid,"message_id":"q1","text":"@Builder queued"})).unwrap();chat::ui(r,&json!({"action":"send","chat_id":cid,"message_id":"q2","text":"Next"})).unwrap();
  chat::tool(r,"chat_reply",&json!({"chat_id":cid,"attachment_id":a["attachment_id"],"message_id":"done","reply_to":"u","text":"Done","final":true})).unwrap();

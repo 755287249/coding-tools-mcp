@@ -2,7 +2,7 @@
 
 **Status:** Complete
 
-**Baseline:** Rust/Desktop Client `0.1.59` · Node Agent `0.29.35` · client compatibility `0.1.59`
+**Baseline:** Rust/Desktop Client `0.1.115` · Node Agent `0.29.35` · client compatibility `0.1.115`
 
 This checklist tracks shared Management UI capabilities that should remain synchronized with the Rust Desktop console while preserving the pure Node Agent product boundary. It does not require visual identity or desktop-only process management.
 

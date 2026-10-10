@@ -1,4 +1,6 @@
-//! Local chat v1. JSON is authoritative; Markdown is a rebuildable projection.
+//! Local chat. JSON manifests and immutable pages are authoritative; Markdown is a projection.
+#[path = "chat_history.rs"]
+mod history;
 #[path = "chat_operations.rs"]
 pub(crate) mod operations;
 #[path = "chat_group.rs"]
@@ -111,7 +113,8 @@ fn load_snapshot(root: &Path, chat_id: &str) -> Result<Option<Value>> {
     if bytes.len() as u64 > MAX_BYTES {
         return Err(err("Chat archive exceeds size limit"));
     }
-    let mut s: Value = serde_json::from_slice(&bytes).map_err(|e| err(e.to_string()))?;
+    let stored: Value = serde_json::from_slice(&bytes).map_err(|e| err(e.to_string()))?;
+    let mut s = history::unpack(root, chat_id, stored)?;
     if (s["version"] != 1 && s["version"] != 2) || s["id"] != chat_id || !s["messages"].is_array() {
         return Err(err("Invalid chat archive"));
     }
@@ -251,9 +254,10 @@ fn atomic(root: &Path, chat_id: &str, extension: &str, bytes: &[u8]) -> Result<(
     result
 }
 fn save(root: &Path, s: &Value) -> Result<()> {
-    let bytes = serde_json::to_vec_pretty(s).map_err(|e| err(e.to_string()))?;
-    if bytes.len() as u64 > MAX_BYTES || s["messages"].as_array().map_or(0, Vec::len) > 500 {
-        return Err(err("Session is full; start a new conversation"));
+    let stored = history::pack(root, s)?;
+    let bytes = serde_json::to_vec_pretty(&stored).map_err(|e| err(e.to_string()))?;
+    if bytes.len() as u64 > MAX_BYTES {
+        return Err(err("Chat metadata exceeds limit; preserve the archive and start a new conversation"));
     }
     let chat_id = id(&s["id"])?;
     atomic(root, chat_id, "json", &bytes)?;
@@ -675,6 +679,19 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
             }
             save(root, &s)?;
         }
+        "cancel_queued" => {
+            let message_id = id(&args["message_id"])?;
+            if let Some(index) = s["queue"].as_array().and_then(|queue| queue.iter().position(|message| message["id"] == message_id)) {
+                let message = s["queue"][index].clone();
+                if message.get("discussion").is_some() { return Err(err("Collaboration deliveries cannot be cancelled from the outbox")); }
+                // The send receipt also protects cancellation from delayed retries.
+                if s["queue_receipts"].is_null() { s["queue_receipts"] = json!({}); }
+                s["queue_receipts"][message_id] = json!(queued_fingerprint(message["text"].as_str().unwrap_or(""), message["attachments"].as_array().map(Vec::as_slice).unwrap_or(&[])));
+                s["queue"].as_array_mut().unwrap().remove(index);
+                s["updated_at"] = json!(now());
+                save(root, &s)?;
+            }
+        }
         "set_queue_mode" => {if args["mode"]!="merge"&&args["mode"]!="split"{return Err(err("Invalid queue mode"));}s["queue_mode"]=args["mode"].clone();save(root,&s)?;}
         "pin" => {if !args["pinned"].is_boolean(){return Err(err("pinned must be a boolean"));}s["pinned"]=args["pinned"].clone();save(root,&s)?;}
         "archive" => {if !args["archived"].is_boolean(){return Err(err("archived must be a boolean"));}s["archived"]=args["archived"].clone();save(root,&s)?;}
@@ -796,7 +813,7 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
                 if !s["messages"].as_array().unwrap().iter().any(|m|m["id"]==attempt){s["messages"].as_array_mut().unwrap().push(json!({"id":attempt,"role":"user","kind":"connection_request","text":"请通过 chat_reply 回复“你好，有什么能帮到你？”（final=true），确认接入后继续 chat_wait。","created_at":now(),"recipient_ids":[member["id"]]}));}
             }
             if args["attachment_id"].as_str().unwrap_or("").is_empty(){s.as_object_mut().unwrap().remove("pending_pairing");}
-            if member["role"]=="coordinator"{assign_agent_title(root,&mut s,member["name"].as_str().unwrap_or(""))?;}group::bind_targets(&mut s);save(root,&s)?;return Ok(json!({"ok":true,"attachment_id":member["attachment_id"],"agent_id":member["id"],"role":member["role"],"session":view(root,&s)?,"instruction":"Read skill.text; reply only to your delivered message IDs. Call chat_wait.","skill":local_chat_skill()}));}
+            if member["role"]=="coordinator"{assign_agent_title(root,&mut s,member["name"].as_str().unwrap_or(""))?;}group::bind_targets(&mut s);save(root,&s)?;return Ok(json!({"ok":true,"attachment_id":member["attachment_id"],"agent_id":member["id"],"role":member["role"],"session":history::agent_view(root,&s,&json!({"attachment_id":member["attachment_id"]}))?,"instruction":"Read skill.text; reply only to your delivered message IDs. Call chat_wait.","skill":local_chat_skill()}));}
         if args.get("agent_name").is_some(){s["agent_name"]=json!(group::member_name(&args["agent_name"])?);}
 
         // Keepalive: the saved attachment_id always resumes, even after the lease
@@ -818,7 +835,7 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
         group::renew(&mut s,args)?;
         save(root, &s)?;
         return Ok(
-            json!({"ok":true,"attachment_id":s["attachment_id"],"session":view(root,&s)?,"instruction":"Read skill.text and follow it for this session; save attachment_id and call chat_wait now.","skill":local_chat_skill()}),
+            json!({"ok":true,"attachment_id":s["attachment_id"],"session":history::agent_view(root,&s,args)?,"instruction":"Read skill.text and follow it for this session; save attachment_id and call chat_wait now.","skill":local_chat_skill()}),
         );
     }
     owned(&s, args)?;
@@ -906,7 +923,7 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
             save(root, &s)?;
             let message = delivery(&s,args,true)?;
             Ok(
-                json!({"ok":true,"status":if message.is_some(){"message"}else{"idle"},"discussion_error":discussion_error,"message":message,"session":if group::grouped(&s){view(root,&s)?}else{Value::Null}}),
+                json!({"ok":true,"status":if message.is_some(){"message"}else{"idle"},"discussion_error":discussion_error,"message":message,"session":if group::grouped(&s){history::agent_view(root,&s,args)?}else{Value::Null}}),
             )
         }
         _ => Err(err("Unknown chat tool")),
@@ -1116,6 +1133,36 @@ mod tests {
         tool(root,"chat_reply",&json!({"chat_id":cid,"attachment_id":attachment,"message_id":"done","reply_to":"format-a","text":"done","final":true})).unwrap();
         assert_eq!(tool(root,"chat_wait",&args).unwrap()["message"]["text"],format!("队列1：\n\n{body}\n\n队列2：\n\n{body}"));
         assert!(message_text(&json!(" ".repeat(32000)+"x"),32000).is_err());
+    }
+
+    #[test]
+    fn cancel_one_queued_message_preserves_order_and_retry_receipts() {
+        for grouped in [false, true] { for mode in ["merge", "split"] {
+            let dir = tempfile::tempdir().unwrap(); let root = dir.path();
+            let cid = ui(root, &json!({"action":"create"})).unwrap()["session"]["id"].clone();
+            let aid = tool(root, "chat_open", &json!({"chat_id":cid})).unwrap()["attachment_id"].clone();
+            if grouped { ui(root, &json!({"action":"set_mode","chat_id":cid,"mode":"group"})).unwrap(); }
+            ui(root, &json!({"action":"set_queue_mode","chat_id":cid,"mode":mode})).unwrap();
+            let read = || ui(root, &json!({"action":"read","chat_id":cid})).unwrap()["session"].clone();
+            let send = |id: &str, text: &str| ui(root, &json!({"action":"send","chat_id":cid,"message_id":id,"text":text}));
+            let cancel = |id: &str| ui(root, &json!({"action":"cancel_queued","chat_id":cid,"message_id":id})).unwrap();
+            send("active", "Current work").unwrap();
+            for id in ["q1", "q2", "q3"] { send(id, &format!("Queued {id}")).unwrap(); }
+            let before = read();
+            cancel("q2"); cancel("q2"); send("q2", "Queued q2").unwrap();
+            let expected: Vec<Value> = before["queued_messages"].as_array().unwrap().iter().filter(|m| m["id"] != "q2").cloned().collect();
+            assert_eq!(read()["queued_messages"], json!(expected));
+            assert_eq!(read()["messages"], before["messages"]);
+            assert!(send("q2", "different").is_err());
+            cancel("active"); cancel("missing"); assert_eq!(read()["messages"], before["messages"]);
+            assert!(!fs::read_to_string(root.join(read()["archive_path"].as_str().unwrap())).unwrap().contains("Queued q2"));
+            tool(root, "chat_reply", &json!({"chat_id":cid,"attachment_id":aid,"reply_to":"active","message_id":"done","text":"Done","final":true})).unwrap();
+            let message = tool(root, "chat_wait", &json!({"chat_id":cid,"attachment_id":aid})).unwrap()["message"].clone();
+            assert!(message["text"].as_str().unwrap().contains("Queued q1"));
+            assert!(!message["text"].as_str().unwrap().contains("Queued q2"));
+            let published = read()["messages"].clone(); cancel("q1"); assert_eq!(read()["messages"], published);
+            assert_eq!(read()["queued_messages"].as_array().unwrap().len(), if mode == "split" {1} else {0});
+        }}
     }
 
     #[test]

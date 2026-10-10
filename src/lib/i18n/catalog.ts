@@ -325,6 +325,7 @@ export const MESSAGES = {
   'chat.attachmentChoices': ['Attachment references', '附件引用', '附件引用', '添付ファイルの参照'],
   'chat.outbox': ['Queued messages', '待傳送佇列', '待发送队列', '送信待ちメッセージ'],
   'chat.queueItem': ['Queue', '佇列', '队列', 'キュー'],
+  'chat.cancelQueued': ['Cancel queued message', '取消排隊訊息', '取消待发送消息', '待機中のメッセージを取り消す'],
   'chat.queueMerge': ['M', '合', '合', '合'],
   'chat.queueSplit': ['S', '分', '分', '分'],
   'chat.queueMergeHint': ['Merge queued messages when the AI is ready; click to split', 'AI 可接單時合併傳送；點擊切換逐條', 'AI 可接单时合并发送；点击切换逐条', 'AI の準備ができたらまとめて送信。クリックで個別に切替'],
