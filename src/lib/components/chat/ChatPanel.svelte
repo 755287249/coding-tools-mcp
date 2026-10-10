@@ -845,6 +845,6 @@
 @media(prefers-reduced-motion:reduce){.pairing-orbit{animation:none}}
 
 .mention-choices[popover]{position:fixed;inset:auto;margin:0;z-index:auto;color:var(--color-text);}
-button.connect-button{background:#b4232c;color:#fff;font-weight:600;white-space:nowrap}button.connect-button:hover:enabled{background:#cf2d38}
+button.connect-button{background:rgb(214 111 120 / .18);color:color-mix(in srgb,#d66f78 65%,var(--color-text));font-weight:600;white-space:nowrap}button.connect-button:hover:enabled{background:rgb(214 111 120 / .26)}
 form.file-drop-active{outline:2px dashed var(--primary);outline-offset:3px}.file-drop-hint{position:absolute;inset:4px;z-index:5;display:grid;place-items:center;pointer-events:none;border-radius:inherit;background:var(--surface-2);color:var(--color-text);font-size:14px;font-weight:600}
 </style>
