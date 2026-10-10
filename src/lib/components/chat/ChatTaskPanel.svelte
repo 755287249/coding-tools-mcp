@@ -26,7 +26,7 @@
   let drag:{x:number;width:number;id:number}|null=null;
   function setWidth(value:number){width=Math.max(Math.min(280,maxWidth),Math.min(maxWidth,value));}
   $effect(()=>{const wide=expanded;untrack(()=>setWidth(wide?600:350))});
-  $effect(()=>{const parent=panel?.parentElement;if(!parent)return;const observer=new ResizeObserver(()=>{maxWidth=Math.max(180,Math.min(900,parent.clientWidth>=800?parent.clientWidth*.6:parent.clientWidth-24));setWidth(width)});observer.observe(parent);return()=>observer.disconnect()});
+  $effect(()=>{const parent=panel?.parentElement;if(!parent)return;const observer=new ResizeObserver(()=>{maxWidth=Math.max(180,Math.min(900,parent.clientWidth>=800?parent.clientWidth*.6:parent.clientWidth*.85));setWidth(width)});observer.observe(parent);return()=>observer.disconnect()});
   function begin(event:PointerEvent){if(event.button!==0)return;event.preventDefault();(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);drag={x:event.clientX,width,id:event.pointerId};}
   function move(event:PointerEvent){if(drag?.id===event.pointerId)setWidth(drag.width+drag.x-event.clientX);}
   function end(event:PointerEvent){if(drag?.id!==event.pointerId)return;drag=null;const el=event.currentTarget as HTMLElement;if(el.hasPointerCapture(event.pointerId))el.releasePointerCapture(event.pointerId);}

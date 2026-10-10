@@ -3,7 +3,8 @@
   import BrowserLogin from "$lib/components/BrowserLogin.svelte";
   import { browserAuthenticated, browserLogout } from "$lib/backend/browser-session";
   import { onMount } from "svelte";
-  import { goto } from "$app/navigation";
+  import { goto, afterNavigate } from "$app/navigation";
+  import { resetActivityPanel } from "$lib/stores/activity-panel";
   import { page } from "$app/stores";
   import { appUrl, routePath } from "$lib/app-path";
   import { pickDirectory, confirm } from "$lib/api/native";
@@ -39,6 +40,7 @@
   import type { RuntimeState } from "$lib/types";
 
   installHostBackend();
+  afterNavigate(resetActivityPanel);
 
   let { children } = $props();
   const capabilities = getBackend().capabilities;

@@ -784,7 +784,7 @@
 .mention-input textarea::placeholder{color:#aaa;opacity:1}
 .composer-area form{position:relative;z-index:1}
 .composer-tongue{display:flex;align-items:center;flex-wrap:wrap;gap:4px;max-width:736px;width:calc(100% - 24px);margin:-10px auto 0;padding:16px 10px 7px;border-radius:0 0 15px 15px;background:#272727;color:#ddd;font-size:11px;box-sizing:border-box}
-@container (max-width:799px){.tasks-visible .conversation{margin-right:0;display:none}.tasks-visible :global(.chat-task-panel){width:100%!important}}
+@container (max-width:799px){.tasks-visible .conversation{margin-right:0}.tasks-visible :global(.chat-task-panel){max-width:85%;box-shadow:-12px 0 36px #0005}}
 .conversation-body{display:flex;flex:1;flex-direction:column;min-height:0}
 .landing .conversation-body{justify-content:center;overflow:auto}
 .landing .feed-frame{flex:0 0 auto;margin-top:0}

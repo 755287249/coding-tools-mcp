@@ -12,6 +12,7 @@ const outDir = process.env.CTMCP_UI_OUT ?? "build";
 const config = {
   preprocess: vitePreprocess(),
   kit: {
+    output: { bundleStrategy: "single" },
     adapter: adapter({
       fallback: "index.html",
       pages: outDir,
