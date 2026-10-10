@@ -159,7 +159,7 @@ test('group outbox merge/split is reversible and merged delivery preserves saved
  reply(a,'q1-done','q1');
  assert.equal(read().queued_messages.length,2,'final reply does not publish');
  const merged=chatTool(root,'chat_wait',a).message;
- assert.equal(merged.text,'队列1：Second\n\n队列2：@前端 Third 😀');
+ assert.equal(merged.text,'队列1：\n\nSecond\n\n队列2：\n\n@前端 Third 😀');
  assert.deepEqual(new Set(merged.recipient_ids),new Set([a.agent_id,b.agent_id]));
  assert.deepEqual(merged.attachments.map(f=>f.id),[file.id]);
  assert.equal(chatTool(root,'chat_wait',b).message.id,'q2');

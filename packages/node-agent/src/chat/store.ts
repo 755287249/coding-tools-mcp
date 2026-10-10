@@ -25,9 +25,9 @@ const MAX_BYTES = 2 * 1024 * 1024;
 const LEASE_MS = 10 * 60_000;
 const waiters = new Set<string>();
 const validId = (id: unknown): string => { if (typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(id)) throw new Error('Invalid chat/message ID'); return id; };
-function text(value: unknown, max = 32000): string {
+function text(value: unknown, max = 32000, preserve = false): string {
   if (typeof value !== 'string' || !value.trim() || Buffer.byteLength(value) > max) throw new Error(`Text must contain 1–${max} bytes`);
-  return redactSensitiveText(value.trim()).value;
+  return redactSensitiveText(preserve ? value : value.trim()).value;
 }
 function safe(root: string, relative: string): string {
   const base = realpathSync(root);
@@ -197,8 +197,8 @@ function toolEvent(value: unknown, final: boolean): ToolEvent | undefined {
   const event = value as Record<string, unknown>;
   if (!event || typeof event !== 'object' || final || !['running','completed','failed'].includes(String(event.status))) throw new Error('Tool events require final=false and a valid status');
   const result: ToolEvent = { name: text(event.name, 120), status: event.status as ToolEvent['status'] };
-  if (event.input !== undefined) result.input = text(event.input, 8000);
-  if (event.output !== undefined) result.output = text(event.output, 16000);
+  if (event.input !== undefined) result.input = text(event.input, 8000, true);
+  if (event.output !== undefined) result.output = text(event.output, 16000, true);
   if (event.output_truncated !== undefined) {
     if (typeof event.output_truncated !== 'boolean') throw new Error('output_truncated must be a boolean');
     if (event.output_truncated) result.output_truncated = true;
@@ -286,7 +286,7 @@ export function chatUi(root: string, args: Record<string, unknown>): Record<stri
     }
     if (action === 'send') {
       if (s.closed) throw new Error('Conversation is closed');
-      const id = validId(args.message_id); const attachments = messageFiles(s, args.attachment_ids); const content = text(args.text || (attachments.length ? '📎' : ''));
+      const id = validId(args.message_id); const attachments = messageFiles(s, args.attachment_ids); const content = text(args.text || (attachments.length ? '📎' : ''),32000,true);
       const receipt=Object.hasOwn(s.queue_receipts??{},id)?s.queue_receipts![id]:undefined;
       if(receipt){if(receipt!==queuedFingerprint(content,attachments))throw new Error('Message ID conflicts with a queued delivery');save(root,s);return {session:localView(root,s)};}
       const existing = [...s.messages,...(s.queue??[])].find(m => m.id === id);
@@ -372,7 +372,7 @@ export function chatTool(root: string, name: string, args: Record<string, unknow
     }
     if(name==='chat_discuss')return discussionAction(discussionStore(root),args,s);
     if (name === 'chat_reply') {
-      const id = validId(args.message_id); const replyTo = validId(args.reply_to); const content = text(args.text);
+      const id = validId(args.message_id); const replyTo = validId(args.reply_to); const content = text(args.text,32000,true);
       const attachments = messageFiles(s, args.attachment_ids);
       const final = args.final !== false; const tool_event = toolEvent(args.tool_event, final);
       if (args.awaiting_user !== undefined && typeof args.awaiting_user !== 'boolean') throw new Error('awaiting_user must be a boolean');
@@ -522,7 +522,7 @@ function publishQueued(s: ChatSession): void {
   const count=s.queue[0].discussion?1:(s.queue_mode ?? (group.grouped(s)?'split':'merge'))==='split'?1:boundary<0?s.queue.length:boundary;
   const items=s.queue.splice(0,count);
   const attachments=[...new Map(items.flatMap(m=>m.attachments??[]).map(f=>[f.id,f])).values()];
-  const message:ChatMessage={...items[0],text:items.length===1?items[0].text:items.map((m,i)=>`队列${i+1}：${m.text}`).join('\n\n'),attachments,created_at:Date.now()};
+  const message:ChatMessage={...items[0],text:items.length===1?items[0].text:items.map((m,i)=>`队列${i+1}：\n\n${m.text}`).join('\n\n'),attachments,created_at:Date.now()};
   for(const item of items)Object.defineProperty(s.queue_receipts??={},item.id,{value:queuedFingerprint(item.text,item.attachments??[]),enumerable:true,writable:true,configurable:true});
   // Preserve queued recipients even when a member has since been renamed.
   if(group.grouped(s)){const targets=items.flatMap(item=>{if(!item.recipient_ids?.length)group.targetUser(s,item);return item.recipient_ids??[]});message.recipient_ids=[...new Set(targets)];}

@@ -8,6 +8,7 @@
   import { autoGrow, messageBytes } from '$lib/chat/autogrow';
   import ChatMembers from './ChatMembers.svelte';
   import ChatTaskPanel from './ChatTaskPanel.svelte';
+  import { getRuntimeStatus } from '$lib/api/workspaces';
   import { taskPlanMarkdown } from '$lib/chat/task-state';
   import DraftAttachment from './DraftAttachment.svelte';
   import { IMAGE_GALLERY, conversationImages, attachmentImages } from '$lib/chat/image-gallery';
@@ -156,6 +157,12 @@
   let lastScrollTop = 0;
   let copied = $state(false);
   let queueChanging = $state(false);
+  let queueElement=$state<HTMLDivElement>(),queueExpanded=$state(false);
+  let runtimeState=$state('');
+  $effect(()=>{const ws=workspaceId;runtimeState='';if(!ws)return;let stopped=false,timer:ReturnType<typeof setTimeout>;const poll=async()=>{try{const value=await getRuntimeStatus(ws);if(!stopped)runtimeState=value.state;}catch{if(!stopped)runtimeState='';}finally{if(!stopped)timer=setTimeout(poll,4000)}};void poll();return()=>{stopped=true;clearTimeout(timer)}});
+  const queueNotice=$derived(!workspaceId||!folderId?'':runtimeState&&runtimeState!=='running'?'chat.enableMcp':needsAi?'chat.connectAi':'');
+  function collapseQueue(){queueElement?.querySelectorAll('details[open]').forEach(item=>(item as HTMLDetailsElement).open=false);queueExpanded=false;}
+
   async function toggleQueueMode() {
     if(queueChanging || !detail || !selected || detail.closed || loadingDetail)return;
     const scope=currentScope,ws=workspaceId,folder=folderId,chat=selected;
@@ -509,7 +516,7 @@
     if (messageBytes(draft) > 32000) { error = $t('chat.tooLong'); return; }
     if (!selected && !busy && draft.trim()) await create(true);
     if (busy || (!draft.trim() && !attachments.length) || !selected || !detail || detail.closed) return;
-    busy = true; error = ''; const gen = generation; const target = selected; const content = draft.trim(); const cacheKey = activeDraftKey;
+    busy = true; error = ''; const gen = generation; const target = selected; const content = draft; const cacheKey = activeDraftKey;
     attachments = attachmentCandidates([...attachments,...referencedAttachments(content,mentionFiles)]).concat(attachments.filter(file=>!file.label));
     const attachmentKey = attachments.map(f => f.id).join(',');
     if (!retry || retry.text !== content || retry.attachmentKey !== attachmentKey) retry = { text: content, id: randomId(), attachmentKey };
@@ -664,21 +671,23 @@
     <div class="feed-frame">
     <div class="message-feed" bind:this={feed} onscroll={updateScroll} aria-busy={loadingDetail}>
       {#if selected && !detail}<div class="chat-loading" role="status">{loadingDetail ? $t("Loading…") : error}</div>
-      {:else if !messages.length}<div class="empty-state"><h2>{$t('chat.102')}</h2></div>
+      {:else if !messages.length}<div class="empty-state"><h2>{$t(!workspaceId||!folderId?'chat.selectWorkspaceFirst':'chat.102')}</h2></div>
       {:else}<div class="message-column" bind:this={column}>{#each feedItems as item (item.id)}{#if item.kind === 'tools'}<article class="assistant grouped-tools"><div class="message-meta">{item.messages[0]?.agent_name ?? 'AI'} · {$t("chat.54")}</div><div class="message-body"><ChatToolActivity messages={item.messages} settled={item.settled} {workspaceId} {folderId} chatId={selected}/></div></article>{:else}{@const m = item.message}<article data-user-message={m.role === 'user' ? m.id : undefined} tabindex="-1" class:user={m.role === 'user'} class:assistant={m.role === 'assistant'}><div class="message-meta">{m.role === 'user' ? $t('chat.26') : m.agent_name ?? detail?.agent_name ?? (m.final === false ? $t('chat.27') : 'AI')}<time>{new Date(m.created_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</time></div>{#if (m.attachments??[]).some(file=>file.mime.startsWith('image/'))}<div class="message-images"><div class="image-strip">{#each (m.attachments??[]).filter(file=>file.mime.startsWith('image/')) as file (workspaceId+":"+folderId+":"+selected+":"+file.id+":"+file.sha256)}<ChatAttachment {workspaceId} {folderId} chatId={selected} {file}/>{/each}</div></div>{/if}<div class="message-body" class:image-only={!m.text.trim()&&!(m.attachments??[]).some(file=>!file.mime.startsWith('image/'))}>{#if editingMessage===m.id}<MessageEditor text={m.text} hasAttachments={!!m.attachments?.length} onSend={(text:string,id:string)=>resendMessage(m,text,id)} onCancel={()=>editingMessage=''}/>{:else}<MessageText text={m.text} attachments={m.attachments ?? []} {workspaceId} {folderId} chatId={selected} collapsible={m.role==='user'}/>{/if}{#each (m.attachments??[]).filter(file=>!file.mime.startsWith('image/')) as file (workspaceId + ":" + folderId + ":" + selected + ":" + file.id)}<ChatAttachment {workspaceId} {folderId} chatId={selected} {file}/>{/each}<ChatReplyState state={chatReplyState(detail, m.id)}/><ChatUserState state={chatUserState(detail, m.id)}/></div>{#if editingMessage!==m.id}<div class="message-actions"><button type="button" title={$t('chat.copyMessage')} aria-label={$t('chat.copyMessage')} onclick={()=>copyMessage(m)}>{#if copiedMessage===m.id}<Check size={15}/>{:else}<Copy size={15}/>{/if}</button>{#if m.role==='user'}<button type="button" title={$t('chat.editMessage')} aria-label={$t('chat.editMessage')} disabled={busy||!!detail?.closed} onclick={()=>editingMessage=m.id}><Pencil size={15}/></button>{:else}<button type="button" title={$t('chat.shareMessage')} aria-label={$t('chat.shareMessage')} onclick={()=>shareMessage=m}><Share2 size={15}/></button>{/if}</div>{/if}</article>{/if}{/each}{#if pendingState}<div class="pending" class:processing={pendingState === 'processing'} role="status" aria-live="polite"><ChatStatusIcon state={pendingState} label={pendingState === 'awaiting_user' ? $t('chat.73') : pendingState === 'processing' ? $t('chat.70') : pendingState === 'interrupted' ? $t('chat.71') : $t('chat.29')}/>{pendingState === 'awaiting_user' ? $t('chat.73') : pendingState === 'processing' ? $t('chat.70') : pendingState === 'interrupted' ? $t('chat.71') : $t('chat.29')}</div>{/if}</div>{/if}
     </div>
     <ChatOutline {messages} activeId={activeMessage} onSelect={jumpToMessage}/>
     </div>
     <footer class="composer-area">
-      {#if detail?.queued_messages?.length}<div class="outbox" aria-label={$t('chat.outbox')}>
+      {#if queueNotice}<p class="queue-notice" role="status">{$t(queueNotice)}{#if detail?.queued_messages?.length} · {$t('chat.queuedRetained')}{/if}</p>{/if}
+      {#if detail?.queued_messages?.length}<div class="outbox" class:expanded={queueExpanded} aria-label={$t('chat.outbox')}>
         <button type="button" class="queue-mode" disabled={queueChanging||loadingDetail||detail.closed} aria-pressed={detail.queue_mode!=='split'} aria-busy={queueChanging} onclick={toggleQueueMode} title={$t(detail.queue_mode==='split'?'chat.queueSplitHint':'chat.queueMergeHint')} aria-label={$t(detail.queue_mode==='split'?'chat.queueSplitHint':'chat.queueMergeHint')}>{$t(detail.queue_mode==='split'?'chat.queueSplit':'chat.queueMerge')}</button>
-        <div class="queued-items" aria-live="polite">
+        {#if queueExpanded}<button type="button" class="collapse-queue" onclick={collapseQueue} aria-label={$t('chat.collapseQueue')} title={$t('chat.collapseQueue')}>⌃</button>{/if}
+        <div class="queued-items" bind:this={queueElement} aria-live="polite">
           {#if detail.queue_mode !== 'split'}
-            <details class="queued-card merged-queue"><summary><span>{$t('chat.queueItem')} · {$t('chat.queueMerge')} ({detail.queued_messages.length})</span><span>{detail.queued_messages.map(item=>item.text).join(' · ')}</span></summary>
+            <details class="queued-card merged-queue" ontoggle={()=>queueExpanded=!!queueElement?.querySelector("details[open]")}><summary><span>{$t('chat.queueItem')} · {$t('chat.queueMerge')} ({detail.queued_messages.length})</span><span>{detail.queued_messages.map(item=>item.text).join(' · ')}</span></summary>
               <div>{#each detail.queued_messages as item,i (item.id)}<section><strong>{$t('chat.queueItem')} {i+1}</strong><p>{item.text}</p>{#if item.attachments?.length}<small>{item.attachments.map(f=>f.label??f.name).join(' · ')}</small>{/if}</section>{/each}</div>
             </details>
           {:else}
-            {#each detail.queued_messages as item,i (item.id)}<details class="queued-card"><summary><span>{$t('chat.queueItem')} {i+1}</span><span>{item.text}</span></summary><div><p>{item.text}</p>{#if item.attachments?.length}<small>{item.attachments.map(f=>f.label??f.name).join(' · ')}</small>{/if}</div></details>{/each}
+            {#each detail.queued_messages as item,i (item.id)}<details class="queued-card" ontoggle={()=>queueExpanded=!!queueElement?.querySelector("details[open]")}><summary><span>{$t('chat.queueItem')} {i+1}</span><span>{item.text}</span></summary><div><p>{item.text}</p>{#if item.attachments?.length}<small>{item.attachments.map(f=>f.label??f.name).join(' · ')}</small>{/if}</div></details>{/each}
           {/if}
         </div>
       </div>{/if}{#if referenceOpen}<div class="reference-input"><input aria-label={$t('chat.123')} placeholder="mcp-assistant/artifacts/file.png" bind:value={referenceInput} disabled={busy} onkeydown={event=>{if(event.key==='Enter'){event.preventDefault();void attachReference()}}}/><button type="button" onclick={attachReference} disabled={busy||!referenceInput.trim()}>{$t('chat.122')}</button></div>{/if}<div class="bottom-control" class:at-bottom={following}><button type="button" class="jump-bottom" onclick={toBottom} title={$t('chat.96')} aria-label={$t('chat.96')} aria-pressed={following}><ArrowDown size={16}/></button></div><form onsubmit={(e) => { e.preventDefault(); void send(); }}>{#if attachments.length}<div class="draft-files">{#each attachments as file (file.id)}<DraftAttachment {file} images={draftImages} {workspaceId} {folderId} chatId={selected} disabled={busy} onRemove={()=>removeAttachment(file)}/>{/each}</div>{/if}<div class="composer-input"><div class="mention-input"><div class="draft-highlight" bind:this={draftHighlight} aria-hidden="true">{#each highlightedDraft as part}{#if part.file}<span class="attachment-mention">{part.text}</span>{:else}{part.text}{/if}{/each}{'\n'}</div><textarea use:autoGrow={[draft, mode]} bind:this={composer} aria-label={$t("chat.39")} bind:value={draft} oninput={(event) => { draft = event.currentTarget.value; updateCaret(); mentionFocused=true; persistDraft(event instanceof InputEvent&&(event.inputType==='insertFromPaste'||event.inputType==='deleteByCut')?'action':'typing'); }} onbeforeinput={()=>{if(!composingDraft)draftHistory.record(draftSnapshot())}} oncompositionstart={()=>{draftHistory.record(draftSnapshot());composingDraft=true}} oncompositionend={()=>{composingDraft=false;persistDraft()}} onfocus={()=>{mentionFocused=true;updateCaret()}} onblur={()=>mentionFocused=false} onclick={()=>{mentionFocused=true;updateCaret()}} onkeyup={updateCaret} onscroll={()=>{if(draftHighlight){draftHighlight.scrollTop=composer.scrollTop;draftHighlight.scrollLeft=composer.scrollLeft}}} onpaste={pasteImages} placeholder={!workspaceId ? $t('chat.selectWorkspace') : detail?.closed ? $t('chat.30') : $t('chat.31')} disabled={!folderId || detail?.closed || (busy && !uploading)} onkeydown={composerKeys} rows={mode==='group'?1:3} aria-autocomplete="list" aria-controls="attachment-choices"></textarea></div>{#if mention && (choices.length || hasMoreMentions)}<div class="mention-choices" popover="manual" use:anchoredChoices={()=>composer} id="attachment-choices" role="listbox" aria-label={$t('chat.attachmentChoices')}>
@@ -747,6 +756,8 @@
 {/snippet}
 
 <style>
+.outbox{position:relative}.outbox.expanded{padding-right:30px}.collapse-queue{position:absolute;right:0;top:0;width:26px;height:26px;border:1px solid var(--color-border);border-radius:7px;background:var(--surface-2);color:var(--color-text);z-index:1;cursor:pointer}.queue-notice{max-width:760px;margin:0 auto 8px;color:var(--color-text-muted);font-size:12px}
+
 .mention-section-title{padding:7px 9px 4px;font-size:11px;font-weight:600;color:var(--color-text-muted)}.mention-empty{padding:7px 9px;font-size:12px;color:var(--color-text-muted)}.mention-choices .mention-more{border-top:1px solid var(--color-border);justify-content:space-between;margin-top:4px;color:var(--color-text-muted)}
 
 

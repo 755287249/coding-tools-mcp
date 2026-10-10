@@ -19,4 +19,4 @@ export function autoGrow(node: HTMLTextAreaElement, _value: unknown) {
   resize();
   return { update: resize, destroy() { observer.disconnect(); cancelAnimationFrame(frame); } };
 }
-export function messageBytes(text: string): number { return new TextEncoder().encode(text.trim()).length; }
+export function messageBytes(text: string): number { return new TextEncoder().encode(text).length; }

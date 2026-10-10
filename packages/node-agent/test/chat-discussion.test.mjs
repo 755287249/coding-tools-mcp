@@ -174,3 +174,10 @@ test('robot group posts and task result inboxes preserve their own uploaded atta
  tool(b,bb.attachment_id,'chat_reply',{message_id:'result',reply_to:received.id,text:'Done',final:true,attachment_ids:[result.id]});
  assert.deepEqual(wa().message.attachments,[result]);
 });
+
+test('group messages preserve code indentation, blank lines and exact retry identity',t=>{
+ const {ui,wb}=fixture(t),text='    code\n\n**正文**  \n\tend\n\n';
+ const send={action:'discussion_post',discussion_id:'group1',message_id:'format-group',text,recipient_chat_ids:['unused']};delete send.recipient_chat_ids;
+ const post=ui(send).discussion.posts[0];assert.equal(post.text,text);assert.equal(ui(send).discussion.posts.length,1);
+ assert.throws(()=>ui({...send,text:text.trim()}),/conflict/);assert.ok(wb().message.text.includes(text));
+});

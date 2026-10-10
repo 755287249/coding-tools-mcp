@@ -20,7 +20,7 @@ function remapText(text:string,files:ChatFile[],transferred:ChatFile[]):string {
 }
 /** Chunked transfer avoids loading large attachments into browser memory. */
 export async function forwardMessage(message:ChatMessage,sourceChat:string,targetChat:string,source:Request,target:Request,state:MessageTransfer,id:()=>string):Promise<ChatResult> {
-  if(new TextEncoder().encode(message.text.trim()).length>32000)throw Error('Message exceeds 32000 bytes');
+  if(new TextEncoder().encode(message.text).length>32000)throw Error('Message exceeds 32000 bytes');
   const files=message.attachments??[], transferred:ChatFile[]=[];
   for(const file of files){
     let complete=state.files.get(file.id);

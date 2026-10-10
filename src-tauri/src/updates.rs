@@ -21,14 +21,14 @@ pub fn repository(value: &str) -> Result<&str,String> {
     Ok(value)
 }
 fn version(value:&str)->Option<[u64;3]> {
-    let parts=value.trim_start_matches('v').split('.').map(str::parse).collect::<Result<Vec<u64>,_>>().ok()?;
+    let parts=value.strip_prefix("client-v").unwrap_or(value).trim_start_matches('v').split('.').map(str::parse).collect::<Result<Vec<u64>,_>>().ok()?;
     parts.try_into().ok()
 }
 pub fn parse_release(repo:&str,data:Value)->Result<Release,String> {
     repository(repo)?;
     let tag=data["tag_name"].as_str().ok_or("Release tag missing")?;
     let next=version(tag).ok_or("Release must have a stable vMAJOR.MINOR.PATCH tag")?;
-    let v=tag.trim_start_matches('v').to_string();
+    let v=tag.strip_prefix("client-v").unwrap_or(tag).trim_start_matches('v').to_string();
     let prefix=format!("https://github.com/{repo}/releases/download/");
     let expected=format!("ctmcp-{v}-win64.exe");
     let asset=data["assets"].as_array().and_then(|items|items.iter().find(|a|a["name"]==expected));
@@ -36,17 +36,41 @@ pub fn parse_release(repo:&str,data:Value)->Result<Release,String> {
     let digest=asset.and_then(|a|a["digest"].as_str()).and_then(|d|d.strip_prefix("sha256:")).filter(|d|d.len()==64&&d.bytes().all(|b|b.is_ascii_hexdigit())).map(|v|v.to_ascii_lowercase());
     Ok(Release {current_version:env!("CARGO_PKG_VERSION").into(),version:v,available:next>version(env!("CARGO_PKG_VERSION")).unwrap_or([0;3]),page:format!("https://github.com/{repo}/releases"),notes:data["body"].as_str().unwrap_or("").chars().take(32000).collect(),asset_url:url,sha256:digest})
 }
+// A Worker origin or its /ctmcp base can share a domain with other applications.
+fn worker_base(source:&str)->Result<reqwest::Url,String> {
+    let mut url=reqwest::Url::parse(source).map_err(|_|"Use an HTTPS Worker URL or owner/repository")?;
+    if url.scheme()!="https" || url.host_str().is_none() || !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some() || !matches!(url.path().trim_end_matches('/'),""|"/ctmcp") {return Err("Worker source must be an HTTPS origin or /ctmcp URL without credentials or query parameters".into());}
+    url.set_path("/ctmcp/");Ok(url)
+}
+fn parse_worker_release(base:&reqwest::Url,data:Value)->Result<Release,String> {
+    if data["appId"]!="coding-tools-mcp" {return Err("Update source is not Coding Tools MCP".into());}
+    let v=data["version"].as_str().ok_or("Release version missing")?;
+    let next=version(v).ok_or("Invalid stable release version")?;
+    let file=&data["files"]["portable"];
+    if file["name"]!=format!("ctmcp-{v}-win64.exe") || !file["size"].as_u64().is_some_and(|n|n>0&&n<=200*1024*1024) {return Err("Worker release does not contain the matching Coding Tools Windows EXE".into());}
+    let digest=file["sha256"].as_str().filter(|s|s.len()==64&&s.bytes().all(|b|b.is_ascii_hexdigit())).ok_or("Worker release SHA-256 missing")?.to_ascii_lowercase();
+    let mut download=base.join("download").map_err(|e|e.to_string())?;
+    download.query_pairs_mut().append_pair("version",v).append_pair("sha256",&digest);
+    Ok(Release{current_version:env!("CARGO_PKG_VERSION").into(),version:v.into(),available:next>version(env!("CARGO_PKG_VERSION")).unwrap_or([0;3]),page:base.join("latest").unwrap().to_string(),notes:data["notes"].as_str().unwrap_or("").chars().take(32000).collect(),asset_url:Some(download.to_string()),sha256:Some(digest)})
+}
+async fn metadata(mut response:reqwest::Response)->Result<Value,String>{
+    let mut bytes=Vec::new();
+    while let Some(chunk)=response.chunk().await.map_err(|e|e.to_string())?{if bytes.len()+chunk.len()>2*1024*1024{return Err("Release metadata is too large".into());}bytes.extend_from_slice(&chunk);}
+    serde_json::from_slice(&bytes).map_err(|_|"Invalid update metadata".into())
+}
 fn client()->Result<reqwest::Client,String> {
     reqwest::Client::builder().user_agent(concat!("CodingToolsMCP/",env!("CARGO_PKG_VERSION"))).timeout(std::time::Duration::from_secs(180)).build().map_err(|e|e.to_string())
 }
 #[cfg_attr(feature="desktop",tauri::command)]
 pub async fn check_app_update(repo:String)->Result<Release,String> {
-    let repo=repository(&repo)?;
-    let response=client()?.get(format!("https://api.github.com/repos/{repo}/releases/latest")).timeout(std::time::Duration::from_secs(20)).send().await.map_err(|e|e.to_string())?;
-    if response.status()==reqwest::StatusCode::NOT_FOUND {return Err("No public release found. Check the repository or publish a stable GitHub Release first.".into());}
+    let source=repo.trim();
+    let worker=if source.contains("://"){Some(worker_base(source)?)}else{None};
+    let url=if let Some(base)=&worker{base.join("latest").map_err(|e|e.to_string())?.to_string()}else{format!("https://api.github.com/repos/{}/releases/latest",repository(source)?)};
+    let response=client()?.get(url).timeout(std::time::Duration::from_secs(20)).send().await.map_err(|e|e.to_string())?;
+    if response.status()==reqwest::StatusCode::NOT_FOUND{return Err("No update release found. Check the update source and publish a stable Coding Tools release first.".into());}
     let response=response.error_for_status().map_err(|e|e.to_string())?;
-    if response.content_length().is_some_and(|n|n>2*1024*1024){return Err("Release metadata is too large".into());}
-    parse_release(repo,response.json().await.map_err(|e|e.to_string())?)
+    let data=metadata(response).await?;
+    if let Some(base)=worker{parse_worker_release(&base,data)}else{parse_release(source,data)}
 }
 // Bind both download and installation to the release the user reviewed.
 fn verify_selection(version:&str,digest:&str,expected_version:&str,expected_sha256:&str)->Result<(),String> {
@@ -110,6 +134,15 @@ pub fn install_app_update(app:tauri::AppHandle,expected_version:String,expected_
 #[cfg(test)]
 mod tests{
     use super::*;use serde_json::json;
+    #[test]fn worker_routes_cannot_select_another_application(){
+        let base=worker_base("https://updates.example/ctmcp").unwrap();
+        let valid=json!({"appId":"coding-tools-mcp","version":"999.1.2","notes":"notes","files":{"portable":{"name":"ctmcp-999.1.2-win64.exe","size":1234,"sha256":"a".repeat(64)}}});
+        let r=parse_worker_release(&base,valid.clone()).unwrap();assert!(r.available);assert!(r.asset_url.unwrap().starts_with("https://updates.example/ctmcp/download?version=999.1.2&sha256="));
+        for field in ["appId","version"]{let mut wrong=valid.clone();wrong[field]=json!("brana");assert!(parse_worker_release(&base,wrong).is_err());}
+        for (field,value) in [("name",json!("BranaAi-Setup-999.1.2.exe")),("sha256",json!("")),("size",json!(0)),("size",json!(210*1024*1024))]{let mut wrong=valid.clone();wrong["files"]["portable"][field]=value;assert!(parse_worker_release(&base,wrong).is_err());}
+        for source in ["http://updates.example","https://user:pass@updates.example","https://updates.example/brana","https://updates.example/?token=x","https://updates.example/#x"]{assert!(worker_base(source).is_err());}
+        assert_eq!(worker_base("https://updates.example/").unwrap().as_str(),"https://updates.example/ctmcp/");
+    }
     #[test]fn release_selection_rejects_wrong_assets_and_downgrades(){
         let d=json!({"tag_name":"v999.1.0","body":"release","assets":[{"name":"ctmcp-999.1.0-win64.exe","browser_download_url":"https://evil.example/app.exe","digest":format!("sha256:{}","a".repeat(64))}]});
         let r=parse_release("owner/repo",d).unwrap();assert!(r.available);assert!(r.asset_url.is_none());

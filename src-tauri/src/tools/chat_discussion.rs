@@ -104,7 +104,7 @@ pub(super) fn action(root:&Path,args:&Value,actor:Option<&Value>)->Result<Value>
   },
   "post"=>{
    let attachments=message_files(actor.unwrap_or(&d),args.get("attachment_ids"))?;
-   let pid=id(&args["message_id"])?;let value=if args["text"].as_str().unwrap_or("").is_empty()&&!attachments.is_empty(){json!("📎")}else{args["text"].clone()};let content=text(&value,16000)?;let purpose=args["purpose"].as_str().unwrap_or("discussion");let from=actor.map(|s|s["id"].as_str().unwrap()).unwrap_or("user");
+   let pid=id(&args["message_id"])?;let value=if args["text"].as_str().unwrap_or("").is_empty()&&!attachments.is_empty(){json!("📎")}else{args["text"].clone()};let content=message_text(&value,16000)?;let purpose=args["purpose"].as_str().unwrap_or("discussion");let from=actor.map(|s|s["id"].as_str().unwrap()).unwrap_or("user");
    if !["discussion","question","notice","task"].contains(&purpose){return Err(err("Invalid message purpose"));}
    let targets=args.get("recipient_chat_ids").cloned().unwrap_or_else(||if d["collaboration"]==true{collaboration::targets(&d,&content,from)}else{json!(d["members"].as_array().unwrap().iter().filter(|v|**v!=from).cloned().collect::<Vec<_>>())});
    let targets=targets.as_array().filter(|a|!a.is_empty()&&a.len()<=16).ok_or_else(||err("Choose discussion members other than yourself"))?;

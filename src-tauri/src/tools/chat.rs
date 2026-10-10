@@ -66,11 +66,14 @@ fn id(v: &Value) -> Result<&str> {
     Ok(s)
 }
 fn text(v: &Value, max: usize) -> Result<String> {
+    message_text(v,max).map(|s|s.trim().to_owned())
+}
+fn message_text(v: &Value, max: usize) -> Result<String> {
     let s = v.as_str().unwrap_or("");
     if s.trim().is_empty() || s.len() > max {
         return Err(err(format!("Text must contain 1–{max} bytes")));
     }
-    Ok(super::redaction::redact_sensitive_text(s.trim()).0)
+    Ok(super::redaction::redact_sensitive_text(s).0)
 }
 fn safe(root: &Path, relative: &str) -> Result<PathBuf> {
     let mut p = root.canonicalize().map_err(io)?;
@@ -514,7 +517,7 @@ fn tool_event(value: Option<&Value>, final_reply: bool) -> Result<Value> {
     let mut event = json!({"name":text(&value["name"],120)?,"status":value["status"]});
     for (field, limit) in [("input", 8000), ("output", 16000)] {
         if let Some(detail) = value.get(field) {
-            event[field] = json!(text(detail, limit)?);
+            event[field] = json!(message_text(detail, limit)?);
         }
     }
     if let Some(truncated) = value.get("output_truncated") {
@@ -645,7 +648,7 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
             } else {
                 args["text"].clone()
             };
-            let content = text(&value, 32000)?;
+            let content = message_text(&value, 32000)?;
             if let Some(receipt)=s["queue_receipts"][message_id].as_str(){if receipt!=queued_fingerprint(&content,&attachments){return Err(err("Message ID conflicts with a queued delivery"));}save(root,&s)?;return Ok(json!({"session":local_view(root,&s)?}));}
             if let Some(m) = s["messages"].as_array().unwrap().iter().chain(s["queue"].as_array().into_iter().flatten()).find(|m|m["id"]==message_id)
             {
@@ -835,7 +838,7 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
             let message_id = id(&args["message_id"])?;
             if s["queue_receipts"].get(message_id).is_some() { return Err(err("Message ID conflicts with a queued delivery")); }
             let reply_to = id(&args["reply_to"])?;
-            let content = text(&args["text"], 32000)?;
+            let content = message_text(&args["text"], 32000)?;
             let attachments = message_files(&s, args.get("attachment_ids"))?;
             let final_reply = args["final"] != false;
             if args.get("awaiting_user").is_some_and(|v| !v.is_boolean()) {
@@ -1080,7 +1083,7 @@ fn publish_queued(s: &mut Value) {
     for item in &items {if let Some(files)=item["attachments"].as_array(){for file in files{if seen.insert(file["id"].as_str().unwrap_or("").to_owned()){attachments.push(file.clone());}}}}
     if s["queue_receipts"].is_null(){s["queue_receipts"]=json!({});}
     for item in &items{s["queue_receipts"][item["id"].as_str().unwrap()]=json!(queued_fingerprint(item["text"].as_str().unwrap_or(""),item["attachments"].as_array().map(Vec::as_slice).unwrap_or(&[])));}
-    if items.len()>1 {message["text"]=json!(items.iter().enumerate().map(|(i,m)|format!("队列{}：{}",i+1,m["text"].as_str().unwrap_or(""))).collect::<Vec<_>>().join("\n\n"));}
+    if items.len()>1 {message["text"]=json!(items.iter().enumerate().map(|(i,m)|format!("队列{}：\n\n{}",i+1,m["text"].as_str().unwrap_or(""))).collect::<Vec<_>>().join("\n\n"));}
     message["attachments"]=json!(attachments);message["created_at"]=json!(now());if group::grouped(s){
         // Union the saved identities, not names reparsed from merged text.
         let mut targets=Vec::new();
@@ -1093,6 +1096,28 @@ fn publish_queued(s: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn complete_message_format_survives_persistence_queue_and_reply() {
+        let dir=tempfile::tempdir().unwrap();let root=dir.path();
+        let cid=ui(root,&json!({"action":"create"})).unwrap()["session"]["id"].clone();
+        let attachment=tool(root,"chat_open",&json!({"chat_id":cid})).unwrap()["attachment_id"].clone();
+        let body="    code\r\n\r\n**正文**  \n\tend\n\n";
+        let send=json!({"action":"send","chat_id":cid,"message_id":"format-a","text":body});
+        ui(root,&send).unwrap();ui(root,&send).unwrap();
+        let args=json!({"chat_id":cid,"attachment_id":attachment});
+        assert_eq!(tool(root,"chat_wait",&args).unwrap()["message"]["text"],body);
+        let mut conflict=send.clone();conflict["text"]=json!(body.trim());assert!(ui(root,&conflict).is_err());
+        for id in ["format-b","format-c"]{let mut next=send.clone();next["message_id"]=json!(id);ui(root,&next).unwrap();}
+        let reply=json!({"chat_id":cid,"attachment_id":attachment,"message_id":"format-reply","reply_to":"format-a","text":body,"final":false,"tool_event":{"name":"format-check","status":"completed","input":body,"output":body}});
+        tool(root,"chat_reply",&reply).unwrap();tool(root,"chat_reply",&reply).unwrap();
+        let detail=ui(root,&json!({"action":"read","chat_id":cid})).unwrap()["session"].clone();
+        assert_eq!(detail["messages"][1]["text"],body);assert_eq!(detail["messages"][1]["tool_event"]["output"],body);
+        assert!(fs::read_to_string(root.join(detail["archive_path"].as_str().unwrap())).unwrap().contains(body));
+        tool(root,"chat_reply",&json!({"chat_id":cid,"attachment_id":attachment,"message_id":"done","reply_to":"format-a","text":"done","final":true})).unwrap();
+        assert_eq!(tool(root,"chat_wait",&args).unwrap()["message"]["text"],format!("队列1：\n\n{body}\n\n队列2：\n\n{body}"));
+        assert!(message_text(&json!(" ".repeat(32000)+"x"),32000).is_err());
+    }
+
     #[test]
     fn task_plans_are_owned_persistent_and_message_scoped() {
         let temp=tempfile::tempdir().unwrap();let root=temp.path();
@@ -1143,7 +1168,7 @@ mod tests {
         ui(root,&json!({"action":"set_queue_mode","chat_id":cid,"mode":"merge"})).unwrap();
         ui(root,&json!({"action":"rename_member","chat_id":cid,"member_id":b["agent_id"],"name":"Renamed"})).unwrap();
         reply(&a,"q1-done","q1").unwrap();assert_eq!(read()["queued_messages"].as_array().unwrap().len(),2);
-        let merged=wait(&a)["message"].clone();assert_eq!(merged["text"],"队列1：Second\n\n队列2：@Helper Third 😀");
+        let merged=wait(&a)["message"].clone();assert_eq!(merged["text"],"队列1：\n\nSecond\n\n队列2：\n\n@Helper Third 😀");
         assert_eq!(merged["recipient_ids"],json!([a["agent_id"],b["agent_id"]]));assert_eq!(merged["attachments"].as_array().unwrap().len(),1);
         assert_eq!(wait(&b)["message"]["id"],"q2");assert!(reply(&a,"early","q2").is_err());reply(&b,"b-done","q2").unwrap();reply(&a,"a-done","q2").unwrap();
         send("q2","Second").unwrap();send("q3","@Helper Third 😀").unwrap();assert_eq!(read()["queued_messages"],json!([]));assert_eq!(wait(&a)["status"],"idle");assert!(send("q3","Changed").is_err());
@@ -1171,7 +1196,7 @@ mod tests {
         assert_eq!(tool(root,"chat_open",&args).unwrap()["session"]["messages"].as_array().unwrap().len(),3);
         let delivered=tool(root,"chat_wait",&args).unwrap()["message"].clone();
         assert_eq!(delivered["id"],"__proto__");
-        assert_eq!(delivered["text"],"队列1：__proto__\n\n队列2：constructor");
+        assert_eq!(delivered["text"],"队列1：\n\n__proto__\n\n队列2：\n\nconstructor");
         assert_eq!(delivered["attachments"].as_array().unwrap().len(),1);
         assert!(delivered["received_at"].as_u64().unwrap()>=delivered["created_at"].as_u64().unwrap());
         send("__proto__","__proto__").unwrap();send("constructor","constructor").unwrap();

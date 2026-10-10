@@ -5,7 +5,7 @@ import type {ChatSession,ChatMessage,ChatFile} from './store.js';
 
 export interface DiscussionStore {
   safe(relative:string):string; load(id:string):ChatSession; save(session:ChatSession):void;
-  validateId(value:unknown):string; text(value:unknown,max?:number):string;
+  validateId(value:unknown):string; text(value:unknown,max?:number,preserve?:boolean):string;
 }
 export interface DiscussionDelivery {chat_id:string;message_id:string;title:string;status:string;replies:ChatMessage[];error?:string}
 export interface DiscussionPost {attachments?:ChatFile[];attachment_chat_id?:string;summaries?:ChatMessage[];id:string;from:string;name:string;text:string;goal:string;purpose:string;created_at:number;targets:string[];deliveries:DiscussionDelivery[]}
@@ -111,7 +111,7 @@ export function discussionAction(io:DiscussionStore,args:Record<string,unknown>,
     configureCollaboration(io,d,args);d.updated_at=Date.now();write(io,d);
   }else if(action==='post'){
     const attachments=postFiles(io,d,args,actor);
-    const id=io.validateId(args.message_id),content=io.text(args.text||(attachments.length?'📎':''),16000),purpose=String(args.purpose??'discussion'),from=actor?.id??'user';
+    const id=io.validateId(args.message_id),content=io.text(args.text||(attachments.length?'📎':''),16000,true),purpose=String(args.purpose??'discussion'),from=actor?.id??'user';
     if(!['discussion','question','notice','task'].includes(purpose))throw Error('Invalid message purpose');
     const targets=args.recipient_chat_ids===undefined?(d.collaboration?collaborationTargets(d,content,from):d.members.filter(id=>id!==from)):args.recipient_chat_ids;
     if(!Array.isArray(targets)||!targets.length||targets.length>16||new Set(targets).size!==targets.length||targets.some(t=>typeof t!=='string'||!d.members.includes(t)||t===from))throw Error('Choose discussion members other than yourself');

@@ -5,7 +5,7 @@ import { messageBytes } from '../src/lib/chat/autogrow.ts';
 
 test('browser IDs do not depend on secure-context randomUUID and byte limits account for Unicode', () => {
   const a=randomId(),b=randomId();assert.match(a,/^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/);assert.notEqual(a,b);
-  assert.equal(messageBytes(' 中文😀 '),10);
+  assert.equal(messageBytes(' 中文😀 '),12);
   assert.ok(messageBytes('中文😀'.repeat(3201))>32000);
 });
 

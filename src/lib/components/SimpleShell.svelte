@@ -4,6 +4,9 @@
   import { MOBILE_CHAT_HEADER, type MobileChatHeader } from '$lib/chat/mobile-header';
   import DiscussionGroups from '$lib/components/chat/DiscussionGroups.svelte';
   import BrowserShareDialog from './BrowserShareDialog.svelte';
+  import Info from '@lucide/svelte/icons/info';
+  import AboutDialog from './AboutDialog.svelte';
+  import {appUpdate,checkAppUpdate} from '$lib/stores/app-updates';
   import Globe from '@lucide/svelte/icons/globe';
   import {localDesktop} from '$lib/api/distribution';
   import MobileSheet from './MobileSheet.svelte';
@@ -45,7 +48,9 @@
   import { t } from '$lib/i18n';
   import type { MessageKey } from '$lib/i18n/catalog';
   let { children, settingsNav, onAddWorkspace, onQuickSetup }: { children: Snippet; settingsNav?: Snippet; onQuickSetup?: () => void; onAddWorkspace?: () => void | Promise<void> } = $props();
-  let shareOpen=$state(false);
+  let shareOpen=$state(false),aboutOpen=$state(false),mobileNavMore=$state(false);
+  onMount(()=>{if(localDesktop())void checkAppUpdate()});
+  $effect(()=>{if(!mobileNav)mobileNavMore=false});
   let pinned=$state(true), hovered=$state(false), recent=$state(false), searchOpen=$state(false), settingsOpen=$state(false);
   let assetSearchRequest=$state(0);
   let width=$state(280), error=$state(''), creating=$state(false);
@@ -96,26 +101,30 @@
     file:[{key:'shell.newWindow',run:newAppWindow},{key:'shell.newChat',shortcut:'Ctrl+N',run:()=>newChat(),disabled:creating},{key:'shell.newConversation',run:()=>newChat(true),disabled:creating},null,{key:'shell.openFolder',run:()=>onAddWorkspace?.(),disabled:!onAddWorkspace},null,{key:'Close',run:closeAppWindow,disabled:!desktop},null,{key:'shell.quit',run:quitApp,disabled:!desktop}],
     edit:[...['undo','redo','cut','copy','paste','delete','selectAll'].map(id=>({key:`shell.${id}` as MessageKey,run:()=>edit(id)})),null,{key:'Settings',run:()=>settingsOpen=true}],
     view:[{key:'Collapse sidebar',shortcut:'Ctrl+Shift+S',run:pin},{key:'chat.100',shortcut:'Ctrl+K',run:()=>{searchOpen=!searchOpen}},{key:'chat.103',run:()=>{pinned=true;recent=!recent}},null,{key:'shell.zoomIn',run:()=>zoom=Math.min(150,zoom+10)},{key:'shell.zoomOut',run:()=>zoom=Math.max(70,zoom-10)},{key:'shell.resetZoom',run:()=>zoom=100},{key:'shell.fullscreen',run:toggleFullscreen}],
-    help:[{key:'shell.documentation',run:()=>window.open('https://github.com/755287249/coding-tools-mcp#readme','_blank','noopener')},{key:'shell.shortcuts',run:()=>getBackend().native.alert('Ctrl+[  /  Ctrl+]\nCtrl+Shift+S\nCtrl+N\nCtrl+K',{title:$t('shell.shortcuts')})},{key:'shell.about',run:()=>getBackend().native.alert('Coding Tools MCP',{title:$t('shell.about')})}]
+    help:[{key:'shell.documentation',run:()=>window.open('https://github.com/755287249/coding-tools-mcp#readme','_blank','noopener')},{key:'shell.shortcuts',run:()=>getBackend().native.alert('Ctrl+[  /  Ctrl+]\nCtrl+Shift+S\nCtrl+N\nCtrl+K',{title:$t('shell.shortcuts')})},{key:'shell.about',run:()=>aboutOpen=true}]
   });
   async function openMenu(id:string,event:MouseEvent){menu=id;const rect=(event.currentTarget as HTMLElement).getBoundingClientRect();menuLeft=rect.left;menuTop=rect.bottom+3;menuElement?.showPopover();await tick();menuElement?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus();}
   async function act(item:NonNullable<Item>){menuElement?.hidePopover();try{await item.run()}catch(e){error=String(e)}}
   function menuKeys(event:KeyboardEvent){if(!['ArrowDown','ArrowUp','Home','End'].includes(event.key))return;event.preventDefault();const buttons=[...menuElement!.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')];const index=buttons.indexOf(document.activeElement as HTMLButtonElement);buttons[event.key==='Home'?0:event.key==='End'?buttons.length-1:(index+(event.key==='ArrowDown'?1:-1)+buttons.length)%buttons.length]?.focus();}
   function shortcuts(event:KeyboardEvent){if(!event.ctrlKey||event.altKey||event.isComposing)return;const key=event.key.toLowerCase();if(key==='['){event.preventDefault();history.back()}else if(key===']'){event.preventDefault();history.forward()}else if(key==='s'&&event.shiftKey){event.preventDefault();pin()}else if(key==='n'&&!event.shiftKey){event.preventDefault();void newChat()}else if(key==='k'){event.preventDefault();searchOpen=!searchOpen}}
 </script>
+{#if aboutOpen}<AboutDialog onClose={()=>aboutOpen=false}/>{/if}
 {#if shareOpen}<BrowserShareDialog onClose={()=>shareOpen=false}/>{/if}
 {#if searchOpen}<ConversationSearch onClose={()=>searchOpen=false} onNewChat={async()=>{await newChat()}} onOpenWorkspace={onAddWorkspace} canSearchFiles={!!group} onSearchFiles={()=>{assetSearchRequest++;openPanel('assets')}}/>{/if}
 <svelte:window onkeydown={shortcuts} onresize={()=>{if(innerWidth<700){pinned=false;hovered=false}}}/>
 {#if mobileMore}<MobileSheet title={$t('mobile.chatActions')} onClose={()=>mobileMore=false}><nav class="mobile-destinations"><button onclick={()=>{mobileMore=false;void newChat()}}><SquarePen size={19}/>{$t('shell.newChat')}</button><button onclick={()=>{mobileMore=false;searchOpen=true}}><Search size={19}/>{$t('chat.100')}</button><button onclick={()=>{mobileMore=false;settingsOpen=true}}><Settings size={19}/>{$t('Settings')}</button></nav></MobileSheet>{/if}
 {#if mobileNav}<MobileSheet title="Coding Tools" edge="left" onClose={()=>mobileNav=false}>
-  <nav class="mobile-destinations" aria-label={$t('chat.106')}>
-    <button onclick={()=>{mobileNav=false;searchOpen=true}}><Search size={19}/>{$t('chat.100')}</button>
-    <button onclick={()=>{mobileNav=false;void newChat()}}><SquarePen size={19}/>{$t('shell.newChat')}</button>
-    {#each entries.filter(entry=>entry.id!=='skills') as entry}<button onclick={()=>{mobileNav=false;openPanel(entry.id)}}><entry.icon size={19}/>{$t(entry.id==='plugins'?'features.customize':`shell.${entry.id}` as MessageKey)}</button>{/each}
+  <nav class="mobile-destinations compact-nav" aria-label={$t('chat.106')}>
+    <div class="nav-essentials"><button onclick={()=>{mobileNav=false;searchOpen=true}}><Search size={19}/>{$t('chat.100')}</button><button aria-expanded={mobileNavMore} onclick={()=>mobileNavMore=!mobileNavMore}><Ellipsis size={19}/>{$t('shell.more')}</button></div>
+    {#if mobileNavMore}<div class="nav-more">
+      <button onclick={()=>{mobileNav=false;void newChat()}}><SquarePen size={19}/>{$t('shell.newChat')}</button>
+      {#each entries.filter(entry=>entry.id!=='skills') as entry}<button onclick={()=>{mobileNav=false;openPanel(entry.id)}}><entry.icon size={19}/>{$t(entry.id==='plugins'?'features.customize':`shell.${entry.id}` as MessageKey)}</button>{/each}
+      {#if localDesktop()}<button onclick={()=>{mobileNav=false;shareOpen=true}}><Globe size={19}/>{$t('sharing.title')}</button>{/if}
+      <button onclick={()=>{mobileNav=false;settingsOpen=true}}><Settings size={19}/>{$t('Settings')}</button>
+      <button onclick={()=>{mobileNav=false;aboutOpen=true}}><Info size={19}/>{$t('shell.about')}{#if $appUpdate.release?.available}<i class="update-dot"></i>{/if}</button>
+    </div>{/if}
   </nav>
-  <div class="mobile-projects"><ProjectNavigator {onAddWorkspace} {recent} onSearch={()=>{mobileNav=false;searchOpen=true}}/></div>
-  {#if localDesktop()}<button class="mobile-settings" onclick={()=>{mobileNav=false;shareOpen=true}}><Globe size={20} strokeWidth={1.5}/>{$t('sharing.title')}</button>{/if}
-  <button class="mobile-settings" onclick={()=>{mobileNav=false;settingsOpen=true}}><Settings size={18}/>{$t('Settings')}</button>
+  <div class="mobile-projects" role="presentation" ontouchmove={()=>mobileNavMore=false} onwheel={()=>mobileNavMore=false} onscrollcapture={()=>mobileNavMore=false}><ProjectNavigator {onAddWorkspace} {recent} onSearch={()=>{mobileNav=false;searchOpen=true}}/></div>
 </MobileSheet>{/if}
 <div class="shell-frame" use:mobileViewport>
 <header class="mobile-topbar"><button aria-label={$t('mobile.navigation')} onclick={()=>mobileNav=true}><Menu size={21}/></button><div class="mobile-title"><strong title={$mobileChat?.title}>{$mobileChat?.title??(customizing?$t('features.customize'):panel==='assets'?$t('shell.assets'):panel==='scheduled'?$t('shell.scheduled'):'Coding Tools')}</strong>{#if $mobileChat}<span class="mobile-status"><i class:online={$mobileChat.online}></i>{$mobileChat.status}</span>{/if}</div><button aria-label={$t('mobile.chatActions')} onclick={()=>{$mobileChat?$mobileChat.openMenu():mobileMore=true}}><Ellipsis size={21}/></button></header>
@@ -134,6 +143,7 @@
       <button class:active={!panel&&routePath($page.url.pathname)==='/'} title={$t('chat.107')} aria-label={$t('chat.107')} onmouseenter={()=>hovered=true} onfocus={()=>hovered=true} onclick={()=>goto(appUrl('/'))}><Home size={18}/></button>
       {#each entries.filter(entry=>entry.id!=='skills') as entry}<button class:active={panel===entry.id||(entry.id==='plugins'&&panel==='skills')} title={$t(entry.id==='plugins'?'features.customize':`shell.${entry.id}` as MessageKey)} aria-label={$t(entry.id==='plugins'?'features.customize':`shell.${entry.id}` as MessageKey)} onclick={()=>openPanel(entry.id)}><entry.icon size={18}/></button>{/each}
       <button title={$t('shell.more')} aria-label={$t('shell.more')} aria-expanded={settingsOpen} onclick={()=>settingsOpen=!settingsOpen}><Ellipsis size={19}/></button>
+      <button class="about-button" title={$t('shell.about')} aria-label={$t('shell.about')} onclick={()=>aboutOpen=true}><Info size={20}/>{#if $appUpdate.release?.available}<i class="update-dot" aria-label={$t('updates.available')}></i>{/if}</button>
       {#if localDesktop()}<button class="share-globe" title={$t('sharing.title')} aria-label={$t('sharing.title')} onclick={()=>shareOpen=true}><Globe size={20} strokeWidth={1.5}/></button>{/if}
     </nav>
     {#if !customizing&&!mobileScreen}<aside class="project-sidebar" inert={!pinned&&!hovered}>
@@ -168,7 +178,7 @@
 </div>
 </div>
 <style>
-.app-rail .share-globe{margin-top:auto}
+.app-rail .about-button{margin-top:auto;position:relative}.update-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#e4b641}.about-button .update-dot{position:absolute;right:3px;top:3px}.nav-essentials{display:flex;align-items:center;justify-content:space-between;gap:5px}.nav-essentials button{min-height:40px;padding:8px}.compact-nav{flex:none;padding:0 12px 8px}.nav-more{display:grid;grid-template-columns:1fr 1fr;max-height:35dvh;overflow:auto}.nav-more button{font-size:12px;gap:7px;padding:8px;min-height:38px}
 .shell-frame{display:flex;flex-direction:column;min-height:0;height:100%;width:100%}.shell-topbar{height:38px;flex:none;display:flex;align-items:center;gap:2px;border-bottom:1px solid var(--color-border);padding-left:8px;background:var(--sidebar-bg);user-select:none}.shell-topbar>button{display:grid;place-items:center;min-width:28px;height:28px;border-radius:5px;color:var(--color-text-muted);cursor:pointer}.shell-topbar .menu-trigger{padding:0 9px;font-size:12px}.shell-topbar button:hover{background:var(--surface-hover);color:var(--color-text)}.title-space{flex:1;display:flex;justify-content:center;align-items:center;gap:7px;font-size:11px;color:var(--color-text-muted);min-width:0;overflow:hidden;white-space:nowrap}
 .menu-popup{margin:0;position:fixed;width:240px;padding:5px;border:1px solid var(--color-border);border-radius:9px;background:var(--color-bg);color:var(--color-text);box-shadow:0 12px 35px #0005}.menu-popup button{display:flex;justify-content:space-between;align-items:center;width:100%;padding:7px 10px;border-radius:5px;font-size:12px;cursor:pointer}.menu-popup button:hover,.menu-popup button:focus-visible{background:var(--surface-hover);outline:none}.menu-popup button:disabled{opacity:.4;cursor:default}.menu-popup kbd{font-size:10px;color:var(--color-text-muted)}.menu-popup hr{border:0;border-top:1px solid var(--color-border);margin:5px}
 .unified-shell{position:relative;background:transparent;flex:1;min-height:0;height:auto}.navigation-area{position:relative;flex:none;width:48px;display:flex;z-index:40}.navigation-area.pinned{width:calc(48px + var(--nav-width))}.app-rail{width:48px;flex:none;display:flex;flex-direction:column;align-items:center;gap:8px;padding:12px 5px;background:var(--sidebar-bg);border-right:1px solid var(--color-border)}.app-rail button{display:grid;place-items:center;width:34px;height:34px;border-radius:9px;color:var(--color-text-muted);cursor:pointer}.app-rail button:hover,.app-rail button.active{background:var(--surface-hover);color:var(--color-text)}.app-rail button:focus-visible{outline:2px solid var(--primary)}.project-sidebar{position:absolute;left:48px;top:0;bottom:0;width:var(--nav-width);background:var(--sidebar-bg);border-right:1px solid var(--color-border);transform:translateX(-12px);opacity:0;visibility:hidden;transition:transform .16s,opacity .16s}.pinned .project-sidebar,.peek .project-sidebar{transform:none;opacity:1;visibility:visible}.peek:not(.pinned) .project-sidebar{box-shadow:16px 0 32px #0004;background:var(--color-bg)}.resize-handle{position:absolute;top:0;right:-3px;bottom:0;width:6px;cursor:col-resize;touch-action:none;z-index:2}.resize-handle:hover,.resize-handle:focus-visible{background:var(--color-border);outline:none}.sx-main{background:transparent;min-width:0}.shell-settings{position:absolute;left:12px;top:255px;z-index:80;max-height:calc(100% - 270px);overflow:auto;min-width:240px;padding:12px;border:1px solid var(--color-border);border-radius:12px;background:var(--color-bg);box-shadow:0 10px 30px #0005}.settings-heading{display:flex;justify-content:space-between;margin-bottom:12px;font-size:13px}.settings-heading button{cursor:pointer}.appearance{display:flex;gap:8px;margin-top:12px;border-top:1px solid var(--color-border);padding-top:12px}.library-page{height:100%;overflow:auto;padding:28px}.library-page>header{display:flex;gap:16px;align-items:center;justify-content:space-between;margin-bottom:28px}.library-page h1{font-size:24px;font-weight:600}.library-page select{min-width:0;max-width:60%;padding:8px;border:1px solid var(--color-border);border-radius:7px;background:var(--card-bg);font-size:12px}.shell-error{padding:10px;display:flex;justify-content:space-between;color:var(--danger);font-size:12px;overflow-wrap:anywhere}
@@ -190,7 +200,7 @@
   .appearance :global(.tx-lang-select){flex:1;min-width:0}
   .appearance :global(select){font-size:13px;color:var(--color-text);line-height:20px}
 
-.mobile-topbar{display:none}.mobile-destinations{display:grid;gap:3px;padding:4px 12px 16px;border-bottom:1px solid var(--color-border)}.mobile-destinations button,.mobile-settings{display:flex;align-items:center;gap:14px;min-height:44px;padding:10px 12px;border-radius:12px;font-size:14px;text-align:left;cursor:pointer}.mobile-destinations button:hover,.mobile-settings:hover{background:var(--surface-hover)}.mobile-projects{flex:1;min-height:0;overflow:auto}.mobile-projects :global(.project-nav){height:auto;min-height:100%}.mobile-projects :global(.project-nav>header),.mobile-projects :global(.new-conversation){display:none}.mobile-settings{flex:none;margin:10px 14px}.mobile-destinations button:focus-visible,.mobile-settings:focus-visible{outline:2px solid var(--primary);outline-offset:-2px}
+.mobile-topbar{display:none}.mobile-destinations{display:grid;gap:3px;padding:4px 12px 16px;border-bottom:1px solid var(--color-border)}.mobile-destinations button{display:flex;align-items:center;gap:14px;min-height:44px;padding:10px 12px;border-radius:12px;font-size:14px;text-align:left;cursor:pointer}.mobile-destinations button:hover{background:var(--surface-hover)}.mobile-projects{flex:1;min-height:0;overflow:auto}.mobile-projects :global(.project-nav){height:auto;min-height:100%}.mobile-projects :global(.project-nav>header),.mobile-projects :global(.new-conversation){display:none}.mobile-destinations button:focus-visible{outline:2px solid var(--primary);outline-offset:-2px}
 @media(max-width:700px){
  .shell-frame{background:rgb(var(--glass-base));position:fixed;top:var(--mobile-viewport-top,0px);left:0;right:0;height:var(--mobile-viewport-height,100dvh);max-height:100dvh;border-radius:0!important}
  .shell-topbar,.navigation-area{display:none}.mobile-topbar{display:flex;flex:none;align-items:center;justify-content:space-between;gap:10px;padding:8px 12px;padding-top:max(8px,env(safe-area-inset-top));min-height:54px;background:var(--color-bg)}

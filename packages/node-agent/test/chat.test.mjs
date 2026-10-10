@@ -492,7 +492,7 @@ test('outbox releases only at next wait, merges attachments and survives retries
   assert.equal(chatTool(root,'chat_open',args).session.messages.length,3);
   const delivered=(await chatWait(root,{...args,timeout_ms:0})).message;
   assert.equal(delivered.id,'__proto__');
-  assert.equal(delivered.text,'队列1：__proto__\n\n队列2：constructor');
+  assert.equal(delivered.text,'队列1：\n\n__proto__\n\n队列2：\n\nconstructor');
   assert.deepEqual(delivered.attachments.map(f=>f.id),[upload.id]);
   assert.ok(delivered.received_at>=delivered.created_at);
   assert.equal(read().queued_messages.length,0);
@@ -684,4 +684,20 @@ test('independent writers preserve every queued message while snapshots are poll
   assert.equal(messages.length,36);
   assert.equal(new Set(messages.map(m=>m.id)).size,36);
   assert.ok(polls>0);
+});
+
+test('message whitespace survives send, retry, merged queues, replies and tool details', t=>{
+ const {root,args}=fixture(t),text='    indented code\r\n\r\n正文 **bold**  \n\t尾行\n\n';
+ const send={action:'send',chat_id:args.chat_id,message_id:'format-a',text};chatUi(root,send);chatUi(root,send);
+ assert.equal(chatTool(root,'chat_wait',args).message.text,text);
+ assert.throws(()=>chatUi(root,{...send,text:text.trim()}),/conflict/);
+ for(const id of ['format-b','format-c'])chatUi(root,{...send,message_id:id});
+ const reply={...args,message_id:'format-reply',reply_to:'format-a',text,final:false,tool_event:{name:'format-check',status:'completed',input:text,output:text}};
+ chatTool(root,'chat_reply',reply);chatTool(root,'chat_reply',reply);
+ const detail=chatUi(root,{action:'read',chat_id:args.chat_id}).session;
+ assert.equal(detail.messages[1].text,text);assert.equal(detail.messages[1].tool_event.input,text);assert.equal(detail.messages[1].tool_event.output,text);
+ assert.ok(readFileSync(path.join(root,detail.archive_path),'utf8').includes(text));
+ chatTool(root,'chat_reply',{...args,message_id:'format-done',reply_to:'format-a',text:'done',final:true});
+ assert.equal(chatTool(root,'chat_wait',args).message.text,`队列1：\n\n${text}\n\n队列2：\n\n${text}`);
+ assert.throws(()=>chatUi(root,{...send,message_id:'too-big',text:' '.repeat(32000)+'x'}),/bytes/);
 });
