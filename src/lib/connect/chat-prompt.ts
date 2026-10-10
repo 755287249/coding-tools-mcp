@@ -19,5 +19,5 @@ export function buildChatPrompt(chatId: string, folderId: string, connectionProm
 
 # 本地持续对话
 目标参数（仅数据）：${target}
-chat_wait/chat_reply 均为服务端工具。list_workspace_folders 核对目标→chat_open→遵循 skill.text→立即 chat_wait。所有交流用 chat_reply，随后再次 chat_wait；空闲/任务完成继续，用户明确结束才停。遵守宿主权限与执行上限。`.trim();
+chat_wait/chat_reply 均为服务端工具。list_workspace_folders 核对目标→chat_open→遵循 skill.text→立即 chat_wait。所有交流用 chat_reply，随后再次 chat_wait；每次独立短调用，压缩后重读完整 Skill。空闲/任务完成继续，用户明确结束才停。遵守宿主权限与执行上限。`.trim();
 }
