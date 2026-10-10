@@ -1,4 +1,5 @@
 import {operationsMarkdown, type ChatOperation} from './operation-contract.js';
+import {discussionAction,discussionInbox,type DiscussionStore} from './discussion.js';
 import * as group from './group.js';
 import type {ChatMember} from './group.js';
 import {reduceChatPlan, chatPlanSummary, chatPlanMarkdown, type ChatTaskPlan} from './plan.js';
@@ -13,7 +14,7 @@ import { resolveChatPath } from './reveal.js';
 // The on-disk v1 contract is shared with tools/chat.rs. Never persist waiting=true.
 export interface ChatFile { label?: string; local_reference?: boolean; id: string; name: string; path: string; mime: string; size: number; sha256: string }
 export interface ToolEvent { name: string; status: 'running' | 'completed' | 'failed'; input?: string; output?: string; output_truncated?: boolean }
-export interface ChatMessage { received_by?:string[]; agent_id?:string;agent_name?:string;recipient_ids?:string[];agent_plans?:{agent_id:string;plan:ChatTaskPlan}[]; task_plan?:ChatTaskPlan; kind?: 'connection_request' | 'assignment'; awaiting_user?: boolean; received_at?: number; attachments?: ChatFile[]; tool_event?: ToolEvent; id: string; role: 'user' | 'assistant'; text: string; created_at: number; reply_to?: string; final?: boolean }
+export interface ChatMessage { discussion?:{id:string;post_id:string;source_chat_id:string;purpose:string}; received_by?:string[]; agent_id?:string;agent_name?:string;recipient_ids?:string[];agent_plans?:{agent_id:string;plan:ChatTaskPlan}[]; task_plan?:ChatTaskPlan; kind?: 'connection_request' | 'assignment'; awaiting_user?: boolean; received_at?: number; attachments?: ChatFile[]; tool_event?: ToolEvent; id: string; role: 'user' | 'assistant'; text: string; created_at: number; reply_to?: string; final?: boolean }
 export interface ChatSession { note?:string; title_agent_name?:string; work_member?:ChatMember; mode?:'work'|'group';members?:ChatMember[];agent_name?:string; pinned?: boolean; archived?: boolean; queue?: ChatMessage[]; queue_mode?: 'merge' | 'split'; queue_receipts?: Record<string,string>; title_custom?: boolean; files?: ChatFile[]; version: 1|2; id: string; title: string; created_at: number; updated_at: number; closed: boolean; messages: ChatMessage[]; attachment_id: string; lease_until: number }
 const DIR = 'docs/chat-sessions';
 const ASSET_DIR = 'mcp-assistant/chat-assets';
@@ -215,9 +216,11 @@ function readArtifact(root: string, value: unknown): Record<string, unknown> {
     return {name: relative.split('/').at(-1), mime, data_base64: bytes.toString('base64')};
   } finally { closeSync(fd); }
 }
+function discussionStore(root:string):DiscussionStore {return {safe:relative=>safe(root,relative),load:id=>load(root,id),save:s=>save(root,s),validateId:validId,text};}
 export function chatUi(root: string, args: Record<string, unknown>): Record<string, unknown> {
   return locked(root, () => {
     const action = args.action;
+    if(String(action).startsWith('discussion_'))return discussionAction(discussionStore(root),args);
     if (action === 'list') {
       const sessions = readdirSync(safe(root, DIR)).filter(n => /^[a-zA-Z0-9_-]{1,80}\.json$/.test(n)).map(n => {
         const s = view(root, load(root, n.slice(0, -5))); return { ...s, messages: undefined };
@@ -319,6 +322,8 @@ function assignAgentTitle(root:string,s:ChatSession,name:string|undefined):void 
 }
 export function chatTool(root: string, name: string, args: Record<string, unknown>): Record<string, unknown> {
   return locked(root, () => {
+    let discussion_error:string|undefined;
+    if(name==='chat_wait'){const current=load(root,validId(args.chat_id));if(!current.closed){owned(current,args.attachment_id);try{discussionInbox(discussionStore(root),current.id)}catch{discussion_error='Discussion result synchronization is pending; retry chat_wait or inspect the discussion group';}}}
     const s = load(root, validId(args.chat_id));
     if (s.closed) return { ok: true, status: 'closed' };
     if (name === 'chat_open') {
@@ -339,6 +344,7 @@ export function chatTool(root: string, name: string, args: Record<string, unknow
       if (typeof encoded === 'string' && (encoded.length > 699052 || Buffer.from(encoded, 'base64').length > 512 * 1024)) throw new Error('MCP attachment must not exceed 512 KiB; compress it before upload');
       group.renew(s,args.attachment_id); return { ok: true, attachment: upload(root, s, args) };
     }
+    if(name==='chat_discuss')return discussionAction(discussionStore(root),args,s);
     if (name === 'chat_reply') {
       const id = validId(args.message_id); const replyTo = validId(args.reply_to); const content = text(args.text);
       const attachments = messageFiles(s, args.attachment_ids);
@@ -370,7 +376,7 @@ export function chatTool(root: string, name: string, args: Record<string, unknow
         s.updated_at = message.received_at;
       }
       save(root, s);
-      return { ok: true, status: message ? 'message' : 'idle', message: message ?? null,...(group.grouped(s)?{session:view(root,s)}:{}) };
+      return { ok: true, status: message ? 'message' : 'idle', message: message ?? null,...(discussion_error?{discussion_error}:{}),...(group.grouped(s)?{session:view(root,s)}:{}) };
     }
     throw new Error('Unknown chat tool');
   });
@@ -485,7 +491,9 @@ function queuedFingerprint(content: string, attachments: ChatFile[]): string {
 function localView(root: string, s: ChatSession) {return {...view(root,s),connection_id:s.attachment_id?createHash('sha256').update(s.attachment_id).digest('hex').slice(0,12):undefined,...readChatOperations(root,s.id),queued_messages:s.queue ?? [],queue_mode:s.queue_mode ?? (group.grouped(s)?'split':'merge')};}
 function publishQueued(s: ChatSession): void {
   if(pending(s)||awaitingConfirmation(s)||!s.queue?.length)return;
-  const items=s.queue.splice(0,(s.queue_mode ?? (group.grouped(s)?'split':'merge'))==='split'?1:s.queue.length);
+  const boundary=s.queue.findIndex(m=>!!m.discussion);
+  const count=s.queue[0].discussion?1:(s.queue_mode ?? (group.grouped(s)?'split':'merge'))==='split'?1:boundary<0?s.queue.length:boundary;
+  const items=s.queue.splice(0,count);
   const attachments=[...new Map(items.flatMap(m=>m.attachments??[]).map(f=>[f.id,f])).values()];
   const message:ChatMessage={...items[0],text:items.length===1?items[0].text:items.map((m,i)=>`队列${i+1}：${m.text}`).join('\n\n'),attachments,created_at:Date.now()};
   for(const item of items)Object.defineProperty(s.queue_receipts??={},item.id,{value:queuedFingerprint(item.text,item.attachments??[]),enumerable:true,writable:true,configurable:true});

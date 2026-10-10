@@ -3,6 +3,8 @@
 pub(crate) mod operations;
 #[path = "chat_group.rs"]
 mod group;
+#[path = "chat_discussion.rs"]
+mod discussion;
 use super::workspace::WorkspaceError;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -522,6 +524,7 @@ fn read_artifact(root: &Path, value: &Value) -> Result<Value> {
 pub fn ui(root: &Path, args: &Value) -> Result<Value> {
     let _lock = lock(root)?;
     let action = args["action"].as_str().unwrap_or("");
+    if action.starts_with("discussion_"){return discussion::action(root,args,None);}
     if action == "list" {
         let mut sessions = Vec::new();
         for entry in fs::read_dir(safe(root, DIR)?).map_err(io)? {
@@ -738,6 +741,8 @@ fn assign_agent_title(root:&Path,s:&mut Value,name:&str)->Result<()> {
 }
 pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
     let _lock = lock(root)?;
+    let mut discussion_error=None::<&str>;
+    if name=="chat_wait"{let current=load(root,id(&args["chat_id"])?)?;if current["closed"]!=true{owned(&current,args)?;if discussion::inbox(root,id(&args["chat_id"])?) .is_err(){discussion_error=Some("Discussion result synchronization is pending; retry chat_wait or inspect the discussion group");}}}
     let mut s = load(root, id(&args["chat_id"])?)?;
     if s["closed"] == true {
         return Ok(json!({"ok":true,"status":"closed"}));
@@ -769,6 +774,7 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
         );
     }
     owned(&s, args)?;
+    if name=="chat_discuss"{return discussion::action(root,args,Some(&s));}
     match name {
         "chat_upload" => {
             use base64::{engine::general_purpose::STANDARD, Engine};
@@ -852,7 +858,7 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
             save(root, &s)?;
             let message = delivery(&s,args,true)?;
             Ok(
-                json!({"ok":true,"status":if message.is_some(){"message"}else{"idle"},"message":message,"session":if group::grouped(&s){view(root,&s)?}else{Value::Null}}),
+                json!({"ok":true,"status":if message.is_some(){"message"}else{"idle"},"discussion_error":discussion_error,"message":message,"session":if group::grouped(&s){view(root,&s)?}else{Value::Null}}),
             )
         }
         _ => Err(err("Unknown chat tool")),
@@ -1018,7 +1024,7 @@ fn publish_queued(s: &mut Value) {
     if pending(s).is_some()||awaiting_confirmation(s){return;}
     let split=s["queue_mode"].as_str().unwrap_or(if group::grouped(s){"split"}else{"merge"})=="split";
     let Some(queue)=s["queue"].as_array_mut() else{return;};if queue.is_empty(){return;}
-    let count=if split{1}else{queue.len()};let items=queue.drain(..count).collect::<Vec<_>>();
+    let count=if split||queue[0].get("discussion").is_some(){1}else{queue.iter().position(|m|m.get("discussion").is_some()).unwrap_or(queue.len())};let items=queue.drain(..count).collect::<Vec<_>>();
     let mut message=items[0].clone();let mut attachments=Vec::new();let mut seen=HashSet::new();
     for item in &items {if let Some(files)=item["attachments"].as_array(){for file in files{if seen.insert(file["id"].as_str().unwrap_or("").to_owned()){attachments.push(file.clone());}}}}
     if s["queue_receipts"].is_null(){s["queue_receipts"]=json!({});}
@@ -1135,6 +1141,8 @@ mod tests {
         let dir=tempfile::tempdir().unwrap();let root=dir.path();
         let older=ui(root,&json!({"action":"create","title":"older"})).unwrap()["session"]["id"].as_str().unwrap().to_string();
         let newer=ui(root,&json!({"action":"create","title":"newer"})).unwrap()["session"]["id"].as_str().unwrap().to_string();
+        // Explicit timestamps avoid relying on filesystem work crossing a millisecond.
+        let mut previous=load(root,&older).unwrap();previous["updated_at"]=json!(1);save(root,&previous).unwrap();
         assert!(ui(root,&json!({"action":"archive","chat_id":newer,"archived":"yes"})).is_err());
         let archived=ui(root,&json!({"action":"archive","chat_id":newer,"archived":true})).unwrap();
         assert_eq!(archived["session"]["archived"],true);

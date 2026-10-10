@@ -266,7 +266,7 @@ async fn call_tool_async_inner(
     args: Value,
     execution: ToolCallExecutionContext,
 ) -> Value {
-    if matches!(name.as_str(), "chat_open" | "chat_wait" | "chat_reply" | "chat_close" | "chat_upload") {
+    if matches!(name.as_str(), "chat_open" | "chat_wait" | "chat_reply" | "chat_close" | "chat_upload" | "chat_discuss") {
         let runtime = ctx.runtime_config();
         if let Err(error) = validate_tool_arguments_for_workspace(&name, &args, &runtime.policy, Some(&ctx.workspace)) {
             return policy_tool_err(ctx.as_ref(), &name, &args, error);

@@ -2,7 +2,7 @@ use serde_json::{json, Value};
 pub(super) fn input_schema(name: &str) -> Option<Value> {
     if !matches!(
         name,
-        "chat_open" | "chat_wait" | "chat_reply" | "chat_close" | "chat_upload"
+        "chat_discuss" | "chat_open" | "chat_wait" | "chat_reply" | "chat_close" | "chat_upload"
     ) {
         return None;
     }
@@ -13,6 +13,15 @@ pub(super) fn input_schema(name: &str) -> Option<Value> {
     let mut required = vec!["chat_id"];
     if name != "chat_open" {
         required.push("attachment_id");
+    }
+    if name == "chat_discuss" {
+        properties["action"]=json!({"type":"string","enum":["list","read","post"],"default":"list"});
+        properties["discussion_id"]=json!({"type":"string","minLength":1,"maxLength":80});
+        properties["message_id"]=json!({"type":"string","minLength":1,"maxLength":80,"description":"Stable post/task ID. Reuse with identical payload after uncertain delivery."});
+        properties["text"]=json!({"type":"string","minLength":1,"maxLength":16000});
+        properties["purpose"]=json!({"type":"string","enum":["discussion","question","notice","task"],"default":"discussion"});
+        properties["recipient_chat_ids"]=json!({"type":"array","minItems":1,"maxItems":16,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":80},"description":"Explicit member conversation IDs; omitted broadcasts to other members."});
+        properties["offset"]=json!({"type":"integer","minimum":0,"maximum":1000,"default":0});
     }
     if name == "chat_open" {properties["agent_name"]=json!({"type":"string","minLength":1,"maxLength":80,"description":"Unique agent remark, without spaces or @. Required when joining a group for the first time; resume with saved attachment_id."});}
     if name == "chat_wait" {

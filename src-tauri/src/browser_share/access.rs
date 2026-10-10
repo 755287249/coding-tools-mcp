@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 #[derive(Default)]
 pub struct Access {
     password: Option<[u8; 32]>,
-    // Kept only in this process for the local desktop settings page. Never serialized to disk.
+    // Decrypted only for local desktop controls; persistence uses the encrypted app secret store.
     display_password: Option<String>,
     origins: Vec<String>,
     sessions: HashMap<String, (String, Instant)>,
@@ -46,6 +46,12 @@ impl Access {
         self.display_password.as_deref()
     }
     pub fn configure(&mut self, origins: Vec<String>) -> Result<String, String> {
+        self.configure_password(origins, format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple()))
+    }
+    pub fn configure_password(&mut self, origins: Vec<String>, password: String) -> Result<String, String> {
+        if password.trim().is_empty() || password.len() < 8 || password.len() > 256 {
+            return Err("Sharing password must contain 8–256 bytes".into());
+        }
         let origins = origins
             .iter()
             .map(|o| normalize_origin(o))
@@ -53,11 +59,6 @@ impl Access {
         if origins.is_empty() || origins.len() > 32 {
             return Err("Choose 1–32 browser origins".into());
         }
-        let password = format!(
-            "{}{}",
-            uuid::Uuid::new_v4().simple(),
-            uuid::Uuid::new_v4().simple()
-        );
         self.disable();
         self.origins = origins;
         self.password = Some(hash(&password));
@@ -205,4 +206,17 @@ mod tests {
             assert!(normalize_origin(url).is_err());
         }
     }
+}
+
+#[cfg(test)]
+mod persistent_password_tests {
+ use super::*;
+ #[test]
+ fn custom_password_restores_in_a_fresh_gate_and_rotation_revokes_sessions(){
+  let origin="https://share.example";let custom="synthetic-fixed-password";
+  let mut gate=Access::default();gate.configure_password(vec![origin.into()],custom.into()).unwrap();let now=Instant::now();let token=gate.login(origin,custom,now).unwrap();
+  assert!(gate.configure_password(vec![origin.into()],"short".into()).is_err());assert!(gate.authorized(origin,&token,now));
+  let mut restarted=Access::default();restarted.configure_password(vec![origin.into()],custom.into()).unwrap();assert!(restarted.login(origin,custom,now).is_ok());assert!(!restarted.authorized(origin,&token,now));
+  gate.configure_password(vec![origin.into()],"synthetic-changed-password".into()).unwrap();assert!(!gate.authorized(origin,&token,now));assert!(gate.login(origin,custom,now).is_err());
+ }
 }

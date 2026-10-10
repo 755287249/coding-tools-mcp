@@ -16,37 +16,55 @@ static ACCESS: OnceLock<Mutex<Access>> = OnceLock::new();
 fn access() -> &'static Mutex<Access> {
     ACCESS.get_or_init(|| Mutex::new(Access::default()))
 }
+fn saved_settings() -> Result<Value, String> {
+    let app = APP.get().ok_or("Desktop unavailable")?;
+    app.state::<crate::AppState>().with_data(|store| {
+        let saved = store.get_app_secret("browser-sharing", "settings");
+        saved.map(|raw| serde_json::from_str(&raw).map_err(crate::error::AppError::from))
+            .unwrap_or_else(|| Ok(json!({"enabled":false,"origins":[]})))
+    }).map_err(|_| "Unable to load saved browser sharing settings".into())
+}
 pub fn init(app: tauri::AppHandle) {
     let _ = APP.set(app);
+    if let Ok(saved) = saved_settings() {
+        if saved["enabled"] == true {
+            let origins = serde_json::from_value(saved["origins"].clone()).unwrap_or_default();
+            if let Ok(mut gate) = access().lock() {
+                let _ = gate.configure_password(origins, saved["password"].as_str().unwrap_or("").into());
+            }
+        }
+    }
 }
 
 #[tauri::command]
 pub fn browser_sharing_status() -> Result<Value, String> {
     let gate = access().lock().map_err(|_| "Sharing lock unavailable")?;
-    let lan_ip = std::net::UdpSocket::bind("0.0.0.0:0")
-        .ok()
-        .and_then(|socket| {
-            socket.connect("192.0.2.1:80").ok()?;
-            Some(socket.local_addr().ok()?.ip().to_string())
-        });
-    Ok(
-        json!({"enabled":gate.enabled(),"origins":gate.origins(),"lanIp":lan_ip,"password":gate.local_password()}),
-    )
+    let saved = saved_settings()?;
+    let lan_ip = std::net::UdpSocket::bind("0.0.0.0:0").ok().and_then(|socket| {
+        socket.connect("192.0.2.1:80").ok()?;
+        Some(socket.local_addr().ok()?.ip().to_string())
+    });
+    Ok(json!({"enabled":gate.enabled(),"origins":gate.origins(),"lanIp":lan_ip,
+        "password":gate.local_password().map(String::from).or_else(||saved["password"].as_str().map(String::from))}))
 }
 #[tauri::command]
-pub fn configure_browser_sharing(enabled: bool, origins: Vec<String>) -> Result<Value, String> {
-    let password = {
+pub fn configure_browser_sharing(enabled: bool, origins: Vec<String>, password: Option<String>, rotate: Option<bool>) -> Result<Value, String> {
+    {
         let mut gate = access().lock().map_err(|_| "Sharing lock unavailable")?;
-        if enabled {
-            Some(gate.configure(origins)?)
-        } else {
-            gate.disable();
-            None
-        }
-    };
-    let mut status = browser_sharing_status()?;
-    status["password"] = json!(password);
-    Ok(status)
+        let saved = saved_settings()?;
+        let secret = password.or_else(|| if rotate == Some(true) {None} else {saved["password"].as_str().map(String::from)})
+            .unwrap_or_else(||format!("{}{}",uuid::Uuid::new_v4().simple(),uuid::Uuid::new_v4().simple()));
+        // Validate before saving; storage failure leaves the live gate unchanged.
+        let mut candidate = Access::default();
+        if enabled { candidate.configure_password(origins.clone(), secret.clone())?; }
+        else if secret.trim().is_empty() || secret.len()<8 || secret.len()>256 {return Err("Sharing password must contain 8–256 bytes".into());}
+        let config=json!({"enabled":enabled,"origins":if enabled {origins}else{vec![]},"password":secret});
+        APP.get().ok_or("Desktop unavailable")?.state::<crate::AppState>().with_data(|store| {
+            store.set_app_secret_preserving_on_error("browser-sharing","settings",&config.to_string())
+        }).map_err(|_| "Unable to save browser sharing settings; previous settings remain active")?;
+        *gate=candidate;
+    }
+    browser_sharing_status()
 }
 fn field<'a>(headers: &'a HeaderMap, name: &str) -> &'a str {
     headers

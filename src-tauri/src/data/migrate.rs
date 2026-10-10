@@ -467,3 +467,17 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod browser_sharing_persistence_tests {
+ use super::*;
+ #[test]
+ fn browser_sharing_config_uses_encrypted_persistence_and_survives_reload(){
+  let temp=tempfile::tempdir().unwrap();let path=temp.path().join("profiles.json");
+  let settings=serde_json::json!({"enabled":true,"origins":["https://synthetic.example"],"password":"synthetic-persistent-password"}).to_string();
+  let mut data=AppData::default();data.app_secrets.entry("browser-sharing".into()).or_default().insert("settings".into(),settings.clone());
+  write_data(&path,&data).unwrap();let disk=fs::read_to_string(&path).unwrap();assert!(!disk.contains("synthetic-persistent-password"));
+  let restored=load_existing_with_recovery(&path).unwrap();assert_eq!(restored.app_secrets["browser-sharing"]["settings"],settings);
+  write_data(&path,&restored).unwrap();assert_eq!(load_existing_with_recovery(&path).unwrap().app_secrets["browser-sharing"]["settings"],settings);
+ }
+}

@@ -125,11 +125,11 @@ async function authorize(localBase) {
 
 test('generated profile catalogs match Rust counts, membership and revisions', () => {
   const expectedCounts = {
-    advanced: 70,
+    advanced: 71,
     'read-only': 18,
-    'compat-readonly-all': 70,
-    'guarded-core': 46,
-    'trusted-core': 45
+    'compat-readonly-all': 71,
+    'guarded-core': 47,
+    'trusted-core': 46
   };
   for (const [profile, count] of Object.entries(expectedCounts)) {
     const tools = toolsForProfile(profile);
@@ -143,6 +143,9 @@ test('generated profile catalogs match Rust counts, membership and revisions', (
   const trusted = new Set(toolNamesForProfile('trusted-core'));
   const guarded = new Set(toolNamesForProfile('guarded-core'));
   const readOnly = new Set(toolNamesForProfile('read-only'));
+  assert.equal(trusted.has('chat_discuss'), true);
+  assert.equal(guarded.has('chat_discuss'), true);
+  assert.equal(readOnly.has('chat_discuss'), false);
   assert.equal(trusted.has('chat_upload'), true);
   assert.equal(guarded.has('chat_upload'), true);
   assert.equal(readOnly.has('chat_upload'), false);

@@ -2,6 +2,11 @@
   import { onMount, tick, setContext, type Snippet } from 'svelte';
   import { writable } from 'svelte/store';
   import { MOBILE_CHAT_HEADER, type MobileChatHeader } from '$lib/chat/mobile-header';
+  import DiscussionGroups from '$lib/components/chat/DiscussionGroups.svelte';
+  import Users from '@lucide/svelte/icons/users';
+  import BrowserShareDialog from './BrowserShareDialog.svelte';
+  import Globe from '@lucide/svelte/icons/globe';
+  import {localDesktop} from '$lib/api/distribution';
   import MobileSheet from './MobileSheet.svelte';
   import { mobileViewport } from '$lib/chat/mobile-viewport';
   import Menu from '@lucide/svelte/icons/menu';
@@ -41,6 +46,7 @@
   import { t } from '$lib/i18n';
   import type { MessageKey } from '$lib/i18n/catalog';
   let { children, settingsNav, onAddWorkspace, onQuickSetup }: { children: Snippet; settingsNav?: Snippet; onQuickSetup?: () => void; onAddWorkspace?: () => void | Promise<void> } = $props();
+  let shareOpen=$state(false);
   let pinned=$state(true), hovered=$state(false), recent=$state(false), searchOpen=$state(false), settingsOpen=$state(false);
   let assetSearchRequest=$state(0);
   let width=$state(280), error=$state(''), creating=$state(false);
@@ -57,7 +63,7 @@
   const group=$derived(groups.find(g=>g.workspace.id===$page.params.id&&g.folder.id===$page.url.searchParams.get('folder'))??groups.find(g=>g.workspace.id===$page.params.id)??groups[0]);
   const panel=$derived($page.url.searchParams.get('panel')??'');
   const customizing=$derived(panel==='plugins'||panel==='skills');
-  const entries=[{id:'assets',icon:Images},{id:'scheduled',icon:Clock},{id:'skills',icon:Library},{id:'plugins',icon:Blocks}];
+  const entries=[{id:'discussions',icon:Users},{id:'assets',icon:Images},{id:'scheduled',icon:Clock},{id:'skills',icon:Library},{id:'plugins',icon:Blocks}];
   onMount(()=>{const media=matchMedia('(max-width:700px)');const resize=()=>{mobileScreen=media.matches;if(!media.matches)mobileNav=false};resize();media.addEventListener('change',resize);try{pinned=localStorage.getItem('ctmcp-nav-pinned')!=='0';width=navigationWidth(localStorage.getItem('ctmcp-nav-width'));if(media.matches)pinned=false;}catch{}const stop=startScheduleRunner();return()=>{media.removeEventListener('change',resize);stop()}});
   $effect(()=>{const route=$page.url.href;mobileNav=false;mobileMore=false;settingsOpen=false;menuElement?.hidePopover();if(typeof window!=='undefined'&&window.innerWidth<700){pinned=false;hovered=false}});
   function pin(){pinned=!pinned;hovered=false;try{localStorage.setItem('ctmcp-nav-pinned',pinned?'1':'0')}catch{}}
@@ -98,6 +104,7 @@
   function menuKeys(event:KeyboardEvent){if(!['ArrowDown','ArrowUp','Home','End'].includes(event.key))return;event.preventDefault();const buttons=[...menuElement!.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')];const index=buttons.indexOf(document.activeElement as HTMLButtonElement);buttons[event.key==='Home'?0:event.key==='End'?buttons.length-1:(index+(event.key==='ArrowDown'?1:-1)+buttons.length)%buttons.length]?.focus();}
   function shortcuts(event:KeyboardEvent){if(!event.ctrlKey||event.altKey||event.isComposing)return;const key=event.key.toLowerCase();if(key==='['){event.preventDefault();history.back()}else if(key===']'){event.preventDefault();history.forward()}else if(key==='s'&&event.shiftKey){event.preventDefault();pin()}else if(key==='n'&&!event.shiftKey){event.preventDefault();void newChat()}else if(key==='k'){event.preventDefault();searchOpen=!searchOpen}}
 </script>
+{#if shareOpen}<BrowserShareDialog onClose={()=>shareOpen=false}/>{/if}
 {#if searchOpen}<ConversationSearch onClose={()=>searchOpen=false} onNewChat={async()=>{await newChat()}} onOpenWorkspace={onAddWorkspace} canSearchFiles={!!group} onSearchFiles={()=>{assetSearchRequest++;openPanel('assets')}}/>{/if}
 <svelte:window onkeydown={shortcuts} onresize={()=>{if(innerWidth<700){pinned=false;hovered=false}}}/>
 {#if mobileMore}<MobileSheet title={$t('mobile.chatActions')} onClose={()=>mobileMore=false}><nav class="mobile-destinations"><button onclick={()=>{mobileMore=false;void newChat()}}><SquarePen size={19}/>{$t('shell.newChat')}</button><button onclick={()=>{mobileMore=false;searchOpen=true}}><Search size={19}/>{$t('chat.100')}</button><button onclick={()=>{mobileMore=false;settingsOpen=true}}><Settings size={19}/>{$t('Settings')}</button></nav></MobileSheet>{/if}
@@ -108,6 +115,7 @@
     {#each entries.filter(entry=>entry.id!=='skills') as entry}<button onclick={()=>{mobileNav=false;openPanel(entry.id)}}><entry.icon size={19}/>{$t(entry.id==='plugins'?'features.customize':`shell.${entry.id}` as MessageKey)}</button>{/each}
   </nav>
   <div class="mobile-projects"><ProjectNavigator {onAddWorkspace} {recent} onSearch={()=>{mobileNav=false;searchOpen=true}}/></div>
+  {#if localDesktop()}<button class="mobile-settings" onclick={()=>{mobileNav=false;shareOpen=true}}><Globe size={20} strokeWidth={1.5}/>{$t('sharing.title')}</button>{/if}
   <button class="mobile-settings" onclick={()=>{mobileNav=false;settingsOpen=true}}><Settings size={18}/>{$t('Settings')}</button>
 </MobileSheet>{/if}
 <div class="shell-frame" use:mobileViewport>
@@ -127,6 +135,7 @@
       <button class:active={!panel&&routePath($page.url.pathname)==='/'} title={$t('chat.107')} aria-label={$t('chat.107')} onmouseenter={()=>hovered=true} onfocus={()=>hovered=true} onclick={()=>goto(appUrl('/'))}><Home size={18}/></button>
       {#each entries.filter(entry=>entry.id!=='skills') as entry}<button class:active={panel===entry.id||(entry.id==='plugins'&&panel==='skills')} title={$t(entry.id==='plugins'?'features.customize':`shell.${entry.id}` as MessageKey)} aria-label={$t(entry.id==='plugins'?'features.customize':`shell.${entry.id}` as MessageKey)} onclick={()=>openPanel(entry.id)}><entry.icon size={18}/></button>{/each}
       <button title={$t('shell.more')} aria-label={$t('shell.more')} aria-expanded={settingsOpen} onclick={()=>settingsOpen=!settingsOpen}><Ellipsis size={19}/></button>
+      {#if localDesktop()}<button class="share-globe" title={$t('sharing.title')} aria-label={$t('sharing.title')} onclick={()=>shareOpen=true}><Globe size={20} strokeWidth={1.5}/></button>{/if}
     </nav>
     {#if !customizing&&!mobileScreen}<aside class="project-sidebar" inert={!pinned&&!hovered}>
       <ProjectNavigator {onAddWorkspace} {recent} onSearch={()=>searchOpen=true}/>
@@ -140,7 +149,7 @@
       {#snippet workspacePicker()}<select aria-label={$t('chat.109')} value={group?.key??''} onchange={event=>selectGroup(event.currentTarget.value)}>{#each groups as g}<option value={g.key}>{g.workspace.name} · {g.folder.name}</option>{/each}</select>{/snippet}
     </WorkspaceFeatureControls>{:else}<section class="library-page"><h1>{$t('features.customize')}</h1><p>{$t('chat.110')}</p>{#if onAddWorkspace}<button onclick={onAddWorkspace}>{$t('chat.openWorkspace')}</button>{/if}</section>{/if}
   {:else if entries.some(entry=>entry.id===panel)}<section class="library-page"><header><h1>{$t(`shell.${panel}` as MessageKey)}</h1><select aria-label={$t('chat.109')} value={group?.key??''} onchange={event=>selectGroup(event.currentTarget.value)}>{#each groups as g}<option value={g.key}>{g.workspace.name} · {g.folder.name}</option>{/each}</select></header>
-    {#if group}{#if panel==='assets'}<AssetLibrary workspaceId={group.workspace.id} folderId={group.folder.id} focusSearchRequest={assetSearchRequest}/>{:else if panel==='scheduled'}<ScheduledTasks workspaceId={group.workspace.id} folderId={group.folder.id}/>{:else}<WorkspaceFeatureControls workspaceId={group.workspace.id} initialTab={panel==='plugins'?'mcp':'skills'}/>{/if}
+    {#if group}{#if panel==='discussions'}{#key group.key}<DiscussionGroups workspaceId={group.workspace.id} folderId={group.folder.id}/>{/key}{:else if panel==='assets'}<AssetLibrary workspaceId={group.workspace.id} folderId={group.folder.id} focusSearchRequest={assetSearchRequest}/>{:else if panel==='scheduled'}<ScheduledTasks workspaceId={group.workspace.id} folderId={group.folder.id}/>{:else}<WorkspaceFeatureControls workspaceId={group.workspace.id} initialTab={panel==='plugins'?'mcp':'skills'}/>{/if}
     {:else}<p>{$t('chat.110')}</p>{#if onAddWorkspace}<button onclick={onAddWorkspace}>{$t('shell.openFolder')}</button>{/if}{/if}
   </section>{:else}{@render children()}{/if}
   </main>
@@ -158,6 +167,7 @@
 </div>
 </div>
 <style>
+.app-rail .share-globe{margin-top:auto}
 .shell-frame{display:flex;flex-direction:column;min-height:0;height:100%;width:100%}.shell-topbar{height:38px;flex:none;display:flex;align-items:center;gap:2px;border-bottom:1px solid var(--color-border);padding-left:8px;background:var(--sidebar-bg);user-select:none}.shell-topbar>button{display:grid;place-items:center;min-width:28px;height:28px;border-radius:5px;color:var(--color-text-muted);cursor:pointer}.shell-topbar .menu-trigger{padding:0 9px;font-size:12px}.shell-topbar button:hover{background:var(--surface-hover);color:var(--color-text)}.title-space{flex:1;display:flex;justify-content:center;align-items:center;gap:7px;font-size:11px;color:var(--color-text-muted);min-width:0;overflow:hidden;white-space:nowrap}
 .menu-popup{margin:0;position:fixed;width:240px;padding:5px;border:1px solid var(--color-border);border-radius:9px;background:var(--color-bg);color:var(--color-text);box-shadow:0 12px 35px #0005}.menu-popup button{display:flex;justify-content:space-between;align-items:center;width:100%;padding:7px 10px;border-radius:5px;font-size:12px;cursor:pointer}.menu-popup button:hover,.menu-popup button:focus-visible{background:var(--surface-hover);outline:none}.menu-popup button:disabled{opacity:.4;cursor:default}.menu-popup kbd{font-size:10px;color:var(--color-text-muted)}.menu-popup hr{border:0;border-top:1px solid var(--color-border);margin:5px}
 .unified-shell{position:relative;background:transparent;flex:1;min-height:0;height:auto}.navigation-area{position:relative;flex:none;width:48px;display:flex;z-index:40}.navigation-area.pinned{width:calc(48px + var(--nav-width))}.app-rail{width:48px;flex:none;display:flex;flex-direction:column;align-items:center;gap:8px;padding:12px 5px;background:var(--sidebar-bg);border-right:1px solid var(--color-border)}.app-rail button{display:grid;place-items:center;width:34px;height:34px;border-radius:9px;color:var(--color-text-muted);cursor:pointer}.app-rail button:hover,.app-rail button.active{background:var(--surface-hover);color:var(--color-text)}.app-rail button:focus-visible{outline:2px solid var(--primary)}.project-sidebar{position:absolute;left:48px;top:0;bottom:0;width:var(--nav-width);background:var(--sidebar-bg);border-right:1px solid var(--color-border);transform:translateX(-12px);opacity:0;visibility:hidden;transition:transform .16s,opacity .16s}.pinned .project-sidebar,.peek .project-sidebar{transform:none;opacity:1;visibility:visible}.peek:not(.pinned) .project-sidebar{box-shadow:16px 0 32px #0004;background:var(--color-bg)}.resize-handle{position:absolute;top:0;right:-3px;bottom:0;width:6px;cursor:col-resize;touch-action:none;z-index:2}.resize-handle:hover,.resize-handle:focus-visible{background:var(--color-border);outline:none}.sx-main{background:transparent;min-width:0}.shell-settings{position:absolute;left:12px;top:255px;z-index:80;max-height:calc(100% - 270px);overflow:auto;min-width:240px;padding:12px;border:1px solid var(--color-border);border-radius:12px;background:var(--color-bg);box-shadow:0 10px 30px #0005}.settings-heading{display:flex;justify-content:space-between;margin-bottom:12px;font-size:13px}.settings-heading button{cursor:pointer}.appearance{display:flex;gap:8px;margin-top:12px;border-top:1px solid var(--color-border);padding-top:12px}.library-page{height:100%;overflow:auto;padding:28px}.library-page>header{display:flex;gap:16px;align-items:center;justify-content:space-between;margin-bottom:28px}.library-page h1{font-size:24px;font-weight:600}.library-page select{min-width:0;max-width:60%;padding:8px;border:1px solid var(--color-border);border-radius:7px;background:var(--card-bg);font-size:12px}.shell-error{padding:10px;display:flex;justify-content:space-between;color:var(--danger);font-size:12px;overflow-wrap:anywhere}

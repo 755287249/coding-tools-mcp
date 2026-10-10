@@ -461,6 +461,16 @@ impl DataStore {
             .cloned()
     }
 
+    /// Keep live settings unchanged if durable secret persistence fails.
+    pub fn set_app_secret_preserving_on_error(&mut self, scope: &str, item_id: &str, value: &str) -> AppResult<()> {
+        let before = self.data.clone();
+        if let Err(error) = self.set_app_secret(scope, item_id, value) {
+            self.data = before;
+            return Err(error);
+        }
+        Ok(())
+    }
+
     pub fn set_app_secret(&mut self, scope: &str, item_id: &str, value: &str) -> AppResult<()> {
         self.data
             .app_secrets

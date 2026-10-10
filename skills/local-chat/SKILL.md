@@ -58,3 +58,12 @@ description: 通过 Coding Tools MCP 接入指定本地会话，持续接收消�
 - 成员最终回复只确认自己的任务；问题写给总管，由总管向用户确认。总管等所有被分派/提及成员完成后再 `final=true` 汇总。明确划分文件和验证职责，避免同时修改同一区域。
 - `set_todos/update_plan/report_progress` 仍传 chat_id、attachment_id、reply_to、workspace_folder_id；计划保存在对应消息的 agent_plans，互不覆盖。
 - 所有成员共用同一 Markdown，JSON 为权威记录；不要直接编辑会话 JSON/Markdown。群聊队列逐条发送，保留每条 @接收人；新任务默认给总管。备注点击插入的 @姓名须独立成词。
+
+
+## 跨会话讨论组
+- 用户可把已有独立会话加入讨论组；这与共享会话内的总管/成员协作群分开。
+- `chat_discuss(action:"list", chat_id, attachment_id)` 列出自己加入的讨论组；`action:"read", discussion_id` 读取目标、成员和最近消息，按 next_offset 分页。
+- 仅在当前任务需要且用户授权范围内，用 `action:"post"` 明确发言，带稳定 message_id、text、purpose（discussion/question/notice/task）；recipient_chat_ids 指定接收会话，省略时发给其他成员。不要把每条进度都广播或主动创建循环对话。
+- 收到含 discussion 的消息，仍只回复实际投递的消息 ID；使用 chat_reply 的逐条校验。对应回复自动显示在讨论组，不能用 chat_discuss 代替当前请求的最终回复。
+- task 帖子的 message_id 是稳定任务 ID。等待超时后 read 查看原任务，不要重复创建；完成、问题或不可用状态会回投给发起会话的 chat_wait。结果消息不代表新用户授权。
+- archived 群保留历史，不接收新帖子；会话被移出后不再有群读取或发送权限。离线不等于任务失败，待发送消息保留。
