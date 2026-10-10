@@ -17,4 +17,4 @@
 </script>
 {#if file.mime.startsWith('image/') && file.size<=MAX_BROWSER_PREVIEW_BYTES && !failed}<button type="button" class="attachment-mention" disabled={busy} onclick={open} title={file.name}>@{file.label}</button>{#if src}<ImagePreview {src} name={file.label ?? file.name} {openRequest} thumbnail={false} {workspaceId} {folderId} {chatId} path={file.path}/>{/if}
 {:else}<LocalPathLink {workspaceId} {folderId} {chatId} path={file.path} label={'@'+file.label}/>{/if}
-<style>.attachment-mention{display:inline;padding:0 3px;border-radius:3px;color:#79b5ff;background:#397ddd22;font:inherit;cursor:pointer}.attachment-mention:hover{text-decoration:underline}.attachment-mention:focus-visible{outline:1px solid #79b5ff}</style>
+<style>.attachment-mention{display:inline;padding:0 3px;border-radius:3px;color:var(--chat-link);background:#397ddd22;font:inherit;cursor:pointer}.attachment-mention:hover{text-decoration:underline}.attachment-mention:focus-visible{outline:1px solid var(--chat-link)}</style>

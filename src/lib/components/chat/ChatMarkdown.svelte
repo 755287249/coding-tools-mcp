@@ -37,4 +37,4 @@
     {/each}{/if}
   {/each}
 </div>
-<style>.markdown a{color:#81b4ff;text-decoration:underline;text-underline-offset:3px}.markdown{font-size:14px;line-height:1.85;overflow-wrap:anywhere}.prose-line{white-space:pre-wrap;min-height:.55em;margin:0}.markdown h3{font-size:16px;font-weight:600;margin:18px 0 8px}.bullet{display:flex;gap:10px;margin:4px 0}.inline{background:var(--bg-main);padding:2px 5px;border-radius:4px;font-size:.9em}</style>
+<style>.markdown a{color:var(--chat-link);text-decoration:underline;text-underline-offset:3px}.markdown{font-size:14px;line-height:1.85;overflow-wrap:anywhere}.prose-line{white-space:pre-wrap;min-height:.55em;margin:0}.markdown h3{font-size:16px;font-weight:600;margin:18px 0 8px}.bullet{display:flex;gap:10px;margin:4px 0}.inline{background:var(--bg-main);padding:2px 5px;border-radius:4px;font-size:.9em}</style>

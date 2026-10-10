@@ -20,6 +20,7 @@
   --titlebar-height: 42px;
 
   /* Surfaces — neutral graphite, Codex-like */
+  --chat-bg: #181818;
   --chat-link: #79b5ff;
   --chat-user-bg: #173e76;
   --chat-selection: #24364c;
@@ -107,6 +108,7 @@
 [data-theme="light"] {
   color-scheme: light;
 
+  --chat-bg: #ffffff;
   --chat-link: #2463a8;
   --chat-user-bg: #235ca3;
   --chat-selection: #e3edfa;
@@ -4186,12 +4188,12 @@ html:has(.ad-drawer) .gc-pill {
 html.is-glass .unified-shell,html.is-glass .sx-main{background:transparent}
 @media(prefers-reduced-motion:reduce){.gc-range{transition:none}}
 
-html.is-glass .chat-shell{background:#181818}
-html.is-glass .message-feed{background:#181818}
+html.is-glass .chat-shell{background:var(--chat-bg)}
+html.is-glass .message-feed{background:var(--chat-bg)}
 html.is-glass.wallpaper-unavailable .win-root,html.is-glass.backdrop-off .win-root{background:rgb(var(--glass-base))}
 html.is-glass .menu-popup,html.is-glass .disconnect-dialog,html.is-glass .shell-settings{background:rgb(var(--glass-base) / .96)}
 
-.chat-workspace{background:#181818}
+.chat-workspace{background:var(--chat-bg)}
 html.is-glass .shell-topbar,html.is-glass .app-rail{background:rgb(var(--glass-base) / calc(var(--glass-alpha, .55) + .12));backdrop-filter:blur(28px) saturate(125%)}
 html.is-glass .project-sidebar{background:rgb(var(--glass-base) / var(--glass-alpha, .55));backdrop-filter:blur(28px) saturate(125%)}
 html.is-glass .connect-dialog{background:rgb(var(--glass-base) / .96)}
@@ -4204,6 +4206,6 @@ html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
 
 @media(max-width:700px){
  .sx-main .chat-workspace .chat-workspace-main{padding:0}
- .chat-workspace,html.is-glass .chat-shell,html.is-glass .message-feed{background:var(--color-bg)}
+ .chat-workspace,html.is-glass .chat-shell,html.is-glass .message-feed{background:var(--chat-bg)}
  .gc-pill{display:none}
 }

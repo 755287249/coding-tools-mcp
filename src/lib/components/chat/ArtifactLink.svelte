@@ -15,4 +15,4 @@
 <LocalPathLink {workspaceId} {folderId} {chatId} {path} label={$t('chat.showInFolder')}/>
 {#if error}<span class="artifact-error" role="alert">{error}</span>{/if}
 {#if src}<ImagePreview {workspaceId} {folderId} {chatId} {path} {src} name={path.split('/').at(-1)??path} openRequest={request} thumbnail={false}/>{/if}
-<style>.artifact-link{display:inline;color:#81b4ff;text-decoration:underline;text-underline-offset:3px;cursor:zoom-in;text-align:left;overflow-wrap:anywhere}.artifact-link:disabled{opacity:.5}.artifact-error{display:block;color:var(--danger);font-size:11px}</style>
+<style>.artifact-link{display:inline;color:var(--chat-link);text-decoration:underline;text-underline-offset:3px;cursor:zoom-in;text-align:left;overflow-wrap:anywhere}.artifact-link:disabled{opacity:.5}.artifact-error{display:block;color:var(--danger);font-size:11px}</style>
