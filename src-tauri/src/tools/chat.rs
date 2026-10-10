@@ -5,6 +5,8 @@ pub(crate) mod operations;
 mod group;
 #[path = "chat_discussion.rs"]
 mod discussion;
+#[path = "chat_collaboration.rs"]
+mod collaboration;
 #[path = "chat_pairing.rs"]
 pub(crate) mod pairing;
 use super::workspace::WorkspaceError;
@@ -151,6 +153,7 @@ fn user_message_state(s: &Value, message: &Value) -> String {
     )
 }
 pub fn markdown(s: &Value) -> String {
+    let visible=collaboration::visible(s);let s=&visible;
     let mut out = format!(
         "# {}\n\nSession: {}\n\n",
         s["title"].as_str().unwrap_or(""),
@@ -294,6 +297,7 @@ fn delivery(s:&Value,args:&Value,waiting:bool)->Result<Option<Value>>{if group::
 fn wait_key(root:&Path,s:&Value,args:&Value)->Result<PathBuf>{Ok(file(root,id(&s["id"])?)?.join(id(&args["attachment_id"])?))}
 
 fn view(root: &Path, s: &Value) -> Result<Value> {
+    let visible=collaboration::visible(s);let s=&visible;
     let waiting = WAITERS
         .get_or_init(Default::default)
         .lock()
@@ -1045,18 +1049,20 @@ fn read_attachment_chunk(root: &Path, s: &Value, args: &Value) -> Result<Value> 
 }
 
 fn awaiting_confirmation(s: &Value) -> bool {
+    let visible=collaboration::visible(s);let s=&visible;
     if let Some(messages)=s["messages"].as_array(){for m in messages.iter().rev(){if m["role"]=="user"{return false;}if m["role"]=="assistant"&&m["final"]==true{return m["awaiting_user"]==true;}}}false
 }
 fn queued_fingerprint(content: &str, attachments: &[Value]) -> String {
     digest(json!([content,attachments.iter().map(|f|f["id"].clone()).collect::<Vec<_>>()]).to_string().as_bytes())
 }
 fn local_view(root: &Path,s: &Value)->Result<Value>{
+    let visible=collaboration::visible(s);let s=&visible;
     let mut result=view(root,s)?;
     result["pairing"]=pairing::status(root,id(&s["id"])?);
     if let Some(attachment)=s["attachment_id"].as_str().filter(|id|!id.is_empty()) {
         result["connection_id"]=json!(format!("{:x}",Sha256::digest(attachment.as_bytes()))[..12].to_string());
     }
-    result.as_object_mut().unwrap().extend(operations::view(root,id(&s["id"])?).as_object().unwrap().clone());result["queued_messages"]=s.get("queue").cloned().unwrap_or(json!([]));result["queue_mode"]=s.get("queue_mode").cloned().unwrap_or_else(||json!(if group::grouped(s){"split"}else{"merge"}));Ok(result)
+    result.as_object_mut().unwrap().extend(operations::view(root,id(&s["id"])?).as_object().unwrap().clone());if let Some(ops)=result["operations"].as_array_mut(){ops.retain(|op|s["messages"].as_array().into_iter().flatten().any(|m|m["id"]==op["reply_to"]));}result["queued_messages"]=s.get("queue").cloned().unwrap_or(json!([]));result["queue_mode"]=s.get("queue_mode").cloned().unwrap_or_else(||json!(if group::grouped(s){"split"}else{"merge"}));Ok(result)
 }
 fn publish_queued(s: &mut Value) {
     if pending(s).is_some()||awaiting_confirmation(s){return;}

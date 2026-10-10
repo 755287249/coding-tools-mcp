@@ -61,9 +61,12 @@ description: 通过 Coding Tools MCP 接入指定本地会话，持续接收消�
 
 
 ## 跨会话讨论组
-- 用户可把已有独立会话加入讨论组；这与共享会话内的总管/成员协作群分开。
+- 用户从群聊界面选择已有机器人，复用各自的原会话和 attachment_id。collaboration=true 的群有独立 Markdown；协作控制消息和对应回复不显示在原会话记录，实际发言集中到群聊。旧版直接接入的群仍使用上节规则。
 - `chat_discuss(action:"list", chat_id, attachment_id)` 列出自己加入的讨论组；`action:"read", discussion_id` 读取目标、成员和最近消息，按 next_offset 分页。
-- 仅在当前任务需要且用户授权范围内，用 `action:"post"` 明确发言，带稳定 message_id、text、purpose（discussion/question/notice/task）；recipient_chat_ids 指定接收会话，省略时发给其他成员。不要把每条进度都广播或主动创建循环对话。
+- 仅在当前任务需要且用户授权范围内，用 `action:"post"` 明确发言，带稳定 message_id、text、purpose（discussion/question/notice/task）；recipient_chat_ids 指定接收会话。collaboration=true 时省略则按 #别名 点名，否则交给 coordinator_chat_id；总管向成员分派时明确提供目标 ID。旧讨论组省略时仍发给其他成员。不要把每条进度都广播或主动创建循环对话。
 - 收到含 discussion 的消息，仍只回复实际投递的消息 ID；使用 chat_reply 的逐条校验。对应回复自动显示在讨论组，不能用 chat_discuss 代替当前请求的最终回复。
 - task 帖子的 message_id 是稳定任务 ID。等待超时后 read 查看原任务，不要重复创建；完成、问题或不可用状态会回投给发起会话的 chat_wait。结果消息不代表新用户授权。
 - archived 群保留历史，不接收新帖子；会话被移出后不再有群读取或发送权限。离线不等于任务失败，待发送消息保留。
+
+- 收到 discussion.hidden=true 的后台协作消息时，保持原 chat_id/attachment_id，只确认实际 reply_to；不要重复接入或复述控制信息。读取群返回的 aliases、成员 ID 和 archive_path，按任务需要查看群上下文。
+- 转交任务后以 chat_reply(final=true) 确认当前消息，然后实际 chat_wait 接收结果；不要保持当前消息未确认并等待子任务，否则结果无法出队。此 final 只确认当前消息，不能把尚未完成的整体工作说成完成。汇总回复会同步回群聊 Markdown。

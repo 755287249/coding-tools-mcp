@@ -59,3 +59,47 @@ test('pagination retains all posts and rejects invalid offsets',t=>{
  const earlier=ui({action:'discussion_read',discussion_id:'group1',offset:50}).discussion;assert.equal(earlier.posts.length,3);assert.equal(earlier.next_offset,null);
  assert.throws(()=>ui({action:'discussion_read',discussion_id:'group1',offset:-1}),/offset/);
 });
+
+test('collaboration reuses attachments, routes #aliases, hides controls and exports shared replies',t=>{
+ const {root,a,b,c,aa,bb,ui,tool,wa,wb}=fixture(t);
+ const create={action:'discussion_create',discussion_id:'team',title:'Team',collaboration:true,member_chat_ids:[a,b],coordinator_chat_id:a};
+ const group=ui(create).discussion;assert.equal(group.aliases[a],'A');assert.equal(group.coordinator_chat_id,a);
+ assert.throws(()=>ui({...create,discussion_id:'bad',member_chat_ids:[c]}),/connected robots/);
+ assert.throws(()=>ui({...create,coordinator_chat_id:b}),/conflicts/);
+ ui({action:'send',chat_id:a,message_id:'ordinary',text:'Private task'});
+ const post={action:'discussion_post',discussion_id:'team',message_id:'group-default',text:'Plan this'};
+ ui(post);ui(post);assert.equal(wa().message.id,'ordinary');
+ tool(a,aa.attachment_id,'chat_reply',{message_id:'ordinary-reply',reply_to:'ordinary',text:'Private result',final:true});
+ const work=wa().message;assert.equal(work.discussion.hidden,true);assert.match(work.text,/不要重新 chat_open/);assert.match(work.text,/Team/);
+ assert.equal(wb().status,'idle');
+ assert.deepEqual(ui({action:'read',chat_id:a}).session.messages.map(m=>m.id),['ordinary','ordinary-reply']);
+ tool(a,aa.attachment_id,'chat_reply',{message_id:'group-question',reply_to:work.id,text:'Which target?',final:true,awaiting_user:true});
+ ui({action:'discussion_post',discussion_id:'team',message_id:'answer',text:'Use default'});
+ const answer=wa().message;assert.equal(answer.discussion.post_id,'answer');
+ tool(a,aa.attachment_id,'chat_reply',{message_id:'answer-done',reply_to:answer.id,text:'Group plan',final:true});
+ ui({action:'discussion_post',discussion_id:'team',message_id:'mention',text:'#b investigate'});
+ assert.equal(wa().status,'idle');const assigned=wb().message;assert.equal(assigned.discussion.post_id,'mention');
+ tool(b,bb.attachment_id,'chat_reply',{message_id:'b-result',reply_to:assigned.id,text:'Shared finding',final:true});
+ const shared=ui({action:'discussion_read',discussion_id:'team'}).discussion;
+ assert.equal(shared.posts.length,3);assert.equal(shared.posts[2].deliveries[0].chat_id,b);
+ const md=readFileSync(path.join(root,shared.archive_path),'utf8');assert.match(md,/Shared finding/);assert.doesNotMatch(md,/协作控制信息|Private task/);
+ const privateMd=readFileSync(path.join(root,`docs/chat-sessions/${a}.md`),'utf8');assert.match(privateMd,/Private result/);assert.doesNotMatch(privateMd,/Group plan|Which target|协作控制信息/);
+ assert.equal(ui({action:'list'}).sessions.find(s=>s.id===a).assistant_message_count,1);
+ assert.equal(wa().status,'idle');assert.equal(wb().status,'idle');
+});
+
+test('coordinator delegation returns hidden results and summary to shared timeline without reconnecting',t=>{
+ const {root,a,b,aa,bb,ui,tool,wa,wb}=fixture(t);
+ ui({action:'discussion_create',discussion_id:'team',title:'Team',collaboration:true,member_chat_ids:[a,b]});
+ const args={action:'post',discussion_id:'team',message_id:'delegate',text:'Inspect',purpose:'task',recipient_chat_ids:[b]};
+ tool(a,aa.attachment_id,'chat_discuss',args);const m=wb().message;
+ tool(b,bb.attachment_id,'chat_reply',{message_id:'found',reply_to:m.id,text:'Found',final:true});
+ const result=wa().message;assert.equal(result.discussion.hidden,true);
+ assert.deepEqual(ui({action:'read',chat_id:a}).session.messages,[]);
+ tool(a,aa.attachment_id,'chat_reply',{message_id:'summary',reply_to:result.id,text:'Final summary',final:true});
+ const d=ui({action:'discussion_read',discussion_id:'team'}).discussion;
+ assert.equal(d.posts[0].summaries[0].text,'Final summary');assert.match(readFileSync(path.join(root,d.archive_path),'utf8'),/Final summary/);
+ assert.equal(wa().status,'idle');assert.equal(wb().status,'idle');
+ ui({action:'discussion_update',discussion_id:'team',member_chat_ids:[a]});
+ assert.throws(()=>tool(b,bb.attachment_id,'chat_discuss',{action:'read',discussion_id:'team'}),/not a discussion member/);
+});

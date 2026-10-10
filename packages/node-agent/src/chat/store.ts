@@ -1,3 +1,4 @@
+import {visibleSession} from './collaboration.js';
 import {operationsMarkdown, type ChatOperation} from './operation-contract.js';
 import {discussionAction,discussionInbox,type DiscussionStore} from './discussion.js';
 import * as group from './group.js';
@@ -15,7 +16,7 @@ import { resolveChatPath } from './reveal.js';
 // The on-disk v1 contract is shared with tools/chat.rs. Never persist waiting=true.
 export interface ChatFile { label?: string; local_reference?: boolean; id: string; name: string; path: string; mime: string; size: number; sha256: string }
 export interface ToolEvent { name: string; status: 'running' | 'completed' | 'failed'; input?: string; output?: string; output_truncated?: boolean }
-export interface ChatMessage { discussion?:{id:string;post_id:string;source_chat_id:string;purpose:string}; received_by?:string[]; agent_id?:string;agent_name?:string;recipient_ids?:string[];agent_plans?:{agent_id:string;plan:ChatTaskPlan}[]; task_plan?:ChatTaskPlan; kind?: 'connection_request' | 'assignment'; awaiting_user?: boolean; received_at?: number; attachments?: ChatFile[]; tool_event?: ToolEvent; id: string; role: 'user' | 'assistant'; text: string; created_at: number; reply_to?: string; final?: boolean }
+export interface ChatMessage { discussion?:{hidden?:boolean;id:string;post_id:string;source_chat_id:string;purpose:string}; received_by?:string[]; agent_id?:string;agent_name?:string;recipient_ids?:string[];agent_plans?:{agent_id:string;plan:ChatTaskPlan}[]; task_plan?:ChatTaskPlan; kind?: 'connection_request' | 'assignment'; awaiting_user?: boolean; received_at?: number; attachments?: ChatFile[]; tool_event?: ToolEvent; id: string; role: 'user' | 'assistant'; text: string; created_at: number; reply_to?: string; final?: boolean }
 export interface ChatSession {pending_pairing?:string; note?:string; title_agent_name?:string; work_member?:ChatMember; mode?:'work'|'group';members?:ChatMember[];agent_name?:string; pinned?: boolean; archived?: boolean; queue?: ChatMessage[]; queue_mode?: 'merge' | 'split'; queue_receipts?: Record<string,string>; title_custom?: boolean; files?: ChatFile[]; version: 1|2; id: string; title: string; created_at: number; updated_at: number; closed: boolean; messages: ChatMessage[]; attachment_id: string; lease_until: number }
 const DIR = 'docs/chat-sessions';
 const ASSET_DIR = 'mcp-assistant/chat-assets';
@@ -59,7 +60,8 @@ function userMessageState(s: ChatSession, message: ChatMessage): string {
   }
   return `消息状态：${read ? '已读' : '未读'} · ${status}`;
 }
-export function chatMarkdown(s: ChatSession): string {
+export function chatMarkdown(session: ChatSession): string {
+  const s=visibleSession(session);
   return `# ${s.title}\n\nSession: ${s.id}\n\n${s.note ? `备注：${s.note}\n\n` : ''}` + group.groupMarkdown(s) + s.messages.map(m => `## ${m.kind === 'connection_request' ? '接入请求' : m.role === 'user' ? '你' : m.final === false ? 'AI · 进度' : 'AI'} · ${m.created_at}\n\n${m.tool_event ? `Tool (AI reported): ${m.tool_event.name} · ${m.tool_event.status}\n\n` : ''}${m.text}\n${group.groupMarkdown(s,m)}${chatPlanMarkdown(m.task_plan)}${m.role === 'user' ? `\n${userMessageState(s, m)}\n` : ''}${m.role === 'assistant' ? `\nReply state: ${m.awaiting_user ? 'awaiting_user' : m.final === false ? 'supplementing' : 'complete'}\n` : ''}${m.tool_event?.input ? `\nInput:\n${m.tool_event.input}\n` : ''}${m.tool_event?.output ? `\nOutput:\n${m.tool_event.output}\n` : ''}${m.tool_event?.output_truncated ? '\nOutput truncated\n' : ''}${(m.attachments ?? []).map(f => `\nAttachment: ${f.name} (${f.size} bytes)\nPath: ${f.path}\n${f.label ? `Reference: @${f.label}\n` : ''}`).join('')}`).join('\n') + queuedMarkdown(s);
 }
 function save(root: string, s: ChatSession): void {
@@ -96,7 +98,8 @@ function pending(s: ChatSession, attachment?:unknown,waiting=false): ChatMessage
   if(group.grouped(s))return group.groupPending(s,attachment?group.memberFor(s,attachment).id:undefined,waiting);
   return s.messages.find(m => m.role === 'user' && !s.messages.some(r => r.role === 'assistant' && r.reply_to === m.id && r.final));
 }
-function view(root: string, s: ChatSession) {
+function view(root: string, session: ChatSession) {
+  const s=visibleSession(session);
   const message = s.closed ? undefined : pending(s);
   const work_state = !message ? null : message.received_at || s.messages.some(r => r.role === 'assistant' && r.reply_to === message.id) ? 'processing' : 'queued';
   const members=group.members(s).map(m=>({id:m.id,name:m.name,role:m.role,paused:m.paused===true,status:s.closed?'offline':waiters.has(key(root,s.id)+':'+m.attachment_id)?'waiting':m.lease_until>Date.now()?'connected':'offline'}));
@@ -503,14 +506,15 @@ function readAttachmentChunk(root: string, s: ChatSession, args: Record<string, 
   } finally {closeSync(fd);}
 }
 
-function awaitingConfirmation(s: ChatSession): boolean {
+function awaitingConfirmation(session: ChatSession): boolean {
+  const s=visibleSession(session);
   for(let i=s.messages.length-1;i>=0;i--){const m=s.messages[i];if(m.role==='user')return false;if(m.role==='assistant'&&m.final===true)return m.awaiting_user===true;}
   return false;
 }
 function queuedFingerprint(content: string, attachments: ChatFile[]): string {
   return createHash('sha256').update(JSON.stringify([content,attachments.map(f=>f.id)])).digest('hex');
 }
-function localView(root: string, s: ChatSession) {return {...view(root,s),pairing:pairingStatus(root,s.id),connection_id:s.attachment_id?createHash('sha256').update(s.attachment_id).digest('hex').slice(0,12):undefined,...readChatOperations(root,s.id),queued_messages:s.queue ?? [],queue_mode:s.queue_mode ?? (group.grouped(s)?'split':'merge')};}
+function localView(root: string, session: ChatSession) {const s=visibleSession(session);const ops=readChatOperations(root,s.id);const visibleIds=new Set(s.messages.map(m=>m.id));ops.operations=ops.operations?.filter(op=>visibleIds.has(op.reply_to));return {...view(root,s),pairing:pairingStatus(root,s.id),connection_id:s.attachment_id?createHash('sha256').update(s.attachment_id).digest('hex').slice(0,12):undefined,...ops,queued_messages:s.queue ?? [],queue_mode:s.queue_mode ?? (group.grouped(s)?'split':'merge')};}
 function publishQueued(s: ChatSession): void {
   if(pending(s)||awaitingConfirmation(s)||!s.queue?.length)return;
   const boundary=s.queue.findIndex(m=>!!m.discussion);

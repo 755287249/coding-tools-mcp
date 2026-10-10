@@ -14,7 +14,8 @@ fn write(root:&Path,d:&Value)->Result<()>{
  if bytes.len()>LIMIT||d["posts"].as_array().map_or(0,Vec::len)>1000{return Err(err("Discussion is full; archive it and create another group"));}
  fs::create_dir_all(safe(root,DISCUSS_DIR)?).map_err(io)?;let gid=id(&d["id"])?;
  let temp=safe(root,&format!("{DISCUSS_DIR}/{gid}.{}.tmp",uuid::Uuid::new_v4()))?;
- let result=(||{fs::write(&temp,&bytes).map_err(io)?;fs::rename(&temp,safe(root,&format!("{DISCUSS_DIR}/{gid}.json"))?).map_err(io)})();let _=fs::remove_file(temp);result
+ let result=(||{fs::write(&temp,&bytes).map_err(io)?;fs::rename(&temp,safe(root,&format!("{DISCUSS_DIR}/{gid}.json"))?).map_err(io)})();let _=fs::remove_file(temp);result?;
+ if d["collaboration"]==true{let temp=safe(root,&format!("{DISCUSS_DIR}/{gid}.{}.tmp",uuid::Uuid::new_v4()))?;let result=(||{fs::write(&temp,collaboration::markdown(d)).map_err(io)?;fs::rename(&temp,safe(root,&format!("{DISCUSS_DIR}/{gid}.md"))?).map_err(io)})();let _=fs::remove_file(temp);result?;}Ok(())
 }
 fn all(root:&Path)->Result<Vec<Value>>{
  let dir=safe(root,DISCUSS_DIR)?;if !dir.exists(){return Ok(vec![])}
@@ -27,8 +28,8 @@ fn members(root:&Path,value:&Value)->Result<Vec<Value>>{
 fn projection(root:&Path,d:&Value,args:&Value)->Result<Value>{
  let offset=match args.get("offset"){None=>0,Some(v)=>v.as_u64().filter(|n|*n<=1000).ok_or_else(||err("Invalid history offset"))? as usize};
  let posts=d["posts"].as_array().unwrap();let end=posts.len().saturating_sub(offset);let begin=end.saturating_sub(50);let mut out=d.clone();
- out["posts"]=json!(&posts[begin..end]);out["next_offset"]=if begin>0{json!(offset+end-begin)}else{Value::Null};out["total"]=json!(posts.len());
- out["member_details"]=json!(d["members"].as_array().unwrap().iter().map(|cid|match load(root,cid.as_str().unwrap_or("")){Ok(s)=>json!({"id":cid,"title":s["title"],"note":s["note"].as_str().unwrap_or(""),"status":if s["closed"]==true{"closed"}else if s["lease_until"].as_u64().unwrap_or(0)>now(){"connected"}else{"offline"}}),Err(_)=>json!({"id":cid,"title":cid,"status":"missing"})}).collect::<Vec<_>>());Ok(out)
+ out["archive_path"]=json!(format!("{DISCUSS_DIR}/{}.md",d["id"].as_str().unwrap()));out["posts"]=json!(&posts[begin..end]);out["next_offset"]=if begin>0{json!(offset+end-begin)}else{Value::Null};out["total"]=json!(posts.len());
+ out["member_details"]=json!(d["members"].as_array().unwrap().iter().map(|cid|match load(root,cid.as_str().unwrap_or("")){Ok(s)=>json!({"id":cid,"title":d["aliases"][cid.as_str().unwrap_or("")].as_str().or(s["agent_name"].as_str()).or(s["title"].as_str()).unwrap_or("AI"),"busy":pending(&s).is_some(),"note":s["note"].as_str().unwrap_or(""),"status":if s["closed"]==true{"closed"}else if s["lease_until"].as_u64().unwrap_or(0)>now(){"connected"}else{"offline"}}),Err(_)=>json!({"id":cid,"title":cid,"status":"missing"})}).collect::<Vec<_>>());Ok(out)
 }
 fn collect(root:&Path,d:&mut Value)->Result<()>{
  let before=d["posts"].clone();
@@ -46,7 +47,8 @@ fn collect(root:&Path,d:&mut Value)->Result<()>{
    },Err(_)=>{delivery["status"]=json!("unavailable");delivery["error"]=json!("Conversation unavailable; existing results retained");}
   }
  }}
- if d["posts"]!=before{write(root,d)?;}Ok(())
+ if d["collaboration"]==true{let gid=d["id"].clone();for p in d["posts"].as_array_mut().unwrap(){if p["from"]=="user"{continue}if let Ok(s)=load(root,p["from"].as_str().unwrap_or("")){let ids:HashSet<_>=s["messages"].as_array().unwrap().iter().filter(|m|m["discussion"]["id"]==gid&&m["discussion"]["post_id"]==p["id"]&&m["discussion"]["purpose"]=="result").filter_map(|m|m["id"].as_str()).collect();p["summaries"]=json!(s["messages"].as_array().unwrap().iter().filter(|m|m["role"]=="assistant"&&ids.contains(m["reply_to"].as_str().unwrap_or(""))).collect::<Vec<_>>());}}}
+ if d["posts"]!=before||d["collaboration"]==true{write(root,d)?;}Ok(())
 }
 fn deliver(root:&Path,d:&Value,p:&Value)->Result<()>{
  for delivery in p["deliveries"].as_array().unwrap(){
@@ -56,7 +58,7 @@ fn deliver(root:&Path,d:&Value,p:&Value)->Result<()>{
   let goal=p["goal"].as_str().filter(|s|!s.is_empty()).unwrap_or("未设置");
   let content=format!("[讨论组：{}]\n目标：{}\n发送者：{}\n用途：{}\n群 ID：{}\n任务/消息 ID：{}\n\n{}\n\n请用 chat_reply 回复本条实际消息 ID；结果会关联回讨论组。需要明确向其他成员发言时使用 chat_discuss。",d["name"].as_str().unwrap_or(""),goal,p["name"].as_str().unwrap_or(""),p["purpose"].as_str().unwrap_or(""),d["id"].as_str().unwrap_or(""),p["id"].as_str().unwrap_or(""),p["text"].as_str().unwrap_or(""));
   if !s["queue"].is_array(){s["queue"]=json!([])}
-  s["queue"].as_array_mut().unwrap().push(json!({"id":delivery["message_id"],"role":"user","created_at":p["created_at"],"text":content,"discussion":{"id":d["id"],"post_id":p["id"],"source_chat_id":p["from"],"purpose":p["purpose"]}}));s["updated_at"]=json!(now());save(root,&s)?;
+  s["queue"].as_array_mut().unwrap().push(json!({"id":delivery["message_id"],"role":"user","created_at":p["created_at"],"text":format!("{}{}",content,collaboration::context(d,p)),"discussion":{"hidden":d["collaboration"]==true,"id":d["id"],"post_id":p["id"],"source_chat_id":p["from"],"purpose":p["purpose"]}}));s["updated_at"]=json!(now());save(root,&s)?;
  }Ok(())
 }
 pub(super) fn action(root:&Path,args:&Value,actor:Option<&Value>)->Result<Value>{
@@ -65,8 +67,8 @@ pub(super) fn action(root:&Path,args:&Value,actor:Option<&Value>)->Result<Value>
  if action=="create"{
   if actor.is_some(){return Err(err("Create groups from the local interface"));}
   let gid=id(&args["discussion_id"])?;let name=text(&args["title"],160)?;let goal=if args["goal"].as_str().unwrap_or("").is_empty(){String::new()}else{text(&args["goal"],2000)?};let ids=members(root,&args["member_chat_ids"])?;
-  if safe(root,&format!("{DISCUSS_DIR}/{gid}.json"))?.exists(){let old=read(root,&args["discussion_id"])?;if old["name"]!=name||old["goal"]!=goal||old["members"]!=json!(ids){return Err(err("Group ID conflicts"));}return Ok(json!({"discussion":projection(root,&old,args)?}));}
-  let d=json!({"version":1,"id":gid,"name":name,"goal":goal,"members":ids,"archived":false,"created_at":now(),"updated_at":now(),"posts":[]});write(root,&d)?;return Ok(json!({"discussion":projection(root,&d,args)?}));
+  if safe(root,&format!("{DISCUSS_DIR}/{gid}.json"))?.exists(){let old=read(root,&args["discussion_id"])?;if old["name"]!=name||old["goal"]!=goal||old["members"]!=json!(ids)||(old["collaboration"]==true)!=(args["collaboration"]==true)||args.get("coordinator_chat_id").is_some_and(|cid|*cid!=old["coordinator_chat_id"]){return Err(err("Group ID conflicts"));}return Ok(json!({"discussion":projection(root,&old,args)?}));}
+  let mut d=json!({"collaboration":args["collaboration"]==true,"version":1,"id":gid,"name":name,"goal":goal,"members":ids,"archived":false,"created_at":now(),"updated_at":now(),"posts":[]});collaboration::configure(root,&mut d,args)?;write(root,&d)?;return Ok(json!({"discussion":projection(root,&d,args)?}));
  }
  let mut d=read(root,&args["discussion_id"])?;
  if actor.is_some_and(|s|!d["members"].as_array().unwrap().contains(&s["id"])){return Err(err("This conversation is not a discussion member"));}
@@ -77,19 +79,19 @@ pub(super) fn action(root:&Path,args:&Value,actor:Option<&Value>)->Result<Value>
    if args.get("goal").is_some(){d["goal"]=json!(if args["goal"].as_str()==Some(""){String::new()}else{text(&args["goal"],2000)?});}
    if args.get("member_chat_ids").is_some(){d["members"]=json!(members(root,&args["member_chat_ids"])?);}
    if let Some(v)=args.get("archived"){if !v.is_boolean(){return Err(err("archived must be boolean"));}d["archived"]=v.clone();}
-   d["updated_at"]=json!(now());write(root,&d)?;
+   collaboration::configure(root,&mut d,args)?;d["updated_at"]=json!(now());write(root,&d)?;
   },
   "post"=>{
    let pid=id(&args["message_id"])?;let content=text(&args["text"],16000)?;let purpose=args["purpose"].as_str().unwrap_or("discussion");let from=actor.map(|s|s["id"].as_str().unwrap()).unwrap_or("user");
    if !["discussion","question","notice","task"].contains(&purpose){return Err(err("Invalid message purpose"));}
-   let targets=args.get("recipient_chat_ids").cloned().unwrap_or_else(||json!(d["members"].as_array().unwrap().iter().filter(|v|**v!=from).cloned().collect::<Vec<_>>()));
+   let targets=args.get("recipient_chat_ids").cloned().unwrap_or_else(||if d["collaboration"]==true{collaboration::targets(&d,&content,from)}else{json!(d["members"].as_array().unwrap().iter().filter(|v|**v!=from).cloned().collect::<Vec<_>>())});
    let targets=targets.as_array().filter(|a|!a.is_empty()&&a.len()<=16).ok_or_else(||err("Choose discussion members other than yourself"))?;
    let mut seen=HashSet::new();for target in targets{if !target.is_string()||!d["members"].as_array().unwrap().contains(target)||*target==from||!seen.insert(target.as_str()){return Err(err("Choose discussion members other than yourself"));}}
    let previous=d["posts"].as_array().unwrap().iter().find(|p|p["id"]==pid).cloned();
    let p=if let Some(p)=previous{if p["from"]!=from||p["text"]!=content||p["purpose"]!=purpose||p["targets"]!=json!(targets){return Err(err("Message ID conflicts with a discussion post"));}p}else{
     if d["archived"]==true{return Err(err("Discussion is archived"));}members(root,&json!(targets))?;
     let mut deliveries=vec![];for target in targets{let cid=target.as_str().unwrap();deliveries.push(json!({"chat_id":target,"message_id":format!("d-{}",digest(&format!("{}:{pid}:{cid}",d["id"].as_str().unwrap()))),"title":load(root,cid)?["title"],"status":"undelivered","replies":[]}));}
-    let p=json!({"id":pid,"from":from,"name":actor.map(|s|s["title"].clone()).unwrap_or(json!("你")),"text":content,"goal":d["goal"],"purpose":purpose,"targets":targets,"created_at":now(),"deliveries":deliveries});d["posts"].as_array_mut().unwrap().push(p.clone());d["updated_at"]=json!(now());write(root,&d)?;p
+    let p=json!({"id":pid,"from":from,"name":actor.map(|s|d["aliases"][s["id"].as_str().unwrap()].as_str().or(s["agent_name"].as_str()).map(|n|json!(n)).unwrap_or(s["title"].clone())).unwrap_or(json!("你")),"text":content,"goal":d["goal"],"purpose":purpose,"targets":targets,"created_at":now(),"deliveries":deliveries});d["posts"].as_array_mut().unwrap().push(p.clone());d["updated_at"]=json!(now());write(root,&d)?;p
    };deliver(root,&d,&p)?;
   },"read"=>(),_=>return Err(err("Unknown discussion action"))
  }
@@ -106,7 +108,7 @@ pub(super) fn inbox(root:&Path,cid:&str)->Result<()>{
    if s["closed"]==true||s["messages"].as_array().unwrap().iter().chain(s["queue"].as_array().into_iter().flatten()).any(|m|m["id"]==mid){continue}
    if !s["queue"].is_array(){s["queue"]=json!([])}
    let content=format!("[讨论组任务结果] {}\n任务 ID：{}\n成员：{}\n状态：{}\n\n{}",d["name"].as_str().unwrap(),p["id"].as_str().unwrap(),delivery["title"].as_str().unwrap(),status,last.and_then(|v|v["text"].as_str()).unwrap_or("会话不可用，请在讨论组查看状态。"));
-   s["queue"].as_array_mut().unwrap().push(json!({"id":mid,"role":"user","created_at":now(),"text":content,"discussion":{"id":d["id"],"post_id":p["id"],"source_chat_id":delivery["chat_id"],"purpose":"result"}}));s["updated_at"]=json!(now());save(root,&s)?;
+   s["queue"].as_array_mut().unwrap().push(json!({"id":mid,"role":"user","created_at":now(),"text":content,"discussion":{"hidden":d["collaboration"]==true,"id":d["id"],"post_id":p["id"],"source_chat_id":delivery["chat_id"],"purpose":"result"}}));s["updated_at"]=json!(now());save(root,&s)?;
   }}
  }Ok(())
 }
