@@ -802,13 +802,20 @@ fn assign_agent_title(root:&Path,s:&mut Value,name:&str)->Result<()> {
     while occupied.contains(&candidate){candidate=format!("{name}{index}");index+=1;}
     s["title"]=json!(candidate);s["title_agent_name"]=json!(name);s["updated_at"]=json!(now());Ok(())
 }
+const CHAT_OPEN_INSTRUCTION: &str = "Read the complete skill.text and follow it for this session. Save the returned attachment_id; use the same chat_id, workspace_folder_id and attachment_id. Call chat_wait(timeout_ms:25000) now, shorter if the host requires. Reply only to delivered message IDs.";
+const CHAT_MESSAGE_INSTRUCTION: &str = "Process the delivered message; use message.id as reply_to. Follow skill.text, check existing replies before repeating work, and require chat_reply persisted=true. Progress uses final=false; after a final reply start another independent chat_wait(timeout_ms:25000), within host limits.";
+const CHAT_IDLE_INSTRUCTION: &str = "No message. Immediately make one new independent chat_wait(timeout_ms:25000), shorter if the host requires, with the same session and attachment. Idle is not an exit; do not batch waits in a polling script.";
+const CHAT_PROGRESS_INSTRUCTION: &str = "Progress reply persisted. Continue the current task under skill.text; send a final chat_reply when complete or when user input is needed. Require persisted=true before advancing.";
+const CHAT_FINAL_INSTRUCTION: &str = "Final reply persisted; this acknowledges the message and does not close the chat. Immediately make one independent chat_wait(timeout_ms:25000) with the same session and attachment, shorter if the host requires, including when awaiting user input.";
+const CHAT_CLOSED_INSTRUCTION: &str = "Conversation is closed. Stop waiting; do not retry chat_wait or create a new attachment for this closed session.";
+
 pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
     let _lock = lock(root)?;
     let mut discussion_error=None::<&str>;
     if name=="chat_wait"{let current=load(root,id(&args["chat_id"])?)?;if current["closed"]!=true{owned(&current,args)?;if discussion::inbox(root,id(&args["chat_id"])?) .is_err(){discussion_error=Some("Discussion result synchronization is pending; retry chat_wait or inspect the discussion group");}}}
     let mut s = load(root, id(&args["chat_id"])?)?;
     if s["closed"] == true {
-        return Ok(json!({"ok":true,"status":"closed"}));
+        return Ok(json!({"ok":true,"status":"closed","instruction":CHAT_CLOSED_INSTRUCTION}));
     }
     if name == "chat_open" {
         if group::grouped(&s){let member=group::open(&mut s,args)?;
@@ -817,7 +824,7 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
                 if !s["messages"].as_array().unwrap().iter().any(|m|m["id"]==attempt){s["messages"].as_array_mut().unwrap().push(json!({"id":attempt,"role":"user","kind":"connection_request","text":"请通过 chat_reply 回复“你好，有什么能帮到你？”（final=true），确认接入后继续 chat_wait。","created_at":now(),"recipient_ids":[member["id"]]}));}
             }
             if args["attachment_id"].as_str().unwrap_or("").is_empty(){s.as_object_mut().unwrap().remove("pending_pairing");}
-            if member["role"]=="coordinator"{assign_agent_title(root,&mut s,member["name"].as_str().unwrap_or(""))?;}group::bind_targets(&mut s);save(root,&s)?;return Ok(json!({"ok":true,"attachment_id":member["attachment_id"],"agent_id":member["id"],"role":member["role"],"session":history::agent_view(root,&s,&json!({"attachment_id":member["attachment_id"]}))?,"instruction":"Read skill.text; reply only to your delivered message IDs. Call chat_wait.","skill":local_chat_skill()}));}
+            if member["role"]=="coordinator"{assign_agent_title(root,&mut s,member["name"].as_str().unwrap_or(""))?;}group::bind_targets(&mut s);save(root,&s)?;return Ok(json!({"ok":true,"attachment_id":member["attachment_id"],"agent_id":member["id"],"role":member["role"],"session":history::agent_view(root,&s,&json!({"attachment_id":member["attachment_id"]}))?,"instruction":CHAT_OPEN_INSTRUCTION,"skill":local_chat_skill()}));}
         if args.get("agent_name").is_some(){s["agent_name"]=json!(group::member_name(&args["agent_name"])?);}
 
         // Keepalive: the saved attachment_id always resumes, even after the lease
@@ -839,7 +846,7 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
         group::renew(&mut s,args)?;
         save(root, &s)?;
         return Ok(
-            json!({"ok":true,"attachment_id":s["attachment_id"],"session":history::agent_view(root,&s,args)?,"instruction":"Read skill.text and follow it for this session; save attachment_id and call chat_wait now.","skill":local_chat_skill()}),
+            json!({"ok":true,"attachment_id":s["attachment_id"],"session":history::agent_view(root,&s,args)?,"instruction":CHAT_OPEN_INSTRUCTION,"skill":local_chat_skill()}),
         );
     }
     owned(&s, args)?;
@@ -900,7 +907,7 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
             }
             group::renew(&mut s,args)?;
             save(root, &s)?;
-            Ok(json!({"ok":true,"persisted":true,"message_id":message_id}))
+            Ok(json!({"ok":true,"persisted":true,"message_id":message_id,"instruction":if final_reply {CHAT_FINAL_INSTRUCTION}else{CHAT_PROGRESS_INSTRUCTION}}))
         }
         "chat_close" => {
             if group::grouped(&s)&&group::member_for(&s,args,false)?["role"]!="coordinator"{return Err(err("Only the coordinator can close the group"));}
@@ -908,7 +915,7 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
             s["attachment_id"] = json!("");
             s["lease_until"] = json!(0);
             save(root, &s)?;
-            Ok(json!({"ok":true,"status":"closed"}))
+            Ok(json!({"ok":true,"status":"closed","instruction":CHAT_CLOSED_INSTRUCTION}))
         }
         "chat_wait" => {
             publish_queued(&mut s);
@@ -930,7 +937,7 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
             save(root, &s)?;
             let message = delivery(&s,args,true)?;
             Ok(
-                json!({"ok":true,"status":if message.is_some(){"message"}else{"idle"},"discussion_error":discussion_error,"message":message,"session":if group::grouped(&s){history::agent_view(root,&s,args)?}else{Value::Null}}),
+                json!({"ok":true,"status":if message.is_some(){"message"}else{"idle"},"instruction":if message.is_some(){CHAT_MESSAGE_INSTRUCTION}else{CHAT_IDLE_INSTRUCTION},"discussion_error":discussion_error,"message":message,"session":if group::grouped(&s){history::agent_view(root,&s,args)?}else{Value::Null}}),
             )
         }
         _ => Err(err("Unknown chat tool")),
@@ -973,7 +980,7 @@ pub async fn wait(root: &Path, args: &Value) -> Result<Value> {
     while tokio::time::Instant::now() < deadline {
         let s = load(root, chat_id)?;
         if s["closed"] == true {
-            return Ok(json!({"ok":true,"status":"closed"}));
+            return Ok(json!({"ok":true,"status":"closed","instruction":CHAT_CLOSED_INSTRUCTION}));
         }
         owned(&s, args)?;
         if delivery(&s,args,true)?.is_some() || (pending(&s).is_none() && s["queue"].as_array().is_some_and(|q|!q.is_empty()) && !awaiting_confirmation(&s)) {
@@ -986,7 +993,7 @@ pub async fn wait(root: &Path, args: &Value) -> Result<Value> {
         .await;
     }
     Ok(
-        json!({"ok":true,"status":"idle","instruction":"No message. Call chat_wait again now with the same session and attachment; idle is not an exit. Keep waiting within host limits."}),
+        json!({"ok":true,"status":"idle","instruction":CHAT_IDLE_INSTRUCTION}),
     )
 }
 

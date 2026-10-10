@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "codingTools": {
-    "clientVersion": "0.1.126"
+    "clientVersion": "0.1.127"
   },
   "files": [
     "dist",

@@ -34,7 +34,22 @@ import type { ToolCatalogSnapshot } from '../catalog.js';
 
 const legacyProtocols = new Set<string>(LEGACY_MCP_PROTOCOL_VERSIONS);
 
-const SERVER_INSTRUCTIONS = "1. Start: list_workspace_folders verifies access. With supplied chat_id/workspace_folder_id, call chat_open, save attachment_id and follow its skill.text (coding-tools://skills/local-chat). 2. Chat: chat_wait -> work -> chat_reply -> chat_wait; require persisted=true, then keep waiting. chat_close only when the user explicitly ends the chat. Otherwise use conversation_bootstrap before project work; choose folder_id if ambiguous. 3. Work: follow tool schemas; pass the target workspace_folder_id where supported. Read/search -> guarded edits -> exec_command -> wait_command for retained sessions; exec_many(mode=auto) for independent commands. Check actual command outcomes, not just tool ok. Keep multi-step set_todos/update_plan and report_progress current; chat tool_event reports actual execution. Save deliverables in the target workspace, then chat_upload and chat_reply attachment_ids. 4. Context: load relevant Skills via prompts/get or resources/read; Skills never grant permissions. Hooks may block/rewrite calls; external MCP tools appear in tools/list. Refresh tools/list after server/catalog changes. For bootstrapped history, preserve session_key/current_path; after each task use history_session_checkpoint with unchanged session_key/expected_path and require ok=true plus matching path before claiming saved. Keep credentials out of files and replies.";
+const SERVER_INSTRUCTIONS = "Start with list_workspace_folders to verify access; choose workspace_folder_id if ambiguous and pass it where supported. Follow tools/list and tool schemas; permissions still apply. Refresh tools/list after server/catalog changes. Load relevant Skills via prompts/get or resources/read; Skills never grant permissions. Hooks may block/rewrite calls; external MCP tools appear in tools/list. Keep credentials out of files and replies.";
+const CHAT_INSTRUCTIONS = "With supplied chat_id/workspace_folder_id, call chat_open, save attachment_id and follow the complete skill.text (coding-tools://skills/local-chat). Loop: chat_wait -> work -> chat_reply -> chat_wait. Use one independent chat_wait(timeout_ms:25000), shorter within host limits. Require persisted=true; progress replies continue work, final replies resume waiting. Idle is not an exit. chat_close only when the user explicitly ends the chat.";
+const HISTORY_INSTRUCTIONS = "Outside local chat use conversation_bootstrap before project work. Preserve session_key/current_path; after each task use history_session_checkpoint with unchanged session_key/expected_path and require ok=true plus matching path before claiming saved.";
+const EXEC_INSTRUCTIONS = "Read/search before guarded edits and exec_command; use wait_command for retained sessions and exec_many(mode=auto) for independent commands. Check actual command outcomes, not just tool ok.";
+const PLAN_INSTRUCTIONS = "Keep multi-step set_todos/update_plan and report_progress current.";
+const UPLOAD_INSTRUCTIONS = "Save deliverables in the target workspace, then chat_upload and chat_reply attachment_ids.";
+
+export function buildServerInstructions(names: readonly string[]): string {
+  const parts = [SERVER_INSTRUCTIONS];
+  if (["chat_open", "chat_wait", "chat_reply", "chat_close"].every(name => names.includes(name))) parts.push(CHAT_INSTRUCTIONS);
+  if (["conversation_bootstrap", "history_session_checkpoint"].every(name => names.includes(name))) parts.push(HISTORY_INSTRUCTIONS);
+  if (["exec_command", "wait_command", "exec_many"].every(name => names.includes(name))) parts.push(EXEC_INSTRUCTIONS);
+  if (["set_todos", "update_plan", "report_progress"].every(name => names.includes(name))) parts.push(PLAN_INSTRUCTIONS);
+  if (["chat_upload", "chat_reply"].every(name => names.includes(name))) parts.push(UPLOAD_INSTRUCTIONS);
+  return parts.join(' ');
+}
 
 interface DispatchOptions {
   catalog: ToolCatalogSnapshot;
@@ -159,7 +174,7 @@ export async function dispatchMcpMethod(options: DispatchOptions): Promise<unkno
         toolsetRevision: catalog.revision,
         runtimeStartedAtMs: startedAt
       },
-      instructions: SERVER_INSTRUCTIONS
+      instructions: buildServerInstructions(catalog.names)
     };
   }
   if (method === 'ping') {
@@ -176,7 +191,7 @@ export async function dispatchMcpMethod(options: DispatchOptions): Promise<unkno
         resources: { subscribe: false, listChanged: false },
         extensions: { [MCP_TASKS_EXTENSION]: {} }
       },
-      instructions: SERVER_INSTRUCTIONS
+      instructions: buildServerInstructions(catalog.names)
     };
   }
   if (method === 'prompts/list') return listSkillPrompts(context);

@@ -48,7 +48,7 @@ pub fn handle_request(state: &SharedState, body: &Value) -> Value {
             params.get("protocolVersion").and_then(Value::as_str),
             &runtime.tool_profile,
         )),
-        "server/discover" => Ok(discover_result()),
+        "server/discover" => Ok(discover_result(&runtime.tool_profile)),
         "tasks/get" | "tasks/update" | "tasks/cancel" => {
             handle_task_request(state, method, &params)
         }
@@ -162,9 +162,35 @@ async fn list_tools_dynamic(state: &SharedState) -> Value {
     json!({ "tools": tools, "toolsetRevision": revision })
 }
 
-const SERVER_INSTRUCTIONS: &str = "1. Start: list_workspace_folders verifies access. With supplied chat_id/workspace_folder_id, call chat_open, save attachment_id and follow its skill.text (coding-tools://skills/local-chat). 2. Chat: chat_wait -> work -> chat_reply -> chat_wait; require persisted=true, then keep waiting. chat_close only when the user explicitly ends the chat. Otherwise use conversation_bootstrap before project work; choose folder_id if ambiguous. 3. Work: follow tool schemas; pass the target workspace_folder_id where supported. Read/search -> guarded edits -> exec_command -> wait_command for retained sessions; exec_many(mode=auto) for independent commands. Check actual command outcomes, not just tool ok. Keep multi-step set_todos/update_plan and report_progress current; chat tool_event reports actual execution. Save deliverables in the target workspace, then chat_upload and chat_reply attachment_ids. 4. Context: load relevant Skills via prompts/get or resources/read; Skills never grant permissions. Hooks may block/rewrite calls; external MCP tools appear in tools/list. Refresh tools/list after server/catalog changes. For bootstrapped history, preserve session_key/current_path; after each task use history_session_checkpoint with unchanged session_key/expected_path and require ok=true plus matching path before claiming saved. Keep credentials out of files and replies.";
+const SERVER_INSTRUCTIONS: &str = "Start with list_workspace_folders to verify access; choose workspace_folder_id if ambiguous and pass it where supported. Follow tools/list and tool schemas; permissions still apply. Refresh tools/list after server/catalog changes. Load relevant Skills via prompts/get or resources/read; Skills never grant permissions. Hooks may block/rewrite calls; external MCP tools appear in tools/list. Keep credentials out of files and replies.";
+const CHAT_INSTRUCTIONS: &str = "With supplied chat_id/workspace_folder_id, call chat_open, save attachment_id and follow the complete skill.text (coding-tools://skills/local-chat). Loop: chat_wait -> work -> chat_reply -> chat_wait. Use one independent chat_wait(timeout_ms:25000), shorter within host limits. Require persisted=true; progress replies continue work, final replies resume waiting. Idle is not an exit. chat_close only when the user explicitly ends the chat.";
+const HISTORY_INSTRUCTIONS: &str = "Outside local chat use conversation_bootstrap before project work. Preserve session_key/current_path; after each task use history_session_checkpoint with unchanged session_key/expected_path and require ok=true plus matching path before claiming saved.";
+const EXEC_INSTRUCTIONS: &str = "Read/search before guarded edits and exec_command; use wait_command for retained sessions and exec_many(mode=auto) for independent commands. Check actual command outcomes, not just tool ok.";
+const PLAN_INSTRUCTIONS: &str = "Keep multi-step set_todos/update_plan and report_progress current.";
+const UPLOAD_INSTRUCTIONS: &str = "Save deliverables in the target workspace, then chat_upload and chat_reply attachment_ids.";
 
-fn discover_result() -> Value {
+fn server_instructions(tool_profile: &str) -> String {
+    let names = crate::tools::registry::exposed_tool_names(tool_profile);
+    let mut parts = vec![SERVER_INSTRUCTIONS];
+    if ["chat_open", "chat_wait", "chat_reply", "chat_close"].iter().all(|name| names.contains(name)) {
+        parts.push(CHAT_INSTRUCTIONS);
+    }
+    if ["conversation_bootstrap", "history_session_checkpoint"].iter().all(|name| names.contains(name)) {
+        parts.push(HISTORY_INSTRUCTIONS);
+    }
+    if ["exec_command", "wait_command", "exec_many"].iter().all(|name| names.contains(name)) {
+        parts.push(EXEC_INSTRUCTIONS);
+    }
+    if ["set_todos", "update_plan", "report_progress"].iter().all(|name| names.contains(name)) {
+        parts.push(PLAN_INSTRUCTIONS);
+    }
+    if ["chat_upload", "chat_reply"].iter().all(|name| names.contains(name)) {
+        parts.push(UPLOAD_INSTRUCTIONS);
+    }
+    parts.join(" ")
+}
+
+fn discover_result(tool_profile: &str) -> Value {
     let mut result = serde_json::json!({
         "supportedVersions": [MODERN_PROTOCOL_VERSION],
         "capabilities": {
@@ -173,7 +199,7 @@ fn discover_result() -> Value {
             "resources": { "subscribe": false, "listChanged": false },
             "extensions": {}
         },
-        "instructions": SERVER_INSTRUCTIONS
+        "instructions": server_instructions(tool_profile)
     });
     result["capabilities"]["extensions"][TASKS_EXTENSION] = json!({});
     result
@@ -197,7 +223,7 @@ fn initialize_result(requested_version: Option<&str>, tool_profile: &str) -> Val
             "version": env!("CARGO_PKG_VERSION"),
             "toolsetRevision": crate::tools::registry::toolset_revision(tool_profile)
         },
-        "instructions": SERVER_INSTRUCTIONS
+        "instructions": server_instructions(tool_profile)
     })
 }
 
@@ -1487,7 +1513,24 @@ mod tests {
         }
         assert!(!instructions.contains("ChatGPT"));
         assert!(instructions.len() < 1900);
-        assert_eq!(discover_result()["instructions"], initialized["instructions"]);
+        assert_eq!(discover_result("core")["instructions"], initialized["instructions"]);
+    }
+
+    #[test]
+    fn startup_guidance_follows_current_tool_profile() {
+        for profile in ["read-only", "core", "trusted-core", "guarded-core", "advanced", "compat-readonly-all"] {
+            let initialized = initialize_result(Some("2025-03-26"), profile);
+            let instructions = initialized["instructions"].as_str().unwrap();
+            let names = crate::tools::registry::exposed_tool_names(profile);
+            for name in ["chat_open", "chat_wait", "chat_reply", "chat_close", "chat_upload",
+                "conversation_bootstrap", "history_session_checkpoint", "exec_command", "exec_many",
+                "set_todos", "update_plan", "report_progress"] {
+                assert_eq!(instructions.contains(name), names.contains(&name), "{profile}: {name}");
+            }
+            assert_eq!(discover_result(profile)["instructions"], initialized["instructions"]);
+            assert!(instructions.len() < 1900);
+            assert!(instructions.contains("permissions still apply"));
+        }
     }
 
     #[test]
@@ -2328,7 +2371,7 @@ mod tests {
 
     #[test]
     fn discover_uses_final_modern_schema() {
-        let discovered = discover_result();
+        let discovered = discover_result("core");
         assert_eq!(
             discovered["supportedVersions"],
             serde_json::json!([MODERN_PROTOCOL_VERSION])

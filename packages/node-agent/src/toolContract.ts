@@ -254,6 +254,12 @@ export function mcpResultSummary(toolName: string, structured: JsonObject): stri
     );
   }
 
+  // Chat guidance must also reach clients that render only MCP text content.
+  if (['chat_open', 'chat_wait', 'chat_reply', 'chat_close'].includes(toolName)) {
+    const instruction = stringValue(structured.instruction);
+    if (instruction) return truncateUtf8(instruction);
+  }
+
   const explicit = stringValue(structured.summary);
   if (explicit) return truncateUtf8(explicit);
 

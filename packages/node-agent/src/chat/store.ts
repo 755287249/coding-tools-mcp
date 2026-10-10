@@ -385,18 +385,25 @@ function assignAgentTitle(root:string,s:ChatSession,name:string|undefined):void 
   while(occupied.has(candidate))candidate=name+index++;
   s.title=candidate;s.title_agent_name=name;s.updated_at=Date.now();
 }
+const CHAT_OPEN_INSTRUCTION = "Read the complete skill.text and follow it for this session. Save the returned attachment_id; use the same chat_id, workspace_folder_id and attachment_id. Call chat_wait(timeout_ms:25000) now, shorter if the host requires. Reply only to delivered message IDs.";
+const CHAT_MESSAGE_INSTRUCTION = "Process the delivered message; use message.id as reply_to. Follow skill.text, check existing replies before repeating work, and require chat_reply persisted=true. Progress uses final=false; after a final reply start another independent chat_wait(timeout_ms:25000), within host limits.";
+const CHAT_IDLE_INSTRUCTION = "No message. Immediately make one new independent chat_wait(timeout_ms:25000), shorter if the host requires, with the same session and attachment. Idle is not an exit; do not batch waits in a polling script.";
+const CHAT_PROGRESS_INSTRUCTION = "Progress reply persisted. Continue the current task under skill.text; send a final chat_reply when complete or when user input is needed. Require persisted=true before advancing.";
+const CHAT_FINAL_INSTRUCTION = "Final reply persisted; this acknowledges the message and does not close the chat. Immediately make one independent chat_wait(timeout_ms:25000) with the same session and attachment, shorter if the host requires, including when awaiting user input.";
+const CHAT_CLOSED_INSTRUCTION = "Conversation is closed. Stop waiting; do not retry chat_wait or create a new attachment for this closed session.";
+
 export function chatTool(root: string, name: string, args: Record<string, unknown>): Record<string, unknown> {
   return locked(root, () => {
     let discussion_error:string|undefined;
     if(name==='chat_wait'){const current=load(root,validId(args.chat_id));if(!current.closed){owned(current,args.attachment_id);try{discussionInbox(discussionStore(root),current.id)}catch{discussion_error='Discussion result synchronization is pending; retry chat_wait or inspect the discussion group';}}}
     const s = load(root, validId(args.chat_id));
-    if (s.closed) return { ok: true, status: 'closed' };
+    if (s.closed) return { ok: true, status: 'closed', instruction: CHAT_CLOSED_INSTRUCTION };
     if (name === 'chat_open') {
       if(group.grouped(s)){const member=group.openGroup(s,args);
         const attempt=s.pending_pairing;
         if(!args.attachment_id&&attempt&&!s.messages.some(m=>m.id===attempt))s.messages.push({id:attempt,role:'user',kind:'connection_request',text:'请通过 chat_reply 回复“你好，有什么能帮到你？”（final=true），确认接入后继续 chat_wait。',created_at:Date.now(),recipient_ids:[member.id]});
         if(!args.attachment_id)delete s.pending_pairing;
-        if(member.role==='coordinator')assignAgentTitle(root,s,member.name);group.bindTargets(s);save(root,s);return {ok:true,attachment_id:member.attachment_id,agent_id:member.id,role:member.role,session:agentView(root,s,{attachment_id:member.attachment_id}),instruction: 'Read skill.text; reply only to your delivered message IDs. Call chat_wait.',skill:localChatSkill};}
+        if(member.role==='coordinator')assignAgentTitle(root,s,member.name);group.bindTargets(s);save(root,s);return {ok:true,attachment_id:member.attachment_id,agent_id:member.id,role:member.role,session:agentView(root,s,{attachment_id:member.attachment_id}),instruction: CHAT_OPEN_INSTRUCTION,skill:localChatSkill};}
       if(args.agent_name!==undefined)s.agent_name=group.memberName(args.agent_name);
       // Keepalive: the saved attachment_id resumes even after the lease lapsed, unless another AI attached meanwhile.
       const resuming = typeof args.attachment_id === 'string' && !!args.attachment_id && args.attachment_id === s.attachment_id;
@@ -405,7 +412,7 @@ export function chatTool(root: string, name: string, args: Record<string, unknow
       if (!resuming) s.attachment_id = randomUUID();
       assignAgentTitle(root,s,s.agent_name);
       group.renew(s,args.attachment_id); save(root, s);
-      return { ok: true, attachment_id: s.attachment_id, session: agentView(root, s, args), instruction: 'Read skill.text and follow it for this session; save attachment_id and call chat_wait now.', skill: localChatSkill };
+      return { ok: true, attachment_id: s.attachment_id, session: agentView(root, s, args), instruction: CHAT_OPEN_INSTRUCTION, skill: localChatSkill };
     }
     owned(s, args.attachment_id);
     if (name === 'chat_upload') {
@@ -434,9 +441,9 @@ export function chatTool(root: string, name: string, args: Record<string, unknow
         if (pending(s,args.attachment_id)?.id !== replyTo) throw new Error('Reply must address the oldest unanswered user message');
         s.messages.push({ ...identity, id, role: 'assistant', text: content, reply_to: replyTo, final, awaiting_user, tool_event, attachments, questions, created_at: Date.now() }); s.updated_at = Date.now();
       }
-      group.renew(s,args.attachment_id); save(root, s); return { ok: true, persisted: true, message_id: id };
+      group.renew(s,args.attachment_id); save(root, s); return { ok: true, persisted: true, message_id: id, instruction: final ? CHAT_FINAL_INSTRUCTION : CHAT_PROGRESS_INSTRUCTION };
     }
-    if (name === 'chat_close') { if(group.grouped(s)&&group.memberFor(s,args.attachment_id).role!=='coordinator')throw new Error('Only the coordinator can close the group');s.closed = true; s.attachment_id = ''; s.lease_until = 0; save(root, s); return { ok: true, status: 'closed' }; }
+    if (name === 'chat_close') { if(group.grouped(s)&&group.memberFor(s,args.attachment_id).role!=='coordinator')throw new Error('Only the coordinator can close the group');s.closed = true; s.attachment_id = ''; s.lease_until = 0; save(root, s); return { ok: true, status: 'closed', instruction: CHAT_CLOSED_INSTRUCTION }; }
     if (name === 'chat_wait') {
       publishQueued(s);
       group.renew(s,args.attachment_id);
@@ -447,7 +454,7 @@ export function chatTool(root: string, name: string, args: Record<string, unknow
         s.updated_at = message.received_at;
       }
       save(root, s);
-      return { ok: true, status: message ? 'message' : 'idle', message: message ?? null,...(discussion_error?{discussion_error}:{}),...(group.grouped(s)?{session:agentView(root,s,args)}:{}) };
+      return { ok: true, status: message ? 'message' : 'idle', instruction: message ? CHAT_MESSAGE_INSTRUCTION : CHAT_IDLE_INSTRUCTION, message: message ?? null,...(discussion_error?{discussion_error}:{}),...(group.grouped(s)?{session:agentView(root,s,args)}:{}) };
     }
     throw new Error('Unknown chat tool');
   });
@@ -465,13 +472,13 @@ export async function chatWait(root: string, args: Record<string, unknown>, sign
     while (Date.now() < end) {
       signal?.throwIfAborted();
       const s = load(root, id);
-      if (s.closed) return { ok: true, status: 'closed' };
+      if (s.closed) return { ok: true, status: 'closed', instruction: CHAT_CLOSED_INSTRUCTION };
       owned(s, args.attachment_id);
       const message = pending(s,args.attachment_id,true);
       if (message || (s.queue?.length && !pending(s) && !awaitingConfirmation(s))) return chatTool(root, 'chat_wait', args);
       await sleep(Math.min(250, end - Date.now()), undefined, { signal });
     }
-    return { ok: true, status: 'idle', instruction: 'No message. Call chat_wait again now with the same session and attachment; idle is not an exit. Keep waiting within host limits.' };
+    return { ok: true, status: 'idle', instruction: CHAT_IDLE_INSTRUCTION };
   } finally { waiters.delete(k); }
 }
 

@@ -545,6 +545,12 @@ fn mcp_result_summary(tool_name: &str, structured: &Value, is_error: bool) -> St
             .unwrap_or("Tool call failed.")
             .to_string();
     }
+    // Chat guidance must also reach clients that render only MCP text content.
+    if matches!(tool_name, "chat_open" | "chat_wait" | "chat_reply" | "chat_close") {
+        if let Some(instruction) = structured.get("instruction").and_then(Value::as_str) {
+            return instruction.to_string();
+        }
+    }
     if let Some(summary) = structured.get("summary").and_then(Value::as_str) {
         return summary.to_string();
     }
