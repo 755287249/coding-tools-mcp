@@ -1,4 +1,5 @@
 export const MESSAGES = {
+  "Follow system": ["Follow system", "跟隨系統", "跟随系统", "システムに合わせる"],
   "chat.note": ["Note", "備註", "备注", "メモ"],
   "chat.editNote": ["Edit note", "編輯備註", "编辑备注", "メモを編集"],
   "mobile.navigation": ["Open navigation", "開啟導覽", "打开导航", "ナビゲーションを開く"],

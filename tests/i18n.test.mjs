@@ -51,7 +51,7 @@ function literalVisibleText(source) {
   return values.filter((value) => /\p{L}/u.test(value));
 }
 
-test("i18n exposes complete four-locale messages with English defaults", async () => {
+test("i18n exposes complete four-locale messages with an English fallback", async () => {
   const { MESSAGES } = await importTypeScriptModule(
     path.join(root, "src", "lib", "i18n", "catalog.ts"),
   );
@@ -68,7 +68,7 @@ test("i18n exposes complete four-locale messages with English defaults", async (
   const runtime = await readFile(path.join(root, "src", "lib", "i18n", "index.ts"), "utf8");
   assert.match(runtime, /DEFAULT_LOCALE:\s*Locale\s*=\s*"en"/);
   assert.match(runtime, /\["en",\s*"zh-TW",\s*"zh-CN",\s*"ja"\]/);
-  assert.match(runtime, /coding-tools\.locale/);
+  assert.match(runtime, /loadLocalePreference/);
 
   const appHtml = await readFile(path.join(root, "src", "app.html"), "utf8");
   assert.match(appHtml, /<html lang="en"/);
@@ -121,4 +121,32 @@ test("visible Svelte prose is routed through i18n without assuming a language", 
       `${path.relative(root, file)} contains visible prose outside i18n`,
     );
   }
+});
+
+test('system locale follows ordered visitor languages and Chinese script/region variants', async () => {
+  const { resolveSystemLocale } = await importTypeScriptModule(path.join(root, 'src/lib/i18n/preference.ts'));
+  for (const [languages, expected] of [
+    [['zh-CN'], 'zh-CN'], [['zh'], 'zh-CN'], [['zh-SG'], 'zh-CN'],
+    [['zh-TW'], 'zh-TW'], [['zh-HK'], 'zh-TW'], [['zh-MO'], 'zh-TW'],
+    [['zh-Hans-TW'], 'zh-CN'], [['zh-Hant-CN'], 'zh-TW'], [['ZH_hAnT_hK'], 'zh-TW'],
+    [['ja-JP'], 'ja'], [['en-GB','zh-CN'], 'en'], [['fr-FR','ja-JP'], 'ja'],
+    [['fr-FR'], 'en'], [[], 'en'],
+  ]) assert.equal(resolveSystemLocale(languages), expected, languages.join(','));
+});
+
+test('default and legacy automatic English migrate to system while explicit preferences persist', async () => {
+  const { loadLocalePreference, LOCALE_PREFERENCE_KEY } = await importTypeScriptModule(path.join(root, 'src/lib/i18n/preference.ts'));
+  const read = values => key => values[key] ?? null;
+  assert.equal(loadLocalePreference(read({})), 'system');
+  assert.equal(loadLocalePreference(read({'coding-tools.locale':'en'})), 'system');
+  assert.equal(loadLocalePreference(read({'coding-tools.locale':'zh-TW'})), 'zh-TW');
+  assert.equal(loadLocalePreference(read({'coding-tools.locale':'ja'})), 'ja');
+  assert.equal(loadLocalePreference(read({[LOCALE_PREFERENCE_KEY]:'en','coding-tools.locale':'zh-CN'})), 'en');
+  assert.equal(loadLocalePreference(read({[LOCALE_PREFERENCE_KEY]:'system','coding-tools.locale':'ja'})), 'system');
+  assert.equal(loadLocalePreference(read({[LOCALE_PREFERENCE_KEY]:'invalid','coding-tools.locale':'invalid'})), 'system');
+});
+
+test('blocked browser storage still permits the system language default', async () => {
+  const { loadLocalePreference } = await importTypeScriptModule(path.join(root, 'src/lib/i18n/preference.ts'));
+  assert.equal(loadLocalePreference(() => { throw new Error('Storage denied'); }), 'system');
 });

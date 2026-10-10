@@ -2,7 +2,8 @@ import { browser } from "$app/environment";
 import { derived, get, writable } from "svelte/store";
 import { MESSAGES, type Locale, type MessageKey } from "./catalog";
 
-const STORAGE_KEY = "coding-tools.locale";
+import { resolveSystemLocale, loadLocalePreference, LOCALE_PREFERENCE_KEY, type LocalePreference } from "./preference";
+export type { LocalePreference } from "./preference";
 export const DEFAULT_LOCALE: Locale = "en";
 export const SUPPORTED_LOCALES: readonly Locale[] = ["en", "zh-TW", "zh-CN", "ja"];
 
@@ -19,8 +20,7 @@ export function isLocale(value: unknown): value is Locale {
 
 function initialLocale(): Locale {
   if (!browser) return DEFAULT_LOCALE;
-  const saved = localStorage.getItem(STORAGE_KEY);
-  return isLocale(saved) ? saved : DEFAULT_LOCALE;
+  return resolveSystemLocale([...navigator.languages, navigator.language]);
 }
 
 function interpolate(message: string, values: Record<string, string | number> = {}): string {
@@ -38,13 +38,21 @@ function translateFor(
   return interpolate(MESSAGES[key][localeIndex] ?? MESSAGES[key][0], values);
 }
 
-export const locale = writable<Locale>(initialLocale());
+const systemLocale = writable<Locale>(initialLocale());
+export const localePreference = writable<LocalePreference>(
+  browser ? loadLocalePreference((key) => localStorage.getItem(key)) : "system",
+);
+export const locale = derived(
+  [localePreference, systemLocale],
+  ([preference, system]) => preference === "system" ? system : preference,
+);
 
 if (browser) {
-  locale.subscribe((activeLocale) => {
-    localStorage.setItem(STORAGE_KEY, activeLocale);
-    document.documentElement.lang = activeLocale;
+  localePreference.subscribe((preference) => {
+    try { localStorage.setItem(LOCALE_PREFERENCE_KEY, preference); } catch { /* Storage may be unavailable. */ }
   });
+  locale.subscribe((activeLocale) => { document.documentElement.lang = activeLocale; });
+  window.addEventListener("languagechange", () => systemLocale.set(initialLocale()));
 }
 
 export const t = derived(
@@ -54,8 +62,8 @@ export const t = derived(
       translateFor(activeLocale, key, values),
 );
 
-export function setLocale(nextLocale: Locale): void {
-  locale.set(nextLocale);
+export function setLocale(nextLocale: LocalePreference): void {
+  if (nextLocale === "system" || isLocale(nextLocale)) localePreference.set(nextLocale);
 }
 
 export function translate(
