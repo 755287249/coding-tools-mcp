@@ -37,7 +37,7 @@ export function createDraftStore(storage: () => StoragePort) {
   }
   function clearSent(key: string, sent: DraftRetry) {
     const current = load(key).draft;
-    if (current.retry?.id !== sent.id || current.text.trim() !== sent.text || current.attachments.map(file => file.id).join(',') !== sent.attachmentKey) return { cleared: false, persisted: true };
+    if (current.retry?.id !== sent.id || current.text !== sent.text || current.attachments.map(file => file.id).join(',') !== sent.attachmentKey) return { cleared: false, persisted: true };
     return { cleared: true, persisted: save(key, empty()) };
   }
   return { load, save, clearSent };

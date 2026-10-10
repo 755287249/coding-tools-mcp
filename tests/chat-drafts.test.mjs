@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createDraftStore, chatDraftKey, conversationAccent } from '../src/lib/chat/drafts.ts';
 const file={id:'f1',name:'test.png',path:'docs/test.png',mime:'image/png',sha256:'test',size:20};
-const draft={text:' draft A ',attachments:[file],retry:{id:'send-1',text:'draft A',attachmentKey:'f1'}};
+const draft={text:' draft A ',attachments:[file],retry:{id:'send-1',text:' draft A ',attachmentKey:'f1'}};
 function storage() { const map=new Map();return {getItem:k=>map.get(k)??null,setItem:(k,v)=>map.set(k,v),removeItem:k=>map.delete(k)}; }
 
 test('drafts retain text, uploaded files and retry identity across routes and reloads with isolated scope',()=>{
@@ -55,4 +55,31 @@ test('drafts retain more than five path-only attachment references',()=>{
  const restored=createDraftStore(()=>({getItem:k=>values.get(k)??null,setItem(){},removeItem(){}}));
  assert.equal(restored.load('many').draft.attachments[11].label,'图片12');
  assert.equal(values.get('many').includes('data_base64'),false);
+});
+
+
+test('successful sends clear the exact original whitespace, including image mention suffixes',()=>{
+  const disk=storage(), store=createDraftStore(()=>disk);
+  for(const text of ['@图片1 ', '  图片说明\n@图片1 \n', '普通文字 ', '\n代码\n', '']){
+    const sent={id:'send-whitespace',text,attachmentKey:'f1'};
+    store.save('a',{text,attachments:[file],retry:sent});
+    assert.equal(store.clearSent('a',sent).cleared,true,JSON.stringify(text));
+    assert.deepEqual(createDraftStore(()=>disk).load('a').draft,{text:'',attachments:[],retry:null});
+  }
+});
+
+test('an in-flight send cannot erase whitespace edits, added files, or a newer retry',()=>{
+  const store=createDraftStore(()=>storage()),sent={id:'original',text:'@图片1 ',attachmentKey:'f1'};
+  const original={text:sent.text,attachments:[file],retry:sent};
+  for(const newer of [
+    {...original,text:'@图片1'},
+    {...original,text:'@图片1  '},
+    {...original,text:'@图片1 \n'},
+    {...original,attachments:[file,{...file,id:'f2'}]},
+    {...original,retry:{...sent,id:'new-retry'}}
+  ]){
+    store.save('a',newer);
+    assert.equal(store.clearSent('a',sent).cleared,false);
+    assert.deepEqual(store.load('a').draft,newer);
+  }
 });
