@@ -24,6 +24,8 @@ import { localPath, routePrefix, sendText } from './server/http.js';
 import { rpcErrorResponse } from './server/mcp/dispatcher.js';
 import { handleMcpRoute } from './server/routes/mcp.js';
 import { handleOAuthRoute } from './server/routes/oauth.js';
+import { handleChatCompat } from './chat/compat.js';
+import { compatGrants } from './chat/compat-grants.js';
 import { markPairing } from './chat/pairing.js';
 import { handleSystemRoute } from './server/routes/system.js';
 
@@ -136,6 +138,7 @@ export async function createAgentRuntime(config: AgentConfig, options: AgentRunt
         const accepted=typeof ticket==='string'&&markPairing(ticket,context.config.folders.map(f=>f.path));
         sendJson(res,accepted?202:404,accepted?{status:'preparing',authenticated:false}:{error:'pairing_unavailable'});return;
       }
+      if (pathname === '/mcp/chat-compat') { await handleChatCompat(req,res,url,context); return; }
       await context.extensions.refresh();
       const catalog = currentToolCatalog(context);
       setRuntimeRevisionHeaders(res, catalog, startedAt);
@@ -178,6 +181,7 @@ export async function createAgentRuntime(config: AgentConfig, options: AgentRunt
       if (options.runtimeRegistry?.get(workspaceId)?.context === context) {
         options.runtimeRegistry.delete(workspaceId);
       }
+      compatGrants.revoke(workspaceId);
       oauth.dispose();
       const errors: unknown[] = [];
       try {

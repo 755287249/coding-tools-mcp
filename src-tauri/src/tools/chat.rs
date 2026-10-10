@@ -13,6 +13,8 @@ mod discussion;
 mod collaboration;
 #[path = "chat_pairing.rs"]
 pub(crate) mod pairing;
+#[path = "chat_compat.rs"]
+pub(crate) mod compat;
 use super::workspace::WorkspaceError;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -593,6 +595,7 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
     }
     if let Some(gid)=args["chat_id"].as_str().and_then(|v|v.strip_prefix("discussion:")){return discussion::attachment_action(root,gid,args);}
     let mut s = load(root, id(&args["chat_id"])?)?;
+    if matches!(action, "detach" | "close" | "set_mode") { s.as_object_mut().unwrap().remove("compat_grant_id"); }
     match action {
         "prepare_pairing" => {
             if s["closed"]==true{return Err(err("Conversation is closed"));}
@@ -803,10 +806,20 @@ fn assign_agent_title(root:&Path,s:&mut Value,name:&str)->Result<()> {
     s["title"]=json!(candidate);s["title_agent_name"]=json!(name);s["updated_at"]=json!(now());Ok(())
 }
 pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
+    tool_inner(root, name, args, None)
+}
+fn tool_inner(root: &Path, name: &str, args: &Value, compat_id: Option<&str>) -> Result<Value> {
     let _lock = lock(root)?;
     let mut discussion_error=None::<&str>;
-    if name=="chat_wait"{let current=load(root,id(&args["chat_id"])?)?;if current["closed"]!=true{owned(&current,args)?;if discussion::inbox(root,id(&args["chat_id"])?) .is_err(){discussion_error=Some("Discussion result synchronization is pending; retry chat_wait or inspect the discussion group");}}}
+    if compat_id.is_none() && name=="chat_wait"{let current=load(root,id(&args["chat_id"])?)?;if current["closed"]!=true{owned(&current,args)?;if discussion::inbox(root,id(&args["chat_id"])?) .is_err(){discussion_error=Some("Discussion result synchronization is pending; retry chat_wait or inspect the discussion group");}}}
     let mut s = load(root, id(&args["chat_id"])?)?;
+    if let Some(grant) = compat_id {
+        compat::check_session(&s)?;
+        if s["compat_grant_id"].as_str() != Some(grant) { return Err(err("Compatibility authorization revoked")); }
+        if !matches!(name, "compat_info" | "chat_open" | "chat_wait" | "chat_reply") { return Err(err("Unsupported compatibility operation")); }
+        if name == "compat_info" { return Ok(json!({"ok":true,"status":"ready"})); }
+        if name == "chat_open" && !s["attachment_id"].as_str().unwrap_or("").is_empty() && args["attachment_id"] != s["attachment_id"] { return Err(err("Conversation already attached")); }
+    }
     if s["closed"] == true {
         return Ok(json!({"ok":true,"status":"closed"}));
     }

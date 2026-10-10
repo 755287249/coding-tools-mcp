@@ -4,6 +4,7 @@ import {visibleSession} from './collaboration.js';
 import {operationsMarkdown, type ChatOperation} from './operation-contract.js';
 import {discussionAction,discussionInbox,discussionAttachmentStore,type DiscussionStore} from './discussion.js';
 import * as group from './group.js';
+import { compatGrants } from './compat-grants.js';
 import { preparePairing, pairingStatus } from './pairing.js';
 import type {ChatMember} from './group.js';
 import {reduceChatPlan, chatPlanSummary, chatPlanMarkdown, type ChatTaskPlan} from './plan.js';
@@ -19,7 +20,7 @@ import { resolveChatPath } from './reveal.js';
 export interface ChatFile { label?: string; local_reference?: boolean; id: string; name: string; path: string; mime: string; size: number; sha256: string }
 export interface ToolEvent { name: string; status: 'running' | 'completed' | 'failed'; input?: string; output?: string; output_truncated?: boolean }
 export interface ChatMessage { questions?:ChatQuestion[];question_answer?:QuestionResponse;question_response?:QuestionResponse;questions_active?:boolean; discussion?:{hidden?:boolean;id:string;post_id:string;source_chat_id:string;purpose:string}; received_by?:string[]; agent_id?:string;agent_name?:string;recipient_ids?:string[];agent_plans?:{agent_id:string;plan:ChatTaskPlan}[]; task_plan?:ChatTaskPlan; kind?: 'connection_request' | 'assignment'; awaiting_user?: boolean; received_at?: number; attachments?: ChatFile[]; tool_event?: ToolEvent; id: string; role: 'user' | 'assistant'; text: string; created_at: number; reply_to?: string; final?: boolean }
-export interface ChatSession {pending_pairing?:string; note?:string; title_agent_name?:string; work_member?:ChatMember; mode?:'work'|'group';members?:ChatMember[];agent_name?:string; pinned?: boolean; archived?: boolean; queue?: ChatMessage[]; queue_mode?: 'merge' | 'split'; queue_receipts?: Record<string,string>; title_custom?: boolean; files?: ChatFile[]; version: 1|2; id: string; title: string; created_at: number; updated_at: number; closed: boolean; messages: ChatMessage[]; attachment_id: string; lease_until: number }
+export interface ChatSession {compat_grant_id?:string;pending_pairing?:string; note?:string; title_agent_name?:string; work_member?:ChatMember; mode?:'work'|'group';members?:ChatMember[];agent_name?:string; pinned?: boolean; archived?: boolean; queue?: ChatMessage[]; queue_mode?: 'merge' | 'split'; queue_receipts?: Record<string,string>; title_custom?: boolean; files?: ChatFile[]; version: 1|2; id: string; title: string; created_at: number; updated_at: number; closed: boolean; messages: ChatMessage[]; attachment_id: string; lease_until: number }
 const DIR = 'docs/chat-sessions';
 const ASSET_DIR = 'mcp-assistant/chat-assets';
 const ARTIFACT_DIR = 'mcp-assistant/artifacts/';
@@ -285,6 +286,7 @@ export function chatUi(root: string, args: Record<string, unknown>): Record<stri
     }
     const groupFiles=typeof args.chat_id==='string'&&args.chat_id.startsWith('discussion:')?discussionAttachmentStore(discussionStore(root),args):undefined;
     const s = groupFiles?.session ?? load(root, validId(args.chat_id));
+    if (['detach','close','set_mode'].includes(String(action))) delete s.compat_grant_id;
     if(action==='prepare_pairing'){if(s.closed)throw new Error('Conversation is closed');const attempt=validId(args.message_id);if(s.messages.some(m=>m.id===attempt))throw new Error('Pairing ID already used');if(group.grouped(s)){s.pending_pairing=attempt;save(root,s);}return {pairing:preparePairing(root,s.id,attempt)};}
     if(['set_mode','rename_member','detach_member','resume_member','set_coordinator'].includes(String(action))){group.groupUi(s,args);s.updated_at=Date.now();save(root,s);return {session:localView(root,s)};}
     if (action === 'reveal_path') return resolveChatPath(root, args.source_path);
@@ -385,11 +387,18 @@ function assignAgentTitle(root:string,s:ChatSession,name:string|undefined):void 
   while(occupied.has(candidate))candidate=name+index++;
   s.title=candidate;s.title_agent_name=name;s.updated_at=Date.now();
 }
-export function chatTool(root: string, name: string, args: Record<string, unknown>): Record<string, unknown> {
+export function chatTool(root: string, name: string, args: Record<string, unknown>, compatId?: string): Record<string, unknown> {
   return locked(root, () => {
     let discussion_error:string|undefined;
-    if(name==='chat_wait'){const current=load(root,validId(args.chat_id));if(!current.closed){owned(current,args.attachment_id);try{discussionInbox(discussionStore(root),current.id)}catch{discussion_error='Discussion result synchronization is pending; retry chat_wait or inspect the discussion group';}}}
+    if(!compatId && name==='chat_wait'){const current=load(root,validId(args.chat_id));if(!current.closed){owned(current,args.attachment_id);try{discussionInbox(discussionStore(root),current.id)}catch{discussion_error='Discussion result synchronization is pending; retry chat_wait or inspect the discussion group';}}}
     const s = load(root, validId(args.chat_id));
+    if (compatId) {
+      assertCompatSession(s);
+      if (s.compat_grant_id !== compatId) throw new Error('Compatibility authorization revoked');
+      if (!['compat_info','chat_open','chat_wait','chat_reply'].includes(name)) throw new Error('Unsupported compatibility operation');
+      if (name === 'compat_info') return {ok:true,status:'ready'};
+      if (name === 'chat_open' && s.attachment_id && args.attachment_id !== s.attachment_id) throw new Error('Conversation already attached');
+    }
     if (s.closed) return { ok: true, status: 'closed' };
     if (name === 'chat_open') {
       if(group.grouped(s)){const member=group.openGroup(s,args);
@@ -622,4 +631,36 @@ export function writeChatOperation(root:string,chatId:string,event:ChatOperation
    try{writeFileSync(temporary,body,{mode:0o600,flag:'wx'});renameSync(temporary,safe(root,`${DIR}/${chatId}.operations.${ext}`));}finally{rmSync(temporary,{force:true});}
   }
  });
+}
+
+function assertCompatSession(s: ChatSession): void {
+  if (s.closed || group.grouped(s) || [...s.messages, ...(s.queue ?? [])].some(m => m.discussion)) {
+    throw new Error('GET trial requires an open work conversation without discussion deliveries');
+  }
+}
+/** Called only by authenticated local management, never by an MCP tool. */
+export function chatCompatManagement(root: string, profile: string, folder: string, args: Record<string, unknown>): Record<string, unknown> {
+  return locked(root, () => {
+    const s = load(root, validId(args.chat_id));
+    if (args.action === 'revoke_compat') {
+      const grant=compatGrants.find(profile,folder,s.id);
+      if (grant?.attachment && grant.id===s.compat_grant_id && grant.attachment===s.attachment_id) {
+        s.attachment_id='';s.lease_until=0;s.updated_at=Date.now();
+      }
+      compatGrants.revoke(profile, folder, s.id);
+      delete s.compat_grant_id;
+      save(root, s);
+      return {ok:true, revoked:true};
+    }
+    if (args.action !== 'prepare_compat') throw new Error('Unknown compatibility management action');
+    assertCompatSession(s);
+    const attempt = validId(args.message_id);
+    const prior = compatGrants.find(profile, folder, s.id, attempt);
+    if (prior && s.compat_grant_id === prior.id) return {compat:compatGrants.publicGrant(prior)};
+    if (s.attachment_id) throw new Error('Disconnect the current AI before issuing a GET grant');
+    const grant = compatGrants.issue(profile, folder, realpathSync(root), s.id, attempt);
+    s.compat_grant_id = grant.id;
+    save(root, s);
+    return {compat:compatGrants.publicGrant(grant)};
+  });
 }

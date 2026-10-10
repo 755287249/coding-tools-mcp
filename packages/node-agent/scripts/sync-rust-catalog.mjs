@@ -100,3 +100,11 @@ if (checkOnly) {
   await writeFile(outputFile, content);
   console.log(`generated ${path.relative(worktreeRoot, outputFile)} from ${profileNames.length} Rust tool profiles`);
 }
+
+// Keep the GET/file instructions in a single packaged source, including portable builds.
+const compatSource = await readFile(new URL('../../../skills/chat-get-compat/SKILL.md', import.meta.url), 'utf8');
+const compatOutput = new URL('../src/chat/compat-skill.generated.ts', import.meta.url);
+const compatContent = '// Generated from skills/chat-get-compat/SKILL.md.\nexport const compatSkill = ' + JSON.stringify(compatSource.replace(/\r\n/g, '\n')) + ';\n';
+if (process.argv.includes('--check')) {
+  if (await readFile(compatOutput, 'utf8') !== compatContent) throw new Error('GET compatibility skill is stale; run sync:rust-contract');
+} else await writeFile(compatOutput, compatContent);

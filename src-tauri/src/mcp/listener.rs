@@ -1,5 +1,6 @@
 mod lifecycle;
 mod routes;
+mod chat_compat;
 
 use std::convert::Infallible;
 use std::future::Future;
