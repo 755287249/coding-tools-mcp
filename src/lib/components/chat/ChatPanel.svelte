@@ -659,7 +659,7 @@
       <button class="mobile-chat-actions" aria-label={$t('mobile.chatActions')} aria-expanded={mobileActions} onclick={()=>mobileActions=!mobileActions}><Ellipsis size={20}/></button>
       <div class="header-actions">
         {#if unreadTotal}<button class="unread-total" onclick={showUnread} aria-label={`${$t('chat.90')}: ${unreadTotal}`}>{unreadTotal}</button>{/if}
-        <div class="connection-actions"><button disabled={busy || !selected || !(detail?.status === 'connected' || detail?.status === 'waiting')} onclick={requestDisconnect}>{$t('chat.disconnect')}</button><button class="connect-button" class:needs-ai={needsAi} title={needsAi?$t('chat.connectHint'):undefined} disabled={busy || !folderId || detail?.closed} onclick={openConnection}>{$t('chat.connect')}{#if needsAi}<i class="attention-dot" aria-hidden="true"></i>{/if}</button></div>
+        <div class="connection-actions"><button disabled={busy || !selected || !(detail?.status === 'connected' || detail?.status === 'waiting')} onclick={requestDisconnect}>{$t('chat.disconnect')}</button><button class="connect-button" title={needsAi?$t('chat.connectHint'):undefined} disabled={busy || !folderId || detail?.closed} onclick={openConnection}>{$t(mode==='group'?'chat.inviteGroup':'chat.connectWork')}</button></div>
         {#if selected}<button title={$t('chat.36')} aria-label={$t('chat.36')} onclick={download}><Download size={16}/></button>{/if}
 
         {#if headerActions}{@render headerActions()}{/if}
@@ -711,7 +711,7 @@
   {:else}<div class="mobile-action-list">
     {#if mobileHeader}<button disabled={busy} onclick={()=>{mobileActions=false;void mobileHeader.newChat()}}><SquarePen size={18}/>{$t('shell.newChat')}</button>{/if}
     {#if detail}<button disabled={busy} onclick={()=>startRename(detail!)}><Pencil size={18}/>{$t('chat.85')}</button>{/if}
-    <button disabled={busy||!folderId||detail?.closed} onclick={()=>{mobileActions=false;void openConnection()}}><Plus size={18}/>{$t('chat.connect')}</button>
+    <button class="connect-button" disabled={busy||!folderId||detail?.closed} onclick={()=>{mobileActions=false;void openConnection()}}><Plus size={18}/>{$t(mode==='group'?'chat.inviteGroup':'chat.connectWork')}</button>
     <button disabled={busy||!selected||!(detail?.status==='connected'||detail?.status==='waiting')} onclick={()=>{mobileActions=false;requestDisconnect()}}><X size={18}/>{$t('chat.disconnect')}</button>
     {#if selected}<button onclick={()=>{mobileActions=false;download()}}><Download size={18}/>{$t('chat.36')}</button>{/if}
     {#if unreadTotal}<button onclick={()=>{mobileActions=false;showUnread()}}>{$t('chat.90')} ({unreadTotal})</button>{/if}
@@ -727,7 +727,7 @@
 </MobileSheet>{/if}
 <input class="file-input" type="file" accept="image/*" multiple bind:this={photoInput} onchange={()=>{const files=Array.from(photoInput.files??[]);photoInput.value='';void uploadFiles(files)}} aria-label={$t('mobile.photos')}/>
 <dialog class="connect-dialog" bind:this={connectDialog} onclose={() => { guide = false; connectionPrompt = ''; }}>
-  <header><h2>{$t('chat.connect')}</h2><button aria-label={$t('Close')} onclick={()=>guide=false}><X size={18}/></button></header>
+  <header><h2>{$t(mode==='group'?'chat.inviteGroup':'chat.connectWork')}</h2><button aria-label={$t('Close')} onclick={()=>guide=false}><X size={18}/></button></header>
   <p>{$t('chat.sendInstruction')}</p>
   {#if copied || intentReceived || connectionPeer}
     <div class="pairing-progress" role="status" aria-live="polite">
@@ -793,7 +793,6 @@
 .composer-input{position:relative}.mention-input{position:relative;min-width:0;flex:1;display:block}.mention-input textarea,.draft-highlight{grid-area:1/1;width:100%;box-sizing:border-box;padding:0;border:0;font:13px/1.7 system-ui;letter-spacing:normal;white-space:pre-wrap;overflow-wrap:break-word;tab-size:8}.draft-highlight{position:absolute;inset:0;height:100%;pointer-events:none;overflow:hidden;color:#eee;max-height:100%;min-height:62px}.mention-input textarea{position:relative;z-index:1;color:transparent!important;caret-color:#eee;background:transparent;resize:none}.attachment-mention{color:#79b5ff;background:#397ddd22;border-radius:3px}.mention-choices{position:absolute;bottom:calc(100% + 10px);left:0;z-index:15;width:min(340px,100%);max-height:220px;overflow:auto;border:1px solid #ffffff25;border-radius:12px;background:#262626;box-shadow:0 12px 32px #0007;padding:5px}.mention-choices button{display:flex;align-items:center;gap:12px;width:100%;text-align:left;padding:9px;border-radius:7px;font-size:12px}.mention-choices button.active,.mention-choices button:hover{background:#ffffff12}.mention-choices strong{color:#79b5ff;white-space:nowrap}.mention-choices span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#aaa}.draft-files{margin-bottom:10px;flex-wrap:nowrap;overflow-x:auto;padding:4px 2px;max-height:150px}
 
 .outbox{display:flex;align-items:flex-start;gap:10px;max-width:760px;margin:0 auto 10px;color:#ddd}.queue-mode{display:grid;place-items:center;flex:none;width:29px;height:29px;border:1px solid #ffffff30;border-radius:50%;font-size:12px;background:#292929}.queue-mode:hover{background:#3b3b3b}.queue-mode:disabled{opacity:.5;cursor:wait}.queue-mode[aria-pressed=true]{border-color:#91b9f5;background:#24364c}.merged-queue section+section{border-top:1px solid #ffffff20;margin-top:10px;padding-top:10px}.queued-items{flex:1;min-width:0;max-height:160px;overflow:auto;display:flex;flex-direction:column;gap:5px}.queued-card{border:1px solid #ffffff20;border-radius:10px;background:#262626;font-size:12px}.queued-card summary{display:flex;gap:10px;padding:7px 10px;cursor:pointer;list-style:none}.queued-card summary::-webkit-details-marker{display:none}.queued-card summary span:first-child{flex:none;color:#91b9f5}.queued-card summary span:last-child{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#bbb}.queued-card>div{padding:2px 10px 10px;white-space:pre-wrap;overflow-wrap:anywhere}.queued-card small{color:#aaa}.landing:has(.outbox) .composer-area{padding-bottom:35px}
-/* connect button attention dot */.connect-button{position:relative}.attention-dot{position:absolute;top:3px;right:3px;width:7px;height:7px;border-radius:50%;background:#ef4b4b;box-shadow:0 0 0 2px var(--card-bg);pointer-events:none}@media(prefers-reduced-motion:no-preference){.attention-dot{animation:attention-pulse 1.6s ease-in-out infinite}}@keyframes attention-pulse{50%{opacity:.45}}
 @container (min-width:800px){.tasks-visible .conversation{margin-right:var(--chat-task-width)}}
 .mode-switch{display:flex;justify-content:center;align-self:center;gap:3px;margin:20px 0 0;padding:4px;background:#252525;border:1px solid #ffffff0c;border-radius:22px;font-size:12px}.mode-switch button{padding:7px 22px;border-radius:18px;color:#969696}.mode-switch button[aria-pressed=true]{background:#414141;color:#eee;box-shadow:0 2px 4px #0003}.group-mode .composer-area form{position:relative;display:flex;flex-wrap:wrap;align-items:center;gap:8px;border-radius:28px;padding:10px 12px 10px 20px}.group-mode .composer-input{flex:1;min-width:100px;margin-left:26px}.group-mode .mention-input textarea,.group-mode .draft-highlight{min-height:28px;line-height:28px}.group-mode .composer-toolbar{margin:0;gap:8px}.group-mode .composer-toolbar>span{position:absolute;left:12px}.group-mode .composer-toolbar>span>button:not(.attach-button){display:none}.group-mode .draft-files{width:100%;margin:0}.composer-toolbar>span>button{padding:4px 6px}.group-mode.landing .composer-area{padding-bottom:35px}
 .mention-input textarea::placeholder{color:#aaa;opacity:1}
@@ -844,4 +843,5 @@
 @media(prefers-reduced-motion:reduce){.pairing-orbit{animation:none}}
 
 .mention-choices[popover]{position:fixed;inset:auto;margin:0;z-index:auto;color:var(--color-text);}
+button.connect-button{background:#b4232c;color:#fff;font-weight:600;white-space:nowrap}button.connect-button:hover:enabled{background:#cf2d38}
 </style>
