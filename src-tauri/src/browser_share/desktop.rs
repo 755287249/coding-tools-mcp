@@ -155,22 +155,19 @@ async fn asset(headers: HeaderMap, uri: Uri) -> Response {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     let path = uri.path().trim_start_matches('/');
-    let spa = path.is_empty()
-        || path == "quick-setup"
-        || path.starts_with("workspace/")
-        || path.starts_with("settings/");
-    let known = spa
-        || path.starts_with("_app/")
-        || ["favicon.png", "favicon.svg", "chat-preview.html"].contains(&path);
-    if !known || path.contains("..") {
-        return StatusCode::NOT_FOUND.into_response();
+    let Some(resolved) = super::assets::asset_path(path) else {
+        return (StatusCode::NOT_FOUND, [("Cache-Control", "no-store")]).into_response();
+    };
+    // Tauri's resolver silently falls back to index.html for absent assets.
+    // Cache names once to avoid walking/decompressing the embedded bundle per request.
+    static ASSET_NAMES: OnceLock<std::collections::HashSet<String>> = OnceLock::new();
+    let names = ASSET_NAMES.get_or_init(|| app.asset_resolver().iter()
+        .map(|(name, _)| name.trim_start_matches('/').to_string()).collect());
+    if !names.contains(resolved) {
+        return (StatusCode::NOT_FOUND, [("Cache-Control", "no-store")]).into_response();
     }
-    let Some(asset) = app.asset_resolver().get(if spa {
-        "index.html".into()
-    } else {
-        path.into()
-    }) else {
-        return StatusCode::NOT_FOUND.into_response();
+    let Some(asset) = app.asset_resolver().get(resolved.into()) else {
+        return (StatusCode::NOT_FOUND, [("Cache-Control", "no-store")]).into_response();
     };
     let csp = if path == "chat-preview.html" {
         "sandbox allow-scripts; frame-ancestors 'self'"
@@ -181,7 +178,7 @@ async fn asset(headers: HeaderMap, uri: Uri) -> Response {
         .status(200)
         .header("Content-Type", asset.mime_type)
         .header("Content-Security-Policy", csp)
-        .header("Cache-Control", "no-store")
+        .header("Cache-Control", super::assets::cache_control(resolved))
         .header("Referrer-Policy", "no-referrer")
         .header("X-Content-Type-Options", "nosniff")
         .body(Body::from(asset.bytes))

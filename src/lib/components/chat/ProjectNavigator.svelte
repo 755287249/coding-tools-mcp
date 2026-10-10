@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { startVisiblePolling, reconcileSnapshot } from '$lib/chat/polling';
   import { goto } from '$app/navigation';
   import { page } from '$app/stores';
   import { appUrl } from '$lib/app-path';
@@ -135,20 +136,19 @@
   onMount(() => { try { const value=JSON.parse(localStorage.getItem('ctmcp-project-collapse') ?? '{}'); if(value && typeof value==='object' && !Array.isArray(value)) collapsed=value; } catch {} });
   $effect(() => {
     const targets = groups;
-    let stopped=false; let timer:ReturnType<typeof setTimeout>;
+    let stopped=false;
     async function poll() {
       // Query summaries only; no transcript or authentication material is loaded by navigation.
       for(let offset=0;offset<targets.length;offset+=4) {
-        if(stopped) return;
+        if(stopped || document.hidden) return;
         await Promise.all(targets.slice(offset,offset+4).map(async group => {
-          try { const [result,discussions]=await Promise.all([localChat(group.workspace.id,group.folder.id,{action:'list'}),localDiscussion(group.workspace.id,group.folder.id,{action:'discussion_list'})]); if(!stopped){sessions={...sessions,[group.key]:sortChats([...(result.sessions??[]),...(discussions.discussions??[]).map(d=>discussionNavigation(d,result.sessions??[]))])};errors={...errors,[group.key]:''};} }
+          try { const [result,discussions]=await Promise.all([localChat(group.workspace.id,group.folder.id,{action:'list'}),localDiscussion(group.workspace.id,group.folder.id,{action:'discussion_list'})]); if(!stopped){const next=reconcileSnapshot(sessions[group.key]??[],sortChats([...(result.sessions??[]),...(discussions.discussions??[]).map(d=>discussionNavigation(d,result.sessions??[]))]));if(next!==sessions[group.key])sessions={...sessions,[group.key]:next};if(errors[group.key])errors={...errors,[group.key]:''};} }
           catch(error){if(!stopped)errors={...errors,[group.key]:String(error)}}
         }));
       }
-      if(!stopped)timer=setTimeout(poll,document.hidden?10000:3000);
     }
-    void poll();
-    return()=>{stopped=true;clearTimeout(timer)};
+    const stop=startVisiblePolling(poll,()=>3000);
+    return()=>{stopped=true;stop()};
   });
   function unread(ws:string,folder:string,chat:ChatSession){try{const saved=JSON.parse(localStorage.getItem(`ctmcp-chat-seen:${ws}:${folder}`)??'{}');return Math.max(0,(chat.assistant_message_count??0)-(Number(saved?.[chat.id])||0))}catch{return 0}}
   function visibleChats(ws:string,folder:string){

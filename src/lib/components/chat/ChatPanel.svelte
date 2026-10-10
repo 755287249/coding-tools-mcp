@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { startVisiblePolling, reconcileSnapshot } from '$lib/chat/polling';
   import {goto} from '$app/navigation';
   import {appUrl} from '$lib/app-path';
   import {anchoredChoices} from '$lib/chat/anchored-choices';
@@ -159,7 +160,7 @@
   let queueChanging = $state(false);
   let queueElement=$state<HTMLDivElement>(),queueExpanded=$state(false);
   let runtimeState=$state('');
-  $effect(()=>{const ws=workspaceId;runtimeState='';if(!ws)return;let stopped=false,timer:ReturnType<typeof setTimeout>;const poll=async()=>{try{const value=await getRuntimeStatus(ws);if(!stopped)runtimeState=value.state;}catch{if(!stopped)runtimeState='';}finally{if(!stopped)timer=setTimeout(poll,4000)}};void poll();return()=>{stopped=true;clearTimeout(timer)}});
+  $effect(()=>{const ws=workspaceId;runtimeState='';if(!ws)return;let stopped=false;const stop=startVisiblePolling(async()=>{try{const value=await getRuntimeStatus(ws);if(!stopped)runtimeState=value.state;}catch{if(!stopped)runtimeState='';}},()=>4000);return()=>{stopped=true;stop()}});
   const queueNotice=$derived(!workspaceId||!folderId?'':runtimeState&&runtimeState!=='running'?'chat.enableMcp':needsAi?'chat.connectAi':'');
   function collapseQueue(){queueElement?.querySelectorAll('details[open]').forEach(item=>(item as HTMLDetailsElement).open=false);queueExpanded=false;}
 
@@ -415,14 +416,16 @@
       if (!current()) return;
       if (!result.session || result.session.id !== target) throw new Error('Chat session not found');
       const switched = detail?.id !== target;
-      detail = result.session;
+      const next = reconcileSnapshot(detail, result.session);
+      const changed = next !== detail;
+      if (changed) detail = next;
       displayedScope = { workspace: ws, folder, chat: target };
-      detailCache.put(sessionCacheKey(ws, folder, target), result.session);
+      if (changed) detailCache.put(sessionCacheKey(ws, folder, target), result.session);
       loadingDetail = false;
       if (error === readError) error = '';
       readError = '';
-      await tick();
-      if (current() && (switched || following)) toBottom();
+      if (changed) await tick();
+      if (changed && current() && (switched || following)) toBottom();
       if (current()) markRead();
     } catch (e) {
       if (current()) { loadingDetail = false; readError = String(e); error = readError; }
@@ -431,7 +434,7 @@
   async function refresh(ws: string, folder: string, gen: number) {
     const list = await localChat(ws, folder, { action: 'list' });
     if (gen !== generation) return;
-    sessions = list.sessions ?? [];
+    sessions = reconcileSnapshot(sessions, list.sessions ?? []);
     if (!selected && requestedChatId) selectSession(ws, folder, requestedChatId);
     else if (!selected && sessions.length && !startNew) {
       selectSession(ws, folder, sessions[0].id); onNavigate?.(folder, selected);
@@ -449,14 +452,11 @@
     readSequence++; displayedScope = null; loadingDetail = false; readError = '';
     seen = restoreSeen(ws, folder);
     sessions = []; selected = ''; detail = null; draft = ''; error = ''; retry = null; attachments = []; renameId = ''; renameTitle = '';
-    let stopped = false; let timer: ReturnType<typeof setTimeout>;
-    async function poll() {
-      if (!folder || stopped) return;
+    const stop = startVisiblePolling(async () => {
+      if (!folder) return;
       try { await refresh(ws, folder, gen); } catch (e) { if (gen === generation) error = String(e); }
-      if (!stopped) timer = setTimeout(poll, guide ? 500 : 1500);
-    }
-    void poll();
-    return () => { stopped = true; clearTimeout(timer); generation++; };
+    }, () => guide ? 500 : 1500);
+    return () => { stop(); generation++; };
   });
   $effect(() => {
     const ws = workspaceId, target = requestedChatId, folder = folderId, fresh = startNew;
@@ -816,7 +816,7 @@
  .chat-header,.external-navigation .chat-header{position:relative;min-height:46px;padding:4px 16px 10px;border-bottom:0;gap:8px}.chat-header>.chat-heading:first-child{align-items:flex-start;gap:3px}.chat-heading strong{font-size:13px;font-weight:550}.status{font-size:10px;max-width:100%;overflow:hidden;text-overflow:ellipsis}.mobile-chat-actions{display:grid;place-items:center;width:36px;height:36px;border-radius:50%;background:var(--surface-hover);flex:none}
  .header-actions{display:none}.connection-actions{border-color:var(--color-border)}.connection-actions button+button{border-color:var(--color-border)}
  .message-feed{padding:0}.message-feed :global(.markdown){font-size:13px;line-height:1.7;font-weight:400}.message-feed :global(.markdown h3){font-size:14px;line-height:1.55;margin:14px 0 7px}.message-feed :global(.markdown strong){font-weight:600}.message-feed :global(.markdown a){color:var(--primary)}.feed-frame :global(.chat-outline),.feed-frame :global(.outline-preview){display:none}
- .message-column{padding:14px 18px 18px}.message-column article{margin-bottom:22px}.message-meta{font-size:10px;margin-bottom:7px}.message-meta time{font-size:9px}.user{margin-left:12%}.user .message-body,.external-navigation .user .message-body{padding:10px 13px;border-radius:16px;background:var(--surface-hover);color:var(--color-text)}
+ .message-column{padding:14px 18px 18px}.message-column article{margin-bottom:22px}.message-meta{font-size:10px;margin-bottom:7px}.message-meta time{font-size:9px}.user{margin-left:12%}.user .message-body,.external-navigation .user .message-body{padding:10px 13px;border-radius:16px;background:#173e76;color:#fff}
  .composer-area,.external-navigation .composer-area,.landing .composer-area,.group-mode.landing .composer-area{position:relative;padding:8px 12px max(12px,env(safe-area-inset-bottom));flex:none;margin:0}
  .composer-area form,.external-navigation .composer-area form,.group-mode .composer-area form{display:grid;grid-template-columns:32px minmax(0,1fr) 34px;align-items:center;column-gap:8px;row-gap:6px;min-height:54px;padding:10px;border-radius:28px;background:var(--surface-2);border:1px solid var(--color-border);box-shadow:none;overflow:visible;max-height:none;color:var(--color-text)}
  .composer-input,.group-mode .composer-input{grid-column:2;grid-row:2;margin:0;min-width:0;width:100%;align-self:center}.composer-toolbar,.group-mode .composer-toolbar,.composer-toolbar>div{display:contents}.composer-toolbar>span,.group-mode .composer-toolbar>span{position:static;grid-column:1;grid-row:2;margin:0;padding:0;display:grid;place-items:center}.composer-toolbar>div>.send-button{grid-column:3;grid-row:2}.attach-button{width:32px;height:34px;color:var(--color-text)}.send-button{width:34px;height:34px}

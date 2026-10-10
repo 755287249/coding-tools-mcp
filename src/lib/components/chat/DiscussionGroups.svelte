@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { startVisiblePolling, reconcileSnapshot } from '$lib/chat/polling';
   import {page} from '$app/stores';
   import {tick,getContext,onDestroy} from 'svelte';
   import {MOBILE_CHAT_HEADER,type MobileHeaderContext} from '$lib/chat/mobile-header';
@@ -87,15 +88,15 @@
       const older=(await call({action:'discussion_read',discussion_id:id,offset:next.next_offset})).discussion;
       if(!older)break;next={...next,posts:[...(older.posts??[]),...(next.posts??[])],next_offset:older.next_offset};
     }
-    if(alive&&selected===id){current=next;targets=targets.filter(id=>next?.members.includes(id));}
+    if(alive&&selected===id){current=reconcileSnapshot(current,next);targets=reconcileSnapshot(targets,targets.filter(id=>next?.members.includes(id)));}
   }
   async function refresh(){
     const [list,chats]=await Promise.all([call({action:'discussion_list'}),localChat(workspaceId,folderId,{action:'list'})]);
-    if(!alive)return;groups=list.discussions??[];sessions=chats.sessions??[];
+    if(!alive)return;groups=reconcileSnapshot(groups,list.discussions??[]);sessions=reconcileSnapshot(sessions,chats.sessions??[]);
     if(!selected&&!editing){const first=groups.find(g=>!g.archived);if(first){await goto(appUrl(discussionLocation(workspaceId,folderId,first.id)),{replaceState:true});return;}edit(true);}
     if(selected)await read(selected);
   }
-  onMount(()=>{alive=true;draftKey='ctmcp-discussion-draft:'+JSON.stringify([workspaceId,folderId,selected]);const cached=discussionDrafts.load(draftKey);text=cached.text;attachments=cached.attachments;pending=cached.pending?.discussion_id===selected?cached.pending:null;draftReady=true;if($page.url.searchParams.get('createGroup')==='1')edit(true);let timer:ReturnType<typeof setTimeout>;async function poll(){try{if(!busy)await refresh()}catch(e){if(alive)error=String(e)}finally{if(alive){loading=false;timer=setTimeout(poll,3000)}}}void poll();return()=>{alive=false;clearTimeout(timer)}});
+  onMount(()=>{alive=true;draftKey='ctmcp-discussion-draft:'+JSON.stringify([workspaceId,folderId,selected]);const cached=discussionDrafts.load(draftKey);text=cached.text;attachments=cached.attachments;pending=cached.pending?.discussion_id===selected?cached.pending:null;draftReady=true;if($page.url.searchParams.get('createGroup')==='1')edit(true);const stop=startVisiblePolling(async()=>{try{if(!busy)await refresh()}catch(e){if(alive)error=String(e)}finally{if(alive)loading=false}},()=>3000);return()=>{alive=false;stop()}});
   function edit(fresh=false){if(pending)return;creating=fresh;editing=true;name=fresh?'':current?.name??'';goal=fresh?'':current?.goal??'';members=fresh?[]:[...(current?.members??[])];coordinator=fresh?'':current?.coordinator_chat_id??current?.members[0]??'';if(fresh)createId=randomId();error='';}
   async function save(){if(busy)return;busy=true;error='';try{const result=await call({action:creating?'discussion_create':'discussion_update',discussion_id:creating?createId:selected,title:name,goal,member_chat_ids:members,collaboration:creating?true:current?.collaboration,coordinator_chat_id:members.includes(coordinator)?coordinator:members[0],paused:false});if(result.discussion){selected=result.discussion.id;current=result.discussion;}editing=false;if(creating){await goto(appUrl(discussionLocation(workspaceId,folderId,selected)),{replaceState:true});}else await refresh()}catch(e){error=String(e)}finally{busy=false}}
   async function archive(){if(!current||busy||pending)return;busy=true;error='';try{await call({action:'discussion_update',discussion_id:selected,archived:!current.archived});menu?.hidePopover();await refresh()}catch(e){error=String(e)}finally{busy=false}}

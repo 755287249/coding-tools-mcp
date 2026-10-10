@@ -57,3 +57,30 @@ test('late requests cannot erase a newer login or restore a session after logout
   s.forgetBrowserSession();resolve(Response.json({token:'fixture-too-late'}));await assert.rejects(pendingLogin,/session changed/);assert.equal(memory.size,0);
  }finally{s.forgetBrowserSession();globalThis.fetch=oldFetch;globalThis.sessionStorage=oldStorage;}
 });
+
+test('transient proxy failures retry reads once, preserve login, and never replay writes',async()=>{
+ const oldFetch=globalThis.fetch;const s=await import('../src/lib/backend/browser-session.ts');s.forgetBrowserSession();
+ try{
+  globalThis.fetch=async()=>Response.json({token:'fixture-session'});await s.browserLogin('fixture');
+  let calls=0;
+  globalThis.fetch=async()=>++calls===1?new Response('<html>temporary proxy page</html>',{headers:{'content-type':'text/html'}}):Response.json({value:['recovered']});
+  assert.deepEqual(await s.browserInvoke('list_workspaces'),['recovered']);assert.equal(calls,2);
+  calls=0;globalThis.fetch=async()=>{calls++;return new Response('proxy',{status:502,headers:{'content-type':'text/html'}})};
+  await assert.rejects(s.browserInvoke('local_chat',{args:{action:'send'}}),/HTTP 502, text\/html/);assert.equal(calls,1);
+  calls=0;await assert.rejects(s.browserInvoke('local_chat',{args:{action:'read'}}),/HTTP 502/);assert.equal(calls,2);
+  calls=0;globalThis.fetch=async()=>{calls++;return Response.json({error:'invalid'}, {status:400})};
+  await assert.rejects(s.browserInvoke('list_workspaces'),/invalid/);assert.equal(calls,1);
+  calls=0;globalThis.fetch=async()=>{calls++;return Response.json({other:'missing value'})};
+  await assert.rejects(s.browserInvoke('list_workspaces'),/missing result/);assert.equal(calls,1);
+ }finally{s.forgetBrowserSession();globalThis.fetch=oldFetch}
+});
+
+test('logout during retry delay cancels the retry rather than sending with another session',async()=>{
+ const oldFetch=globalThis.fetch;const s=await import('../src/lib/backend/browser-session.ts');s.forgetBrowserSession();
+ try{
+  globalThis.fetch=async()=>Response.json({token:'fixture-session'});await s.browserLogin('fixture');let calls=0;
+  globalThis.fetch=async()=>{calls++;return new Response('proxy',{status:503})};
+  const pending=s.browserInvoke('list_workspaces');await new Promise(r=>setTimeout(r,40));s.forgetBrowserSession();
+  await assert.rejects(pending,/session changed/);assert.equal(calls,1);
+ }finally{s.forgetBrowserSession();globalThis.fetch=oldFetch}
+});
