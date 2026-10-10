@@ -8,7 +8,7 @@ export async function newAppWindow() {
   }
   const { WebviewWindow } = desktopWindowApi;
   await new Promise<void>((resolve, reject) => {
-    const view = new WebviewWindow(`workspace-${crypto.randomUUID()}`, {url: '/', title:'Coding Tools MCP', width:1200, height:800, decorations:false, transparent:true});
+    const view = new WebviewWindow(`workspace-${crypto.randomUUID()}`, {url: '/', title:'Coding Tools MCP', width:1200, height:800, decorations:false, transparent:true, dragDropEnabled:false});
     void view.once('tauri://created', () => resolve()).catch(reject);
     void view.once('tauri://error', event => reject(new Error(String(event.payload)))).catch(reject);
   });
