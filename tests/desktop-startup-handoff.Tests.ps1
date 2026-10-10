@@ -36,3 +36,65 @@ Assert-Equal (Test-DesktopName 'ctmcp (2).exe') $true 'Browser numbered download
 Assert-Equal (Test-DesktopName 'ctmcp-random.exe') $false 'Unrelated filename must not be accepted'
 Assert-Equal @(Select-UpgradeTargets @((Candidate 10 3 'ctmcp-0.1.66-win64.exe' 'Coding Tools MCP' '0.1.66' 'C:\old\ctmcp-0.1.66-win64.exe')) 'C:\new\ctmcp-0.1.67-win64.exe' ([version]'0.1.67') 3 9).Count 1 'Versioned old build must be selectable'
 Write-Output 'PASS: version/product/session/PID/path selection and canonical/legacy runtime snapshots (14 assertions). No processes were started or stopped.'
+
+# Pure doubles: no production process is stopped or launched by these checks.
+$stamp=[DateTime]::new(638960000000000000,[DateTimeKind]::Utc)
+$identities=@(1,2,3,4,5,6 | ForEach-Object { [pscustomobject]@{ProcessId=$_;SessionId=3;CreatedAt=$stamp.Ticks;Name='msedgewebview2.exe'} })
+function Get-CimInstance {
+    param($ClassName)
+    foreach($item in $identities){[pscustomobject]@{ProcessId=$item.ProcessId;SessionId=$item.SessionId;CreationDate=$stamp}}
+}
+function Get-Process {
+    param($Id,$ErrorAction)
+    if($Id -eq 4){throw [UnauthorizedAccessException]::new('Synthetic access denied')}
+    if($Id -eq 5){
+        $record=[Management.Automation.ErrorRecord]::new([ArgumentException]::new('Synthetic process disappeared'),'NoProcessFoundForGivenId',[Management.Automation.ErrorCategory]::ObjectNotFound,$Id)
+        throw $record
+    }
+    $result=[pscustomobject]@{HasExited=($Id -eq 2);SessionId=$(if($Id -eq 6){4}else{3});StartTime=$(if($Id -eq 3){$stamp.AddSeconds(1)}else{$stamp.AddTicks(1)})}
+    $result | Add-Member ScriptMethod Dispose { $script:disposedCount++ }
+    return $result
+}
+$script:disposedCount=0
+try {
+    $remaining=@(Get-RemainingUpgradeProcesses $identities)
+    Assert-Equal ($remaining.ProcessId -join ',') '1,4' 'Only live and unreadable identities may remain; exited/reused/missing/foreign-session processes must not block'
+    Assert-Equal $script:disposedCount 4 'Every successfully opened process must be disposed'
+} finally {
+    Remove-Item Function:\Get-Process
+    Remove-Item Function:\Get-CimInstance
+}
+function New-TaskKillDouble($Finished,$Exited,$ExitCode,$DenyKill) {
+    $p=[pscustomobject]@{Finished=$Finished;HasExited=$Exited;ExitCode=$ExitCode;DenyKill=$DenyKill;KillCalls=0}
+    $p | Add-Member ScriptMethod WaitForExit {param($Timeout); return $this.Finished}
+    $p | Add-Member ScriptMethod Kill {$this.KillCalls++;if($this.DenyKill){throw 'Synthetic cleanup access denied'}}
+    return $p
+}
+$normal=New-TaskKillDouble $true $true 128 $false
+Assert-Equal (Wait-UpgradeTaskKill $normal) 128 'Native nonzero exit must remain visible'
+$race=New-TaskKillDouble $false $true 0 $true
+Assert-Equal (Wait-UpgradeTaskKill $race) 1460 'Timeout/exit race must return for identity verification'
+Assert-Equal $race.KillCalls 0 'An exited helper must not be killed'
+$denied=New-TaskKillDouble $false $false 0 $true
+Assert-Equal (Wait-UpgradeTaskKill $denied) 1460 'Cleanup denial must not bypass subsequent identity checks'
+Assert-Equal $denied.KillCalls 1 'A live timed-out helper gets one cleanup attempt'
+
+# Exercise shutdown orchestration with synthetic observations and requests only.
+function Get-UpgradeTree {param($Candidate); return $identities[0]}
+function Get-RemainingUpgradeProcesses {
+    param($Captured)
+    $script:remainingCalls++
+    if($script:remainingCalls -le 2){return $identities[0]}
+}
+function Invoke-UpgradeTaskKill {param($ProcessId,$Tree);$script:shutdownCalls++;return 1460}
+$script:remainingCalls=0;$script:shutdownCalls=0
+try {
+    Stop-UpgradeTree $identities[0]
+    Assert-Equal $script:shutdownCalls 2 'A timeout must recheck and retry only the captured surviving identity'
+    Assert-Equal $script:remainingCalls 3 'Shutdown succeeds only after no live captured identity remains'
+} finally {
+    Remove-Item Function:\Get-UpgradeTree
+    Remove-Item Function:\Get-RemainingUpgradeProcesses
+    Remove-Item Function:\Invoke-UpgradeTaskKill
+}
+Write-Output 'PASS: stale CIM entries, PID/session reuse, missing/denied process state, handle disposal, helper timeout/exit/denied-cleanup races and shutdown identity rechecks. Pure doubles only.'

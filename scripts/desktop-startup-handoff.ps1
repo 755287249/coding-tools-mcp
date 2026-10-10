@@ -130,13 +130,42 @@ function Get-UpgradeTree($Root) {
     }
 }
 
+# CIM can retain terminated WebView2 entries while another process owns a handle.
+# Check the waitable process state; unreadable state still blocks replacement.
+function Test-UpgradeProcessAlive($Identity) {
+    $process = $null
+    try {
+        $process = Get-Process -Id $Identity.ProcessId -ErrorAction Stop
+        if ($process.HasExited) { return $false }
+        # Win32_Process CreationDate has microsecond precision, whereas native
+        # StartTime has 100ns precision. Compare after truncating the native tail.
+        $started = $process.StartTime.ToUniversalTime().Ticks
+        $captured = [long]$Identity.CreatedAt
+        if ($process.SessionId -ne $Identity.SessionId -or ($started - ($started % 10)) -ne ($captured - ($captured % 10))) { return $false }
+        return $true
+    } catch {
+        if ($_.FullyQualifiedErrorId -like 'NoProcessFoundForGivenId*') { return $false }
+        return $true
+    } finally { if ($process) { $process.Dispose() } }
+}
+
 function Get-RemainingUpgradeProcesses([array]$Captured) {
     $all = @(Get-CimInstance Win32_Process)
     foreach ($identity in $Captured) {
         foreach ($item in $all) {
-            if ($item.ProcessId -eq $identity.ProcessId -and $item.SessionId -eq $identity.SessionId -and $item.CreationDate -and $item.CreationDate.ToUniversalTime().Ticks -eq $identity.CreatedAt) { $identity }
+            if ($item.ProcessId -eq $identity.ProcessId -and $item.SessionId -eq $identity.SessionId -and $item.CreationDate -and $item.CreationDate.ToUniversalTime().Ticks -eq $identity.CreatedAt -and (Test-UpgradeProcessAlive $identity)) { $identity }
         }
     }
+}
+
+# A shutdown helper timeout is not proof that the desktop is still alive.
+# Let the caller recheck captured identities even if cleanup races with exit.
+function Wait-UpgradeTaskKill($Process) {
+    if ($Process.WaitForExit(15000)) { return $Process.ExitCode }
+    try { if (-not $Process.HasExited) { $Process.Kill() } }
+    catch { Write-UpgradeLog 'Shutdown helper cleanup raced with exit or was denied; checking captured application identities.' }
+    Write-UpgradeLog 'Shutdown helper timed out; checking captured application identities.'
+    return 1460
 }
 
 function Invoke-UpgradeTaskKill([int]$ProcessId, [bool]$Tree = $false) {
@@ -151,9 +180,12 @@ function Invoke-UpgradeTaskKill([int]$ProcessId, [bool]$Tree = $false) {
     try {
         $stdout = $process.StandardOutput.ReadToEndAsync()
         $stderr = $process.StandardError.ReadToEndAsync()
-        if (-not $process.WaitForExit(15000)) { $process.Kill(); throw 'Timed out while requesting application shutdown.' }
-        $null=$stdout.GetAwaiter().GetResult(); $null=$stderr.GetAwaiter().GetResult()
-        return $process.ExitCode
+        $exitCode = Wait-UpgradeTaskKill $process
+        # Do not block on redirected pipes after a timeout. Dispose closes our
+        # handles; Stop-UpgradeTree still rejects every actually live identity.
+        if ($exitCode -ne 1460) { $null=$stdout.GetAwaiter().GetResult(); $null=$stderr.GetAwaiter().GetResult() }
+        if ($exitCode -ne 0) { Write-UpgradeLog "Shutdown request pid=$ProcessId exit=$exitCode" }
+        return $exitCode
     } finally { $process.Dispose() }
 }
 
