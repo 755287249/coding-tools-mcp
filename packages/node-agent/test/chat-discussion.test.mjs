@@ -103,3 +103,21 @@ test('coordinator delegation returns hidden results and summary to shared timeli
  ui({action:'discussion_update',discussion_id:'team',member_chat_ids:[a]});
  assert.throws(()=>tool(b,bb.attachment_id,'chat_discuss',{action:'read',discussion_id:'team'}),/not a discussion member/);
 });
+
+test('disconnect blocks new group tasks, keeps source attachment and in-flight results, and pin survives reads',t=>{
+ const {a,b,aa,bb,ui,tool,wb}=fixture(t);
+ const post={action:'discussion_post',discussion_id:'group1',message_id:'before',text:'Finish this',recipient_chat_ids:[b]};
+ ui(post);const message=wb().message;const connection=ui({action:'read',chat_id:b}).session.connection_id;
+ const paused=ui({action:'discussion_update',discussion_id:'group1',paused:true,pinned:true}).discussion;
+ assert.equal(paused.paused,true);assert.equal(paused.pinned,true);
+ assert.throws(()=>ui({...post,message_id:'blocked'}),/disconnected/);
+ assert.throws(()=>tool(a,aa.attachment_id,'chat_discuss',{...post,action:'post',message_id:'blocked-agent'}),/disconnected/);
+ assert.equal(ui({action:'read',chat_id:b}).session.connection_id,connection);
+ tool(b,bb.attachment_id,'chat_reply',{message_id:'reply-after-pause',reply_to:message.id,text:'Still finished',final:true});
+ assert.equal(ui({action:'discussion_read',discussion_id:'group1'}).discussion.posts[0].deliveries[0].status,'completed');
+ ui(post);assert.equal(ui({action:'discussion_read',discussion_id:'group1'}).discussion.posts.length,1);
+ ui({action:'discussion_update',discussion_id:'group1',paused:false});ui({...post,message_id:'resumed'});
+ const restored=ui({action:'discussion_list'}).discussions[0];assert.equal(restored.paused,false);assert.equal(restored.pinned,true);
+ assert.throws(()=>ui({action:'discussion_update',discussion_id:'group1',paused:'true'}),/boolean/);
+ assert.throws(()=>tool(a,aa.attachment_id,'chat_discuss',{action:'update',discussion_id:'group1',paused:true}),/local interface/);
+});

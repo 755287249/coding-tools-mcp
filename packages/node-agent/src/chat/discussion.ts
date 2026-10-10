@@ -9,7 +9,7 @@ export interface DiscussionStore {
 }
 export interface DiscussionDelivery {chat_id:string;message_id:string;title:string;status:string;replies:ChatMessage[];error?:string}
 export interface DiscussionPost {summaries?:ChatMessage[];id:string;from:string;name:string;text:string;goal:string;purpose:string;created_at:number;targets:string[];deliveries:DiscussionDelivery[]}
-export interface Discussion {collaboration?:boolean;coordinator_chat_id?:string;aliases?:Record<string,string>;version:1;id:string;name:string;goal:string;members:string[];archived:boolean;created_at:number;updated_at:number;posts:DiscussionPost[]}
+export interface Discussion {paused?:boolean;pinned?:boolean;collaboration?:boolean;coordinator_chat_id?:string;aliases?:Record<string,string>;version:1;id:string;name:string;goal:string;members:string[];archived:boolean;created_at:number;updated_at:number;posts:DiscussionPost[]}
 const DIR='docs/chat-sessions/discussions';
 const LIMIT=8*1024*1024;
 const digest=(s:string)=>createHash('sha256').update(s).digest('hex');
@@ -92,6 +92,7 @@ export function discussionAction(io:DiscussionStore,args:Record<string,unknown>,
     if(args.goal!==undefined)d.goal=args.goal?io.text(args.goal,2000):'';
     if(args.member_chat_ids!==undefined)d.members=members(io,args.member_chat_ids);
     if(args.archived!==undefined){if(typeof args.archived!=='boolean')throw Error('archived must be boolean');d.archived=args.archived;}
+    for(const field of ['paused','pinned'] as const)if(args[field]!==undefined){if(typeof args[field]!=='boolean')throw Error(`${field} must be boolean`);d[field]=args[field];}
     configureCollaboration(io,d,args);d.updated_at=Date.now();write(io,d);
   }else if(action==='post'){
     const id=io.validateId(args.message_id),content=io.text(args.text,16000),purpose=String(args.purpose??'discussion'),from=actor?.id??'user';
@@ -102,6 +103,7 @@ export function discussionAction(io:DiscussionStore,args:Record<string,unknown>,
     if(p){if(p.from!==from||p.text!==content||p.purpose!==purpose||JSON.stringify(p.targets)!==JSON.stringify(targets))throw Error('Message ID conflicts with a discussion post');}
     else{
       if(d.archived)throw Error('Discussion is archived');
+      if(d.paused)throw Error('Group is disconnected; reconnect from the local interface');
       members(io,targets);
       p={id,from,name:actor?(d.aliases?.[actor.id]??actor.agent_name??actor.title):'你',text:content,goal:d.goal,purpose,targets:targets as string[],created_at:Date.now(),deliveries:targets.map(chat=>({chat_id:chat as string,message_id:'d-'+digest(`${d.id}:${id}:${chat}`),title:io.load(chat as string).title,status:'undelivered',replies:[]}))};
       d.posts.push(p);d.updated_at=Date.now();write(io,d);

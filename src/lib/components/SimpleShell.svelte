@@ -3,7 +3,6 @@
   import { writable } from 'svelte/store';
   import { MOBILE_CHAT_HEADER, type MobileChatHeader } from '$lib/chat/mobile-header';
   import DiscussionGroups from '$lib/components/chat/DiscussionGroups.svelte';
-  import Users from '@lucide/svelte/icons/users';
   import BrowserShareDialog from './BrowserShareDialog.svelte';
   import Globe from '@lucide/svelte/icons/globe';
   import {localDesktop} from '$lib/api/distribution';
@@ -63,7 +62,7 @@
   const group=$derived(groups.find(g=>g.workspace.id===$page.params.id&&g.folder.id===$page.url.searchParams.get('folder'))??groups.find(g=>g.workspace.id===$page.params.id)??groups[0]);
   const panel=$derived($page.url.searchParams.get('panel')??'');
   const customizing=$derived(panel==='plugins'||panel==='skills');
-  const entries=[{id:'discussions',icon:Users},{id:'assets',icon:Images},{id:'scheduled',icon:Clock},{id:'skills',icon:Library},{id:'plugins',icon:Blocks}];
+  const entries=[{id:'assets',icon:Images},{id:'scheduled',icon:Clock},{id:'skills',icon:Library},{id:'plugins',icon:Blocks}];
   onMount(()=>{const media=matchMedia('(max-width:700px)');const resize=()=>{mobileScreen=media.matches;if(!media.matches)mobileNav=false};resize();media.addEventListener('change',resize);try{pinned=localStorage.getItem('ctmcp-nav-pinned')!=='0';width=navigationWidth(localStorage.getItem('ctmcp-nav-width'));if(media.matches)pinned=false;}catch{}const stop=startScheduleRunner();return()=>{media.removeEventListener('change',resize);stop()}});
   $effect(()=>{const route=$page.url.href;mobileNav=false;mobileMore=false;settingsOpen=false;menuElement?.hidePopover();if(typeof window!=='undefined'&&window.innerWidth<700){pinned=false;hovered=false}});
   function pin(){pinned=!pinned;hovered=false;try{localStorage.setItem('ctmcp-nav-pinned',pinned?'1':'0')}catch{}}
@@ -148,8 +147,10 @@
     {#if group}<WorkspaceFeatureControls workspaceId={group.workspace.id} initialTab={panel==='skills'?'skills':$page.url.searchParams.get('featureTab')==='hooks'?'hooks':'mcp'} catalog onCatalogTab={openFeatureTab}>
       {#snippet workspacePicker()}<select aria-label={$t('chat.109')} value={group?.key??''} onchange={event=>selectGroup(event.currentTarget.value)}>{#each groups as g}<option value={g.key}>{g.workspace.name} · {g.folder.name}</option>{/each}</select>{/snippet}
     </WorkspaceFeatureControls>{:else}<section class="library-page"><h1>{$t('features.customize')}</h1><p>{$t('chat.110')}</p>{#if onAddWorkspace}<button onclick={onAddWorkspace}>{$t('chat.openWorkspace')}</button>{/if}</section>{/if}
+  {:else if panel==='discussions'}
+    {#if group}{#key group.key+($page.url.searchParams.get('discussion')??'')+($page.url.searchParams.get('createGroup')??'')}<DiscussionGroups workspaceId={group.workspace.id} folderId={group.folder.id}/>{/key}{:else}<section class="library-page"><p>{$t('chat.110')}</p></section>{/if}
   {:else if entries.some(entry=>entry.id===panel)}<section class="library-page"><header><h1>{$t(`shell.${panel}` as MessageKey)}</h1><select aria-label={$t('chat.109')} value={group?.key??''} onchange={event=>selectGroup(event.currentTarget.value)}>{#each groups as g}<option value={g.key}>{g.workspace.name} · {g.folder.name}</option>{/each}</select></header>
-    {#if group}{#if panel==='discussions'}{#key group.key}<DiscussionGroups workspaceId={group.workspace.id} folderId={group.folder.id}/>{/key}{:else if panel==='assets'}<AssetLibrary workspaceId={group.workspace.id} folderId={group.folder.id} focusSearchRequest={assetSearchRequest}/>{:else if panel==='scheduled'}<ScheduledTasks workspaceId={group.workspace.id} folderId={group.folder.id}/>{:else}<WorkspaceFeatureControls workspaceId={group.workspace.id} initialTab={panel==='plugins'?'mcp':'skills'}/>{/if}
+    {#if group}{#if panel==='assets'}<AssetLibrary workspaceId={group.workspace.id} folderId={group.folder.id} focusSearchRequest={assetSearchRequest}/>{:else if panel==='scheduled'}<ScheduledTasks workspaceId={group.workspace.id} folderId={group.folder.id}/>{:else}<WorkspaceFeatureControls workspaceId={group.workspace.id} initialTab={panel==='plugins'?'mcp':'skills'}/>{/if}
     {:else}<p>{$t('chat.110')}</p>{#if onAddWorkspace}<button onclick={onAddWorkspace}>{$t('shell.openFolder')}</button>{/if}{/if}
   </section>{:else}{@render children()}{/if}
   </main>

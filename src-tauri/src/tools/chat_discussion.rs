@@ -79,6 +79,7 @@ pub(super) fn action(root:&Path,args:&Value,actor:Option<&Value>)->Result<Value>
    if args.get("goal").is_some(){d["goal"]=json!(if args["goal"].as_str()==Some(""){String::new()}else{text(&args["goal"],2000)?});}
    if args.get("member_chat_ids").is_some(){d["members"]=json!(members(root,&args["member_chat_ids"])?);}
    if let Some(v)=args.get("archived"){if !v.is_boolean(){return Err(err("archived must be boolean"));}d["archived"]=v.clone();}
+   for field in ["paused","pinned"]{if let Some(v)=args.get(field){if !v.is_boolean(){return Err(err(format!("{field} must be boolean")));}d[field]=v.clone();}}
    collaboration::configure(root,&mut d,args)?;d["updated_at"]=json!(now());write(root,&d)?;
   },
   "post"=>{
@@ -89,7 +90,7 @@ pub(super) fn action(root:&Path,args:&Value,actor:Option<&Value>)->Result<Value>
    let mut seen=HashSet::new();for target in targets{if !target.is_string()||!d["members"].as_array().unwrap().contains(target)||*target==from||!seen.insert(target.as_str()){return Err(err("Choose discussion members other than yourself"));}}
    let previous=d["posts"].as_array().unwrap().iter().find(|p|p["id"]==pid).cloned();
    let p=if let Some(p)=previous{if p["from"]!=from||p["text"]!=content||p["purpose"]!=purpose||p["targets"]!=json!(targets){return Err(err("Message ID conflicts with a discussion post"));}p}else{
-    if d["archived"]==true{return Err(err("Discussion is archived"));}members(root,&json!(targets))?;
+    if d["archived"]==true{return Err(err("Discussion is archived"));}if d["paused"]==true{return Err(err("Group is disconnected; reconnect from the local interface"));}members(root,&json!(targets))?;
     let mut deliveries=vec![];for target in targets{let cid=target.as_str().unwrap();deliveries.push(json!({"chat_id":target,"message_id":format!("d-{}",digest(&format!("{}:{pid}:{cid}",d["id"].as_str().unwrap()))),"title":load(root,cid)?["title"],"status":"undelivered","replies":[]}));}
     let p=json!({"id":pid,"from":from,"name":actor.map(|s|d["aliases"][s["id"].as_str().unwrap()].as_str().or(s["agent_name"].as_str()).map(|n|json!(n)).unwrap_or(s["title"].clone())).unwrap_or(json!("你")),"text":content,"goal":d["goal"],"purpose":purpose,"targets":targets,"created_at":now(),"deliveries":deliveries});d["posts"].as_array_mut().unwrap().push(p.clone());d["updated_at"]=json!(now());write(root,&d)?;p
    };deliver(root,&d,&p)?;
@@ -116,6 +117,23 @@ pub(super) fn inbox(root:&Path,cid:&str)->Result<()>{
 #[cfg(test)]
 mod tests {
  use super::*;
+ #[test]
+ fn group_disconnect_preserves_source_and_pending_results(){
+  let temp=tempfile::tempdir().unwrap();let root=temp.path();let a=ui(root,&json!({"action":"create"})).unwrap()["session"]["id"].clone();
+  let aa=tool(root,"chat_open",&json!({"chat_id":a,"agent_name":"A"})).unwrap();
+  ui(root,&json!({"action":"discussion_create","discussion_id":"pause-test","title":"Team","member_chat_ids":[a],"collaboration":true})).unwrap();
+  let post=json!({"action":"discussion_post","discussion_id":"pause-test","message_id":"before","text":"Finish this"});ui(root,&post).unwrap();
+  let message=tool(root,"chat_wait",&json!({"chat_id":a,"attachment_id":aa["attachment_id"]})).unwrap()["message"].clone();
+  ui(root,&json!({"action":"discussion_update","discussion_id":"pause-test","paused":true,"pinned":true})).unwrap();
+  let mut blocked=post.clone();blocked["message_id"]=json!("blocked");assert!(ui(root,&blocked).is_err());
+  assert_eq!(load(root,a.as_str().unwrap()).unwrap()["attachment_id"],aa["attachment_id"]);
+  tool(root,"chat_reply",&json!({"chat_id":a,"attachment_id":aa["attachment_id"],"message_id":"result","reply_to":message["id"],"text":"Done","final":true})).unwrap();
+  let read=ui(root,&json!({"action":"discussion_read","discussion_id":"pause-test"})).unwrap();assert_eq!(read["discussion"]["posts"][0]["deliveries"][0]["status"],"completed");
+  ui(root,&post).unwrap();assert_eq!(read["discussion"]["posts"].as_array().unwrap().len(),1);
+  ui(root,&json!({"action":"discussion_update","discussion_id":"pause-test","paused":false})).unwrap();ui(root,&blocked).unwrap();
+  let list=ui(root,&json!({"action":"discussion_list"})).unwrap();assert_eq!(list["discussions"][0]["pinned"],true);assert_eq!(list["discussions"][0]["paused"],false);
+  assert!(ui(root,&json!({"action":"discussion_update","discussion_id":"pause-test","paused":"true"})).is_err());
+ }
  #[test]
  fn task_results_return_to_the_authenticated_caller_and_dedupe(){
   let temp=tempfile::tempdir().unwrap();let root=temp.path();let a=ui(root,&json!({"action":"create"})).unwrap()["session"]["id"].clone();let b=ui(root,&json!({"action":"create"})).unwrap()["session"]["id"].clone();
