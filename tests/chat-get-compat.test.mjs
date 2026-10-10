@@ -9,6 +9,6 @@ test('GET prompt uses bounded independent grant and exact target, prefix and no 
  for(const endpoint of ['file:///mcp','https://user:pass@host/mcp','https://host/mcp?key=x'])assert.throws(()=>buildCompatPrompt(endpoint,'a'.repeat(64),'c','f'));
 });
 test('packaged instructions equal source and lines fit file readers',()=>{
- assert.equal(compatSkill,readFileSync(new URL('../skills/chat-get-compat/SKILL.md',import.meta.url),'utf8'));
+ assert.equal(compatSkill,readFileSync(new URL('../skills/chat-get-compat/SKILL.md',import.meta.url),'utf8').replace(/\r\n/g,'\n'));
  assert.ok(compatSkill.split('\n').every(l=>l.length<1000));
 });

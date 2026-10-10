@@ -323,7 +323,7 @@ mod tests {
                 .map(|v| v.as_str().unwrap())
                 .collect::<Vec<_>>()
                 .join("\n"),
-            compat::SKILL
+            compat::SKILL.replace("\r\n", "\n")
         );
         assert_eq!(client.get(url("open")).send().await.unwrap().status(), 200);
         chat::ui(
