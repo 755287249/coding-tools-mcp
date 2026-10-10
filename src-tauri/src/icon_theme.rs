@@ -1,5 +1,9 @@
 //! Native taskbar/tray icons follow the OS surface, independently of web UI theme.
 
+#[cfg(all(target_os = "windows", any(feature = "desktop", test)))]
+#[path = "icon_taskbar.rs"]
+mod taskbar;
+
 #[cfg(any(feature = "desktop", test))]
 fn icon_pixels(source: &[u8], light_surface: bool) -> Vec<u8> {
     let mut pixels = source.to_vec();
@@ -59,9 +63,14 @@ mod desktop {
     }
 
     pub fn icon(app: &AppHandle, light: bool) -> Option<Image<'static>> {
-        let source = app.default_window_icon()?;
+        let _ = app;
+        // The embedded ICO may select a small frame; use the full resolution
+        // normalized mark for both native icon slots and the tray.
+        let source = image::load_from_memory(include_bytes!("../icons/icon.png"))
+            .ok()?
+            .into_rgba8();
         Some(Image::new_owned(
-            icon_pixels(source.rgba(), light),
+            icon_pixels(source.as_raw(), light),
             source.width(),
             source.height(),
         ))
@@ -71,16 +80,28 @@ mod desktop {
         tauri::async_runtime::spawn(async move {
             let mut applied_tray = None;
             let mut applied_windows = HashMap::new();
+            #[cfg(target_os = "windows")]
+            let mut taskbar_icons = HashMap::new();
             let mut interval = tokio::time::interval(Duration::from_secs(2));
             loop {
                 interval.tick().await;
                 let light = light_surface(&app);
                 let windows = app.webview_windows();
                 applied_windows.retain(|label, _| windows.contains_key(label));
+                #[cfg(target_os = "windows")]
+                taskbar_icons.retain(|label, _| windows.contains_key(label));
                 if applied_tray == Some(light)
-                    && windows
-                        .keys()
-                        .all(|label| applied_windows.get(label) == Some(&light))
+                    && windows.iter().all(|(label, _window)| {
+                        #[cfg(target_os = "windows")]
+                        if !_window.hwnd().ok().is_some_and(|hwnd| {
+                            taskbar_icons.get(label).is_some_and(
+                                |icon: &super::taskbar::TaskbarIcon| icon.is_installed(hwnd),
+                            )
+                        }) {
+                            return false;
+                        }
+                        applied_windows.get(label) == Some(&light)
+                    })
                 {
                     continue;
                 }
@@ -98,9 +119,29 @@ mod desktop {
                     }
                 }
                 for (label, window) in windows {
-                    if applied_windows.get(&label) != Some(&light)
-                        && window.set_icon(image.clone()).is_ok()
-                    {
+                    #[cfg(target_os = "windows")]
+                    let needs_icon = applied_windows.get(&label) != Some(&light)
+                        || window.hwnd().ok().is_some_and(|hwnd| {
+                            !taskbar_icons.get(&label).is_some_and(
+                                |icon: &super::taskbar::TaskbarIcon| icon.is_installed(hwnd),
+                            )
+                        });
+                    #[cfg(not(target_os = "windows"))]
+                    let needs_icon = applied_windows.get(&label) != Some(&light);
+                    if needs_icon && window.set_icon(image.clone()).is_ok() {
+                        #[cfg(target_os = "windows")]
+                        {
+                            let Ok(hwnd) = window.hwnd() else { continue };
+                            let Ok(big) = super::taskbar::TaskbarIcon::new(
+                                image.rgba(),
+                                image.width(),
+                                image.height(),
+                            ) else {
+                                continue;
+                            };
+                            big.install(hwnd);
+                            taskbar_icons.insert(label.clone(), big);
+                        }
                         applied_windows.insert(label, light);
                     }
                 }
@@ -153,5 +194,36 @@ mod tests {
             dark,
             "theme switches are reversible"
         );
+    }
+    #[test]
+    fn bundled_icons_use_the_canvas_without_clipping_the_mark() {
+        for data in [
+            include_bytes!("../icons/icon.png").as_slice(),
+            include_bytes!("../icons/32x32.png").as_slice(),
+        ] {
+            let image = image::load_from_memory(data).unwrap().into_rgba8();
+            let (width, height) = image.dimensions();
+            let (mut left, mut top, mut right, mut bottom) = (width, height, 0, 0);
+            for (x, y, pixel) in image.enumerate_pixels() {
+                if pixel[3] > 100 {
+                    left = left.min(x);
+                    top = top.min(y);
+                    right = right.max(x);
+                    bottom = bottom.max(y);
+                }
+            }
+            assert!(
+                left > 0 && top > 0 && right < width - 1 && bottom < height - 1,
+                "mark must not clip"
+            );
+            assert!(
+                (right - left + 1) as f32 / width as f32 >= 0.93,
+                "remove excessive horizontal padding"
+            );
+            assert!(
+                (bottom - top + 1) as f32 / height as f32 >= 0.87,
+                "remove excessive vertical padding"
+            );
+        }
     }
 }

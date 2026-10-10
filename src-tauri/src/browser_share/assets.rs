@@ -4,7 +4,7 @@ pub(crate) fn asset_path(path: &str) -> Option<&str> {
     if path.is_empty() || path == "quick-setup" || path.starts_with("workspace/") || path.starts_with("settings/") {
         return Some("index.html");
     }
-    if path.starts_with("_app/") || ["app-icon.svg", "favicon.png", "favicon.svg", "chat-preview.html"].contains(&path) { Some(path) } else { None }
+    if path.starts_with("_app/") || ["app-icon.svg", "favicon.png", "favicon.svg", "favicon-light.png", "favicon-dark.png", "theme.js", "chat-preview.html"].contains(&path) { Some(path) } else { None }
 }
 
 pub(crate) fn cache_control(path: &str) -> &'static str {
@@ -16,9 +16,19 @@ mod tests {
     use super::*;
     #[test]
     fn logo_and_ui_routes_are_available_but_private_paths_are_not() {
-        for path in ["app-icon.svg", "favicon.png", "_app/immutable/bundle.hash.js"] { assert_eq!(asset_path(path), Some(path)); }
+        for path in ["app-icon.svg", "favicon.png", "favicon-light.png", "favicon-dark.png", "theme.js", "_app/immutable/bundle.hash.js"] { assert_eq!(asset_path(path), Some(path)); }
         for path in ["", "workspace/example", "settings/appearance", "quick-setup"] { assert_eq!(asset_path(path), Some("index.html")); }
         for path in ["browser/invoke", "secrets.json", "_app/../secret", "_app/%2e%2e/secret", "_app/..%2fsecret", "_app/\\secret"] { assert_eq!(asset_path(path), None); }
+    }
+    #[test]
+    fn every_initial_html_static_asset_is_routable() {
+        let html = include_str!("../../../src/app.html");
+        for tail in html.split("%sveltekit.assets%/").skip(1) {
+            let path = tail.split('"').next().unwrap().split('?').next().unwrap();
+            assert_eq!(asset_path(path), Some(path), "startup asset blocked: {path}");
+            assert_eq!(cache_control(path), "no-store");
+        }
+        assert!(html.contains("/theme.js"));
     }
     #[test]
     fn only_content_addressed_assets_are_cached() {

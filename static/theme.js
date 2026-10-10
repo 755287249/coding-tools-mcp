@@ -11,6 +11,9 @@
     root.dataset.theme = resolved;
     root.classList.toggle('dark', resolved === 'dark');
     root.style.colorScheme = resolved;
+    const favicon = document.querySelector('[data-theme-icon]');
+    if (favicon) favicon.setAttribute('href', favicon.dataset[resolved]);
+    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', resolved === 'dark' ? '#181818' : '#ffffff');
     window.dispatchEvent(new Event('ctmcp-theme-change'));
   }
   window.addEventListener('ctmcp-theme-preference', event => {
