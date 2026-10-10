@@ -23,39 +23,39 @@ function promptLanguage(locale: Locale): PromptLanguage {
 /** Host setup and a successful tool call are separate connection requirements. */
 const TEXT = {
   en: {
-    oauthCompact: `OAuth + S256 PKCE; discover auth/token endpoints. Manual HTTP redirect_uri=${MANUAL_OAUTH_REDIRECT_URI}; native hosts use their callback. Verify state, reuse valid tokens; when refresh_token is issued, retain it in host storage/memory and refresh expired access with it. Reuse the authorization password if credentials were lost; keep the live client and its tokens in memory across calls. Password is not a token.`,
-    compactFlow: `Use native MCP or HTTP MCP (User-Agent required). initialize → notifications/initialized (no id) → tools/list → list_workspace_folders must succeed. Use the negotiated protocolVersion in subsequent MCP-Protocol-Version headers. HTTP access is not host registration. Never write credentials to files/replies.`,
+    oauthCompact: `OAuth/S256 PKCE: discover auth/token endpoints, verify state. Manual redirect_uri=${MANUAL_OAUTH_REDIRECT_URI}; native hosts use theirs. Exchange password for tokens; reuse valid tokens, refresh with any returned refresh_token; reauthorize if lost.`,
+    compactFlow: `Native/HTTP MCP; User-Agent: ${MCP_USER_AGENT}. initialize → notifications/initialized (no id) → tools/list → list_workspace_folders must succeed. Then MCP-Protocol-Version=negotiated version. Reuse live client; credentials only in host/memory, never files/replies. HTTP access ≠ host registration.`,
     oauthManual: `Manual OAuth (native hosts use their callback): discover auth/token endpoints; redirect_uri=${MANUAL_OAUTH_REDIRECT_URI}. Generate random state + PKCE verifier/challenge. Authorize: response_type=code, client_id, redirect_uri, state, code_challenge, code_challenge_method=S256; submit password once, do not follow redirects. Verify state from Location, then exchange code with grant_type=authorization_code, client_id, same redirect_uri, code_verifier. Reuse unexpired tokens; retain any refresh_token in host storage/memory and use grant_type=refresh_token, client_id and refresh_token on expiry. Reuse the authorization password if credentials were lost; keep the live client and its tokens in memory across calls. Password is not a token.`,
     bearerReuse: `Reuse Bearer until rotated/deleted; no OAuth. On 401 check credentials.`,
     intro: "Connect to this MCP server and read the project root:",
     url: "URL: ",
-    clientId: (id: string) => `Client ID: ${id} (OAuth + PKCE, no secret)`,
+    clientId: (id: string) => `Client ID: ${id} (no secret)`,
     password: "Authorization password: ",
     bearer: "Auth header: ",
     multi: `Use the supplied workspace_folder_id; otherwise conversation_bootstrap returns folder choices.`,
     fallback: `Configure remote MCP in the host; if unsupported, use HTTP MCP (OAuth/PKCE or Bearer). Send User-Agent (Cloudflare). initialize → notifications/initialized (no id) → tools/list → list_workspace_folders must succeed. HTTP access is not host registration; if blocked, give setup steps. Remote AI needs a public URL. Keep credentials in host storage/memory, never files/replies. Follow the session instructions below, if supplied.`,
   },
   "zh-CN": {
-    oauthCompact: `OAuth + S256 PKCE，发现授权/令牌端点。手动 HTTP 用 redirect_uri=${MANUAL_OAUTH_REDIRECT_URI}，原生宿主用自身回调；校验 state，复用有效令牌；如返回 refresh_token，仅存宿主/内存，过期时用它刷新。凭据丢失时可用原授权密码重新授权；保留客户端进程和内存令牌供后续调用。密码不是令牌。`,
-    compactFlow: `用宿主或 HTTP MCP 连接（带 User-Agent），initialize → notifications/initialized（无 id）→ tools/list → list_workspace_folders 成功才确认接通。后续 MCP-Protocol-Version 使用协商版本。HTTP 接通不等于宿主注册；凭据不写文件或回复。`,
+    oauthCompact: `OAuth/S256 PKCE：发现授权/令牌端点，校验 state。手动 redirect_uri=${MANUAL_OAUTH_REDIRECT_URI}，宿主用自身回调。密码换令牌；复用有效令牌，过期用返回的 refresh_token，丢失则重新授权。`,
+    compactFlow: `宿主/HTTP MCP，User-Agent: ${MCP_USER_AGENT}。initialize→notifications/initialized（无 id）→tools/list→list_workspace_folders 成功才接通；后续 MCP-Protocol-Version=协商版本。复用客户端；凭据仅存宿主/内存，勿写文件/回复。HTTP 接通≠宿主注册。`,
     oauthManual: `手动 OAuth（原生宿主用自身回调）：发现授权/令牌端点，redirect_uri=${MANUAL_OAUTH_REDIRECT_URI}。生成随机 state 和 PKCE verifier/challenge；授权传 response_type=code、client_id、redirect_uri、state、code_challenge、code_challenge_method=S256。密码提交一次，不跟随跳转；校验 Location 的 state，再以 grant_type=authorization_code、code、client_id、原 redirect_uri、code_verifier 换令牌。复用未过期令牌；如返回 refresh_token，仅存宿主/内存，过期以 grant_type=refresh_token、client_id、refresh_token 刷新。凭据丢失时可用原授权密码重新授权；保留客户端进程和内存令牌供后续调用。密码不是令牌。`,
     bearerReuse: `固定 Bearer 复用至重新生成/删除，无需 OAuth；401 时检查凭据。`,
     intro: "连接 MCP 服务器并读取项目根目录：",
     url: "地址：",
-    clientId: (id: string) => `Client ID：${id}（OAuth + PKCE，无 Secret）`,
+    clientId: (id: string) => `Client ID：${id}（无 Secret）`,
     password: "授权密码：",
     bearer: "认证头：",
     multi: `有目标 workspace_folder_id 就使用它；否则 conversation_bootstrap 返回目录选择。`,
     fallback: `优先宿主配置；不支持则用 HTTP MCP（OAuth/PKCE 或 Bearer），带 User-Agent（Cloudflare）。initialize → notifications/initialized（无 id）→ tools/list → list_workspace_folders 成功才确认接通。后续 MCP-Protocol-Version 使用协商版本。HTTP 接通不等于宿主注册；受阻给出配置步骤。远程 AI 用公开地址，凭据仅存宿主/内存，不写文件或回复。若附有会话指令，立即执行。`,
   },
   "zh-TW": {
-    oauthCompact: `OAuth + S256 PKCE，探索授權/權杖端點。手動 HTTP 用 redirect_uri=${MANUAL_OAUTH_REDIRECT_URI}，原生宿主用自身回呼；驗證 state，重用有效權杖；若回傳 refresh_token，僅存宿主/記憶體，過期時用它更新。憑證遺失時可用原授權密碼重新授權；保留用戶端行程和記憶體權杖供後續呼叫。密碼不是權杖。`,
-    compactFlow: `用宿主或 HTTP MCP 連接（帶 User-Agent），initialize → notifications/initialized（無 id）→ tools/list → list_workspace_folders 成功才確認連通。後續 MCP-Protocol-Version 使用協商版本。HTTP 連通不等於宿主註冊；憑證不寫檔案或回覆.`,
+    oauthCompact: `OAuth/S256 PKCE：探索授權/權杖端點，驗證 state。手動 redirect_uri=${MANUAL_OAUTH_REDIRECT_URI}，宿主用自身回呼。密碼換權杖；重用有效權杖，過期用回傳的 refresh_token，遺失則重新授權。`,
+    compactFlow: `宿主/HTTP MCP，User-Agent: ${MCP_USER_AGENT}。initialize→notifications/initialized（無 id）→tools/list→list_workspace_folders 成功才連通；後續 MCP-Protocol-Version=協商版本。重用用戶端；憑證僅存宿主/記憶體，勿寫檔案/回覆。HTTP 連通≠宿主註冊。`,
     oauthManual: `手動 OAuth（原生宿主用自身回呼）：探索授權/權杖端點，redirect_uri=${MANUAL_OAUTH_REDIRECT_URI}。產生隨機 state 和 PKCE verifier/challenge；授權傳 response_type=code、client_id、redirect_uri、state、code_challenge、code_challenge_method=S256。密碼提交一次，不跟隨重新導向；驗證 Location 的 state，再以 grant_type=authorization_code、code、client_id、原 redirect_uri、code_verifier 換權杖。重用未過期權杖；若回傳 refresh_token，僅存宿主/記憶體，過期以 grant_type=refresh_token、client_id、refresh_token 更新。憑證遺失時可用原授權密碼重新授權；保留用戶端行程和記憶體權杖供後續呼叫。密碼不是權杖。`,
     bearerReuse: `固定 Bearer 重用至重新產生/刪除，不需 OAuth；401 時檢查憑證。`,
     intro: "連接 MCP 伺服器並讀取專案根目錄：",
     url: "位址：",
-    clientId: (id: string) => `Client ID：${id}（OAuth + PKCE，無 Secret）`,
+    clientId: (id: string) => `Client ID：${id}（無 Secret）`,
     password: "授權密碼：",
     bearer: "認證標頭：",
     multi: `有目標 workspace_folder_id 就使用它；否則 conversation_bootstrap 回傳目錄選擇。`,
@@ -74,7 +74,7 @@ export function isTemporaryEndpoint(endpoint: string): boolean {
 /** Build the copy-paste prompt any AI assistant can follow to connect. */
 export function buildConnectionPrompt(info: ConnectionInfo, locale: Locale, compact = false): string {
   const text = TEXT[promptLanguage(locale)];
-  const lines: string[] = [text.intro, `${text.url}${info.endpoint}`];
+  const lines: string[] = compact ? [`${text.url}${info.endpoint}`] : [text.intro, `${text.url}${info.endpoint}`];
   if (info.authType === "oauth") {
     lines.push(text.clientId(info.clientId), `${text.password}${info.password}`, compact ? text.oauthCompact : text.oauthManual);
   } else if (info.authType === "bearer") {

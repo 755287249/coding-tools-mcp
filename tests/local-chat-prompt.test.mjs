@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import { buildChatPrompt, pairingPrelude } from '../src/lib/connect/chat-prompt.ts';
-import { buildConnectionPrompt, buildClientConfigJson, MANUAL_OAUTH_REDIRECT_URI } from '../src/lib/connect/prompt.ts';
+import { buildConnectionPrompt, buildClientConfigJson, MANUAL_OAUTH_REDIRECT_URI, MCP_USER_AGENT } from '../src/lib/connect/prompt.ts';
 
 test('session target round-trips quotes and newlines as one JSON line', () => {
   const chat = 'session-"\n1', folder = 'folder-\\"\n2';
@@ -12,10 +12,10 @@ test('session target round-trips quotes and newlines as one JSON line', () => {
   assert.match(prompt, /chat_open/);
   assert.match(prompt, /list_workspace_folders/);
   assert.match(prompt, /skill.text/);
-  assert.match(prompt, /chat_wait \/ chat_reply 是该 MCP 服务端提供的工具/);
-  assert.match(prompt, /立即调用 chat_wait/);
-  assert.match(prompt, /每次回复后再次调用 chat_wait/);
-  assert.match(prompt, /空闲或单条任务完成时继续等待/);
+  assert.match(prompt, /chat_wait\/chat_reply 均为服务端工具/);
+  assert.match(prompt, /立即 chat_wait/);
+  assert.match(prompt, /随后再次 chat_wait/);
+  assert.match(prompt, /空闲\/任务完成继续/);
   assert.ok(prompt.length < 400, 'copied session guidance should delegate details to the skill');
 });
 
@@ -76,16 +76,32 @@ test('desktop and Node expose the same startup and chat guidance', () => {
 
 
 test('compact chat connection retains authentication bootstrap without the manual tutorial', () => {
-  const info = { workspaceName: 'test', endpoint: 'https://example.test/mcp', authType: 'oauth', clientId: 'test-client', password: 'x'.repeat(64), bearerToken: 'x'.repeat(64), folders: ['/test'] };
+  const info = { workspaceName: 'test', endpoint: 'https://example.test/mcp', authType: 'oauth', clientId: 'chatgpt-client-123456789-123', password: 'p'.repeat(64), bearerToken: 't'.repeat(64), folders: ['/test'] };
   for (const locale of ['en', 'zh-CN', 'zh-TW', 'ja']) {
-    for (const authType of ['oauth', 'bearer']) {
+    for (const authType of ['oauth', 'bearer', 'none']) {
       const prompt = buildConnectionPrompt({ ...info, authType }, locale, true);
-      assert.match(prompt, /User-Agent/);
+      assert.ok(prompt.includes(`User-Agent: ${MCP_USER_AGENT}`));
       assert.match(prompt, /notifications\/initialized/);
+      assert.match(prompt, /tools\/list/);
       assert.match(prompt, /list_workspace_folders/);
+      assert.match(prompt, /MCP-Protocol-Version/);
       assert.ok(prompt.length < buildConnectionPrompt({ ...info, authType }, locale).length);
-      if (authType === 'oauth') assert.ok(prompt.includes(MANUAL_OAUTH_REDIRECT_URI));
-      else assert.doesNotMatch(prompt, /redirect_uri/);
+      if (authType === 'oauth') {
+        for (const value of [MANUAL_OAUTH_REDIRECT_URI, 'S256', 'state', 'refresh_token', info.clientId, info.password]) assert.ok(prompt.includes(value));
+        assert.ok(!prompt.includes(info.bearerToken));
+      } else {
+        assert.doesNotMatch(prompt, /redirect_uri/);
+        assert.ok(!prompt.includes(info.password));
+        assert.ok(!prompt.includes(info.clientId));
+        assert.equal(prompt.includes(info.bearerToken), authType === 'bearer');
+      }
+      const full = pairingPrelude(info.endpoint, 'a'.repeat(32)) + '\n\n' + buildChatPrompt('00000000-0000-0000-0000-000000000000', 'f'.repeat(32), prompt);
+      const target = full.split('\n').find(line => line.startsWith('目标参数'));
+      assert.deepEqual(JSON.parse(target.slice(target.indexOf('{'))), { chat_id: '00000000-0000-0000-0000-000000000000', workspace_folder_id: 'f'.repeat(32) });
+      // Bound the entire copied prompt, including pairing/auth/target, not just its final paragraph.
+      assert.ok(full.length <= (locale.startsWith('zh') ? 950 : 1200), `${locale}/${authType}: ${full.length}`);
+      assert.match(full, /skill.text→立即 chat_wait/);
+      assert.match(full, /chat_reply，随后再次 chat_wait/);
     }
   }
 });
@@ -104,10 +120,13 @@ test('generated Node skill matches the single packaged Markdown source', () => {
 test('early pairing uses a status-only POST with a header ticket and preserves route prefixes',()=>{
  const ticket='a'.repeat(32);
  const result=pairingPrelude('https://example.test/builtin/clients/demo/mcp',ticket);
- const request=JSON.parse(result.split('：')[1].split('\n')[0]);
- assert.equal(request.url,'https://example.test/builtin/clients/demo/mcp/pairing');
- assert.equal(request.method,'POST');assert.equal(request.headers['X-Chat-Pairing'],ticket);
- assert.ok(request.headers['User-Agent']);assert.equal(request.headers.Authorization,undefined);
+ const lines=result.split('\n');
+ assert.equal(lines[1],'POST https://example.test/builtin/clients/demo/mcp/pairing');
+ assert.equal(lines[2],'User-Agent: Coding-Tools-MCP/1.0');
+ assert.equal(lines[3],`X-Chat-Pairing: ${ticket}`);
+ assert.doesNotMatch(result,/Authorization:/);
+ assert.match(result,/超时 5 秒/);
+ assert.match(result,/仅标记准备/);
  assert.match(result,/失败或过期仍继续/);
  for(const url of ['javascript:alert(1)','file:///tmp/mcp','https://user:pass@example.test/mcp','invalid'])assert.equal(pairingPrelude(url,ticket),'');
  assert.equal(pairingPrelude('https://example.test/mcp','bad'),'');

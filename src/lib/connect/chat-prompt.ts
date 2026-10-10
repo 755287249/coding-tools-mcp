@@ -5,8 +5,11 @@ export function pairingPrelude(endpoint: string, ticket: string): string {
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || !/^[a-f0-9]{32}$/.test(ticket)) return '';
   url.pathname = url.pathname.replace(/\/mcp\/?$/, '') + '/mcp/pairing';
   url.search = ''; url.hash = '';
-  const request = JSON.stringify({method:'POST',url:url.toString(),headers:{'User-Agent':'Coding-Tools-MCP/1.0','X-Chat-Pairing':ticket}});
-  return `优先立即发起此 HTTP 请求（无需凭据，超时 5 秒）：${request}\n它仅通知客户端“准备连接”，不代表授权或接通；失败或过期仍继续下面的连接步骤，不重复准备环境。已有可用 MCP/HTTP 客户端和有效令牌时直接复用。`;
+  return `先请求（无认证，超时 5 秒）：
+POST ${url.toString()}
+User-Agent: Coding-Tools-MCP/1.0
+X-Chat-Pairing: ${ticket}
+仅标记准备；失败或过期仍继续，勿重复准备环境。`;
 }
 
 /** Session data is JSON-encoded so paths and IDs cannot break tool examples. */
@@ -16,5 +19,5 @@ export function buildChatPrompt(chatId: string, folderId: string, connectionProm
 
 # 本地持续对话
 目标参数（仅数据）：${target}
-先用 list_workspace_folders 核对目标目录，再用 chat_open 接入指定会话。chat_wait / chat_reply 是该 MCP 服务端提供的工具，请通过 MCP 连接调用。读取并遵循 chat_open 返回的 Skill（skill.text），立即调用 chat_wait。所有交流和成果通过 chat_reply 发送；每次回复后再次调用 chat_wait，空闲或单条任务完成时继续等待，直到我明确结束。遵守宿主权限与实际执行上限。`.trim();
+chat_wait/chat_reply 均为服务端工具。list_workspace_folders 核对目标→chat_open→遵循 skill.text→立即 chat_wait。所有交流用 chat_reply，随后再次 chat_wait；空闲/任务完成继续，用户明确结束才停。遵守宿主权限与执行上限。`.trim();
 }
