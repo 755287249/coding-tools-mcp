@@ -223,6 +223,10 @@ pub fn run() {
                 window_corners::init(window);
             }
 
+            // An upgrade worker may carry hidden Windows startup state. Show
+            // the real main window explicitly, independently of frontend load.
+            show_main_window(app.handle());
+
             let state = AppState::new().expect("failed to load app state");
             if let Err(error) =
                 state.with_workspaces(|store| store.consume_runtime_handoff_state().map(|_| ()))

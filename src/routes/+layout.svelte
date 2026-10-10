@@ -162,6 +162,9 @@
   connectionActions.newConnection = () => void addWorkspace();
 
   onMount(async () => {
+    // The shell is mounted; initial workspace requests must not trap users
+    // behind the pre-JavaScript loading screen if a backend is slow or offline.
+    document.getElementById("startup-splash")?.remove();
     if (remoteDesktop && !$browserAuthenticated) return;
     await refreshWorkspaces();
     if (capabilities.runtimeSupervisor) startSessionPolling();

@@ -220,6 +220,15 @@ function Wait-DesktopMutexReleased([int]$TimeoutSeconds=15) {
     return $false
 }
 
+# The worker is launched hidden. GUI replacements must explicitly opt out of
+# inherited hidden startup state, including the rollback executable.
+function Start-UpgradeDesktop {
+    param([string]$Path, [switch]$Handoff)
+    $options = @{FilePath=$Path;WorkingDirectory=(Split-Path -Parent $Path);WindowStyle='Normal';PassThru=$true}
+    if ($Handoff) { $options.ArgumentList='--handoff-child' }
+    Start-Process @options
+}
+
 if ($LibraryOnly) { return }
 $mutex = [Threading.Mutex]::new($false, 'Local\CodingToolsMcpDesktop-Upgrade')
 $owned = $false
@@ -269,7 +278,7 @@ try {
         Stop-UpgradeTree $candidate
     }
     if (-not (Wait-DesktopMutexReleased)) { throw 'The desktop single-instance lock is still held after shutdown.' }
-    $replacement = Start-Process -FilePath $target -WorkingDirectory (Split-Path -Parent $target) -ArgumentList '--handoff-child' -PassThru
+    $replacement = Start-UpgradeDesktop -Path $target -Handoff
     $health = Test-UpgradeHealth $replacement $requiredEndpoints $NewVersion
     if (-not $health.ready) { throw $health.reason }
     Write-UpgradeLog "Ready: desktop $NewVersion pid=$($replacement.Id)"
@@ -286,7 +295,7 @@ try {
     $survivors = @(Get-DesktopCandidates | Where-Object { $_.SessionId -eq $sessionId })
     if ($stoppedAny -and $survivors.Count -eq 0 -and $old.Count -gt 0 -and (Test-Path -LiteralPath $old[0].ExecutablePath) -and (Wait-DesktopMutexReleased)) {
         try {
-            Start-Process -FilePath $old[0].ExecutablePath -WorkingDirectory (Split-Path -Parent $old[0].ExecutablePath) | Out-Null
+            Start-UpgradeDesktop -Path $old[0].ExecutablePath | Out-Null
             $failure += "`nThe previous executable was launched again. Check its tray status."
         } catch { $failure += "`nRollback could not start. Open the previous executable manually." }
     } elseif ($wroteHandoff -and (Test-Path -LiteralPath $handoff)) {

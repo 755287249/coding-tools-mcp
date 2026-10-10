@@ -98,3 +98,19 @@ try {
     Remove-Item Function:\Invoke-UpgradeTaskKill
 }
 Write-Output 'PASS: stale CIM entries, PID/session reuse, missing/denied process state, handle disposal, helper timeout/exit/denied-cleanup races and shutdown identity rechecks. Pure doubles only.'
+
+function Start-Process {
+    param($FilePath,$WorkingDirectory,$WindowStyle,[switch]$PassThru,$ArgumentList)
+    return [pscustomobject]@{Path=$FilePath;Directory=$WorkingDirectory;Style=$WindowStyle;Retained=$PassThru.IsPresent;Arguments=$ArgumentList}
+}
+try {
+    $replacement=Start-UpgradeDesktop -Path 'C:\with spaces\ctmcp.exe' -Handoff
+    Assert-Equal $replacement.Style 'Normal' 'Replacement must override the hidden worker startup style'
+    Assert-Equal $replacement.Directory 'C:\with spaces' 'Replacement working directory must be preserved'
+    Assert-Equal $replacement.Arguments '--handoff-child' 'Replacement must retain recursive handoff guard'
+    Assert-Equal $replacement.Retained $true 'Health checks need the replacement process handle'
+    $rollback=Start-UpgradeDesktop -Path 'C:\old\ctmcp.exe'
+    Assert-Equal $rollback.Style 'Normal' 'Rollback must restore a visible desktop too'
+    Assert-Equal ([string]$rollback.Arguments) '' 'Rollback must preserve normal launch semantics'
+} finally { Remove-Item Function:\Start-Process }
+Write-Output 'PASS: replacement and rollback launch visibly, preserve paths/process handles and isolate the handoff argument. No real process launched.'
