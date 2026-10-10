@@ -2,7 +2,7 @@ use axum::routing::{get, post};
 use axum::Router;
 
 use super::{
-    mcp_delete, mcp_get, mcp_info, mcp_post, oauth_authorization_server_metadata,
+    mcp_delete, mcp_get, mcp_info, mcp_post, pairing_intent, oauth_authorization_server_metadata,
     oauth_authorize_get, oauth_authorize_post, oauth_protected_resource_metadata,
     oauth_register_post, oauth_token_post, ListenerState,
 };
@@ -49,6 +49,7 @@ fn service_routes_for_prefix(prefix: &str) -> Router<ListenerState> {
     Router::new()
         .route(&mcp, get(mcp_get).post(mcp_post).delete(mcp_delete))
         .route(&mcp_info_path, get(mcp_info))
+        .route(&prefixed_route(prefix, "/mcp/pairing"), post(pairing_intent))
         .route(
             &authorize,
             get(oauth_authorize_get).post(oauth_authorize_post),

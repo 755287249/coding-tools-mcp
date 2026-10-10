@@ -312,6 +312,7 @@ export function tunnelPathAllowed(config: AgentConfig, pathname: string): boolea
   return new Set([
     scoped('/mcp'),
     scoped('/mcp/info'),
+    scoped('/mcp/pairing'),
     scoped('/oauth/authorize'),
     scoped('/oauth/token'),
     scoped('/oauth/register'),

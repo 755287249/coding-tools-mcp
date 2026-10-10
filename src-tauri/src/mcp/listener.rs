@@ -123,6 +123,14 @@ fn modern_request_method_supported(method: &str) -> bool {
     )
 }
 
+async fn pairing_intent(State(state): State<ListenerState>, headers: HeaderMap) -> Response {
+    let listing=crate::tools::hub::list_workspace_folders(&state.mcp,None);
+    let roots:Vec<std::path::PathBuf>=listing["folders"].as_array().into_iter().flatten().filter_map(|f|f["path"].as_str().map(std::path::PathBuf::from)).collect();
+    let accepted=headers.get("x-chat-pairing").and_then(|v|v.to_str().ok()).is_some_and(|t|crate::tools::chat::pairing::mark(t,&roots));
+    let (status,body)=if accepted{(StatusCode::ACCEPTED,json!({"status":"preparing","authenticated":false}))}else{(StatusCode::NOT_FOUND,json!({"error":"pairing_unavailable"}))};
+    (status,[(CACHE_CONTROL,"no-store")],Json(body)).into_response()
+}
+
 async fn mcp_info() -> Response {
     ([(CACHE_CONTROL, "no-store")], Json(mcp_discovery_payload())).into_response()
 }
@@ -1620,6 +1628,30 @@ mod tests {
             redact_telemetry: true,
         };
         (workspace, harness, state)
+    }
+
+    #[tokio::test]
+    async fn pairing_status_route_is_scoped_and_does_not_authorize_mcp() {
+        let (workspace,_harness,mut state)=test_state("streamable-http");
+        state.auth.auth_type="bearer".into();state.bearer_token=Some("synthetic-secret".into());
+        state.configured_public_url="https://example.test/builtin/clients/test".into();
+        let chat=crate::tools::chat::ui(workspace.path(),&json!({"action":"create"})).unwrap()["session"]["id"].clone();
+        let prepared=crate::tools::chat::ui(workspace.path(),&json!({"action":"prepare_pairing","chat_id":chat,"message_id":"http-intent"})).unwrap();
+        let ticket=prepared["pairing"]["ticket"].as_str().unwrap();
+        let archive=workspace.path().join("docs/chat-sessions").join(format!("{}.json",chat.as_str().unwrap()));let before=std::fs::read(&archive).unwrap();
+        let listener=tokio::net::TcpListener::bind(("127.0.0.1",0)).await.unwrap();let address=listener.local_addr().unwrap();
+        let server=tokio::spawn(async move{let _=axum::serve(listener,build_router(state)).await;});
+        let client=reqwest::Client::new();let base=format!("http://{address}/builtin/clients/test/mcp");
+        assert_eq!(client.get(format!("{base}/pairing")).send().await.unwrap().status(),405);
+        assert_eq!(client.post(format!("{base}/pairing")).send().await.unwrap().status(),404);
+        let response=client.post(format!("{base}/pairing")).header("X-Chat-Pairing",ticket).send().await.unwrap();
+        assert_eq!(response.status(),202);assert_eq!(response.headers()["cache-control"],"no-store");
+        assert_eq!(response.json::<Value>().await.unwrap(),json!({"status":"preparing","authenticated":false}));
+        let read=crate::tools::chat::ui(workspace.path(),&json!({"action":"read","chat_id":chat})).unwrap();
+        assert!(read["session"]["pairing"]["started_at"].as_u64().is_some());assert_eq!(read["session"]["status"],"offline");
+        assert_eq!(std::fs::read(archive).unwrap(),before);assert!(!read.to_string().contains(ticket));
+        let forbidden=client.post(&base).header("X-Chat-Pairing",ticket).json(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}})).send().await.unwrap();
+        assert_eq!(forbidden.status(),401);server.abort();
     }
 
     #[test]

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
-import { buildChatPrompt } from '../src/lib/connect/chat-prompt.ts';
+import { buildChatPrompt, pairingPrelude } from '../src/lib/connect/chat-prompt.ts';
 import { buildConnectionPrompt, buildClientConfigJson, MANUAL_OAUTH_REDIRECT_URI } from '../src/lib/connect/prompt.ts';
 
 test('session target round-trips quotes and newlines as one JSON line', () => {
@@ -95,4 +95,17 @@ test('generated Node skill matches the single packaged Markdown source', () => {
   assert.equal(skill.text, read('skills/local-chat/SKILL.md'));
   assert.equal(skill.uri, 'coding-tools://skills/local-chat');
   assert.match(read('src-tauri/src/tools/chat.rs'), /include_str!\("\.\.\/\.\.\/\.\.\/skills\/local-chat\/SKILL.md"\)/);
+});
+
+
+test('early pairing uses a status-only POST with a header ticket and preserves route prefixes',()=>{
+ const ticket='a'.repeat(32);
+ const result=pairingPrelude('https://example.test/builtin/clients/demo/mcp',ticket);
+ const request=JSON.parse(result.split('：')[1].split('\n')[0]);
+ assert.equal(request.url,'https://example.test/builtin/clients/demo/mcp/pairing');
+ assert.equal(request.method,'POST');assert.equal(request.headers['X-Chat-Pairing'],ticket);
+ assert.ok(request.headers['User-Agent']);assert.equal(request.headers.Authorization,undefined);
+ assert.match(result,/失败或过期仍继续/);
+ for(const url of ['javascript:alert(1)','file:///tmp/mcp','https://user:pass@example.test/mcp','invalid'])assert.equal(pairingPrelude(url,ticket),'');
+ assert.equal(pairingPrelude('https://example.test/mcp','bad'),'');
 });

@@ -5,6 +5,8 @@ pub(crate) mod operations;
 mod group;
 #[path = "chat_discussion.rs"]
 mod discussion;
+#[path = "chat_pairing.rs"]
+pub(crate) mod pairing;
 use super::workspace::WorkspaceError;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -552,6 +554,13 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
     }
     let mut s = load(root, id(&args["chat_id"])?)?;
     match action {
+        "prepare_pairing" => {
+            if s["closed"]==true{return Err(err("Conversation is closed"));}
+            let attempt=id(&args["message_id"])?;
+            if s["messages"].as_array().unwrap().iter().any(|m|m["id"]==attempt){return Err(err("Pairing ID already used"));}
+            if group::grouped(&s){s["pending_pairing"]=json!(attempt);save(root,&s)?;}
+            return Ok(json!({"pairing":pairing::prepare(root,id(&s["id"])?,attempt)?}));
+        }
         "set_mode"|"rename_member"|"detach_member"|"resume_member"|"set_coordinator"=>{group::ui(&mut s,args)?;s["updated_at"]=json!(now());save(root,&s)?;}
         "reveal_path" => {
             crate::platform::reveal::reveal_chat_path(root, args["source_path"].as_str().unwrap_or("")).map_err(err)?;
@@ -748,7 +757,13 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
         return Ok(json!({"ok":true,"status":"closed"}));
     }
     if name == "chat_open" {
-        if group::grouped(&s){let member=group::open(&mut s,args)?;if member["role"]=="coordinator"{assign_agent_title(root,&mut s,member["name"].as_str().unwrap_or(""))?;}group::bind_targets(&mut s);save(root,&s)?;return Ok(json!({"ok":true,"attachment_id":member["attachment_id"],"agent_id":member["id"],"role":member["role"],"session":view(root,&s)?,"instruction":"Read skill.text; reply only to your delivered message IDs. Call chat_wait.","skill":local_chat_skill()}));}
+        if group::grouped(&s){let member=group::open(&mut s,args)?;
+            let prepared=s["pending_pairing"].clone();
+            if let Some(attempt)=prepared.as_str().filter(|_|args["attachment_id"].as_str().unwrap_or("").is_empty()) {
+                if !s["messages"].as_array().unwrap().iter().any(|m|m["id"]==attempt){s["messages"].as_array_mut().unwrap().push(json!({"id":attempt,"role":"user","kind":"connection_request","text":"请通过 chat_reply 回复“你好，有什么能帮到你？”（final=true），确认接入后继续 chat_wait。","created_at":now(),"recipient_ids":[member["id"]]}));}
+            }
+            if args["attachment_id"].as_str().unwrap_or("").is_empty(){s.as_object_mut().unwrap().remove("pending_pairing");}
+            if member["role"]=="coordinator"{assign_agent_title(root,&mut s,member["name"].as_str().unwrap_or(""))?;}group::bind_targets(&mut s);save(root,&s)?;return Ok(json!({"ok":true,"attachment_id":member["attachment_id"],"agent_id":member["id"],"role":member["role"],"session":view(root,&s)?,"instruction":"Read skill.text; reply only to your delivered message IDs. Call chat_wait.","skill":local_chat_skill()}));}
         if args.get("agent_name").is_some(){s["agent_name"]=json!(group::member_name(&args["agent_name"])?);}
 
         // Keepalive: the saved attachment_id always resumes, even after the lease
@@ -1015,6 +1030,7 @@ fn queued_fingerprint(content: &str, attachments: &[Value]) -> String {
 }
 fn local_view(root: &Path,s: &Value)->Result<Value>{
     let mut result=view(root,s)?;
+    result["pairing"]=pairing::status(root,id(&s["id"])?);
     if let Some(attachment)=s["attachment_id"].as_str().filter(|id|!id.is_empty()) {
         result["connection_id"]=json!(format!("{:x}",Sha256::digest(attachment.as_bytes()))[..12].to_string());
     }
@@ -1286,6 +1302,23 @@ mod tests {
         ui(root,&json!({"action":"set_mode","chat_id":cid,"mode":"work"})).unwrap();
         assert!(tool(root,"chat_open",&args).is_err());
         assert_ne!(tool(root,"chat_open",&json!({"chat_id":cid})).unwrap()["attachment_id"],joined["attachment_id"]);
+    }
+
+    #[test]
+    fn prepared_group_pairing_targets_only_new_member_and_resumes_once() {
+        let root=tempfile::tempdir().unwrap();let root=root.path();
+        let cid=ui(root,&json!({"action":"create","mode":"group"})).unwrap()["session"]["id"].clone();
+        let chief=tool(root,"chat_open",&json!({"chat_id":cid,"agent_name":"Chief"})).unwrap();
+        ui(root,&json!({"action":"prepare_pairing","chat_id":cid,"message_id":"member-pair"})).unwrap();
+        let member=tool(root,"chat_open",&json!({"chat_id":cid,"agent_name":"Member"})).unwrap();
+        assert_eq!(tool(root,"chat_wait",&json!({"chat_id":cid,"attachment_id":chief["attachment_id"]})).unwrap()["status"],"idle");
+        let args=json!({"chat_id":cid,"attachment_id":member["attachment_id"]});
+        assert_eq!(tool(root,"chat_wait",&args).unwrap()["message"]["id"],"member-pair");
+        tool(root,"chat_reply",&json!({"chat_id":cid,"attachment_id":member["attachment_id"],"message_id":"hello","reply_to":"member-pair","text":"你好，有什么能帮到你？","final":true})).unwrap();
+        tool(root,"chat_open",&args).unwrap();
+        let read=ui(root,&json!({"action":"read","chat_id":cid})).unwrap();
+        assert_eq!(read["session"]["messages"].as_array().unwrap().iter().filter(|m|m["kind"]=="connection_request").count(),1);
+        assert_eq!(read["session"]["messages"][1]["agent_id"],member["agent_id"]);
     }
 
     #[test]

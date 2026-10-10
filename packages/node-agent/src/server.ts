@@ -24,6 +24,7 @@ import { localPath, routePrefix, sendText } from './server/http.js';
 import { rpcErrorResponse } from './server/mcp/dispatcher.js';
 import { handleMcpRoute } from './server/routes/mcp.js';
 import { handleOAuthRoute } from './server/routes/oauth.js';
+import { markPairing } from './chat/pairing.js';
 import { handleSystemRoute } from './server/routes/system.js';
 
 export async function createToolContext(config: AgentConfig): Promise<ToolContext> {
@@ -128,6 +129,13 @@ export async function createAgentRuntime(config: AgentConfig, options: AgentRunt
       const prefix = routePrefix(config);
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? `${config.host}:${config.port}`}`);
       const pathname = localPath(url.pathname, prefix);
+      // No auth/session/catalog work on this bounded status-only endpoint.
+      if (pathname === '/mcp/pairing') {
+        if (req.method !== 'POST') {res.setHeader('Allow','POST');sendJson(res,405,{error:'method_not_allowed'});return;}
+        const ticket=req.headers['x-chat-pairing'];
+        const accepted=typeof ticket==='string'&&markPairing(ticket,context.config.folders.map(f=>f.path));
+        sendJson(res,accepted?202:404,accepted?{status:'preparing',authenticated:false}:{error:'pairing_unavailable'});return;
+      }
       await context.extensions.refresh();
       const catalog = currentToolCatalog(context);
       setRuntimeRevisionHeaders(res, catalog, startedAt);

@@ -279,6 +279,9 @@ test('built-in tunnel exposes only scoped MCP and OAuth routes', () => {
     tunnel: { publicUrl: 'https://tunnel.example/builtin/clients/device_1/mcp' }
   };
   assert.equal(tunnelPathAllowed(config, '/builtin/clients/device_1/mcp'), true);
+  assert.equal(tunnelPathAllowed(config, '/builtin/clients/device_1/mcp/pairing'), true);
+  assert.equal(tunnelPathAllowed(config, '/builtin/clients/other/mcp/pairing'), false);
+  assert.equal(tunnelPathAllowed(config, '/mcp/pairing'), false);
   assert.equal(tunnelPathAllowed(config, '/builtin/clients/device_1/oauth/authorize'), true);
   assert.equal(tunnelPathAllowed(config, '/builtin/clients/device_1/oauth/register'), true);
   assert.equal(tunnelPathAllowed(config, '/builtin/clients/other/oauth/register'), false);

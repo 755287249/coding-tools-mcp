@@ -49,7 +49,7 @@
   import { localChat, type ChatSession, type ChatFile, type ChatAction, type ChatMessage } from '$lib/api/chat';
   import { getBackend, loadMcpAuthSecrets } from '$lib/backend';
   import { buildConnectionPrompt } from '$lib/connect/prompt';
-  import { buildChatPrompt } from '$lib/connect/chat-prompt';
+  import { buildChatPrompt, pairingPrelude } from '$lib/connect/chat-prompt';
   import { pendingChatState, chatReplyState, chatUserState, USER_MESSAGE_STATUS_KEYS } from '$lib/chat/status';
   import type { AuthConfig, WorkspaceFolder } from '$lib/types';
   let { onPlugins, tasksOpen=false, tasksExpanded=false, onCloseTasks=()=>{}, onToggleTasksExpanded=()=>{}, workspaceId, folders, activeFolderId = '', endpoint = '', auth, externalNavigation = false, requestedChatId = '', requestedFolderId = '', startNew = false, connectRequested = false, workspacePicker, headerActions, onNavigate }: { onPlugins?:(folderId:string)=>void;tasksOpen?:boolean;tasksExpanded?:boolean;onCloseTasks?:()=>void;onToggleTasksExpanded?:()=>void; workspaceId: string; workspacePicker?: Snippet; folders: WorkspaceFolder[]; activeFolderId?: string; endpoint?: string; auth: AuthConfig; externalNavigation?: boolean; requestedChatId?: string; requestedFolderId?: string; startNew?: boolean; connectRequested?: boolean; headerActions?: Snippet; onNavigate?: (folderId: string, chatId: string) => void } = $props();
@@ -187,6 +187,13 @@
   let connectionSending = $state(false);
   let connectionRetry = '';
   let connectionMembers=$state<string[]>([]);
+  let pairingAttempt=$state('');
+  let pairingExpires=$state(0);
+  let pairingNow=$state(Date.now());
+  let revealPrompt=$state(false);
+  const intentReceived=$derived(detail?.pairing?.attempt_id===pairingAttempt && !!detail?.pairing?.started_at);
+  const intentExpired=$derived(!!pairingExpires && pairingNow>=pairingExpires);
+  $effect(()=>{if(!guide)return;pairingNow=Date.now();const timer=setInterval(()=>pairingNow=Date.now(),1000);return()=>clearInterval(timer);});
   let promptSequence = 0;
   const currentScope = $derived(sessionCacheKey(workspaceId, folderId, selected));
   const pairing = $derived(connectionRequest ? connectionResult(detail, connectionRequest) : 'waiting');
@@ -194,8 +201,8 @@
   const connectionPeer = $derived(mode==='group' ? joinedMember :
     detail?.connection_id && (detail.status==='connected'||detail.status==='waiting')
       ? {id:detail.connection_id,name:detail.agent_name??'AI'} : undefined);
-  const connectionComplete = $derived(mode==='group' ? !!joinedMember : pairing==='success');
-  const connectionGreeting = $derived(detail?.messages?.find(m=>m.role==='assistant'&&m.reply_to===connectionRequest&&m.final===true)?.text??'');
+  const connectionComplete = $derived(pairing==='success');
+  $effect(()=>{if(guide && connectionScope===currentScope && connectionComplete)guide=false;});
   $effect(() => {
     if (guide && connectionScope === currentScope) connectDialog?.showModal();
     else untrack(() => { connectDialog?.close(); guide = false; connectionPrompt = ''; connectionError = ''; connectionRequest = ''; connectionRetry = ''; promptSequence++; });
@@ -209,7 +216,7 @@
     if (!selected) await create(true);
     if (!selected || detail?.closed) return;
     onNavigate?.(folderId, selected);
-    connectionMembers=(detail?.members??[]).map(m=>m.id);connectionScope = currentScope; connectionError = ''; connectionSending = false; copied = false; guide = true;
+    connectionMembers=(detail?.members??[]).map(m=>m.id);connectionScope = currentScope; connectionError = ''; connectionSending = false; copied = false; revealPrompt=false; pairingAttempt=randomId(); pairingExpires=0; guide = true;
     connectionRequest = detail?.messages?.find(m => m.kind === 'connection_request' && !detail?.messages?.some(r => r.role === 'assistant' && r.reply_to === m.id && r.final === true))?.id ?? '';
     connectionRetry=connectionRequest;
     const request = ++promptSequence, ws = workspaceId, folder = folderId, chat = selected, scope = currentScope;
@@ -220,14 +227,18 @@
       const connection = loaded ? buildConnectionPrompt({ workspaceName: selectedFolder?.name ?? '', endpoint, authType: auth.type, clientId: loaded.oauth_client_id || auth.oauth_client_id, password: loaded.oauth_password ?? '', bearerToken: loaded.bearer_token ?? '', folders: folders.map(f => f.path) }, $locale, true) : '';
       connectionPrompt = buildChatPrompt(chat, folder, connection);
       await prepareConnection(request);
-    } catch { if (request === promptSequence) connectionError = $t('chat.42'); }
+      if(request!==promptSequence || scope!==currentScope || !guide || connectionComplete)return;
+      const prepared=await localChat(ws,folder,{action:'prepare_pairing',chat_id:chat,message_id:pairingAttempt});
+      if(request!==promptSequence || scope!==currentScope || !guide)return;
+      if(prepared.pairing){pairingExpires=prepared.pairing.expires_at;const prelude=pairingPrelude(endpoint,prepared.pairing.ticket);if(prelude)connectionPrompt=prelude+'\n\n'+connectionPrompt;}
+    } catch { if (request === promptSequence) connectionError = $t('chat.prepareFailed'); }
     finally { if (request === promptSequence) connectionLoading = false; }
   }
   async function prepareConnection(request: number) {
     if (request !== promptSequence || connectionScope !== currentScope || !selected || !connectionPrompt) return;
     const scope = currentScope, ws = workspaceId, folder = folderId, chat = selected;
-    if(mode==='group'){connectionRequest='group-join';return;}
-    // Reopening a live connection displays its existing greeting and public ID.
+    if(mode==='group'){connectionRequest=pairingAttempt;return;}
+    // An already confirmed live connection returns directly to its conversation.
     const previous = [...(detail?.messages??[])].reverse().find(m=>m.kind==='connection_request');
     if(connectionPeer && previous && connectionResult(detail,previous.id)==='success') {
       connectionRequest=previous.id;return;
@@ -428,7 +439,7 @@
     async function poll() {
       if (!folder || stopped) return;
       try { await refresh(ws, folder, gen); } catch (e) { if (gen === generation) error = String(e); }
-      if (!stopped) timer = setTimeout(poll, 1500);
+      if (!stopped) timer = setTimeout(poll, guide ? 500 : 1500);
     }
     void poll();
     return () => { stopped = true; clearTimeout(timer); generation++; };
@@ -584,7 +595,7 @@
   }
   async function copyPrompt() {
     if (!connectionPrompt || connectionLoading) return;
-    try { await copyText(connectionPrompt); copied = true; }
+    try { await copyText(connectionPrompt); copied = true; revealPrompt=false; }
     catch { connectionError = $t('chat.42'); }
   }
   function download() {
@@ -701,21 +712,21 @@
 <input class="file-input" type="file" accept="image/*" multiple bind:this={photoInput} onchange={()=>{const files=Array.from(photoInput.files??[]);photoInput.value='';void uploadFiles(files)}} aria-label={$t('mobile.photos')}/>
 <dialog class="connect-dialog" bind:this={connectDialog} onclose={() => { guide = false; connectionPrompt = ''; }}>
   <header><h2>{$t('chat.connect')}</h2><button aria-label={$t('Close')} onclick={()=>guide=false}><X size={18}/></button></header>
-  {#if connectionPeer || connectionComplete}
-    <div class="connection-success" role="status"><Check size={18}/><strong>{$t('chat.connectedSuccess')}</strong></div>
-    <p class="connection-id">{$t('chat.connectionId')}: <code>{connectionPeer?.id??detail?.connection_id??selected}</code>{#if connectionPeer?.name} · {connectionPeer.name}{/if}</p>
-    {#if connectionComplete && connectionGreeting}<p class="connection-greeting">{connectionGreeting}</p>
-    {:else if !connectionComplete}<p role="status">{$t('chat.waitGreeting')}</p>{/if}
+  <p>{$t('chat.sendInstruction')}</p>
+  {#if copied || intentReceived || connectionPeer}
+    <div class="pairing-progress" role="status" aria-live="polite">
+      <span class="pairing-orbit" class:active={intentReceived||!!connectionPeer} aria-hidden="true"><i></i></span>
+      <strong>{connectionPeer?$t('chat.waitGreeting'):intentReceived?$t('chat.preparingConnection'):$t('chat.waitingProbe')}</strong>
+      <span>{$t('chat.pairingHint')}</span>
+    </div>
   {/if}
-  {#if !connectionComplete}
-    <p>{$t('chat.sendInstruction')}</p>
-    <textarea class="connection-prompt" readonly aria-label={$t('chat.9')} value={connectionLoading ? $t('Loading…') : connectionPrompt}></textarea>
-    {#if !connectionLoading && connectionRequest && !connectionPeer}<p class="pairing-hint" role="status">{$t('chat.pairing')} {$t('chat.pairingHint')}</p>{/if}
-    {#if pairing === 'failed'}<p role="alert">{$t('chat.pairingFailed')}</p>{/if}
-  {/if}
+  <button class="prompt-disclosure" type="button" aria-expanded={revealPrompt} onclick={()=>revealPrompt=!revealPrompt}>{$t(revealPrompt?'chat.hidePrompt':'chat.showPrompt')}</button>
+  {#if revealPrompt}<textarea class="connection-prompt" readonly aria-label={$t('chat.9')} value={connectionLoading ? $t('Loading…') : connectionPrompt}></textarea>{/if}
+  {#if intentExpired && !connectionPeer}<p class="pairing-hint">{$t('chat.intentExpired')}</p>{/if}
+  {#if pairing === 'failed'}<p role="alert">{$t('chat.pairingFailed')}</p>{/if}
   <div class="connection-buttons">
     {#if !connectionComplete}<button onclick={copyPrompt} disabled={connectionLoading || connectionSending || !connectionPrompt}>{#if copied}<Check size={14}/>{:else}<Copy size={14}/>{/if}{copied ? $t('chat.25') : $t('chat.24')}</button>{/if}
-    {#if connectionError || pairing==='failed'}<button onclick={openConnection} disabled={connectionLoading || connectionSending}>{$t('shell.resume')}</button>{/if}
+    {#if connectionError || pairing==='failed' || (intentExpired && !connectionPeer)}<button onclick={openConnection} disabled={connectionLoading || connectionSending}>{$t('shell.resume')}</button>{/if}
     <button onclick={()=>guide=false}>{$t(connectionComplete?'chat.showConversation':'chat.backConversation')}</button>
   </div>
   {#if connectionError}<p class="connection-error" role="alert">{connectionError}</p>{/if}
@@ -758,7 +769,7 @@
 
 .chat-header{flex:none;min-height:60px;gap:12px}.chat-header .chat-heading{min-width:0;flex:1;gap:12px;flex-wrap:nowrap}.chat-heading strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.status{white-space:nowrap}.header-actions{flex-wrap:nowrap;gap:14px}.connection-actions{display:flex;border:1px solid #ffffff24;border-radius:9px;overflow:hidden}.connection-actions button{padding:7px 13px}.connection-actions button+button{border-left:1px solid #ffffff24}.connection-actions button:hover:enabled{background:#ffffff10}
 .landing .feed-frame{flex:0 0 auto;margin-top:auto}.landing .empty-state{padding:20px 16px 24px}.landing .empty-state h2{margin:0;font-size:30px;font-weight:500}.landing .composer-area{margin-bottom:auto;padding-top:0;padding-bottom:60px}.landing .bottom-control,.landing .composer-hint{display:none}.landing .message-feed{padding:0;overflow:visible}.composer-area{background:#181818}.composer-area textarea{color:#eee}
-.connect-dialog{margin:auto;width:min(560px,calc(100vw - 32px));max-height:calc(100dvh - 32px);overflow:auto;padding:24px;border:1px solid var(--color-border);border-radius:18px;background:var(--color-bg);color:var(--color-text);box-shadow:0 20px 80px #0007}.connect-dialog::backdrop{background:#0007;backdrop-filter:blur(5px)}.connect-dialog header{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px}.connect-dialog h2{font-size:17px;font-weight:600}.connect-dialog p{font-size:13px;line-height:1.7;margin:12px 0}.connection-prompt{width:100%;height:220px;resize:vertical;padding:12px;border:1px solid var(--color-border);border-radius:10px;background:var(--card-bg);font:11px/1.7 monospace;color:var(--color-text)}.connection-buttons{display:flex;justify-content:space-between;gap:12px;margin-top:18px}.connection-buttons button{display:flex;align-items:center;gap:7px;padding:9px 14px;border:1px solid var(--color-border);border-radius:8px}.connection-success{display:flex;align-items:center;gap:8px;color:#8fcaa0}.connection-id code{user-select:all;overflow-wrap:anywhere}.connection-greeting{padding:12px;border-radius:8px;background:#ffffff08}.pairing-hint{color:var(--color-text-muted)}.connection-error{color:var(--danger);overflow-wrap:anywhere}
+.connect-dialog{margin:auto;width:min(560px,calc(100vw - 32px));max-height:calc(100dvh - 32px);overflow:auto;padding:24px;border:1px solid var(--color-border);border-radius:18px;background:var(--color-bg);color:var(--color-text);box-shadow:0 20px 80px #0007}.connect-dialog::backdrop{background:#0007;backdrop-filter:blur(5px)}.connect-dialog header{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px}.connect-dialog h2{font-size:17px;font-weight:600}.connect-dialog p{font-size:13px;line-height:1.7;margin:12px 0}.connection-prompt{width:100%;height:220px;resize:vertical;padding:12px;border:1px solid var(--color-border);border-radius:10px;background:var(--card-bg);font:11px/1.7 monospace;color:var(--color-text)}.connection-buttons{display:flex;justify-content:space-between;gap:12px;margin-top:18px}.connection-buttons button{display:flex;align-items:center;gap:7px;padding:9px 14px;border:1px solid var(--color-border);border-radius:8px}.pairing-hint{color:var(--color-text-muted)}.connection-error{color:var(--danger);overflow-wrap:anywhere}
 @media(max-width:700px){.chat-header,.external-navigation .chat-header{padding:12px}.chat-header .chat-heading{flex-direction:column;align-items:flex-start;gap:3px}.chat-heading strong{max-width:100%}.header-actions{gap:8px}.connection-actions button{padding:6px 8px}.landing .composer-area{padding-bottom:35px}}
 
 .composer-input{position:relative}.mention-input{position:relative;min-width:0;flex:1;display:block}.mention-input textarea,.draft-highlight{grid-area:1/1;width:100%;box-sizing:border-box;padding:0;border:0;font:13px/1.7 system-ui;letter-spacing:normal;white-space:pre-wrap;overflow-wrap:break-word;tab-size:8}.draft-highlight{position:absolute;inset:0;height:100%;pointer-events:none;overflow:hidden;color:#eee;max-height:100%;min-height:62px}.mention-input textarea{position:relative;z-index:1;color:transparent!important;caret-color:#eee;background:transparent;resize:none}.attachment-mention{color:#79b5ff;background:#397ddd22;border-radius:3px}.mention-choices{position:absolute;bottom:calc(100% + 10px);left:0;z-index:15;width:min(340px,100%);max-height:220px;overflow:auto;border:1px solid #ffffff25;border-radius:12px;background:#262626;box-shadow:0 12px 32px #0007;padding:5px}.mention-choices button{display:flex;align-items:center;gap:12px;width:100%;text-align:left;padding:9px;border-radius:7px;font-size:12px}.mention-choices button.active,.mention-choices button:hover{background:#ffffff12}.mention-choices strong{color:#79b5ff;white-space:nowrap}.mention-choices span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#aaa}.draft-files{margin-bottom:10px;flex-wrap:nowrap;overflow-x:auto;padding:4px 2px;max-height:150px}
@@ -805,4 +816,12 @@
 .mobile-action-list{display:grid;gap:3px;padding:0 16px 16px}.mobile-action-list>button,.mobile-extra-actions :global(button){display:flex;align-items:center;justify-content:flex-start;gap:13px;width:100%;min-height:44px;height:auto;padding:10px 12px;border-radius:12px;color:var(--color-text);font-size:13px;text-align:left}.mobile-action-list>button:hover:enabled,.mobile-extra-actions :global(button:hover){background:var(--surface-hover)}.mobile-extra-actions :global(button[aria-label])::after{content:attr(aria-label)}.mobile-extra-actions{display:grid;gap:3px;border-top:1px solid var(--color-border);margin-top:5px;padding-top:5px}.mobile-rename{padding:4px 22px 22px}.mobile-rename input{width:100%;padding:12px;border:1px solid var(--color-border);border-radius:10px;background:var(--surface-2);font-size:16px;color:var(--color-text)}.mobile-rename>div{display:flex;justify-content:flex-end;gap:12px;margin-top:16px}.mobile-rename button{padding:8px 15px;border-radius:9px;background:var(--surface-hover);font-size:13px}.mobile-rename p{font-size:12px;color:var(--danger);padding-top:10px}
 @media(max-width:700px){.chat-header.mobile-header-shared{display:none}}
 .message-actions{display:flex;gap:5px;margin-top:5px;color:var(--color-text-muted)}.user .message-actions{justify-content:flex-end}.message-actions button{display:grid;place-items:center;width:29px;height:28px;border-radius:6px}.message-actions button:hover{background:var(--surface-hover);color:var(--color-text)}
+
+
+.prompt-disclosure{font-size:12px;color:var(--color-text-muted);padding:8px 0;text-decoration:underline;text-underline-offset:3px}
+.pairing-progress{display:flex;flex-direction:column;align-items:center;gap:12px;padding:24px 12px;text-align:center;border:1px solid var(--color-border);border-radius:14px;background:var(--card-bg)}
+.pairing-progress strong{font-size:14px}.pairing-progress>span:last-child{font-size:12px;color:var(--color-text-muted)}
+.pairing-orbit{display:grid;place-items:center;width:64px;height:64px;border:2px solid var(--color-border);border-top-color:#7b92b5;border-radius:50%;animation:pairing-spin 2s linear infinite}.pairing-orbit.active{border-top-color:#3b82f6;border-right-color:#3b82f6}.pairing-orbit i{width:13px;height:13px;border-radius:50%;background:#7b92b5}.pairing-orbit.active i{background:#3b82f6}
+@keyframes pairing-spin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.pairing-orbit{animation:none}}
 </style>
