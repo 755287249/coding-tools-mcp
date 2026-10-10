@@ -10,7 +10,7 @@ pub(super) fn configure(root:&Path,d:&mut Value,args:&Value)->Result<()> {
  if d["collaboration"]!=true{return Ok(())}
  let mut aliases=serde_json::Map::new();let mut used=HashSet::new();
  for cid in d["members"].as_array().unwrap(){let cid=id(cid)?;let s=load(root,cid)?;
-  if s["attachment_id"].as_str().unwrap_or("").is_empty(){return Err(err("Choose previously connected robots"));}
+  if s["attachment_id"].as_str().unwrap_or("").is_empty()&&d["aliases"][cid].as_str().is_none(){return Err(err("Choose previously connected robots"));}
   let base=d["aliases"][cid].as_str().map(str::to_owned).unwrap_or_else(||s["agent_name"].as_str().or(s["title"].as_str()).unwrap_or("AI").chars().filter(|c|c.is_alphanumeric()||*c=='_'||*c=='-').take(40).collect());
   let base=if base.is_empty(){"AI".to_owned()}else{base};let mut alias=base.clone();let mut n=1;while used.contains(&alias.to_lowercase()){n+=1;alias=format!("{base}-{n}");}used.insert(alias.to_lowercase());aliases.insert(cid.to_owned(),json!(alias));
  }

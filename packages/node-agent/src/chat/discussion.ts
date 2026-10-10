@@ -43,7 +43,7 @@ function projection(io:DiscussionStore,d:Discussion,offset:unknown=0){
   const start=Number(offset);if(!Number.isInteger(start)||start<0||start>1000)throw Error('Invalid history offset');
   const end=Math.max(0,d.posts.length-start),begin=Math.max(0,end-50);
   return {...d,archive_path:`${DIR}/${d.id}.md`,posts:d.posts.slice(begin,end),next_offset:begin?start+end-begin:null,total:d.posts.length,
-    member_details:d.members.map(id=>{try{const s=io.load(id);return {id,title:d.aliases?.[id]??s.agent_name??s.title,note:s.note??'',busy:s.messages.some(m=>m.role==='user'&&!s.messages.some(r=>r.reply_to===m.id&&r.final)),status:s.closed?'closed':s.lease_until>Date.now()?'connected':'offline'}}catch{return {id,title:id,status:'missing'}}})};
+    member_details:d.members.map(id=>{try{const s=io.load(id),pending=s.messages.find(m=>m.role==='user'&&!s.messages.some(r=>r.role==='assistant'&&r.reply_to===m.id&&r.final)),replies=pending?s.messages.filter(r=>r.role==='assistant'&&r.reply_to===pending.id):[];return {id,title:d.aliases?.[id]??s.agent_name??s.title,note:s.note??'',busy:!!pending&&(!!pending.received_at||replies.length>0),error:replies.filter(r=>r.tool_event).at(-1)?.tool_event?.status==='failed',status:s.closed?'closed':s.lease_until>Date.now()?'connected':'offline'}}catch{return {id,title:id,status:'missing'}}})};
 }
 function collect(io:DiscussionStore,d:Discussion){
   const before=JSON.stringify(d.posts);

@@ -22,6 +22,7 @@ export const MESSAGES = {
   "sharing.hidePassword": ["Hide", "隐藏", "隐藏", "Hide"],
   "sharing.savePassword": ["Save password", "保存口令", "保存口令", "Save password"],
   "sharing.connectionSettings": ["Connection settings", "连接设置", "连接设置", "Connection settings"],
+  "collab.error": ["Error", "異常", "异常", "エラー"],
   "collab.copyLink": ["Copy group link", "複製群聊連結", "复制群聊链接", "グループリンクをコピー"],
   "collab.linkCopied": ["Link copied", "已複製連結", "链接已复制", "リンクをコピーしました"],
   "collab.disconnected": ["Disconnected", "已斷開", "已断开", "切断済み"],

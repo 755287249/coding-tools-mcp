@@ -29,7 +29,7 @@ fn projection(root:&Path,d:&Value,args:&Value)->Result<Value>{
  let offset=match args.get("offset"){None=>0,Some(v)=>v.as_u64().filter(|n|*n<=1000).ok_or_else(||err("Invalid history offset"))? as usize};
  let posts=d["posts"].as_array().unwrap();let end=posts.len().saturating_sub(offset);let begin=end.saturating_sub(50);let mut out=d.clone();
  out["archive_path"]=json!(format!("{DISCUSS_DIR}/{}.md",d["id"].as_str().unwrap()));out["posts"]=json!(&posts[begin..end]);out["next_offset"]=if begin>0{json!(offset+end-begin)}else{Value::Null};out["total"]=json!(posts.len());
- out["member_details"]=json!(d["members"].as_array().unwrap().iter().map(|cid|match load(root,cid.as_str().unwrap_or("")){Ok(s)=>json!({"id":cid,"title":d["aliases"][cid.as_str().unwrap_or("")].as_str().or(s["agent_name"].as_str()).or(s["title"].as_str()).unwrap_or("AI"),"busy":pending(&s).is_some(),"note":s["note"].as_str().unwrap_or(""),"status":if s["closed"]==true{"closed"}else if s["lease_until"].as_u64().unwrap_or(0)>now(){"connected"}else{"offline"}}),Err(_)=>json!({"id":cid,"title":cid,"status":"missing"})}).collect::<Vec<_>>());Ok(out)
+ out["member_details"]=json!(d["members"].as_array().unwrap().iter().map(|cid|match load(root,cid.as_str().unwrap_or("")){Ok(s)=>{let pending=pending(&s);let replies:Vec<_>=s["messages"].as_array().unwrap().iter().filter(|r|r["role"]=="assistant"&&pending.as_ref().is_some_and(|m|r["reply_to"]==m["id"])).collect();json!({"id":cid,"title":d["aliases"][cid.as_str().unwrap_or("")].as_str().or(s["agent_name"].as_str()).or(s["title"].as_str()).unwrap_or("AI"),"busy":pending.as_ref().is_some_and(|m|m["received_at"].as_u64().unwrap_or(0)>0||!replies.is_empty()),"error":replies.iter().rev().find(|r|r["tool_event"].is_object()).is_some_and(|r|r["tool_event"]["status"]=="failed"),"note":s["note"].as_str().unwrap_or(""),"status":if s["closed"]==true{"closed"}else if s["lease_until"].as_u64().unwrap_or(0)>now(){"connected"}else{"offline"}})},Err(_)=>json!({"id":cid,"title":cid,"status":"missing"})}).collect::<Vec<_>>());Ok(out)
 }
 fn collect(root:&Path,d:&mut Value)->Result<()>{
  let before=d["posts"].clone();
@@ -117,6 +117,26 @@ pub(super) fn inbox(root:&Path,cid:&str)->Result<()>{
 #[cfg(test)]
 mod tests {
  use super::*;
+ #[test]
+ fn offline_existing_robots_do_not_block_group_management(){
+  let temp=tempfile::tempdir().unwrap();let root=temp.path();let a=ui(root,&json!({"action":"create"})).unwrap()["session"]["id"].clone();let b=ui(root,&json!({"action":"create"})).unwrap()["session"]["id"].clone();
+  tool(root,"chat_open",&json!({"chat_id":a,"agent_name":"A"})).unwrap();ui(root,&json!({"action":"discussion_create","discussion_id":"offline","title":"Team","collaboration":true,"member_chat_ids":[a]})).unwrap();ui(root,&json!({"action":"detach","chat_id":a})).unwrap();
+  let changed=ui(root,&json!({"action":"discussion_update","discussion_id":"offline","paused":true,"pinned":true})).unwrap();assert_eq!(changed["discussion"]["paused"],true);
+  assert_eq!(ui(root,&json!({"action":"discussion_update","discussion_id":"offline","paused":false,"member_chat_ids":[a]})).unwrap()["discussion"]["paused"],false);
+  assert!(ui(root,&json!({"action":"discussion_update","discussion_id":"offline","member_chat_ids":[a,b]})).is_err());
+ }
+ #[test]
+ fn member_presence_tracks_receipts_and_reported_errors(){
+  let temp=tempfile::tempdir().unwrap();let root=temp.path();let a=ui(root,&json!({"action":"create"})).unwrap()["session"]["id"].clone();
+  let aa=tool(root,"chat_open",&json!({"chat_id":a,"agent_name":"A"})).unwrap();
+  ui(root,&json!({"action":"discussion_create","discussion_id":"presence-test","title":"Team","member_chat_ids":[a]})).unwrap();
+  let state=||ui(root,&json!({"action":"discussion_read","discussion_id":"presence-test"})).unwrap()["discussion"]["member_details"][0].clone();
+  ui(root,&json!({"action":"send","chat_id":a,"message_id":"task","text":"Check this"})).unwrap();assert_eq!(state()["busy"],false);assert_eq!(state()["status"],"connected");
+  tool(root,"chat_wait",&json!({"chat_id":a,"attachment_id":aa["attachment_id"]})).unwrap();assert_eq!(state()["busy"],true);
+  for (mid,status) in [("failed","failed"),("fixed","completed")]{tool(root,"chat_reply",&json!({"chat_id":a,"attachment_id":aa["attachment_id"],"reply_to":"task","message_id":mid,"text":status,"final":false,"tool_event":{"name":"test","status":status}})).unwrap();assert_eq!(state()["error"],status=="failed");}
+  tool(root,"chat_reply",&json!({"chat_id":a,"attachment_id":aa["attachment_id"],"reply_to":"task","message_id":"done","text":"Done","final":true})).unwrap();assert_eq!(state()["busy"],false);assert_eq!(state()["error"],false);
+  ui(root,&json!({"action":"detach","chat_id":a})).unwrap();assert_eq!(state()["status"],"offline");
+ }
  #[test]
  fn group_disconnect_preserves_source_and_pending_results(){
   let temp=tempfile::tempdir().unwrap();let root=temp.path();let a=ui(root,&json!({"action":"create"})).unwrap()["session"]["id"].clone();

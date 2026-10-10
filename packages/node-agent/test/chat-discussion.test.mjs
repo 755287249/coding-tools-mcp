@@ -121,3 +121,21 @@ test('disconnect blocks new group tasks, keeps source attachment and in-flight r
  assert.throws(()=>ui({action:'discussion_update',discussion_id:'group1',paused:'true'}),/boolean/);
  assert.throws(()=>tool(a,aa.attachment_id,'chat_discuss',{action:'update',discussion_id:'group1',paused:true}),/local interface/);
 });
+
+test('robot cards separate queued work, picked-up tasks, reported failures and finished tasks',t=>{
+ const {b,bb,ui,tool,wb}=fixture(t);const state=()=>ui({action:'discussion_read',discussion_id:'group1'}).discussion.member_details.find(m=>m.id===b);
+ ui({action:'send',chat_id:b,message_id:'presence-task',text:'Check this'});assert.equal(state().busy,false);assert.equal(state().error,false);assert.equal(state().status,'connected');
+ wb();assert.equal(state().busy,true);
+ tool(b,bb.attachment_id,'chat_reply',{reply_to:'presence-task',message_id:'presence-fail',text:'Failed',final:false,tool_event:{name:'test',status:'failed'}});assert.equal(state().error,true);
+ tool(b,bb.attachment_id,'chat_reply',{reply_to:'presence-task',message_id:'presence-fixed',text:'Recovered',final:false,tool_event:{name:'test',status:'completed'}});assert.equal(state().error,false);assert.equal(state().busy,true);
+ tool(b,bb.attachment_id,'chat_reply',{reply_to:'presence-task',message_id:'presence-done',text:'Done',final:true});assert.equal(state().busy,false);assert.equal(state().error,false);
+ ui({action:'detach',chat_id:b});assert.equal(state().status,'offline');
+});
+
+test('existing collaboration members may go offline without blocking group management',t=>{
+ const {a,b,c,ui}=fixture(t);
+ ui({action:'discussion_create',discussion_id:'offline-members',title:'Team',collaboration:true,member_chat_ids:[a,b]});ui({action:'detach',chat_id:b});
+ const updated=ui({action:'discussion_update',discussion_id:'offline-members',paused:true,pinned:true}).discussion;assert.equal(updated.paused,true);assert.ok(updated.aliases[b]);
+ assert.equal(ui({action:'discussion_update',discussion_id:'offline-members',paused:false,member_chat_ids:[a,b]}).discussion.paused,false);
+ assert.throws(()=>ui({action:'discussion_update',discussion_id:'offline-members',member_chat_ids:[a,b,c]}),/previously connected/);
+});

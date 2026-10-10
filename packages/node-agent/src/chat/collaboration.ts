@@ -12,7 +12,7 @@ export function configureCollaboration(io:DiscussionStore,d:Discussion,args:Reco
  if(!d.collaboration)return;
  const aliases:Record<string,string>={};const used=new Set<string>();
  for(const id of d.members){
-  const s=io.load(id);if(!s.attachment_id)throw Error('Choose previously connected robots');
+  const s=io.load(id);if(!s.attachment_id&&!d.aliases?.[id])throw Error('Choose previously connected robots');
   const base=d.aliases?.[id]??((s.agent_name??s.title).replace(/[^\p{L}\p{N}_-]/gu,'').slice(0,40)||'AI');
   let alias=base,n=1;while(used.has(alias.toLowerCase()))alias=`${base}-${++n}`;used.add(alias.toLowerCase());aliases[id]=alias;
  }
