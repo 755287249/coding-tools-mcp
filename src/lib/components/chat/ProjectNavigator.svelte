@@ -83,6 +83,7 @@
   let errors = $state<Record<string, string>>({});
   let rename = $state('');
   let title = $state('');
+  let editingNote=$state(false);
   let saving = $state(false);
   let renameInput=$state<HTMLInputElement>();
   $effect(()=>{if(rename&&renameInput){renameInput.focus();renameInput.select()}});
@@ -153,15 +154,15 @@
   function open(workspace:string,folder:string,chat?:string){void goto(appUrl(chatLocation(workspace,folder,chat)),{noScroll:true});}
   function editProject(id:string){uiMode.set('advanced');void goto(appUrl(`/workspace/${encodeURIComponent(id)}?tab=settings`));}
   async function renameChat(workspace:string,folder:string,chat:ChatSession){
-    const value=title.trim();if(saving||!value)return;saving=true;
-    try{await localChat(workspace,folder,{action:'rename',chat_id:chat.id,title:value});sessions={...sessions,[scope(workspace,folder)]:(sessions[scope(workspace,folder)]??[]).map(item=>item.id===chat.id?{...item,title:value}:item)};rename=''}
+    const value=title.trim();if(saving||(!editingNote&&!value))return;saving=true;
+    try{const result=await localChat(workspace,folder,editingNote?{action:'set_note',chat_id:chat.id,note:value}:{action:'rename',chat_id:chat.id,title:value});if(result.session)sessions={...sessions,[scope(workspace,folder)]:(sessions[scope(workspace,folder)]??[]).map(item=>item.id===chat.id?result.session!:item)};rename=''}
     catch(error){errors={...errors,[scope(workspace,folder)]:String(error)}}finally{saving=false}
   }
 </script>
 
 <svelte:window onresize={()=>{positionProjectMenu();positionChatMenu();positionPicker();positionRecentMenu()}} onscrollcapture={()=>{positionProjectMenu();positionChatMenu();positionPicker();positionRecentMenu()}}/>
 <div bind:this={chatMenu} class="chat-actions-menu" popover="auto" style:left={`${chatMenuLeft}px`} style:top={`${chatMenuTop}px`}>
-  {#if chatMenuTarget}{@const target=chatMenuTarget}<button onclick={()=>{rename=scope(scope(target.workspace,target.folder),target.chat.id);title=target.chat.title;chatMenu?.hidePopover()}}><Pencil size={15}/>{$t('chat.85')}</button><button disabled={!!pinSaving} onclick={()=>togglePin(target.workspace,target.folder,target.chat)}><Pin size={15} class={target.chat.pinned?'pin-icon is-pinned':'pin-icon'}/>{$t(target.chat.pinned?'chat.unpin':'chat.pin')}</button><button disabled={!!pinSaving} onclick={()=>toggleArchive(target.workspace,target.folder,target.chat)}>{#if target.chat.archived}<ArchiveRestore size={15}/>{$t('chat.unarchive')}{:else}<Archive size={15}/>{$t('chat.archive')}{/if}</button><hr/><button class="danger" class:armed={deleteArmed} disabled={!!pinSaving} onclick={()=>deleteChat(target.workspace,target.folder,target.chat)}><Trash2 size={15}/>{deleteArmed?$t(target.chat.status==='connected'||target.chat.status==='waiting'?'chat.deleteConfirmConnected':'chat.deleteConfirm'):$t('chat.delete')}</button>{/if}
+  {#if chatMenuTarget}{@const target=chatMenuTarget}<button onclick={()=>{editingNote=false;rename=scope(scope(target.workspace,target.folder),target.chat.id);title=target.chat.title;chatMenu?.hidePopover()}}><Pencil size={15}/>{$t('chat.85')}</button><button onclick={()=>{editingNote=true;rename=scope(scope(target.workspace,target.folder),target.chat.id);title=target.chat.note??'';chatMenu?.hidePopover()}}><Pencil size={15}/>{$t('chat.editNote')}</button><button disabled={!!pinSaving} onclick={()=>togglePin(target.workspace,target.folder,target.chat)}><Pin size={15} class={target.chat.pinned?'pin-icon is-pinned':'pin-icon'}/>{$t(target.chat.pinned?'chat.unpin':'chat.pin')}</button><button disabled={!!pinSaving} onclick={()=>toggleArchive(target.workspace,target.folder,target.chat)}>{#if target.chat.archived}<ArchiveRestore size={15}/>{$t('chat.unarchive')}{:else}<Archive size={15}/>{$t('chat.archive')}{/if}</button><hr/><button class="danger" class:armed={deleteArmed} disabled={!!pinSaving} onclick={()=>deleteChat(target.workspace,target.folder,target.chat)}><Trash2 size={15}/>{deleteArmed?$t(target.chat.status==='connected'||target.chat.status==='waiting'?'chat.deleteConfirmConnected':'chat.deleteConfirm'):$t('chat.delete')}</button>{/if}
 </div>
 <div bind:this={projectMenu} class="project-info-card" popover="auto" style:left={`${menuLeft}px`} style:top={`${menuTop}px`}>
   {#if menuWorkspace}{@const workspace=$workspaces.find(w=>w.id===menuWorkspace)}{#if workspace}<strong>{workspace.name}</strong>{#each workspaceFolders(workspace) as folder}<p>{folder.path}</p>{/each}<button onclick={()=>{projectMenu?.hidePopover();editProject(workspace.id)}}>{$t('Workspace settings')}</button>{/if}{/if}
@@ -173,7 +174,7 @@
       {#each pickerItems as {group,chat} (scope(group.key,chat.id))}
         {@const active=activeGroup?.key===group.key && activeChat?.id===chat.id}
         <button class="picker-chat" aria-current={active?'page':undefined} onclick={()=>{picker?.hidePopover();open(group.workspace.id,group.folder.id,chat.id)}}>
-          <span><strong>{chat.title}</strong><small>{group.workspace.name} · {$t(presenceLabels[sessionPresence(chat)])}</small></span>{#if active}<Check size={16}/>{/if}
+          <span><strong>{chat.title}{#if chat.note}<span class="conversation-note" title={chat.note}>{chat.note}</span>{/if}</strong><small>{group.workspace.name} · {$t(presenceLabels[sessionPresence(chat)])}</small></span>{#if active}<Check size={16}/>{/if}
         </button>
       {:else}<p class="muted">{$t('chat.noConnected')}</p>{/each}
     </div>
@@ -246,14 +247,16 @@
   {@const newCount=unread(ws,folder,chat)}
   <div class="tree-chat" class:active class:archived-row={chat.archived} data-presence={presence}>
     {#if rename===key}
-      <form onsubmit={event=>{event.preventDefault();void renameChat(ws,folder,chat)}}><input bind:this={renameInput} aria-label={$t('chat.86')} bind:value={title} maxlength="240" disabled={saving} onkeydown={event=>{if(event.key==='Escape')rename=''}}/><button disabled={saving||!title.trim()}>{$t('Save')}</button></form>
+      <form onsubmit={event=>{event.preventDefault();void renameChat(ws,folder,chat)}}><input bind:this={renameInput} aria-label={$t(editingNote?'chat.note':'chat.86')} bind:value={title} maxlength="240" disabled={saving} onkeydown={event=>{if(event.key==='Escape')rename=''}}/><button disabled={saving||(!editingNote&&!title.trim())}>{$t('Save')}</button></form>
     {:else}
-      <button class="chat-link" onclick={()=>open(ws,folder,chat.id)} aria-current={active?'page':undefined} title={`${chat.title} · ${$t(presenceLabels[presence])}`}><i title={$t(presenceLabels[presence])}></i><span>{chat.title}{#if showProject}<small>{$workspaces.find(item=>item.id===ws)?.name}</small>{/if}</span><em class="chat-mode-tag">#{$t(chat.mode==='group'?'chat.group':'chat.work')}</em>{#if newCount}<b class="unread-count" aria-label={`${$t('chat.90')}: ${newCount}`}>{newCount>99?'99+':newCount}</b>{/if}</button>
+      <button class="chat-link" onclick={()=>open(ws,folder,chat.id)} aria-current={active?'page':undefined} title={`${chat.title} · ${$t(presenceLabels[presence])}`}><i title={$t(presenceLabels[presence])}></i><span>{chat.title}{#if chat.note}<span class="conversation-note" title={chat.note}>{chat.note}</span>{/if}{#if showProject}<small>{$workspaces.find(item=>item.id===ws)?.name}</small>{/if}</span><em class="chat-mode-tag">#{$t(chat.mode==='group'?'chat.group':'chat.work')}</em>{#if newCount}<b class="unread-count" aria-label={`${$t('chat.90')}: ${newCount}`}>{newCount>99?'99+':newCount}</b>{/if}</button>
       <div class="chat-row-actions"><button title={$t('chat.conversationActions')} aria-label={`${$t('chat.conversationActions')}: ${chat.title}`} onclick={event=>showChatMenu(ws,folder,chat,event)}><Ellipsis size={15}/></button><button class:pinned={chat.pinned} disabled={!!pinSaving} title={$t(chat.pinned?'chat.unpin':'chat.pin')} aria-label={`${$t(chat.pinned?'chat.unpin':'chat.pin')}: ${chat.title}`} onclick={()=>togglePin(ws,folder,chat)}><Pin size={14} class={chat.pinned?'pin-icon is-pinned':'pin-icon'}/></button></div>
     {/if}
   </div>
 {/snippet}
 <style>
+.conversation-note{font-size:11px;font-weight:400;color:var(--color-text-muted);margin-left:7px}.picker-chat strong .conversation-note{font-size:11px}
+
 .recent-section{margin-top:18px}.recent-actions{display:flex;gap:2px}.recent-actions button{width:26px;height:26px;justify-content:center}.recent-actions .filtered{color:var(--primary);background:var(--surface-hover)}.recent-heading{padding-bottom:4px}.recent-heading :global(.collapsed-chevron){transform:rotate(-90deg)}
 .recent-menu{position:fixed;inset:auto;margin:0;width:200px;max-width:calc(100vw - 16px);padding:6px;border:1px solid var(--color-border);border-radius:12px;background:var(--surface-2);color:var(--color-text);box-shadow:0 12px 32px #0007}.recent-menu button{display:flex;align-items:center;justify-content:space-between;width:100%;gap:10px;padding:9px 10px;font-size:13px;text-align:left}
 :global(.pin-icon){transform:rotate(35deg)}:global(.pin-icon.is-pinned){transform:none;fill:currentColor}

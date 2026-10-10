@@ -1,4 +1,6 @@
 export const MESSAGES = {
+  "chat.note": ["Note", "備註", "备注", "メモ"],
+  "chat.editNote": ["Edit note", "編輯備註", "编辑备注", "メモを編集"],
   "mobile.navigation": ["Open navigation", "開啟導覽", "打开导航", "ナビゲーションを開く"],
   "mobile.chatActions": ["Conversation actions", "對話操作", "对话操作", "会話の操作"],
   "mobile.addToChat": ["Add to conversation", "新增至對話", "添加到对话", "会話に追加"],

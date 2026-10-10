@@ -14,7 +14,7 @@ import { resolveChatPath } from './reveal.js';
 export interface ChatFile { label?: string; local_reference?: boolean; id: string; name: string; path: string; mime: string; size: number; sha256: string }
 export interface ToolEvent { name: string; status: 'running' | 'completed' | 'failed'; input?: string; output?: string; output_truncated?: boolean }
 export interface ChatMessage { received_by?:string[]; agent_id?:string;agent_name?:string;recipient_ids?:string[];agent_plans?:{agent_id:string;plan:ChatTaskPlan}[]; task_plan?:ChatTaskPlan; kind?: 'connection_request' | 'assignment'; awaiting_user?: boolean; received_at?: number; attachments?: ChatFile[]; tool_event?: ToolEvent; id: string; role: 'user' | 'assistant'; text: string; created_at: number; reply_to?: string; final?: boolean }
-export interface ChatSession { work_member?:ChatMember; mode?:'work'|'group';members?:ChatMember[];agent_name?:string; pinned?: boolean; archived?: boolean; queue?: ChatMessage[]; queue_mode?: 'merge' | 'split'; queue_receipts?: Record<string,string>; title_custom?: boolean; files?: ChatFile[]; version: 1|2; id: string; title: string; created_at: number; updated_at: number; closed: boolean; messages: ChatMessage[]; attachment_id: string; lease_until: number }
+export interface ChatSession { note?:string; title_agent_name?:string; work_member?:ChatMember; mode?:'work'|'group';members?:ChatMember[];agent_name?:string; pinned?: boolean; archived?: boolean; queue?: ChatMessage[]; queue_mode?: 'merge' | 'split'; queue_receipts?: Record<string,string>; title_custom?: boolean; files?: ChatFile[]; version: 1|2; id: string; title: string; created_at: number; updated_at: number; closed: boolean; messages: ChatMessage[]; attachment_id: string; lease_until: number }
 const DIR = 'docs/chat-sessions';
 const ASSET_DIR = 'mcp-assistant/chat-assets';
 const ARTIFACT_DIR = 'mcp-assistant/artifacts/';
@@ -58,7 +58,7 @@ function userMessageState(s: ChatSession, message: ChatMessage): string {
   return `消息状态：${read ? '已读' : '未读'} · ${status}`;
 }
 export function chatMarkdown(s: ChatSession): string {
-  return `# ${s.title}\n\nSession: ${s.id}\n\n` + group.groupMarkdown(s) + s.messages.map(m => `## ${m.kind === 'connection_request' ? '接入请求' : m.role === 'user' ? '你' : m.final === false ? 'AI · 进度' : 'AI'} · ${m.created_at}\n\n${m.tool_event ? `Tool (AI reported): ${m.tool_event.name} · ${m.tool_event.status}\n\n` : ''}${m.text}\n${group.groupMarkdown(s,m)}${chatPlanMarkdown(m.task_plan)}${m.role === 'user' ? `\n${userMessageState(s, m)}\n` : ''}${m.role === 'assistant' ? `\nReply state: ${m.awaiting_user ? 'awaiting_user' : m.final === false ? 'supplementing' : 'complete'}\n` : ''}${m.tool_event?.input ? `\nInput:\n${m.tool_event.input}\n` : ''}${m.tool_event?.output ? `\nOutput:\n${m.tool_event.output}\n` : ''}${m.tool_event?.output_truncated ? '\nOutput truncated\n' : ''}${(m.attachments ?? []).map(f => `\nAttachment: ${f.name} (${f.size} bytes)\nPath: ${f.path}\n${f.label ? `Reference: @${f.label}\n` : ''}`).join('')}`).join('\n') + queuedMarkdown(s);
+  return `# ${s.title}\n\nSession: ${s.id}\n\n${s.note ? `备注：${s.note}\n\n` : ''}` + group.groupMarkdown(s) + s.messages.map(m => `## ${m.kind === 'connection_request' ? '接入请求' : m.role === 'user' ? '你' : m.final === false ? 'AI · 进度' : 'AI'} · ${m.created_at}\n\n${m.tool_event ? `Tool (AI reported): ${m.tool_event.name} · ${m.tool_event.status}\n\n` : ''}${m.text}\n${group.groupMarkdown(s,m)}${chatPlanMarkdown(m.task_plan)}${m.role === 'user' ? `\n${userMessageState(s, m)}\n` : ''}${m.role === 'assistant' ? `\nReply state: ${m.awaiting_user ? 'awaiting_user' : m.final === false ? 'supplementing' : 'complete'}\n` : ''}${m.tool_event?.input ? `\nInput:\n${m.tool_event.input}\n` : ''}${m.tool_event?.output ? `\nOutput:\n${m.tool_event.output}\n` : ''}${m.tool_event?.output_truncated ? '\nOutput truncated\n' : ''}${(m.attachments ?? []).map(f => `\nAttachment: ${f.name} (${f.size} bytes)\nPath: ${f.path}\n${f.label ? `Reference: @${f.label}\n` : ''}`).join('')}`).join('\n') + queuedMarkdown(s);
 }
 function save(root: string, s: ChatSession): void {
   const body = JSON.stringify(s, null, 2);
@@ -99,7 +99,7 @@ function view(root: string, s: ChatSession) {
   const work_state = !message ? null : message.received_at || s.messages.some(r => r.role === 'assistant' && r.reply_to === message.id) ? 'processing' : 'queued';
   const members=group.members(s).map(m=>({id:m.id,name:m.name,role:m.role,paused:m.paused===true,status:s.closed?'offline':waiters.has(key(root,s.id)+':'+m.attachment_id)?'waiting':m.lease_until>Date.now()?'connected':'offline'}));
   const presence=members.some(m=>m.status==='waiting')?'waiting':members.some(m=>m.status==='connected')?'connected':'offline';
-  return { mode:s.mode??'work',members,agent_name:s.agent_name, pinned:s.pinned===true, archived:s.archived===true, work_state, id: s.id, title: s.title, created_at: s.created_at, updated_at: s.updated_at, closed: s.closed, messages: s.messages, assistant_message_count: s.messages.filter(m => m.role === 'assistant').length,
+  return { mode:s.mode??'work',members,agent_name:s.agent_name, pinned:s.pinned===true, archived:s.archived===true, work_state, id: s.id, title: s.title, note:s.note??'', created_at: s.created_at, updated_at: s.updated_at, closed: s.closed, messages: s.messages, assistant_message_count: s.messages.filter(m => m.role === 'assistant').length,
     status: s.closed ? 'closed' : group.grouped(s)?presence:waiters.has(key(root, s.id)+':'+s.attachment_id) ? 'waiting' : s.lease_until > Date.now() ? 'connected' : 'offline',
     archive_path: `${DIR}/${s.id}.md` };
 }
@@ -267,7 +267,7 @@ export function chatUi(root: string, args: Record<string, unknown>): Record<stri
       if(receipt){if(receipt!==queuedFingerprint(content,attachments))throw new Error('Message ID conflicts with a queued delivery');save(root,s);return {session:localView(root,s)};}
       const existing = [...s.messages,...(s.queue??[])].find(m => m.id === id);
       if (existing && (existing.role !== 'user' || existing.kind === 'connection_request' || existing.text !== content || JSON.stringify(existing.attachments ?? []) !== JSON.stringify(attachments))) throw new Error('Message ID conflicts with an existing message');
-      if (!existing) { if (!s.messages.some(m => m.role === 'user' && m.kind !== 'connection_request') && !s.title_custom) s.title = [...content.replace(/\s+/g, ' ')].slice(0, 36).join(''); const message:ChatMessage={ id, role: 'user', text: content, attachments, created_at: Date.now() };group.targetUser(s,message);if(!awaitingConfirmation(s)&&(pending(s)||s.queue?.length))(s.queue??=[]).push(message);else s.messages.push(message); s.updated_at = Date.now(); }
+      if (!existing) { if (!s.messages.some(m => m.role === 'user' && m.kind !== 'connection_request') && !s.title_custom && !s.title_agent_name) s.title = [...content.replace(/\s+/g, ' ')].slice(0, 36).join(''); const message:ChatMessage={ id, role: 'user', text: content, attachments, created_at: Date.now() };group.targetUser(s,message);if(!awaitingConfirmation(s)&&(pending(s)||s.queue?.length))(s.queue??=[]).push(message);else s.messages.push(message); s.updated_at = Date.now(); }
       save(root, s);
     } else if(action==='set_queue_mode'){if(args.mode!=='merge'&&args.mode!=='split')throw new Error('Invalid queue mode');s.queue_mode=args.mode;save(root,s);}
     else if(action==='pin'){if(typeof args.pinned!=='boolean')throw new Error('pinned must be a boolean');s.pinned=args.pinned;save(root,s);}
@@ -278,6 +278,7 @@ export function chatUi(root: string, args: Record<string, unknown>): Record<stri
       deleteSessionFiles(root,s.id);
       return {deleted:true,chat_id:s.id};
     }
+    else if (action === 'set_note') { if(typeof args.note!=='string'||Buffer.byteLength(args.note)>1000)throw new Error('Note must be a string of at most 1000 bytes'); s.note=args.note.trim()?text(args.note,1000).replace(/\s+/gu,' '):'';s.updated_at=Date.now();save(root,s); }
     else if (action === 'rename') { s.title = text(args.title, 240).replace(/\s+/gu, ' '); s.title_custom = true; s.updated_at = Date.now(); save(root, s); }
     else if (action === 'detach') { for(const m of group.members(s)){m.lease_until=0;m.paused=true;}s.attachment_id = ''; s.lease_until = 0; s.updated_at = Date.now(); save(root, s); }
     else if (action === 'close') { s.closed = true; s.attachment_id = ''; s.lease_until = 0; s.updated_at = Date.now(); save(root, s); }
@@ -308,18 +309,27 @@ function owned(s: ChatSession, attachment: unknown): void {
   // The lease only governs takeover by another AI; the holder keeps working through long tasks.
   if (!attachment || attachment !== s.attachment_id) throw new Error('Chat attachment expired; call chat_open again');
 }
+/** Called under the folder storage lock: deleted names are available, resumes keep their number. */
+function assignAgentTitle(root:string,s:ChatSession,name:string|undefined):void {
+  if(!name||s.title_custom||s.title_agent_name===name)return;
+  const occupied=new Set(readdirSync(safe(root,DIR)).filter(n=>/^[a-zA-Z0-9_-]{1,80}\.json$/.test(n)&&n!==s.id+'.json').map(n=>load(root,n.slice(0,-5)).title));
+  let candidate=name,index=2;
+  while(occupied.has(candidate))candidate=name+index++;
+  s.title=candidate;s.title_agent_name=name;s.updated_at=Date.now();
+}
 export function chatTool(root: string, name: string, args: Record<string, unknown>): Record<string, unknown> {
   return locked(root, () => {
     const s = load(root, validId(args.chat_id));
     if (s.closed) return { ok: true, status: 'closed' };
     if (name === 'chat_open') {
-      if(group.grouped(s)){const member=group.openGroup(s,args);group.bindTargets(s);save(root,s);return {ok:true,attachment_id:member.attachment_id,agent_id:member.id,role:member.role,session:view(root,s),instruction: 'Read skill.text; reply only to your delivered message IDs. Call chat_wait.',skill:localChatSkill};}
+      if(group.grouped(s)){const member=group.openGroup(s,args);if(member.role==='coordinator')assignAgentTitle(root,s,member.name);group.bindTargets(s);save(root,s);return {ok:true,attachment_id:member.attachment_id,agent_id:member.id,role:member.role,session:view(root,s),instruction: 'Read skill.text; reply only to your delivered message IDs. Call chat_wait.',skill:localChatSkill};}
       if(args.agent_name!==undefined)s.agent_name=group.memberName(args.agent_name);
       // Keepalive: the saved attachment_id resumes even after the lease lapsed, unless another AI attached meanwhile.
       const resuming = typeof args.attachment_id === 'string' && !!args.attachment_id && args.attachment_id === s.attachment_id;
       if(args.attachment_id && !resuming)throw new Error('Chat attachment expired or replaced; start a new connection from the UI');
       if (!resuming && s.lease_until > Date.now()) throw new Error('Conversation already attached; close it in the UI or wait for the lease to expire');
       if (!resuming) s.attachment_id = randomUUID();
+      assignAgentTitle(root,s,s.agent_name);
       group.renew(s,args.attachment_id); save(root, s);
       return { ok: true, attachment_id: s.attachment_id, session: view(root, s), instruction: 'Read skill.text and follow it for this session; save attachment_id and call chat_wait now.', skill: localChatSkill };
     }

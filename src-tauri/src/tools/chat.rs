@@ -139,6 +139,7 @@ pub fn markdown(s: &Value) -> String {
         s["title"].as_str().unwrap_or(""),
         s["id"].as_str().unwrap_or("")
     );
+    if let Some(note)=s["note"].as_str().filter(|note|!note.is_empty()){out.push_str(&format!("备注：{note}\n\n"));}
     out.push_str(&group::markdown(s,None));
     if let Some(messages) = s["messages"].as_array() {
         for m in messages {
@@ -614,7 +615,7 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
                     return Err(err("Message ID conflicts with an existing message"));
                 }
             } else {
-                if !s["messages"].as_array().unwrap().iter().any(|m| m["role"] == "user" && m["kind"] != "connection_request") && s["title_custom"] != true {
+                if !s["messages"].as_array().unwrap().iter().any(|m| m["role"] == "user" && m["kind"] != "connection_request") && s["title_custom"] != true && s["title_agent_name"].as_str().is_none() {
                     s["title"] = json!(content
                         .split_whitespace()
                         .collect::<Vec<_>>()
@@ -640,6 +641,11 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
             let chat_id = id(&s["id"])?.to_string();
             delete_session_files(root, &chat_id)?;
             return Ok(json!({"deleted":true,"chat_id":chat_id}));
+        }
+        "set_note" => {
+            let note=args["note"].as_str().filter(|note|note.len()<=1000).ok_or_else(||err("Note must be a string of at most 1000 bytes"))?;
+            let note=if note.trim().is_empty(){String::new()}else{text(&args["note"],1000)?.split_whitespace().collect::<Vec<_>>().join(" ")};
+            s["note"]=json!(note);s["updated_at"]=json!(now());save(root,&s)?;
         }
         "rename" => {
             let title = text(&args["title"], 240)?;
@@ -714,6 +720,22 @@ fn owned(s: &Value, args: &Value) -> Result<()> {
     }
     Ok(())
 }
+// Allocate while holding the folder storage lock; keep names stable on resume.
+fn assign_agent_title(root:&Path,s:&mut Value,name:&str)->Result<()> {
+    if name.is_empty()||s["title_custom"]==true||s["title_agent_name"]==name{return Ok(());}
+    let mut occupied=std::collections::HashSet::new();
+    for entry in fs::read_dir(safe(root,DIR)?).map_err(io)? {
+        let filename=entry.map_err(io)?.file_name().to_string_lossy().to_string();
+        if let Some(cid)=filename.strip_suffix(".json").filter(|cid|id(&json!(cid)).is_ok()) {
+            if s["id"]==cid{continue;}
+            let other=load(root,cid)?;
+            if let Some(title)=other["title"].as_str(){occupied.insert(title.to_string());}
+        }
+    }
+    let mut candidate=name.to_string();let mut index=2;
+    while occupied.contains(&candidate){candidate=format!("{name}{index}");index+=1;}
+    s["title"]=json!(candidate);s["title_agent_name"]=json!(name);s["updated_at"]=json!(now());Ok(())
+}
 pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
     let _lock = lock(root)?;
     let mut s = load(root, id(&args["chat_id"])?)?;
@@ -721,7 +743,7 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
         return Ok(json!({"ok":true,"status":"closed"}));
     }
     if name == "chat_open" {
-        if group::grouped(&s){let member=group::open(&mut s,args)?;group::bind_targets(&mut s);save(root,&s)?;return Ok(json!({"ok":true,"attachment_id":member["attachment_id"],"agent_id":member["id"],"role":member["role"],"session":view(root,&s)?,"instruction":"Read skill.text; reply only to your delivered message IDs. Call chat_wait.","skill":local_chat_skill()}));}
+        if group::grouped(&s){let member=group::open(&mut s,args)?;if member["role"]=="coordinator"{assign_agent_title(root,&mut s,member["name"].as_str().unwrap_or(""))?;}group::bind_targets(&mut s);save(root,&s)?;return Ok(json!({"ok":true,"attachment_id":member["attachment_id"],"agent_id":member["id"],"role":member["role"],"session":view(root,&s)?,"instruction":"Read skill.text; reply only to your delivered message IDs. Call chat_wait.","skill":local_chat_skill()}));}
         if args.get("agent_name").is_some(){s["agent_name"]=json!(group::member_name(&args["agent_name"])?);}
 
         // Keepalive: the saved attachment_id always resumes, even after the lease
@@ -739,6 +761,7 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
         if !resuming {
             s["attachment_id"] = json!(uuid::Uuid::new_v4().to_string());
         }
+        let agent_name=s["agent_name"].as_str().unwrap_or("").to_string();assign_agent_title(root,&mut s,&agent_name)?;
         group::renew(&mut s,args)?;
         save(root, &s)?;
         return Ok(
@@ -1749,4 +1772,47 @@ pub fn plan(root:&Path,name:&str,args:&Value)->Result<Value>{
  else if next.is_null(){stored.as_object_mut().unwrap().remove("task_plan");}else{stored["task_plan"]=next.clone();}
  session["updated_at"]=json!(now());group::renew(&mut session,args)?;save(root,&session)?;
  let mut result=json!({"ok":true,"persisted":true,"chat_id":session["id"],"reply_to":reply_to,"plan":super::chat_plan::summary(&next)});if name=="report_progress"{result["progress"]=next["progress"].clone();}Ok(result)
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    use super::*;
+    fn create(root: &Path) -> String {
+        ui(root, &json!({"action":"create"})).unwrap()["session"]["id"].as_str().unwrap().into()
+    }
+    fn read(root: &Path, cid: &str) -> Value {
+        ui(root, &json!({"action":"read","chat_id":cid})).unwrap()["session"].clone()
+    }
+    fn open(root: &Path, cid: &str, name: &str) -> Value {
+        tool(root,"chat_open",&json!({"chat_id":cid,"agent_name":name})).unwrap()
+    }
+    #[test]
+    fn agent_names_reuse_gaps_and_preserve_resumes_and_custom_titles() {
+        let temp=tempfile::tempdir().unwrap();let root=temp.path();
+        let a=create(root);let b=create(root);let c=create(root);
+        let first=open(root,&a,"CodeRabbit");open(root,&b,"CodeRabbit");open(root,&c,"CodeRabbit");
+        assert_eq!(read(root,&a)["title"],"CodeRabbit");assert_eq!(read(root,&b)["title"],"CodeRabbit2");assert_eq!(read(root,&c)["title"],"CodeRabbit3");
+        ui(root,&json!({"action":"send","chat_id":b,"message_id":"u","text":"Keep the AI title"})).unwrap();assert_eq!(read(root,&b)["title"],"CodeRabbit2");
+        ui(root,&json!({"action":"detach","chat_id":b})).unwrap();ui(root,&json!({"action":"delete","chat_id":b})).unwrap();let d=create(root);assert_eq!(open(root,&d,"CodeRabbit")["session"]["title"],"CodeRabbit2");assert_eq!(read(root,&c)["title"],"CodeRabbit3");
+        let resumed=tool(root,"chat_open",&json!({"chat_id":a,"attachment_id":first["attachment_id"]})).unwrap();assert_eq!(resumed["session"]["title"],"CodeRabbit");
+        assert!(tool(root,"chat_open",&json!({"chat_id":a,"agent_name":"OtherAI"})).is_err());assert_eq!(read(root,&a)["agent_name"],"CodeRabbit");
+        ui(root,&json!({"action":"rename","chat_id":c,"title":"My title"})).unwrap();ui(root,&json!({"action":"detach","chat_id":c})).unwrap();assert_eq!(open(root,&c,"OtherAI")["session"]["title"],"My title");
+    }
+    #[test]
+    fn group_names_reserve_archived_titles_and_ignore_members() {
+        let temp=tempfile::tempdir().unwrap();let root=temp.path();let a=create(root);
+        ui(root,&json!({"action":"rename","chat_id":a,"title":"CodeRabbit"})).unwrap();ui(root,&json!({"action":"archive","chat_id":a,"archived":true})).unwrap();
+        let g=ui(root,&json!({"action":"create","mode":"group"})).unwrap()["session"]["id"].as_str().unwrap().to_string();let chief=open(root,&g,"CodeRabbit");assert_eq!(chief["session"]["title"],"CodeRabbit2");open(root,&g,"Helper");assert_eq!(read(root,&g)["title"],"CodeRabbit2");
+        assert_eq!(tool(root,"chat_open",&json!({"chat_id":g,"attachment_id":chief["attachment_id"]})).unwrap()["session"]["title"],"CodeRabbit2");
+    }
+    #[test]
+    fn note_roundtrip_does_not_change_title_messages_or_identity() {
+        let temp=tempfile::tempdir().unwrap();let root=temp.path();let cid=create(root);open(root,&cid,"CodeRabbit");
+        ui(root,&json!({"action":"send","chat_id":cid,"message_id":"u","text":"Original"})).unwrap();let before=load(root,&cid).unwrap();
+        let updated=ui(root,&json!({"action":"set_note","chat_id":cid,"note":"  构建\n 服务  "})).unwrap();assert_eq!(updated["session"]["note"],"构建 服务");
+        let saved=load(root,&cid).unwrap();for field in ["title","messages","attachment_id"]{assert_eq!(saved[field],before[field]);}
+        assert_eq!(ui(root,&json!({"action":"list"})).unwrap()["sessions"][0]["note"],"构建 服务");assert!(markdown(&saved).contains("备注：构建 服务"));
+        for note in [Value::Null,json!(3),json!("中".repeat(334))]{assert!(ui(root,&json!({"action":"set_note","chat_id":cid,"note":note})).is_err());}
+        assert_eq!(read(root,&cid)["note"],"构建 服务");ui(root,&json!({"action":"set_note","chat_id":cid,"note":""})).unwrap();assert_eq!(read(root,&cid)["note"],"");
+    }
 }

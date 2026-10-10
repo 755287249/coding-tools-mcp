@@ -4189,7 +4189,7 @@ html.is-glass .project-sidebar{background:rgb(var(--glass-base) / var(--glass-al
 html.is-glass .connect-dialog{background:rgb(var(--glass-base) / .96)}
 
 /* Floating text must remain legible above the native wallpaper and transcript. */
-html.is-glass .project-info-card,html.is-glass .conversation-picker,html.is-glass .outline-preview{background:rgb(var(--glass-base) / .97);backdrop-filter:blur(20px)}
+html.is-glass .project-info-card,html.is-glass .conversation-picker,html.is-glass .outline-preview,html.is-glass .chat-actions-menu,html.is-glass .recent-menu{background:var(--surface-2);backdrop-filter:none}
 
 /* Keep mobile browser text sizing stable without disabling user zoom. */
 html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
