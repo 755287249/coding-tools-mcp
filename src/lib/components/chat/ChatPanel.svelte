@@ -36,12 +36,17 @@
   import { chatDrafts, chatDraftKey, conversationAccent } from '$lib/chat/drafts';
   import { createSessionCache, sessionCacheKey } from '$lib/chat/session-cache';
   import { groupChatMessages } from '$lib/chat/tool-activity';
-  import ChatMarkdown from './ChatMarkdown.svelte';
+  import MessageText from './MessageText.svelte';
+  import MessageEditor from './MessageEditor.svelte';
+  import ShareMessageDialog from './ShareMessageDialog.svelte';
+  import Share2 from '@lucide/svelte/icons/share-2';
+  import {messageClipboardText} from '$lib/chat/message-actions';
+  import {createDraftHistory, type DraftSnapshot} from '$lib/chat/draft-history';
   import ChatReplyState from './ChatReplyState.svelte';
   import ChatUserState from './ChatUserState.svelte';
   import ChatStatusIcon from './ChatStatusIcon.svelte';
   import ChatAttachment from './ChatAttachment.svelte';
-  import { localChat, type ChatSession, type ChatFile, type ChatAction } from '$lib/api/chat';
+  import { localChat, type ChatSession, type ChatFile, type ChatAction, type ChatMessage } from '$lib/api/chat';
   import { getBackend, loadMcpAuthSecrets } from '$lib/backend';
   import { buildConnectionPrompt } from '$lib/connect/prompt';
   import { buildChatPrompt } from '$lib/connect/chat-prompt';
@@ -83,6 +88,11 @@
   let readSequence = 0;
   let readError = '';
   let draft = $state('');
+  const draftHistory=createDraftHistory();
+  let historyScope='',composingDraft=false;
+  let editingMessage=$state(''),copiedMessage=$state('');
+  let shareMessage=$state<ChatMessage|null>(null);
+  $effect(()=>{const scope=[workspaceId,folderId,selected];editingMessage='';copiedMessage='';shareMessage=null;});
   let draftStorageError = $state(false);
   let activeDraftKey = '';
   let error = $state('');
@@ -119,6 +129,7 @@
   }
   function composerKeys(event: KeyboardEvent) {
     if(event.isComposing)return;
+    if(draftHistoryKeys(event))return;
     if(mention && (choices.length || hasMoreMentions)){
       if(event.key==='ArrowDown'||event.key==='ArrowUp'){event.preventDefault();mentionIndex=(mentionIndex+(event.key==='ArrowDown'?1:-1)+choices.length+Number(hasMoreMentions))%(choices.length+Number(hasMoreMentions));return;}
       if(event.key==='Enter'||event.key==='Tab'){event.preventDefault();if(hasMoreMentions && mentionIndex===choices.length){mentionHistoryExpanded=true;}else{insertMention(choices[mentionIndex] ?? choices[0]);}return;}
@@ -130,6 +141,7 @@
     attachments=attachments.filter(f=>f.id!==file.id);
     if(file.label)draft=draft.replace(new RegExp('@'+file.label+'(?![0-9])','g'),'');
     persistDraft();
+    void tick().then(()=>composer?.focus({preventScroll:true}));
   }
   let column = $state<HTMLDivElement>();
   let following = $state(true);
@@ -318,8 +330,29 @@
     if (target.id !== selected) await choose(target);
     await tick(); toBottom();
   }
-  function persistDraft() {
-    if (activeDraftKey) draftStorageError = !chatDrafts.save(activeDraftKey, { text: draft, attachments, retry });
+  function draftSnapshot():DraftSnapshot {return {text:draft,attachments,start:composer?.selectionStart??draft.length,end:composer?.selectionEnd??draft.length};}
+  function resetDraftHistory(){historyScope=activeDraftKey;draftHistory.reset(draftSnapshot());}
+  function persistDraft(kind:'typing'|'action'='action') {
+    if (activeDraftKey) {
+      if(historyScope!==activeDraftKey)resetDraftHistory();else if(!composingDraft)draftHistory.record(draftSnapshot(),kind==='typing');
+      draftStorageError = !chatDrafts.save(activeDraftKey, { text: draft, attachments, retry });
+    }
+  }
+  function draftHistoryKeys(event:KeyboardEvent):boolean {
+    if(event.defaultPrevented||event.isComposing||!(event.ctrlKey||event.metaKey)||event.altKey||busy&&!uploading)return false;
+    const key=event.key.toLowerCase();if(key!=='z'&&key!=='y')return false;
+    event.preventDefault();
+    const next=key==='y'||event.shiftKey?draftHistory.redo():draftHistory.undo();
+    if(next){draft=next.text;attachments=next.attachments;caret=next.start;mentionFocused=false;draftStorageError=!chatDrafts.save(activeDraftKey,{text:draft,attachments,retry});void tick().then(()=>{composer?.focus({preventScroll:true});composer?.setSelectionRange(next.start,next.end)});}
+    return true;
+  }
+  async function copyMessage(message:ChatMessage){const scope=currentScope;try{await copyText(messageClipboardText(message));if(scope===currentScope)copiedMessage=message.id;}catch(e){if(scope===currentScope)error=String(e);}}
+  async function resendMessage(message:ChatMessage,text:string,id:string):Promise<boolean>{
+    if(busy||!selected||!detail||detail.closed)return false;
+    if(messageBytes(text)>32000){error=$t('chat.tooLong');return false;}
+    const scope=currentScope,ws=workspaceId,folder=folderId,chat=selected;busy=true;error='';
+    try{const result=await localChat(ws,folder,{action:'send',chat_id:chat,message_id:id,text,attachment_ids:(message.attachments??[]).map(file=>file.id)});if(scope!==currentScope)return false;readSequence++;detail=result.session??detail;await tick();toBottom();return true;}
+    catch(e){if(scope===currentScope)error=String(e);return false;}finally{busy=false;}
   }
   function activateDraft(ws: string, folder: string, chat: string) {
     const key = chatDraftKey(ws, folder, chat);
@@ -329,6 +362,7 @@
     const saved = chatDrafts.load(key);
     draft = saved.draft.text; attachments = saved.draft.attachments; retry = saved.draft.retry;
     draftStorageError = !saved.persisted;
+    resetDraftHistory();
   }
   onDestroy(persistDraft);
   function rememberDetail() {
@@ -468,7 +502,7 @@
       if (gen !== generation || selected !== target) return;
       readSequence++;
       detail = result.session ?? null;
-      if (cleared.cleared) { draft = ''; retry = null; attachments = []; draftStorageError = !cleared.persisted; }
+      if (cleared.cleared) { draft = ''; retry = null; attachments = []; draftStorageError = !cleared.persisted; resetDraftHistory(); }
       guide = false;
       await tick(); toBottom();
       onNavigate?.(folderId, target);
@@ -488,13 +522,14 @@
       if (gen !== generation || selected !== chat) return;
       if (result.attachment && !attachments.some(file => file.id === result.attachment?.id)) attachments = [...attachments, result.attachment];
       persistDraft(); referenceOpen = false; referenceInput = ''; referenceRetry = null;
+      void tick().then(()=>composer?.focus({preventScroll:true}));
     } catch (e) { if (gen === generation) { error = String(e); referenceInput = source; referenceOpen = true; } }
     finally { busy = false; uploading = false; }
   }
   async function attachLibraryFile(file:ChatFile, sourceChat:string) {
     if(busy||!folderId||detail?.closed)return;
     if(file.path.startsWith('mcp-assistant/artifacts/')){referenceInput=file.path;await attachReference();return;}
-    if(sourceChat===selected){if(!attachments.some(item=>item.id===file.id))attachments=[...attachments,file];persistDraft();return;}
+    if(sourceChat===selected){if(!attachments.some(item=>item.id===file.id))attachments=[...attachments,file];persistDraft();void tick().then(()=>composer?.focus({preventScroll:true}));return;}
     const gen=generation,ws=workspaceId,folder=folderId;
     busy=true;uploading=true;error='';
     try {
@@ -565,8 +600,9 @@
   });
 </script>
 
+{#if shareMessage}<ShareMessageDialog message={shareMessage} {workspaceId} {folderId} chatId={selected} onClose={()=>shareMessage=null}/>{/if}
 <svelte:document onvisibilitychange={markRead}/>
-<svelte:window onpagehide={persistDraft}/>
+<svelte:window onpagehide={()=>persistDraft()} onkeydown={event=>{if(event.target instanceof Node&&composer?.closest('form')?.contains(event.target))draftHistoryKeys(event);}}/>
 <section class="chat-shell" class:group-mode={mode==='group'} class:tasks-visible={tasksOpen} style:--chat-task-width={`${tasksWidth}px`} class:external-navigation={externalNavigation} class:landing={emptyComposer} aria-label={$t("chat.35")}>
   {#if !externalNavigation}<aside class="session-sidebar">
     <div class="sidebar-heading"><span>{$t("chat.0")}</span><span class="beta">{$t("chat.48")}</span></div>
@@ -611,7 +647,7 @@
     <div class="message-feed" bind:this={feed} onscroll={updateScroll} aria-busy={loadingDetail}>
       {#if selected && !detail}<div class="chat-loading" role="status">{loadingDetail ? $t("Loading…") : error}</div>
       {:else if !messages.length}<div class="empty-state"><h2>{$t('chat.102')}</h2></div>
-      {:else}<div class="message-column" bind:this={column}>{#each feedItems as item (item.id)}{#if item.kind === 'tools'}<article class="assistant grouped-tools"><div class="message-meta">{item.messages[0]?.agent_name ?? 'AI'} · {$t("chat.54")}</div><div class="message-body"><ChatToolActivity messages={item.messages} settled={item.settled} {workspaceId} {folderId} chatId={selected}/></div></article>{:else}{@const m = item.message}<article data-user-message={m.role === 'user' ? m.id : undefined} tabindex="-1" class:user={m.role === 'user'} class:assistant={m.role === 'assistant'}><div class="message-meta">{m.role === 'user' ? $t('chat.26') : m.agent_name ?? detail?.agent_name ?? (m.final === false ? $t('chat.27') : 'AI')}<time>{new Date(m.created_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</time></div>{#if (m.attachments??[]).some(file=>file.mime.startsWith('image/'))}<div class="message-images"><div class="image-strip">{#each (m.attachments??[]).filter(file=>file.mime.startsWith('image/')) as file (workspaceId+":"+folderId+":"+selected+":"+file.id+":"+file.sha256)}<ChatAttachment {workspaceId} {folderId} chatId={selected} {file}/>{/each}</div></div>{/if}<div class="message-body" class:image-only={!m.text.trim()&&!(m.attachments??[]).some(file=>!file.mime.startsWith('image/'))}><ChatMarkdown text={m.text} attachments={m.attachments ?? []} {workspaceId} {folderId} chatId={selected}/>{#each (m.attachments??[]).filter(file=>!file.mime.startsWith('image/')) as file (workspaceId + ":" + folderId + ":" + selected + ":" + file.id)}<ChatAttachment {workspaceId} {folderId} chatId={selected} {file}/>{/each}<ChatReplyState state={chatReplyState(detail, m.id)}/><ChatUserState state={chatUserState(detail, m.id)}/></div></article>{/if}{/each}{#if pendingState}<div class="pending" class:processing={pendingState === 'processing'} role="status" aria-live="polite"><ChatStatusIcon state={pendingState} label={pendingState === 'awaiting_user' ? $t('chat.73') : pendingState === 'processing' ? $t('chat.70') : pendingState === 'interrupted' ? $t('chat.71') : $t('chat.29')}/>{pendingState === 'awaiting_user' ? $t('chat.73') : pendingState === 'processing' ? $t('chat.70') : pendingState === 'interrupted' ? $t('chat.71') : $t('chat.29')}</div>{/if}</div>{/if}
+      {:else}<div class="message-column" bind:this={column}>{#each feedItems as item (item.id)}{#if item.kind === 'tools'}<article class="assistant grouped-tools"><div class="message-meta">{item.messages[0]?.agent_name ?? 'AI'} · {$t("chat.54")}</div><div class="message-body"><ChatToolActivity messages={item.messages} settled={item.settled} {workspaceId} {folderId} chatId={selected}/></div></article>{:else}{@const m = item.message}<article data-user-message={m.role === 'user' ? m.id : undefined} tabindex="-1" class:user={m.role === 'user'} class:assistant={m.role === 'assistant'}><div class="message-meta">{m.role === 'user' ? $t('chat.26') : m.agent_name ?? detail?.agent_name ?? (m.final === false ? $t('chat.27') : 'AI')}<time>{new Date(m.created_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</time></div>{#if (m.attachments??[]).some(file=>file.mime.startsWith('image/'))}<div class="message-images"><div class="image-strip">{#each (m.attachments??[]).filter(file=>file.mime.startsWith('image/')) as file (workspaceId+":"+folderId+":"+selected+":"+file.id+":"+file.sha256)}<ChatAttachment {workspaceId} {folderId} chatId={selected} {file}/>{/each}</div></div>{/if}<div class="message-body" class:image-only={!m.text.trim()&&!(m.attachments??[]).some(file=>!file.mime.startsWith('image/'))}>{#if editingMessage===m.id}<MessageEditor text={m.text} hasAttachments={!!m.attachments?.length} onSend={(text:string,id:string)=>resendMessage(m,text,id)} onCancel={()=>editingMessage=''}/>{:else}<MessageText text={m.text} attachments={m.attachments ?? []} {workspaceId} {folderId} chatId={selected} collapsible={m.role==='user'}/>{/if}{#each (m.attachments??[]).filter(file=>!file.mime.startsWith('image/')) as file (workspaceId + ":" + folderId + ":" + selected + ":" + file.id)}<ChatAttachment {workspaceId} {folderId} chatId={selected} {file}/>{/each}<ChatReplyState state={chatReplyState(detail, m.id)}/><ChatUserState state={chatUserState(detail, m.id)}/></div>{#if editingMessage!==m.id}<div class="message-actions"><button type="button" title={$t('chat.copyMessage')} aria-label={$t('chat.copyMessage')} onclick={()=>copyMessage(m)}>{#if copiedMessage===m.id}<Check size={15}/>{:else}<Copy size={15}/>{/if}</button>{#if m.role==='user'}<button type="button" title={$t('chat.editMessage')} aria-label={$t('chat.editMessage')} disabled={busy||!!detail?.closed} onclick={()=>editingMessage=m.id}><Pencil size={15}/></button>{:else}<button type="button" title={$t('chat.shareMessage')} aria-label={$t('chat.shareMessage')} onclick={()=>shareMessage=m}><Share2 size={15}/></button>{/if}</div>{/if}</article>{/if}{/each}{#if pendingState}<div class="pending" class:processing={pendingState === 'processing'} role="status" aria-live="polite"><ChatStatusIcon state={pendingState} label={pendingState === 'awaiting_user' ? $t('chat.73') : pendingState === 'processing' ? $t('chat.70') : pendingState === 'interrupted' ? $t('chat.71') : $t('chat.29')}/>{pendingState === 'awaiting_user' ? $t('chat.73') : pendingState === 'processing' ? $t('chat.70') : pendingState === 'interrupted' ? $t('chat.71') : $t('chat.29')}</div>{/if}</div>{/if}
     </div>
     <ChatOutline {messages} activeId={activeMessage} onSelect={jumpToMessage}/>
     </div>
@@ -627,7 +663,7 @@
             {#each detail.queued_messages as item,i (item.id)}<details class="queued-card"><summary><span>{$t('chat.queueItem')} {i+1}</span><span>{item.text}</span></summary><div><p>{item.text}</p>{#if item.attachments?.length}<small>{item.attachments.map(f=>f.label??f.name).join(' · ')}</small>{/if}</div></details>{/each}
           {/if}
         </div>
-      </div>{/if}{#if referenceOpen}<div class="reference-input"><input aria-label={$t('chat.123')} placeholder="mcp-assistant/artifacts/file.png" bind:value={referenceInput} disabled={busy} onkeydown={event=>{if(event.key==='Enter'){event.preventDefault();void attachReference()}}}/><button type="button" onclick={attachReference} disabled={busy||!referenceInput.trim()}>{$t('chat.122')}</button></div>{/if}<div class="bottom-control" class:at-bottom={following}><button type="button" class="jump-bottom" onclick={toBottom} title={$t('chat.96')} aria-label={$t('chat.96')} aria-pressed={following}><ArrowDown size={16}/></button></div><form onsubmit={(e) => { e.preventDefault(); void send(); }}>{#if attachments.length}<div class="draft-files">{#each attachments as file (file.id)}<DraftAttachment {file} {workspaceId} {folderId} chatId={selected} disabled={busy} onRemove={()=>removeAttachment(file)}/>{/each}</div>{/if}<div class="composer-input"><div class="mention-input"><div class="draft-highlight" bind:this={draftHighlight} aria-hidden="true">{#each highlightedDraft as part}{#if part.file}<span class="attachment-mention">{part.text}</span>{:else}{part.text}{/if}{/each}{'\n'}</div><textarea use:autoGrow={[draft, mode]} bind:this={composer} aria-label={$t("chat.39")} bind:value={draft} oninput={(event) => { draft = event.currentTarget.value; updateCaret(); mentionFocused=true; persistDraft(); }} onfocus={()=>{mentionFocused=true;updateCaret()}} onblur={()=>mentionFocused=false} onclick={()=>{mentionFocused=true;updateCaret()}} onkeyup={updateCaret} onscroll={()=>{if(draftHighlight){draftHighlight.scrollTop=composer.scrollTop;draftHighlight.scrollLeft=composer.scrollLeft}}} onpaste={pasteImages} placeholder={!workspaceId ? $t('chat.selectWorkspace') : detail?.closed ? $t('chat.30') : $t('chat.31')} disabled={!folderId || detail?.closed || (busy && !uploading)} onkeydown={composerKeys} rows={mode==='group'?1:3} aria-autocomplete="list" aria-controls="attachment-choices"></textarea></div>{#if mention && (choices.length || hasMoreMentions)}<div class="mention-choices" id="attachment-choices" role="listbox" aria-label={$t('chat.attachmentChoices')}>
+      </div>{/if}{#if referenceOpen}<div class="reference-input"><input aria-label={$t('chat.123')} placeholder="mcp-assistant/artifacts/file.png" bind:value={referenceInput} disabled={busy} onkeydown={event=>{if(event.key==='Enter'){event.preventDefault();void attachReference()}}}/><button type="button" onclick={attachReference} disabled={busy||!referenceInput.trim()}>{$t('chat.122')}</button></div>{/if}<div class="bottom-control" class:at-bottom={following}><button type="button" class="jump-bottom" onclick={toBottom} title={$t('chat.96')} aria-label={$t('chat.96')} aria-pressed={following}><ArrowDown size={16}/></button></div><form onsubmit={(e) => { e.preventDefault(); void send(); }}>{#if attachments.length}<div class="draft-files">{#each attachments as file (file.id)}<DraftAttachment {file} {workspaceId} {folderId} chatId={selected} disabled={busy} onRemove={()=>removeAttachment(file)}/>{/each}</div>{/if}<div class="composer-input"><div class="mention-input"><div class="draft-highlight" bind:this={draftHighlight} aria-hidden="true">{#each highlightedDraft as part}{#if part.file}<span class="attachment-mention">{part.text}</span>{:else}{part.text}{/if}{/each}{'\n'}</div><textarea use:autoGrow={[draft, mode]} bind:this={composer} aria-label={$t("chat.39")} bind:value={draft} oninput={(event) => { draft = event.currentTarget.value; updateCaret(); mentionFocused=true; persistDraft(event instanceof InputEvent&&(event.inputType==='insertFromPaste'||event.inputType==='deleteByCut')?'action':'typing'); }} onbeforeinput={()=>{if(!composingDraft)draftHistory.record(draftSnapshot())}} oncompositionstart={()=>{draftHistory.record(draftSnapshot());composingDraft=true}} oncompositionend={()=>{composingDraft=false;persistDraft()}} onfocus={()=>{mentionFocused=true;updateCaret()}} onblur={()=>mentionFocused=false} onclick={()=>{mentionFocused=true;updateCaret()}} onkeyup={updateCaret} onscroll={()=>{if(draftHighlight){draftHighlight.scrollTop=composer.scrollTop;draftHighlight.scrollLeft=composer.scrollLeft}}} onpaste={pasteImages} placeholder={!workspaceId ? $t('chat.selectWorkspace') : detail?.closed ? $t('chat.30') : $t('chat.31')} disabled={!folderId || detail?.closed || (busy && !uploading)} onkeydown={composerKeys} rows={mode==='group'?1:3} aria-autocomplete="list" aria-controls="attachment-choices"></textarea></div>{#if mention && (choices.length || hasMoreMentions)}<div class="mention-choices" id="attachment-choices" role="listbox" aria-label={$t('chat.attachmentChoices')}>
   <div role="group" aria-label={$t('chat.currentAttachments')}>
     <p class="mention-section-title">{$t('chat.currentAttachments')}</p>
     {#each mentionGroups.current as file,i (file.id)}{@render mentionOption(file,i)}{:else}<p class="mention-empty">{$t('chat.noCurrentAttachments')}</p>{/each}
@@ -768,4 +804,5 @@
 
 .mobile-action-list{display:grid;gap:3px;padding:0 16px 16px}.mobile-action-list>button,.mobile-extra-actions :global(button){display:flex;align-items:center;justify-content:flex-start;gap:13px;width:100%;min-height:44px;height:auto;padding:10px 12px;border-radius:12px;color:var(--color-text);font-size:13px;text-align:left}.mobile-action-list>button:hover:enabled,.mobile-extra-actions :global(button:hover){background:var(--surface-hover)}.mobile-extra-actions :global(button[aria-label])::after{content:attr(aria-label)}.mobile-extra-actions{display:grid;gap:3px;border-top:1px solid var(--color-border);margin-top:5px;padding-top:5px}.mobile-rename{padding:4px 22px 22px}.mobile-rename input{width:100%;padding:12px;border:1px solid var(--color-border);border-radius:10px;background:var(--surface-2);font-size:16px;color:var(--color-text)}.mobile-rename>div{display:flex;justify-content:flex-end;gap:12px;margin-top:16px}.mobile-rename button{padding:8px 15px;border-radius:9px;background:var(--surface-hover);font-size:13px}.mobile-rename p{font-size:12px;color:var(--danger);padding-top:10px}
 @media(max-width:700px){.chat-header.mobile-header-shared{display:none}}
+.message-actions{display:flex;gap:5px;margin-top:5px;color:var(--color-text-muted)}.user .message-actions{justify-content:flex-end}.message-actions button{display:grid;place-items:center;width:29px;height:28px;border-radius:6px}.message-actions button:hover{background:var(--surface-hover);color:var(--color-text)}
 </style>
