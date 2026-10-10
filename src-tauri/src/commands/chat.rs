@@ -18,12 +18,5 @@ pub fn local_chat(
             .map(|folder| std::path::PathBuf::from(&folder.path))
             .ok_or_else(|| AppError::Message("Select a configured folder".into()))
     })?;
-    if matches!(args["action"].as_str(),Some("prepare_compat" | "revoke_compat")) {
-        if args["action"]=="prepare_compat" {
-            let ctx=crate::tools::hub::resolve_profile_folder_context(&id,&folder_id).map_err(AppError::Message)?;
-            crate::tools::chat::compat::check_policy(&ctx).map_err(|e|AppError::Message(e.message()))?;
-        }
-        return crate::tools::chat::compat::management(&root,&id,&folder_id,&args).map_err(|e|AppError::Message(e.message()));
-    }
     crate::tools::chat::ui(&root, &args).map_err(|e| AppError::Message(e.message()))
 }

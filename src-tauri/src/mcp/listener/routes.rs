@@ -1,4 +1,4 @@
-use axum::routing::{get, post, any};
+use axum::routing::{get, post};
 use axum::Router;
 
 use super::{
@@ -49,7 +49,6 @@ fn service_routes_for_prefix(prefix: &str) -> Router<ListenerState> {
     Router::new()
         .route(&mcp, get(mcp_get).post(mcp_post).delete(mcp_delete))
         .route(&mcp_info_path, get(mcp_info))
-        .route(&prefixed_route(prefix, "/mcp/chat-compat"), any(super::chat_compat::handle))
         .route(&prefixed_route(prefix, "/mcp/pairing"), post(pairing_intent))
         .route(
             &authorize,

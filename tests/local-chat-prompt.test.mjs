@@ -10,12 +10,12 @@ test('session target round-trips quotes and newlines as one JSON line', () => {
   const target = prompt.split('\n').find(line => line.startsWith('目标参数'));
   assert.deepEqual(JSON.parse(target.slice(target.indexOf('{'))), { chat_id: chat, workspace_folder_id: folder });
   assert.match(prompt, /chat_open/);
-  assert.match(prompt, /list_workspace_folders/);
+  assert.match(prompt, /遵循服务端instructions/);
   assert.match(prompt, /skill.text/);
-  assert.match(prompt, /chat_wait\/chat_reply 均为服务端工具/);
-  assert.match(prompt, /立即 chat_wait/);
-  assert.match(prompt, /随后再次 chat_wait/);
-  assert.match(prompt, /空闲\/任务完成继续/);
+  assert.match(prompt, /工具均在服务端/);
+  assert.match(prompt, /立即chat_wait/);
+  assert.match(prompt, /持续对话由Skill指导/);
+  assert.doesNotMatch(prompt, /压缩后|空闲|任务完成|用户明确结束/);
   assert.ok(prompt.length < 400, 'copied session guidance should delegate details to the skill');
 });
 
@@ -81,13 +81,11 @@ test('compact chat connection retains authentication bootstrap without the manua
     for (const authType of ['oauth', 'bearer', 'none']) {
       const prompt = buildConnectionPrompt({ ...info, authType }, locale, true);
       assert.ok(prompt.includes(`User-Agent: ${MCP_USER_AGENT}`));
-      assert.match(prompt, /notifications\/initialized/);
-      assert.match(prompt, /tools\/list/);
-      assert.match(prompt, /list_workspace_folders/);
-      assert.match(prompt, /MCP-Protocol-Version/);
+      assert.match(prompt, /instructions/);
+      assert.doesNotMatch(prompt, /notifications\/initialized|tools\/list|list_workspace_folders|MCP-Protocol-Version/);
       assert.ok(prompt.length < buildConnectionPrompt({ ...info, authType }, locale).length);
       if (authType === 'oauth') {
-        for (const value of [MANUAL_OAUTH_REDIRECT_URI, 'S256', 'state', 'refresh_token', info.clientId, info.password]) assert.ok(prompt.includes(value));
+        for (const value of [MANUAL_OAUTH_REDIRECT_URI, 'S256', 'state', info.clientId, info.password]) assert.ok(prompt.includes(value));
         assert.ok(!prompt.includes(info.bearerToken));
       } else {
         assert.doesNotMatch(prompt, /redirect_uri/);
@@ -99,9 +97,9 @@ test('compact chat connection retains authentication bootstrap without the manua
       const target = full.split('\n').find(line => line.startsWith('目标参数'));
       assert.deepEqual(JSON.parse(target.slice(target.indexOf('{'))), { chat_id: '00000000-0000-0000-0000-000000000000', workspace_folder_id: 'f'.repeat(32) });
       // Bound the entire copied prompt, including pairing/auth/target, not just its final paragraph.
-      assert.ok(full.length <= (locale.startsWith('zh') ? 950 : 1200), `${locale}/${authType}: ${full.length}`);
-      assert.match(full, /skill.text→立即 chat_wait/);
-      assert.match(full, /chat_reply，随后再次 chat_wait/);
+      assert.ok(full.length <= (locale.startsWith('zh') ? 700 : 860), `${locale}/${authType}: ${full.length}`);
+      assert.match(full, /完整执行skill.text，立即chat_wait/);
+      assert.match(full, /持续对话由Skill指导/);
     }
   }
 });

@@ -14,7 +14,6 @@
   import ChatTaskPanel from './ChatTaskPanel.svelte';
   import { getRuntimeStatus } from '$lib/api/workspaces';
   import { taskPlanMarkdown } from '$lib/chat/task-state';
-  import ChatGetCompat from './ChatGetCompat.svelte';
   import DraftAttachment from './DraftAttachment.svelte';
   import { IMAGE_GALLERY, conversationImages, attachmentImages } from '$lib/chat/image-gallery';
   import { uploadLocalFile } from '$lib/chat/attachment-transfer';
@@ -791,7 +790,6 @@
 <dialog class="connect-dialog" bind:this={connectDialog} onclose={() => { guide = false; connectionPrompt = ''; }}>
   <header><h2>{$t(mode==='group'?'chat.inviteGroup':'chat.connectWork')}</h2><button aria-label={$t('Close')} onclick={()=>guide=false}><X size={18}/></button></header>
   <p>{$t('chat.sendInstruction')}</p>
-  {#if mode!=='group' && selected && folderId}{#key currentScope}<ChatGetCompat {workspaceId} {folderId} chatId={selected} {endpoint}/>{/key}{/if}
   {#if copied || intentReceived || connectionPeer}
     <div class="pairing-progress" role="status" aria-live="polite">
       <span class="pairing-orbit" class:active={intentReceived||!!connectionPeer} aria-hidden="true"><i></i></span>

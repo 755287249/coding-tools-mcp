@@ -1,10 +1,4 @@
 export const MESSAGES = {
-  "chat.getTrial": ["GET/file chat trial", "GET／檔案會話試驗", "GET/文件会话试验", "GET／ファイル会話試験"],
-  "chat.getTrialHint": ["For clients that can only download URLs. Authorizes this conversation for 30 minutes; URLs contain a private key. No files, commands or general tools. Disconnect the current AI first.", "供只能下載網址的客戶端使用。僅授權此會話30分鐘；網址含私密金鑰。不提供檔案、命令或通用工具。請先斷開目前AI。", "供只能下载网址的客户端使用。仅授权此会话30分钟；网址含私密密钥。不提供文件、命令或通用工具。请先断开当前AI。", "URLダウンロードのみのクライアント用。この会話を30分間許可します。URLは秘密鍵を含みます。ファイル・コマンド・汎用ツールは使えません。現在のAIを先に切断してください。"],
-  "chat.getAuthorize": ["Authorize this conversation", "授權此會話", "授权此会话", "この会話を許可"],
-  "chat.getRevoke": ["Revoke GET authorization", "撤銷GET授權", "撤销GET授权", "GETの許可を取り消す"],
-  "chat.getExpires": ["Expires at", "到期時間", "到期时间", "有効期限"],
-
   "chat.questionCustom": ["Custom answer", "自訂回答", "自定义回答", "自由回答"],
   "chat.questionSubmit": ["Submit answers", "提交回答", "提交回答", "回答を送信"],
   "chat.questionSending": ["Sending…", "傳送中…", "发送中…", "送信中…"],
