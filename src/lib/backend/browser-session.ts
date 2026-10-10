@@ -1,3 +1,4 @@
+import { clearChatCaches } from '../chat/cache-lifecycle.js';
 import { writable } from 'svelte/store';
 const key = 'ctmcp-browser-session';
 function saved(): string { try { return sessionStorage.getItem(key) ?? ''; } catch { return ''; } }
@@ -6,6 +7,7 @@ let epoch = 0;
 export const browserAuthenticated = writable(!!token);
 export function forgetBrowserSession(): void {
   epoch++;
+  clearChatCaches();
   token = ''; try { sessionStorage.removeItem(key); } catch { /* In-memory fallback. */ }
   browserAuthenticated.set(false);
 }
@@ -34,6 +36,7 @@ export async function browserLogin(password: string): Promise<void> {
   const data = await responseData(response);
   if (requestEpoch !== epoch) throw new Error('Browser session changed; retry the request');
   if (typeof data.token !== 'string' || !data.token.trim()) throw new Error('Invalid browser response');
+  clearChatCaches();
   token = data.token;
   try { sessionStorage.setItem(key, token); } catch { /* In-memory fallback. */ }
   browserAuthenticated.set(true);

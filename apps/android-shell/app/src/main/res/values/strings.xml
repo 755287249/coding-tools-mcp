@@ -1,0 +1,4 @@
+<resources>
+    <string name="allow_http">允许 HTTP（仅用于可信局域网，传输不加密）</string>
+    <string name="http_error">网页返回 HTTP %1$d，请检查分享链接。</string>
+</resources>

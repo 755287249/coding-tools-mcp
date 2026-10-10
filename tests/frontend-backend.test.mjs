@@ -54,6 +54,7 @@ async function importBackendRuntime() {
     "index.ts",
   ];
   await Promise.all([
+    compileTs(path.join(srcDir, "lib", "chat", "cache-lifecycle.js"), path.join(tmp, "chat", "cache-lifecycle.js")),
     compileTs(path.join(srcDir, "lib", "types.ts"), path.join(tmp, "types.js")),
     ...files.map((name) =>
       compileTs(path.join(backendDir, name), path.join(tmp, "backend", name.replace(/\.ts$/, ".js"))),

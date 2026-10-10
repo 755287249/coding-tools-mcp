@@ -38,9 +38,9 @@
         loading=true;
         untrack(()=>{void (async()=>{
           try {
-            const request=(args:Parameters<typeof localChat>[2])=>{if(cancelled)throw Error('Preview cancelled');return localChat(item.workspaceId,item.folderId,args);};
+            const request=(args:Parameters<typeof localChat>[2])=>{return localChat(item.workspaceId,item.folderId,args);};
             if(item.file){
-              const bytes=await readChatFile(request,item.chatId,item.file);
+              const bytes=await readChatFile(request,item.chatId,item.file,[item.workspaceId,item.folderId]);
               if(cancelled)return;
               objectUrl=URL.createObjectURL(new Blob([bytes as BlobPart],{type:item.file.mime}));displayedSrc=objectUrl;
             }else{

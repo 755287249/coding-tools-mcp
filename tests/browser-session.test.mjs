@@ -84,3 +84,19 @@ test('logout during retry delay cancels the retry rather than sending with anoth
   await assert.rejects(pending,/session changed/);assert.equal(calls,1);
  }finally{s.forgetBrowserSession();globalThis.fetch=oldFetch}
 });
+
+test('login changes and expired browser sessions clear cached chat content',async()=>{
+ const oldFetch=globalThis.fetch;
+ const {chatSessionReader}=await import('../src/lib/chat/session-cache.ts');
+ const s=await import('../src/lib/backend/browser-session.ts');s.forgetBrowserSession();
+ const snapshot={id:'cached',messages:[]};
+ try{
+  chatSessionReader.snapshots.put('scope',snapshot);
+  globalThis.fetch=async()=>Response.json({token:'fixture-new-identity'});
+  await s.browserLogin('fixture');assert.equal(chatSessionReader.snapshots.get('scope'),null);
+  chatSessionReader.snapshots.put('scope',snapshot);
+  globalThis.fetch=async()=>new Response('expired',{status:401});
+  await assert.rejects(s.browserInvoke('list_workspaces'));
+  assert.equal(chatSessionReader.snapshots.get('scope'),null);
+ }finally{s.forgetBrowserSession();globalThis.fetch=oldFetch}
+});

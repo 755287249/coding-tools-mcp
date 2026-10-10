@@ -1,4 +1,5 @@
 export const MESSAGES = {
+  "chat.loadOlder": ["Show earlier messages", "顯示較早訊息", "显示更早消息", "以前のメッセージを表示"],
   "collab.addRobots": ["Add / manage robots", "加入／管理機器人", "添加／管理机器人", "ロボットを追加・管理"],
   "collab.robots": ["Group robots", "群聊機器人", "群聊机器人", "グループのロボット"],
   "collab.defaultTargets": ["No selection: #mentions, otherwise the coordinator.", "未選擇時依 #點名，否則交給總管。", "未选择时依 #点名，否则交给总管。", "未選択時は #指定先、なければリーダーへ送信します。"],

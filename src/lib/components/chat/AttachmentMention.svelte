@@ -11,7 +11,7 @@
   onDestroy(()=>{alive=false;if(src)URL.revokeObjectURL(src)});
   async function open(){
     if(busy)return;busy=true;const gen=generation;
-    try{if(!src){const bytes=await readChatFile(args=>localChat(workspaceId,folderId,args),chatId,file);if(!alive||gen!==generation)return;src=URL.createObjectURL(new Blob([bytes as BlobPart],{type:file.mime}));}openRequest++;}
+    try{if(!src){const bytes=await readChatFile(args=>localChat(workspaceId,folderId,args),chatId,file,[workspaceId,folderId]);if(!alive||gen!==generation)return;src=URL.createObjectURL(new Blob([bytes as BlobPart],{type:file.mime}));}openRequest++;}
     catch{if(gen===generation)failed=true}finally{if(gen===generation)busy=false}
   }
 </script>

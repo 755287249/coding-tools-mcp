@@ -4,6 +4,12 @@ on:
   push:
     branches: [coderabbit/mcp-ai-local-chat/c2753b71]
   workflow_dispatch:
+    inputs:
+      publish_release:
+        description: Publish the verified build as a personal GitHub prerelease
+        type: boolean
+        required: false
+        default: true
 
 permissions:
   contents: read
@@ -106,6 +112,7 @@ jobs:
           retention-days: 14
 
   publish-personal-release:
+    if: github.event_name != 'workflow_dispatch' || inputs.publish_release
     needs: [windows-chat-tests, windows-portable]
     runs-on: ubuntu-latest
     permissions:

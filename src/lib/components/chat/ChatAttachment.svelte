@@ -21,20 +21,22 @@
   let pathCopied = $state(false);
   async function copyPath() { try { await navigator.clipboard.writeText(file.path); pathCopied = true; } catch { error = $t('chat.42'); } }
   onDestroy(()=>{alive=false;if(preview)URL.revokeObjectURL(preview)});
-  let autoPreviewKey = '';
+  let thumbnail = $state<HTMLButtonElement>();
   $effect(() => {
-    const key = `${workspaceId}:${folderId}:${chatId}:${file.id}`;
-    if (isImage && autoPreviewKey !== key) {
-      autoPreviewKey = key;
-      untrack(() => { void open(false); });
-    }
+    const target = thumbnail, identity = [workspaceId, folderId, chatId, file.id, file.sha256];
+    if (!isImage || !target) return;
+    const observer = new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) { observer.disconnect(); untrack(() => { void open(false); }); }
+    }, {rootMargin:'200px'});
+    observer.observe(target);
+    return () => observer.disconnect();
   });
   async function open(download: boolean, show=false) {
     if (busy) return;
     busy = true; error = '';
     try {
       if (file.size > MAX_BROWSER_PREVIEW_BYTES) { localOnly = true; return; }
-      const bytes = await readChatFile(args=>localChat(workspaceId,folderId,args),chatId,file);
+      const bytes = await readChatFile(args=>localChat(workspaceId,folderId,args),chatId,file,[workspaceId,folderId]);
       if(!alive)return;
       if (!download && isImage) { if (preview) URL.revokeObjectURL(preview); preview = URL.createObjectURL(new Blob([bytes as BlobPart],{type:file.mime})); if(show)openRequest++; }
       else if (!download && isTextFile(file.name)) {
@@ -51,7 +53,7 @@
 </script>
 {#if isImage}
 <div class="image-attachment">
-  <button type="button" class="image-thumb" title={`${file.label??file.name} · ${$t('chat.66')}`} aria-label={`${file.label??file.name} · ${$t('chat.66')}`} aria-busy={busy} disabled={busy||localOnly} onclick={viewImage}>
+  <button type="button" class="image-thumb" bind:this={thumbnail} title={`${file.label??file.name} · ${$t('chat.66')}`} aria-label={`${file.label??file.name} · ${$t('chat.66')}`} aria-busy={busy} disabled={busy||localOnly} onclick={viewImage}>
     {#if preview}<img src={preview} alt={file.label??file.name}/>{:else}<ImageIcon size={25}/><span>{file.label??file.name}</span><small>{busy?$t('Loading…'):error?$t('Try again'):$t('chat.66')}</small>{/if}
   </button>
   {#if preview}<span class="image-label">{file.label??file.name}</span><button type="button" class="image-download" aria-label={`${$t('chat.52')}: ${file.label??file.name}`} title={$t('chat.52')} disabled={busy} onclick={()=>open(true)}><Download size={13}/></button><ImagePreview src={preview} name={file.label??file.name} {openRequest} thumbnail={false} {workspaceId} {folderId} {chatId} path={file.path}/>{/if}

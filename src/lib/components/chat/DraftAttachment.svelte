@@ -11,7 +11,7 @@
   $effect(()=>{
     const f=file,ws=workspaceId,folder=folderId,chat=chatId; let alive=true,url='';
     src='';error='';
-    if(f.mime.startsWith('image/')&&f.size<=MAX_BROWSER_PREVIEW_BYTES)untrack(()=>{void readChatFile(args=>localChat(ws,folder,args),chat,f).then(bytes=>{if(alive){url=URL.createObjectURL(new Blob([bytes as BlobPart],{type:f.mime}));src=url;}}).catch(e=>{if(alive)error=String(e)})});
+    if(f.mime.startsWith('image/')&&f.size<=MAX_BROWSER_PREVIEW_BYTES)untrack(()=>{void readChatFile(args=>localChat(ws,folder,args),chat,f,[ws,folder]).then(bytes=>{if(alive){url=URL.createObjectURL(new Blob([bytes as BlobPart],{type:f.mime}));src=url;}}).catch(e=>{if(alive)error=String(e)})});
     return()=>{alive=false;if(url)URL.revokeObjectURL(url)};
   });
 </script>

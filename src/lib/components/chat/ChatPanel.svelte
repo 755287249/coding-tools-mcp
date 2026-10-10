@@ -43,7 +43,8 @@
   import { readChatFile } from '$lib/chat/attachment-transfer';
   import ChatToolActivity from './ChatToolActivity.svelte';
   import { chatDrafts, chatDraftKey, conversationAccent } from '$lib/chat/drafts';
-  import { createSessionCache, sessionCacheKey } from '$lib/chat/session-cache';
+  import { chatSessionReader, sessionCacheKey } from '$lib/chat/session-cache';
+  import { chatReadingPositions, type ChatReadingPosition } from '$lib/chat/view-cache';
   import { groupChatMessages } from '$lib/chat/tool-activity';
   import MessageText from './MessageText.svelte';
   import MessageEditor from './MessageEditor.svelte';
@@ -93,8 +94,21 @@
   const needsAi=$derived(!!folderId && !detail?.closed && !(detail?.status==='connected'||detail?.status==='waiting'));
   const mode=$derived(detail?.mode??newMode);
   let loadingDetail = $state(false);
-  const detailCache = createSessionCache();
-  let displayedScope: { workspace: string; folder: string; chat: string } | null = null;
+  const detailCache = chatSessionReader.snapshots;
+  let readingScope = '', readingVersion = 0;
+  let pendingPosition: ChatReadingPosition | null = null;
+  function rememberReadingPosition() {
+    if (!readingScope || !detail || !feed || pendingPosition) return;
+    chatReadingPositions.put(readingScope, {historyAnchor, scrollTop:lastScrollTop, following, activeMessage}, readingVersion);
+  }
+  function restoreReadingPosition() {
+    if (!pendingPosition || !detail || !feed) return;
+    const saved = pendingPosition; pendingPosition = null;
+    following = saved.following;
+    if (following) toBottom();
+    else { feed.scrollTop = saved.scrollTop; lastScrollTop = feed.scrollTop; activeMessage = saved.activeMessage; }
+  }
+  onDestroy(rememberReadingPosition);
   let readSequence = 0;
   let readError = '';
   let draft = $state('');
@@ -311,6 +325,19 @@
     return () => clearTimeout(timer);
   });
   const feedItems = $derived(groupChatMessages(messages, detail?.closed ?? false));
+  const historyPageSize = 60;
+  let historyAnchor = $state('');
+  const historyStart = $derived(historyAnchor ? Math.max(0, feedItems.findIndex(item => item.id === historyAnchor)) : Math.max(0, feedItems.length - historyPageSize));
+  const visibleFeedItems = $derived(feedItems.slice(historyStart));
+  $effect(() => { if (!following && !historyAnchor && visibleFeedItems.length) historyAnchor = visibleFeedItems[0].id; });
+  async function showOlder() {
+    if (!feed || !historyStart) return;
+    const scope = currentScope, height = feed.scrollHeight, top = feed.scrollTop;
+    following = false;
+    historyAnchor = feedItems[Math.max(0, historyStart - historyPageSize)].id;
+    await tick();
+    if (scope === currentScope && feed) { feed.scrollTop = top + feed.scrollHeight - height; lastScrollTop = feed.scrollTop; }
+  }
   const pendingState = $derived(pendingChatState(detail));
   const statusLabel = $derived(pendingState === 'awaiting_user' ? $t('chat.73') : pendingState === 'processing' ? $t('chat.70') : pendingState === 'interrupted' ? $t('chat.71') : detail?.status === 'waiting' ? $t('chat.19') : detail?.status === 'connected' ? $t('chat.20') : detail?.status === 'closed' ? $t('chat.21') : $t('chat.22'));
   const unreadTotal = $derived(sessions.reduce((total, session) => total + unread(session), 0));
@@ -364,8 +391,13 @@
     following = true;
     if (feed) { feed.scrollTop = feed.scrollHeight; lastScrollTop = feed.scrollTop; updateScroll(); }
   }
-  function jumpToMessage(id: string) {
+  async function jumpToMessage(id: string) {
     if (!feed) return;
+    const scope = currentScope;
+    const index = feedItems.findIndex(item => item.kind !== 'tools' && item.message.id === id);
+    following = false;
+    if (index >= 0 && index < historyStart) { historyAnchor = feedItems[index].id; await tick(); }
+    if (scope !== currentScope || !feed) return;
     const target = [...feed.querySelectorAll<HTMLElement>('[data-user-message]')].find(row => row.dataset.userMessage === id);
     if (!target) return;
     following = false;
@@ -421,22 +453,20 @@
     resetDraftHistory();
   }
   onDestroy(persistDraft);
-  function rememberDetail() {
-    if (detail && displayedScope?.chat === detail.id) {
-      detailCache.put(sessionCacheKey(displayedScope.workspace, displayedScope.folder, detail.id), detail);
-    }
-  }
   function selectSession(ws: string, folder: string, target: string) {
-    rememberDetail();
+    rememberReadingPosition();
+    readingScope = sessionCacheKey(ws, folder, target);
+    readingVersion = chatReadingPositions.version();
+    pendingPosition = chatReadingPositions.get(readingScope);
     readSequence++;
     selected = target;
-    displayedScope = { workspace: ws, folder, chat: target };
+    historyAnchor = pendingPosition?.historyAnchor ?? '';
     detail = detailCache.get(sessionCacheKey(ws, folder, target));
     loadingDetail = !detail;
-    following = true; activeMessage = ''; error = ''; readError = '';
+    following = pendingPosition?.following ?? true; activeMessage = pendingPosition?.activeMessage ?? ''; lastScrollTop = 0; error = ''; readError = '';
     activateDraft(ws, folder, target);
     const gen = generation;
-    void tick().then(() => { if (gen === generation && selected === target) toBottom(); });
+    void tick().then(() => { if (gen === generation && selected === target) { if (pendingPosition) restoreReadingPosition(); else toBottom(); } });
   }
   async function readSession(ws: string, folder: string, target: string, gen: number) {
     const request = ++readSequence;
@@ -449,28 +479,28 @@
       const next = reconcileSnapshot(detail, result.session);
       const changed = next !== detail;
       if (changed) detail = next;
-      displayedScope = { workspace: ws, folder, chat: target };
-      if (changed) detailCache.put(sessionCacheKey(ws, folder, target), result.session);
       loadingDetail = false;
       if (error === readError) error = '';
       readError = '';
       if (changed) await tick();
-      if (changed && current() && (switched || following)) toBottom();
+      if (changed && current()) { if (pendingPosition) restoreReadingPosition(); else if (switched || following) toBottom(); }
       if (current()) markRead();
     } catch (e) {
       if (current()) { loadingDetail = false; readError = String(e); error = readError; }
     }
   }
   async function refresh(ws: string, folder: string, gen: number) {
+    // A requested conversation can render/refetch without waiting for the sidebar list.
+    const target = selected;
+    const reading = target ? readSession(ws, folder, target, gen) : Promise.resolve();
     const list = await localChat(ws, folder, { action: 'list' });
     if (gen !== generation) return;
     sessions = reconcileSnapshot(sessions, list.sessions ?? []);
-    if (!selected && requestedChatId) selectSession(ws, folder, requestedChatId);
-    else if (!selected && sessions.length && !startNew) {
+    if (!selected && sessions.length && !startNew && !requestedChatId) {
       selectSession(ws, folder, sessions[0].id); onNavigate?.(folder, selected);
+      await readSession(ws, folder, selected, gen);
     }
-    const target = selected;
-    if (target) await readSession(ws, folder, target, gen);
+    await reading;
   }
   $effect(() => {
     if (requestedFolderId && folders.some(f => f.id === requestedFolderId)) folderId = requestedFolderId;
@@ -478,13 +508,14 @@
   });
   $effect(() => {
     const ws = workspaceId, folder = folderId; const gen = ++generation;
-    untrack(() => { persistDraft(); rememberDetail(); }); activeDraftKey = ''; draftStorageError = false;
-    readSequence++; displayedScope = null; loadingDetail = false; readError = '';
+    untrack(() => { persistDraft(); rememberReadingPosition(); }); readingScope = ''; pendingPosition = null; activeDraftKey = ''; draftStorageError = false;
+    readSequence++; loadingDetail = false; readError = '';
     seen = restoreSeen(ws, folder);
     sessions = []; selected = ''; detail = null; draft = ''; error = ''; retry = null; attachments = []; renameId = ''; renameTitle = '';
+    untrack(() => { if (folder && requestedChatId) selectSession(ws, folder, requestedChatId); });
     const stop = startVisiblePolling(async () => {
       if (!folder) return;
-      try { await refresh(ws, folder, gen); } catch (e) { if (gen === generation) error = String(e); }
+      try { await untrack(() => refresh(ws, folder, gen)); } catch (e) { if (gen === generation) error = String(e); }
     }, () => guide ? 500 : 1500);
     return () => { stop(); generation++; };
   });
@@ -492,7 +523,7 @@
     const ws = workspaceId, target = requestedChatId, folder = folderId, fresh = startNew;
     untrack(() => {
       if (folder && target && selected !== target) { selectSession(ws, folder, target); void readSession(ws, folder, target, generation); }
-      else if (!target && fresh) { rememberDetail(); readSequence++; selected = ''; detail = null; displayedScope = null; loadingDetail = false; activateDraft(ws, folder, 'new'); }
+      else if (!target && fresh) { rememberReadingPosition(); readingScope = ''; pendingPosition = null; readSequence++; selected = ''; detail = null; loadingDetail = false; activateDraft(ws, folder, 'new'); }
     });
   });
   async function choose(s: ChatSession) {
@@ -534,7 +565,6 @@
       if (gen !== generation || selected !== previous) return;
       readSequence++;
       detail = result.session ?? null; selected = detail?.id ?? '';
-      displayedScope = selected ? { workspace: workspaceId, folder: folderId, chat: selected } : null;
       if (selected) { const unsent = draft; activateDraft(workspaceId, folderId, selected); if (keepDraft) { draft = unsent; persistDraft(); chatDrafts.save(chatDraftKey(workspaceId, folderId, 'new'), {text:'',attachments:[],retry:null}); } }
       guide = false;
       await refresh(workspaceId, folderId, gen);
@@ -588,7 +618,7 @@
     const gen=generation,ws=workspaceId,folder=folderId;
     busy=true;uploading=true;error='';
     try {
-      const bytes=await readChatFile(args=>localChat(ws,folder,args),sourceChat,file);
+      const bytes=await readChatFile(args=>localChat(ws,folder,args),sourceChat,file,[ws,folder]);
       if(gen!==generation)return;
       busy=false;
       await uploadFiles([new File([bytes as BlobPart],file.name,{type:file.mime})]);
@@ -700,9 +730,9 @@
     <div class="conversation-body">
     <div class="feed-frame">
     <div class="message-feed" bind:this={feed} onscroll={scheduleScroll} aria-busy={loadingDetail}>
-      {#if selected && !detail}<div class="chat-loading" role="status">{loadingDetail ? $t("Loading…") : error}</div>
+      {#if selected && !detail}<div class="chat-loading" role="status">{loadingDetail ? $t("Loading…") : error}{#if loadingDetail}<div class="history-skeleton" aria-hidden="true"><span></span><span></span><span></span></div>{/if}</div>
       {:else if !messages.length}<div class="empty-state"><h2>{$t(!workspaceId||!folderId?'chat.selectFolder':mode==='group'?'chat.inviteTitle':'chat.connectTitle')}</h2></div>
-      {:else}<div class="message-column" bind:this={column}>{#each feedItems as item (item.id)}{#if item.kind === 'tools'}<article class="assistant grouped-tools"><div class="message-meta">{item.messages[0]?.agent_name ?? 'AI'} · {$t("chat.54")}</div><div class="message-body"><ChatToolActivity messages={item.messages} settled={item.settled} {workspaceId} {folderId} chatId={selected}/></div></article>{:else}{@const m = item.message}<article data-user-message={m.role === 'user' ? m.id : undefined} tabindex="-1" class:user={m.role === 'user'} class:assistant={m.role === 'assistant'}><div class="message-meta">{m.role === 'user' ? $t('chat.26') : m.agent_name ?? detail?.agent_name ?? (m.final === false ? $t('chat.27') : 'AI')}<time>{new Date(m.created_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</time></div>{#if (m.attachments??[]).some(file=>file.mime.startsWith('image/'))}<div class="message-images"><div class="image-strip">{#each (m.attachments??[]).filter(file=>file.mime.startsWith('image/')) as file (workspaceId+":"+folderId+":"+selected+":"+file.id+":"+file.sha256)}<ChatAttachment {workspaceId} {folderId} chatId={selected} {file}/>{/each}</div></div>{/if}<div class="message-body" class:image-only={!m.text.trim()&&!(m.attachments??[]).some(file=>!file.mime.startsWith('image/'))}>{#if editingMessage===m.id}<MessageEditor text={m.text} hasAttachments={!!m.attachments?.length} onSend={(text:string,id:string)=>resendMessage(m,text,id)} onCancel={()=>editingMessage=''}/>{:else}<MessageText text={m.text} attachments={m.attachments ?? []} {workspaceId} {folderId} chatId={selected} collapsible={m.role==='user'}/>{/if}{#each (m.attachments??[]).filter(file=>!file.mime.startsWith('image/')) as file (workspaceId + ":" + folderId + ":" + selected + ":" + file.id)}<ChatAttachment {workspaceId} {folderId} chatId={selected} {file}/>{/each}<ChatReplyState state={chatReplyState(detail, m.id)}/><ChatUserState state={chatUserState(detail, m.id)}/></div>{#if editingMessage!==m.id}<div class="message-actions"><button type="button" title={$t('chat.copyMessage')} aria-label={$t('chat.copyMessage')} onclick={()=>copyMessage(m)}>{#if copiedMessage===m.id}<Check size={15}/>{:else}<Copy size={15}/>{/if}</button>{#if m.role==='user'}<button type="button" title={$t('chat.editMessage')} aria-label={$t('chat.editMessage')} disabled={busy||!!detail?.closed} onclick={()=>editingMessage=m.id}><Pencil size={15}/></button>{:else}<button type="button" title={$t('chat.shareMessage')} aria-label={$t('chat.shareMessage')} onclick={()=>shareMessage=m}><Share2 size={15}/></button>{/if}</div>{/if}</article>{/if}{/each}{#if pendingState}<div class="pending" class:processing={pendingState === 'processing'} role="status" aria-live="polite"><ChatStatusIcon state={pendingState} label={pendingState === 'awaiting_user' ? $t('chat.73') : pendingState === 'processing' ? $t('chat.70') : pendingState === 'interrupted' ? $t('chat.71') : $t('chat.29')}/>{pendingState === 'awaiting_user' ? $t('chat.73') : pendingState === 'processing' ? $t('chat.70') : pendingState === 'interrupted' ? $t('chat.71') : $t('chat.29')}</div>{/if}</div>{/if}
+      {:else}<div class="message-column" bind:this={column}>{#if historyStart}<button type="button" class="load-older" onclick={showOlder}>{$t('chat.loadOlder')}</button>{/if}{#each visibleFeedItems as item (item.id)}{#if item.kind === 'tools'}<article class="assistant grouped-tools"><div class="message-meta">{item.messages[0]?.agent_name ?? 'AI'} · {$t("chat.54")}</div><div class="message-body"><ChatToolActivity messages={item.messages} settled={item.settled} {workspaceId} {folderId} chatId={selected}/></div></article>{:else}{@const m = item.message}<article data-user-message={m.role === 'user' ? m.id : undefined} tabindex="-1" class:user={m.role === 'user'} class:assistant={m.role === 'assistant'}><div class="message-meta">{m.role === 'user' ? $t('chat.26') : m.agent_name ?? detail?.agent_name ?? (m.final === false ? $t('chat.27') : 'AI')}<time>{new Date(m.created_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</time></div>{#if (m.attachments??[]).some(file=>file.mime.startsWith('image/'))}<div class="message-images"><div class="image-strip">{#each (m.attachments??[]).filter(file=>file.mime.startsWith('image/')) as file (workspaceId+":"+folderId+":"+selected+":"+file.id+":"+file.sha256)}<ChatAttachment {workspaceId} {folderId} chatId={selected} {file}/>{/each}</div></div>{/if}<div class="message-body" class:image-only={!m.text.trim()&&!(m.attachments??[]).some(file=>!file.mime.startsWith('image/'))}>{#if editingMessage===m.id}<MessageEditor text={m.text} hasAttachments={!!m.attachments?.length} onSend={(text:string,id:string)=>resendMessage(m,text,id)} onCancel={()=>editingMessage=''}/>{:else}<MessageText text={m.text} attachments={m.attachments ?? []} {workspaceId} {folderId} chatId={selected} collapsible={m.role==='user'}/>{/if}{#each (m.attachments??[]).filter(file=>!file.mime.startsWith('image/')) as file (workspaceId + ":" + folderId + ":" + selected + ":" + file.id)}<ChatAttachment {workspaceId} {folderId} chatId={selected} {file}/>{/each}<ChatReplyState state={chatReplyState(detail, m.id)}/><ChatUserState state={chatUserState(detail, m.id)}/></div>{#if editingMessage!==m.id}<div class="message-actions"><button type="button" title={$t('chat.copyMessage')} aria-label={$t('chat.copyMessage')} onclick={()=>copyMessage(m)}>{#if copiedMessage===m.id}<Check size={15}/>{:else}<Copy size={15}/>{/if}</button>{#if m.role==='user'}<button type="button" title={$t('chat.editMessage')} aria-label={$t('chat.editMessage')} disabled={busy||!!detail?.closed} onclick={()=>editingMessage=m.id}><Pencil size={15}/></button>{:else}<button type="button" title={$t('chat.shareMessage')} aria-label={$t('chat.shareMessage')} onclick={()=>shareMessage=m}><Share2 size={15}/></button>{/if}</div>{/if}</article>{/if}{/each}{#if pendingState}<div class="pending" class:processing={pendingState === 'processing'} role="status" aria-live="polite"><ChatStatusIcon state={pendingState} label={pendingState === 'awaiting_user' ? $t('chat.73') : pendingState === 'processing' ? $t('chat.70') : pendingState === 'interrupted' ? $t('chat.71') : $t('chat.29')}/>{pendingState === 'awaiting_user' ? $t('chat.73') : pendingState === 'processing' ? $t('chat.70') : pendingState === 'interrupted' ? $t('chat.71') : $t('chat.29')}</div>{/if}</div>{/if}
     </div>
     <ChatOutline {messages} activeId={activeMessage} onSelect={jumpToMessage}/>
     </div>
@@ -791,6 +821,8 @@
 
 
 .chat-loading{padding:32px 40px;color:var(--color-text-muted);font-size:12px}
+.load-older{display:block;margin:0 auto 20px;padding:8px 16px;border:1px solid var(--color-border);border-radius:16px;color:var(--color-text-muted);cursor:pointer}
+.history-skeleton{display:grid;gap:24px;max-width:680px;margin:24px auto}.history-skeleton span{display:block;height:72px;width:85%;background:var(--surface-2);border-radius:14px}.history-skeleton span:nth-child(2){justify-self:end;width:65%;height:48px}
 .reference-input{display:flex;gap:8px;max-width:760px;margin:0 auto 10px;font-size:11px}.reference-input input{min-width:0;flex:1;padding:8px;border:1px solid var(--color-border);border-radius:7px;background:var(--card-bg)}.reference-input button{padding:8px;border:1px solid var(--color-border);border-radius:7px}
 
 

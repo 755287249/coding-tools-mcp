@@ -1,3 +1,4 @@
+import { clearChatCaches } from '../chat/cache-lifecycle.js';
 import type { FrontendBackend } from "./types";
 
 export type {
@@ -58,6 +59,7 @@ export { createNodeBackend } from "./node";
 let current: FrontendBackend | null = null;
 
 export function setBackend(backend: FrontendBackend): void {
+  clearChatCaches();
   current = backend;
 }
 
@@ -69,5 +71,6 @@ export function getBackend(): FrontendBackend {
 }
 
 export function resetBackend(): void {
+  clearChatCaches();
   current = null;
 }

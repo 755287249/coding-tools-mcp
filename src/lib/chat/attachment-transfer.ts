@@ -1,3 +1,4 @@
+import { attachmentCache } from './attachment-cache.js';
 import type { ChatFile, ChatAction, ChatResult } from '../api/chat';
 export const TRANSFER_CHUNK_BYTES = 512 * 1024;
 export const MAX_BROWSER_PREVIEW_BYTES = 32 * 1024 * 1024;
@@ -21,7 +22,12 @@ export async function uploadLocalFile(request: Request, chatId: string, file: Fi
 }
 
 /** Validate the complete content before displaying bytes returned by local range reads. */
-export async function readChatFile(request: Request, chat: string, file: ChatFile): Promise<Uint8Array> {
+export async function readChatFile(request: Request, chat: string, file: ChatFile, scope?: readonly [string, string]): Promise<Uint8Array> {
+  if (!scope) return readVerifiedFile(request, chat, file);
+  const key = JSON.stringify([...scope, chat, file.id, file.sha256, file.size]);
+  return attachmentCache.read(key, () => readVerifiedFile(request, chat, file));
+}
+async function readVerifiedFile(request: Request, chat: string, file: ChatFile): Promise<Uint8Array> {
   if (file.size > MAX_BROWSER_PREVIEW_BYTES) throw new Error('Open this file locally to preview it');
   const bytes = new Uint8Array(file.size);
   for (let offset=0;offset<file.size;) {

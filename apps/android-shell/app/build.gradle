@@ -1,0 +1,26 @@
+plugins { id 'com.android.application' }
+android {
+    namespace 'com.codingtools.mcp.mobile'
+    compileSdk 35
+    defaultConfig {
+        applicationId 'com.codingtools.mcp.mobile'
+        minSdk 26
+        targetSdk 35
+        versionCode 1
+        versionName '0.1.0'
+    }
+    buildTypes {
+        release { minifyEnabled false }
+    }
+    // Desktop JDK restricts Origin; Android HttpURLConnection allows this header.
+    testOptions { unitTests.all { jvmArgs '-Dsun.net.http.allowRestrictedHeaders=true' } }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+dependencies {
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'com.squareup.okhttp3:mockwebserver:4.12.0'
+    testImplementation 'org.json:json:20240303'
+}

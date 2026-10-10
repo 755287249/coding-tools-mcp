@@ -20,9 +20,9 @@
     async function load() {
       if(started||!preview)return;started=true;busy=true;
       try {
-        const request=(args:Parameters<typeof localChat>[2])=>{if(cancelled)throw Error('Preview cancelled');return localChat(ws,folder,args)};
+        const request=(args:Parameters<typeof localChat>[2])=>{return localChat(ws,folder,args)};
         if(known){
-          const bytes=await readChatFile(request,chat,attachment);
+          const bytes=await readChatFile(request,chat,attachment,[ws,folder]);
           if(cancelled)return;
           if(preview.kind==='image'){objectUrl=URL.createObjectURL(new Blob([bytes as BlobPart],{type:preview.mime}));src=objectUrl;}
           else excerpt=new TextDecoder('utf-8',{fatal:true}).decode(bytes).slice(0,1600);
