@@ -1,4 +1,7 @@
 export const MESSAGES = {
+  "chat.markdownTable": ["Message table", "訊息表格", "消息表格", "メッセージの表"],
+  "chat.copyCode": ["Copy code", "複製程式碼", "复制代码", "コードをコピー"],
+  "chat.copyCodeFailed": ["Could not copy code. Select the code and copy it manually.", "無法複製程式碼，請選取後手動複製。", "无法复制代码，请选中代码后手动复制。", "コピーできませんでした。コードを選択して手動でコピーしてください。"],
   "chat.questionCustom": ["Custom answer", "自訂回答", "自定义回答", "自由回答"],
   "chat.questionSubmit": ["Submit answers", "提交回答", "提交回答", "回答を送信"],
   "chat.questionSending": ["Sending…", "傳送中…", "发送中…", "送信中…"],
