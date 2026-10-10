@@ -89,18 +89,31 @@ fn file(root: &Path, chat_id: &str) -> Result<PathBuf> {
     safe(root, &format!("{DIR}/{chat_id}.json"))
 }
 fn load(root: &Path, chat_id: &str) -> Result<Value> {
+    load_snapshot(root, chat_id)?.ok_or_else(|| err("Chat storage: conversation no longer exists"))
+}
+// Atomic replacement gives readers a complete old or new archive. Only a missing
+// file is a normal list/delete race; malformed archives and unsafe paths still fail.
+fn load_snapshot(root: &Path, chat_id: &str) -> Result<Option<Value>> {
+    use std::io::Read;
     let p = file(root, chat_id)?;
-    if fs::metadata(&p).map_err(io)?.len() > MAX_BYTES {
+    let source = match fs::File::open(p) {
+        Ok(source) => source,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(io(e)),
+    };
+    let mut bytes = Vec::new();
+    source.take(MAX_BYTES + 1).read_to_end(&mut bytes).map_err(io)?;
+    if bytes.len() as u64 > MAX_BYTES {
         return Err(err("Chat archive exceeds size limit"));
     }
-    let mut s: Value =
-        serde_json::from_slice(&fs::read(p).map_err(io)?).map_err(|e| err(e.to_string()))?;
+    let mut s: Value = serde_json::from_slice(&bytes).map_err(|e| err(e.to_string()))?;
     if (s["version"] != 1 && s["version"] != 2) || s["id"] != chat_id || !s["messages"].is_array() {
         return Err(err("Invalid chat archive"));
     }
     label_files(&mut s);
-    Ok(s)
+    Ok(Some(s))
 }
+
 fn user_message_state(s: &Value, message: &Value) -> String {
     let messages = s["messages"].as_array().unwrap();
     let replies: Vec<_> = messages
@@ -524,12 +537,20 @@ fn read_artifact(root: &Path, value: &Value) -> Result<Value> {
     Ok(json!({"name":relative.rsplit('/').next().unwrap_or("image"), "mime":mime, "data_base64":STANDARD.encode(bytes)}))
 }
 pub fn ui(root: &Path, args: &Value) -> Result<Value> {
-    let _lock = lock(root)?;
     let action = args["action"].as_str().unwrap_or("");
+    // Polling and file reads consume atomic snapshots, without joining the writer
+    // queue. Every mutation (including unknown/discussion actions) stays locked.
+    let read_only = matches!(action, "list" | "read" | "read_attachment" | "read_attachment_chunk" | "read_artifact" | "reveal_path");
+    let _lock = if read_only { None } else { Some(lock(root)?) };
     if action.starts_with("discussion_"){return discussion::action(root,args,None);}
     if action == "list" {
         let mut sessions = Vec::new();
-        for entry in fs::read_dir(safe(root, DIR)?).map_err(io)? {
+        let entries = match fs::read_dir(safe(root, DIR)?) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(json!({"sessions": []})),
+            Err(e) => return Err(io(e)),
+        };
+        for entry in entries {
             let p = entry.map_err(io)?.path();
             if p.extension().and_then(|s| s.to_str()) != Some("json") {
                 continue;
@@ -538,7 +559,8 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
             if id(&json!(stem)).is_err() {
                 continue;
             }
-            let mut v = view(root, &load(root, stem)?)?;
+            let Some(snapshot) = load_snapshot(root, stem)? else { continue; };
+            let mut v = view(root, &snapshot)?;
             v.as_object_mut().unwrap().remove("messages");
             sessions.push(v);
         }
@@ -1701,6 +1723,57 @@ mod tests {
         assert!(ui(a.path(), &json!({"action":"read","chat_id":"../other"})).is_err());
     }
     #[test]
+    fn snapshots_remain_readable_under_writer_lock() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        assert_eq!(ui(root, &json!({"action":"list"})).unwrap()["sessions"], json!([]));
+        assert!(!root.join(DIR).exists());
+        let cid = ui(root, &json!({"action":"create"})).unwrap()["session"]["id"].clone();
+        ui(root, &json!({"action":"upload","chat_id":cid,"upload_id":"snapshot","name":"notes.txt","data_base64":STANDARD.encode(b"snapshot")})).unwrap();
+        let record = file(root, cid.as_str().unwrap()).unwrap();
+        let before = fs::read(&record).unwrap();
+        let guard = lock(root).unwrap();
+        assert_eq!(ui(root, &json!({"action":"list"})).unwrap()["sessions"].as_array().unwrap().len(), 1);
+        assert_eq!(ui(root, &json!({"action":"read","chat_id":cid})).unwrap()["session"]["id"], cid);
+        assert_eq!(ui(root, &json!({"action":"read_attachment","chat_id":cid,"upload_id":"snapshot"})).unwrap()["data_base64"], STANDARD.encode(b"snapshot"));
+        assert_eq!(fs::read(&record).unwrap(), before);
+        assert!(ui(root, &json!({"action":"create"})).is_err());
+        assert!(root.join(DIR).join(".lock").exists());
+        fs::write(&record, b"broken").unwrap();
+        assert!(ui(root, &json!({"action":"list"})).is_err());
+        fs::remove_file(&record).unwrap();
+        assert_eq!(ui(root, &json!({"action":"list"})).unwrap()["sessions"], json!([]));
+        assert!(ui(root, &json!({"action":"read","chat_id":cid})).is_err());
+        drop(guard);
+    }
+    #[test]
+    fn concurrent_writers_preserve_messages_during_snapshot_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let cid = ui(root, &json!({"action":"create"})).unwrap()["session"]["id"].clone();
+        std::thread::scope(|scope| {
+            let mut workers = Vec::new();
+            for worker in 0..3 {
+                let cid = &cid;
+                workers.push(scope.spawn(move || {
+                    for n in 0..12 {
+                        ui(root, &json!({"action":"send","chat_id":cid,"message_id":format!("writer-{worker}-{n}"),"text":"message"})).unwrap();
+                    }
+                }));
+            }
+            while workers.iter().any(|worker| !worker.is_finished()) {
+                assert_eq!(ui(root, &json!({"action":"list"})).unwrap()["sessions"].as_array().unwrap().len(), 1);
+                assert_eq!(ui(root, &json!({"action":"read","chat_id":cid})).unwrap()["session"]["id"], cid);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        });
+        let s = load(root, cid.as_str().unwrap()).unwrap();
+        let messages = s["messages"].as_array().unwrap().iter().chain(s["queue"].as_array().unwrap().iter()).collect::<Vec<_>>();
+        assert_eq!(messages.len(), 36);
+        assert_eq!(messages.iter().map(|m| m["id"].as_str().unwrap()).collect::<HashSet<_>>().len(), 36);
+    }
+    #[test]
     fn temporary_lock_contention_recovers_without_stealing() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -1711,7 +1784,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(100));
             fs::remove_dir(path).unwrap();
         });
-        assert!(ui(root, &json!({"action":"list"})).is_ok());
+        assert!(ui(root, &json!({"action":"create"})).is_ok());
         worker.join().unwrap();
     }
     #[tokio::test]

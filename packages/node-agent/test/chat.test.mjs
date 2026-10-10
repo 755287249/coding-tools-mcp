@@ -84,7 +84,8 @@ test('chat protects folder boundaries, rejects wrong attachments and concurrent 
   const other=mkdtempSync(path.join(tmpdir(),'chat-other-'));t.after(()=>rmSync(other,{recursive:true,force:true}));
   assert.throws(()=>chatUi(other,{action:'read',chat_id:args.chat_id}));
   mkdirSync(path.join(root,'docs/chat-sessions/.lock'));
-  assert.throws(()=>chatUi(root,{action:'list'}),/Chat storage is busy/);
+  assert.throws(()=>chatUi(root,{action:'create'}),/Chat storage is busy/);
+  assert.ok(existsSync(path.join(root,'docs/chat-sessions/.lock')));
   rmSync(path.join(root,'docs/chat-sessions/.lock'),{recursive:true});
   mkdirSync(path.join(other,'linked'));symlinkSync(path.join(root,'docs'),path.join(other,'linked/docs'),'dir');
   assert.throws(()=>chatUi(path.join(other,'linked'),{action:'list'}),/symlink/);
@@ -172,7 +173,7 @@ test('chat waits for a short-lived external lock and preserves a stale lock', as
   const { Worker } = await import('node:worker_threads');
   const worker = new Worker(`const {workerData}=require('node:worker_threads'); setTimeout(()=>require('node:fs').rmdirSync(workerData),100)`, {eval:true,workerData:lockPath});
   const exited = new Promise((resolve,reject)=>{worker.on('exit',resolve);worker.on('error',reject)});
-  assert.ok(Array.isArray(chatUi(root,{action:'list'}).sessions));
+  assert.ok(chatUi(root,{action:'create'}).session.id);
   await exited;
 });
 
@@ -637,4 +638,50 @@ test('invalid deletion assets preserve the authoritative chat and operation reco
   assert.equal(readFileSync(record,'utf8'),original);
   assert.equal(readFileSync(path.join(dir,`${args.chat_id}.operations.json`),'utf8'),'[]');
   assert.ok(existsSync(path.join(dir,`${args.chat_id}.md`)));
+});
+
+test('UI snapshots and attachment reads remain available while a writer owns the folder lock', t => {
+  const {root,args}=fixture(t);
+  chatUi(root,{action:'upload',chat_id:args.chat_id,upload_id:'snapshot-file',name:'snapshot.txt',data_base64:Buffer.from('snapshot').toString('base64')});
+  const record=path.join(root,'docs/chat-sessions',args.chat_id+'.json');
+  const before=readFileSync(record,'utf8');
+  const lockPath=path.join(root,'docs/chat-sessions/.lock');
+  mkdirSync(lockPath);
+  assert.equal(chatUi(root,{action:'list'}).sessions.length,1);
+  assert.equal(chatUi(root,{action:'read',chat_id:args.chat_id}).session.id,args.chat_id);
+  assert.equal(Buffer.from(chatUi(root,{action:'read_attachment',chat_id:args.chat_id,upload_id:'snapshot-file'}).data_base64,'base64').toString(),'snapshot');
+  assert.ok(existsSync(lockPath));
+  assert.equal(readFileSync(record,'utf8'),before);
+  writeFileSync(record,'broken');
+  assert.throws(()=>chatUi(root,{action:'list'}),SyntaxError);
+  rmSync(record);
+  assert.deepEqual(chatUi(root,{action:'list'}).sessions,[]);
+  assert.throws(()=>chatUi(root,{action:'read',chat_id:args.chat_id}),{code:'ENOENT'});
+});
+
+test('listing an unused folder is read-only and does not create storage',t=>{
+  const root=mkdtempSync(path.join(tmpdir(),'chat-empty-'));
+  t.after(()=>rmSync(root,{recursive:true,force:true}));
+  assert.deepEqual(chatUi(root,{action:'list'}),{sessions:[]});
+  assert.equal(existsSync(path.join(root,'docs')),false);
+});
+
+test('independent writers preserve every queued message while snapshots are polled', async t=>{
+  const {root,args}=fixture(t);
+  const {Worker}=await import('node:worker_threads');
+  const moduleUrl=new URL('../dist/chat/store.js',import.meta.url).href;
+  const workers=Array.from({length:3},(_,index)=>new Worker(`
+    const {workerData}=require('node:worker_threads');
+    import(workerData.moduleUrl).then(({chatUi})=>{
+      for(let n=0;n<12;n++)chatUi(workerData.root,{action:'send',chat_id:workerData.chat_id,message_id:'writer-'+workerData.index+'-'+n,text:'message '+n});
+    }).catch(e=>{throw e});`,{eval:true,workerData:{root,chat_id:args.chat_id,moduleUrl,index}}));
+  let polls=0;
+  const timer=setInterval(()=>{assert.equal(chatUi(root,{action:'list'}).sessions.length,1);assert.equal(chatUi(root,{action:'read',chat_id:args.chat_id}).session.id,args.chat_id);polls++;},5);
+  try { await Promise.all(workers.map(worker=>new Promise((resolve,reject)=>{worker.on('error',reject);worker.on('exit',code=>code===0?resolve():reject(new Error('worker exit '+code)));}))); }
+  finally {clearInterval(timer);await Promise.all(workers.map(worker=>worker.terminate()));}
+  const session=chatUi(root,{action:'read',chat_id:args.chat_id}).session;
+  const messages=[...session.messages,...session.queued_messages];
+  assert.equal(messages.length,36);
+  assert.equal(new Set(messages.map(m=>m.id)).size,36);
+  assert.ok(polls>0);
 });

@@ -219,12 +219,27 @@ function readArtifact(root: string, value: unknown): Record<string, unknown> {
 }
 function discussionStore(root:string):DiscussionStore {return {safe:relative=>safe(root,relative),load:id=>load(root,id),save:s=>save(root,s),validateId:validId,text};}
 export function chatUi(root: string, args: Record<string, unknown>): Record<string, unknown> {
-  return locked(root, () => {
-    const action = args.action;
+  const action = args.action;
+  // Readers use complete atomic snapshots; mutations always retain the shared
+  // cross-process lock. In particular, unknown/discussion actions are not exempt.
+  const readOnly = ['list', 'read', 'read_attachment', 'read_attachment_chunk', 'read_artifact', 'reveal_path'].includes(String(action));
+  const run = (): Record<string, unknown> => {
     if(String(action).startsWith('discussion_'))return discussionAction(discussionStore(root),args);
     if (action === 'list') {
-      const sessions = readdirSync(safe(root, DIR)).filter(n => /^[a-zA-Z0-9_-]{1,80}\.json$/.test(n)).map(n => {
-        const s = view(root, load(root, n.slice(0, -5))); return { ...s, messages: undefined };
+      let names: string[];
+      try { names = readdirSync(safe(root, DIR)); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { sessions: [] };
+        throw error;
+      }
+      const sessions = names.filter(n => /^[a-zA-Z0-9_-]{1,80}\.json$/.test(n)).flatMap(n => {
+        let snapshot: ChatSession;
+        try { snapshot = load(root, n.slice(0, -5)); }
+        catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+          throw error;
+        }
+        return [{ ...view(root, snapshot), messages: undefined }];
       }).sort((a, b) => Number(a.archived)-Number(b.archived)||Number(b.pinned)-Number(a.pinned)||b.updated_at-a.updated_at);
       return { sessions };
     }
@@ -289,7 +304,8 @@ export function chatUi(root: string, args: Record<string, unknown>): Record<stri
     else if (action === 'close') { s.closed = true; s.attachment_id = ''; s.lease_until = 0; s.updated_at = Date.now(); save(root, s); }
     else if (action !== 'read') throw new Error('Unknown chat action');
     return { session: localView(root, s) };
-  });
+  };
+  return readOnly ? run() : locked(root, run);
 }
 /** Removes the JSON record, Markdown projection, `<id>.*` sidecars, pasted `<id>-*.<image>` files and chat assets. */
 function deleteSessionFiles(root: string, id: string): void {
