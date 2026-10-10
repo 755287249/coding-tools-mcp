@@ -103,6 +103,17 @@ test('real MCP catalog and explicit workspace routing complete the chat loop wit
   assert.match(opened.instruction,/skill.text/);
   const skillText = readFileSync(new URL('../../../skills/local-chat/SKILL.md', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
   assert.equal(opened.skill.text, skillText);
+  const resumed = await call('chat_open', {chat_id:session.id, attachment_id:opened.attachment_id});
+  assert.equal(resumed.attachment_id, opened.attachment_id);
+  assert.equal(resumed.skill.text, skillText);
+  const groupId = chatUi(state.root, {action:'create', title:'Skill distribution', mode:'group'}).session.id;
+  for (const agent_name of ['Coordinator', 'Member']) {
+    const member = await call('chat_open', {chat_id:groupId, agent_name});
+    assert.equal(member.skill.text, skillText);
+    const restored = await call('chat_open', {chat_id:groupId, attachment_id:member.attachment_id});
+    assert.equal(restored.attachment_id, member.attachment_id);
+    assert.equal(restored.skill.text, skillText);
+  }
   const resources = await responseJson(await mcpRequest(state, {jsonrpc:'2.0',id:++seq,method:'resources/list',params:{}}));
   const listed = resources.result.resources.find(resource => resource.uri === opened.skill.uri);
   assert.ok(listed);
