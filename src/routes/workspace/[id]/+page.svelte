@@ -11,7 +11,6 @@
     TunnelFormConfig,
   } from "$lib/components/TunnelConfigForm.svelte";
   import {
-    deleteWorkspace,
     getActionsRuntimeStatus,
     getRuntimeStatus,
     listWorkspaces,
@@ -24,7 +23,6 @@
     updateWorkspace,
   } from "$lib/api/workspaces";
   import { listFrpProfiles, setLastWorkspace, type FrpProfileDto } from "$lib/api/settings";
-  import { confirm } from "$lib/api/native";
   import { getBackend } from "$lib/backend";
   import { restartTunnel, stopTunnel, testTunnel } from "$lib/api/tunnel";
   import { runServiceToggle, notifyStartFailure } from "$lib/runtime/service";
@@ -53,6 +51,8 @@
   import MessageSquare from '@lucide/svelte/icons/message-square';
   import ArrowLeft from '@lucide/svelte/icons/arrow-left';
   import Trash2 from '@lucide/svelte/icons/trash-2';
+  import WorkspaceRemoveDialog from '$lib/components/WorkspaceRemoveDialog.svelte';
+  let removingWorkspace = $state<{id:string;name:string}|null>(null);
   import ListChecks from '@lucide/svelte/icons/list-checks';
   import { activityPanelExpanded, activityPanelOpen } from '$lib/stores/activity-panel';
   import ChatPanel from "$lib/components/chat/ChatPanel.svelte";
@@ -731,22 +731,6 @@
     await promptServiceRestart(actionsStatus === "running", $t("Actions service"));
   }
 
-  async function removeWorkspace() {
-    if (!profile || !workspaceId) return;
-    const confirmed = await confirm(
-      $t("Delete workspace “{name}”? This action cannot be undone.", { name: profile.name }),
-      {
-        title: $t("Delete workspace"),
-        kind: "warning",
-        okLabel: $t("Delete"),
-        cancelLabel: $t("Cancel"),
-      },
-    );
-    if (!confirmed) return;
-    await measure("workspace.delete", () => deleteWorkspace(workspaceId));
-    workspaces.update((items) => items.filter((item) => item.id !== workspaceId));
-    await goto(appUrl("/"));
-  }
 
   $effect(() => {
     syncNavigationFromUrl($page.url);
@@ -764,6 +748,8 @@
     };
   });
 </script>
+
+{#if removingWorkspace}<WorkspaceRemoveDialog workspace={removingWorkspace} onClose={()=>removingWorkspace=null}/>{/if}
 
 {#if profile && $uiMode === "auto" && activeWorkspaceTab !== "chat"}
   <div class="workspace-chat-bar"><button class="workspace-chat-tab" onclick={() => navigateWorkspace('chat')}><MessageSquare size={15}/>{$t('chat.44')}</button></div>
@@ -892,7 +878,7 @@
               {sandboxLocked}
             />
             {#if capabilities.workspaceLifecycle}
-              <section class="workspace-delete"><button type="button" onclick={() => void removeWorkspace()}><Trash2 size={16}/>{$t('Delete workspace')}</button></section>
+              <section class="workspace-delete"><button type="button" onclick={() => {if(profile)removingWorkspace={id:profile.id,name:profile.name};}}><Trash2 size={16}/>{$t('workspace.remove')}</button></section>
             {/if}
           {:catch cause}
             <div class="tx-card p-5 text-sm text-[var(--color-danger)]">

@@ -7,7 +7,7 @@
 
 /*
  * ─── Design tokens ───
- * Modern dark (VS Code / Linear inspired) is the default theme.
+ * Theme preference defaults to the system; resolved colors are selected before paint.
  * The light theme is selected with [data-theme="light"].
  */
 :root,
@@ -20,6 +20,9 @@
   --titlebar-height: 42px;
 
   /* Surfaces — neutral graphite, Codex-like */
+  --chat-link: #79b5ff;
+  --chat-user-bg: #173e76;
+  --chat-selection: #24364c;
   --page-bg: #0b0b0c;
   --main-content-bg: #111112;
   --surface-1: #141415;
@@ -104,8 +107,11 @@
 [data-theme="light"] {
   color-scheme: light;
 
-  --page-bg: #f4f4f5;
-  --main-content-bg: #f7f7f8;
+  --chat-link: #2463a8;
+  --chat-user-bg: #235ca3;
+  --chat-selection: #e3edfa;
+  --page-bg: #ffffff;
+  --main-content-bg: #ffffff;
   --surface-1: #ffffff;
   --surface-2: #f2f2f4;
   --surface-3: #eaeaed;
@@ -121,7 +127,7 @@
 
   --text-main: #18181b;
   --text-secondary: #56565e;
-  --text-muted: #8c8c94;
+  --text-muted: #686873;
 
   --primary: #18181b;
   --primary-dark: #000000;
@@ -441,6 +447,7 @@ button {
 
 .tx-sidebar-toolbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   margin-top: 8px;
