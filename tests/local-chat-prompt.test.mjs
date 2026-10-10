@@ -10,9 +10,12 @@ test('session target round-trips quotes and newlines as one JSON line', () => {
   const target = prompt.split('\n').find(line => line.startsWith('目标参数'));
   assert.deepEqual(JSON.parse(target.slice(target.indexOf('{'))), { chat_id: chat, workspace_folder_id: folder });
   assert.match(prompt, /chat_open/);
-  assert.match(prompt, /attachment_id/);
+  assert.match(prompt, /list_workspace_folders/);
   assert.match(prompt, /skill.text/);
-  assert.match(prompt, /chat_wait → 工作 → chat_reply → 再等待/);
+  assert.match(prompt, /chat_wait \/ chat_reply 是该 MCP 服务端提供的工具/);
+  assert.match(prompt, /立即调用 chat_wait/);
+  assert.match(prompt, /每次回复后再次调用 chat_wait/);
+  assert.match(prompt, /空闲或单条任务完成时继续等待/);
   assert.ok(prompt.length < 400, 'copied session guidance should delegate details to the skill');
 });
 
