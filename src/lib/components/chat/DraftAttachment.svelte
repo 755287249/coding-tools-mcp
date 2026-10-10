@@ -1,11 +1,12 @@
 <script lang="ts">
   import { untrack } from 'svelte';
+  import type { PreviewImage } from '$lib/chat/image-gallery';
   import { t } from '$lib/i18n';
   import { localChat, type ChatFile } from '$lib/api/chat';
   import { readChatFile, MAX_BROWSER_PREVIEW_BYTES } from '$lib/chat/attachment-transfer';
   import ImagePreview from './ImagePreview.svelte';
   import LocalPathLink from './LocalPathLink.svelte';
-  let {file,workspaceId,folderId,chatId,disabled=false,onRemove}:{file:ChatFile;workspaceId:string;folderId:string;chatId:string;disabled?:boolean;onRemove:()=>void}=$props();
+  let {file,workspaceId,folderId,chatId,images,disabled=false,onRemove}:{images:PreviewImage[];file:ChatFile;workspaceId:string;folderId:string;chatId:string;disabled?:boolean;onRemove:()=>void}=$props();
   let src=$state(''), error=$state(''), openRequest=$state(0);
   $effect(()=>{
     const f=file,ws=workspaceId,folder=folderId,chat=chatId; let alive=true,url='';
@@ -18,7 +19,7 @@
   <button type="button" class="preview" disabled={!src} onclick={()=>openRequest++} title={file.name}>{#if src}<img {src} alt={file.label ?? file.name}/>{:else}<span>{file.mime.startsWith('image/')?'▧':'▤'}</span>{/if}</button>
   <span class="label" title={file.name}>{file.label ?? file.name}</span>
   <button type="button" class="remove" aria-label={`${$t('chat.53')}: ${file.label ?? file.name}`} disabled={disabled} onclick={onRemove}>×</button>
-  {#if src}<ImagePreview {src} name={file.label ?? file.name} {openRequest} thumbnail={false} {workspaceId} {folderId} {chatId} path={file.path}/>{/if}
+  {#if src}<ImagePreview {images} {src} name={file.label ?? file.name} {openRequest} thumbnail={false} {workspaceId} {folderId} {chatId} path={file.path}/>{/if}
   {#if error || file.size>MAX_BROWSER_PREVIEW_BYTES}<LocalPathLink {workspaceId} {folderId} {chatId} path={file.path} label={$t('chat.showInFolder')}/>{/if}
 </div>
 <style>

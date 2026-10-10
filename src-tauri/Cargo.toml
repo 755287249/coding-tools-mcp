@@ -1,6 +1,6 @@
 [package]
 name = "coding-tools-mcp-desktop"
-version = "0.1.93"
+version = "0.1.94"
 description = "Coding Tools MCP desktop client"
 authors = ["Coding Tools MCP Contributors"]
 edition = "2021"

@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { setContext } from 'svelte';
+  import { IMAGE_GALLERY, uniqueImages } from '$lib/chat/image-gallery';
+  import { assetPreview } from '$lib/chat/asset-preview';
   import { localChat, type ChatFile } from '$lib/api/chat';
   import { goto } from '$app/navigation';
   import { appUrl } from '$lib/app-path';
@@ -17,6 +20,9 @@
   const categories=['all','image','document','code','other'] as const;
   function classify(file:ChatFile) { if(file.mime.startsWith('image/')||/\.(png|jpe?g|gif|webp|svg|avif|bmp)$/i.test(file.path))return 'image'; if(/\.(md|txt|pdf|docx?|csv|xlsx?)$/i.test(file.path))return 'document'; if(/\.(svelte|[cm]?[jt]sx?|rs|py|html|css|json|ya?ml|sh)$/i.test(file.path))return 'code';return 'other'; }
   const filtered=$derived(assets.filter(a=>(category==='all'||classify(a.file)===category)&&`${a.file.name} ${a.file.path} ${a.title}`.toLowerCase().includes(query.toLowerCase())));
+  setContext(IMAGE_GALLERY,()=>uniqueImages(filtered.filter(asset=>assetPreview(asset.file,asset.preview)?.kind==='image').map(asset=>({
+    workspaceId,folderId,chatId:asset.chatId,path:asset.file.path,name:asset.file.name,...(asset.preview?{file:asset.file}:{})
+  }))));
   $effect(()=>{
     const ws=workspaceId, folder=folderId;let cancelled=false; assets=[];error='';loading=true;expanded='';
     void (async()=>{try{
