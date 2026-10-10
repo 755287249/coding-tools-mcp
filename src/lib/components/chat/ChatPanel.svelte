@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { chatConnectionTone } from '$lib/chat/connection-tone';
   import { fileDrop } from '$lib/chat/file-drop';
   let dropActive=$state(false);
   import { startVisiblePolling, reconcileSnapshot } from '$lib/chat/polling';
@@ -661,7 +662,7 @@
       <button class="mobile-chat-actions" aria-label={$t('mobile.chatActions')} aria-expanded={mobileActions} onclick={()=>mobileActions=!mobileActions}><Ellipsis size={20}/></button>
       <div class="header-actions">
         {#if unreadTotal}<button class="unread-total" onclick={showUnread} aria-label={`${$t('chat.90')}: ${unreadTotal}`}>{unreadTotal}</button>{/if}
-        <div class="connection-actions"><button disabled={busy || !selected || !(detail?.status === 'connected' || detail?.status === 'waiting')} onclick={requestDisconnect}>{$t('chat.disconnect')}</button><button class="connect-button" title={needsAi?$t('chat.connectHint'):undefined} disabled={busy || !folderId || detail?.closed} onclick={openConnection}>{$t(mode==='group'?'chat.inviteGroup':'chat.connectWork')}</button></div>
+        <div class="connection-actions"><button disabled={busy || !selected || !(detail?.status === 'connected' || detail?.status === 'waiting')} onclick={requestDisconnect}>{$t('chat.disconnect')}</button><button class="connect-button" data-connection={chatConnectionTone(detail)} title={needsAi?$t('chat.connectHint'):undefined} disabled={busy || !folderId || detail?.closed} onclick={openConnection}>{$t(mode==='group'?'chat.inviteGroup':'chat.connectWork')}</button></div>
         {#if selected}<button title={$t('chat.36')} aria-label={$t('chat.36')} onclick={download}><Download size={16}/></button>{/if}
 
         {#if headerActions}{@render headerActions()}{/if}
@@ -713,7 +714,7 @@
   {:else}<div class="mobile-action-list">
     {#if mobileHeader}<button disabled={busy} onclick={()=>{mobileActions=false;void mobileHeader.newChat()}}><SquarePen size={18}/>{$t('shell.newChat')}</button>{/if}
     {#if detail}<button disabled={busy} onclick={()=>startRename(detail!)}><Pencil size={18}/>{$t('chat.85')}</button>{/if}
-    <button class="connect-button" disabled={busy||!folderId||detail?.closed} onclick={()=>{mobileActions=false;void openConnection()}}><Plus size={18}/>{$t(mode==='group'?'chat.inviteGroup':'chat.connectWork')}</button>
+    <button class="connect-button" data-connection={chatConnectionTone(detail)} disabled={busy||!folderId||detail?.closed} onclick={()=>{mobileActions=false;void openConnection()}}><Plus size={18}/>{$t(mode==='group'?'chat.inviteGroup':'chat.connectWork')}</button>
     <button disabled={busy||!selected||!(detail?.status==='connected'||detail?.status==='waiting')} onclick={()=>{mobileActions=false;requestDisconnect()}}><X size={18}/>{$t('chat.disconnect')}</button>
     {#if selected}<button onclick={()=>{mobileActions=false;download()}}><Download size={18}/>{$t('chat.36')}</button>{/if}
     {#if unreadTotal}<button onclick={()=>{mobileActions=false;showUnread()}}>{$t('chat.90')} ({unreadTotal})</button>{/if}
@@ -845,6 +846,6 @@
 @media(prefers-reduced-motion:reduce){.pairing-orbit{animation:none}}
 
 .mention-choices[popover]{position:fixed;inset:auto;margin:0;z-index:auto;color:var(--color-text);}
-button.connect-button{background:rgb(214 111 120 / .18);color:color-mix(in srgb,#d66f78 65%,var(--color-text));font-weight:600;white-space:nowrap}button.connect-button:hover:enabled{background:rgb(214 111 120 / .26)}
+button.connect-button{--connection-color:214 111 120;background:rgb(var(--connection-color) / .18);color:color-mix(in srgb,rgb(var(--connection-color)) 65%,var(--color-text));font-weight:600;white-space:nowrap}button.connect-button:hover:enabled{background:rgb(var(--connection-color) / .26)}button.connect-button[data-connection=online]{--connection-color:66 166 119}button.connect-button[data-connection=stale]{--connection-color:195 153 61}
 form.file-drop-active{outline:2px dashed var(--primary);outline-offset:3px}.file-drop-hint{position:absolute;inset:4px;z-index:5;display:grid;place-items:center;pointer-events:none;border-radius:inherit;background:var(--surface-2);color:var(--color-text);font-size:14px;font-weight:600}
 </style>
