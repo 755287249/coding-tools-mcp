@@ -46,8 +46,9 @@ try {
 
     $phaseTimer.Restart()
     Write-Host 'Building frontend assets...'
-    # Use the Windows command shim so PowerShell waits for pnpm and receives its exit code.
-    & pnpm.cmd run build
+    # pnpm 12 may provide an EXE; older installations provide a CMD shim.
+    $pnpmCommand = (Get-Command pnpm -CommandType Application -ErrorAction Stop).Source
+    & $pnpmCommand run build
     if ($LASTEXITCODE -ne 0) {
         throw "Frontend build failed with exit code $LASTEXITCODE."
     }
