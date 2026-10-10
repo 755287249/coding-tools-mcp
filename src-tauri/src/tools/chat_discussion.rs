@@ -25,13 +25,22 @@ fn members(root:&Path,value:&Value)->Result<Vec<Value>>{
  let ids=value.as_array().filter(|a|!a.is_empty()&&a.len()<=16).ok_or_else(||err("Choose 1–16 conversations"))?;
  let mut seen=HashSet::new();for v in ids{let cid=id(v)?;if !seen.insert(cid){return Err(err("Duplicate conversation"))}let s=load(root,cid)?;if s["closed"]==true||s["archived"]==true||s["mode"]=="group"{return Err(err("Choose active independent conversations"));}}Ok(ids.clone())
 }
+fn last_message_at(d:&Value)->u64 {
+ let mut latest=d["created_at"].as_u64().unwrap_or(0);
+ for post in d["posts"].as_array().into_iter().flatten(){
+  latest=latest.max(post["created_at"].as_u64().unwrap_or(0));
+  for reply in post["summaries"].as_array().into_iter().flatten(){latest=latest.max(reply["created_at"].as_u64().unwrap_or(0));}
+  for delivery in post["deliveries"].as_array().into_iter().flatten(){for reply in delivery["replies"].as_array().into_iter().flatten(){latest=latest.max(reply["created_at"].as_u64().unwrap_or(0));}}
+ }
+ latest
+}
 fn projection(root:&Path,d:&Value,args:&Value)->Result<Value>{
  let offset=match args.get("offset"){None=>0,Some(v)=>v.as_u64().filter(|n|*n<=1000).ok_or_else(||err("Invalid history offset"))? as usize};
  let posts=d["posts"].as_array().unwrap();let end=posts.len().saturating_sub(offset);let begin=end.saturating_sub(50);let mut out=d.clone();out.as_object_mut().unwrap().remove("files");
- out["archive_path"]=json!(format!("{DISCUSS_DIR}/{}.md",d["id"].as_str().unwrap()));out["posts"]=json!(&posts[begin..end]);out["next_offset"]=if begin>0{json!(offset+end-begin)}else{Value::Null};out["total"]=json!(posts.len());
+ out["last_message_at"]=json!(last_message_at(d));out["archive_path"]=json!(format!("{DISCUSS_DIR}/{}.md",d["id"].as_str().unwrap()));out["posts"]=json!(&posts[begin..end]);out["next_offset"]=if begin>0{json!(offset+end-begin)}else{Value::Null};out["total"]=json!(posts.len());
  out["member_details"]=json!(d["members"].as_array().unwrap().iter().map(|cid|match load(root,cid.as_str().unwrap_or("")){Ok(s)=>{let pending=pending(&s);let replies:Vec<_>=s["messages"].as_array().unwrap().iter().filter(|r|r["role"]=="assistant"&&pending.as_ref().is_some_and(|m|r["reply_to"]==m["id"])).collect();json!({"id":cid,"title":d["aliases"][cid.as_str().unwrap_or("")].as_str().or(s["agent_name"].as_str()).or(s["title"].as_str()).unwrap_or("AI"),"busy":pending.as_ref().is_some_and(|m|m["received_at"].as_u64().unwrap_or(0)>0||!replies.is_empty()),"error":replies.iter().rev().find(|r|r["tool_event"].is_object()).is_some_and(|r|r["tool_event"]["status"]=="failed"),"note":s["note"].as_str().unwrap_or(""),"status":if s["closed"]==true{"closed"}else if s["lease_until"].as_u64().unwrap_or(0)>now(){"connected"}else{"offline"}})},Err(_)=>json!({"id":cid,"title":cid,"status":"missing"})}).collect::<Vec<_>>());Ok(out)
 }
-fn collect(root:&Path,d:&mut Value)->Result<()>{
+fn collect(root:&Path,d:&mut Value,persist:bool)->Result<()>{
  let before=d["posts"].clone();
  for post in d["posts"].as_array_mut().unwrap(){for delivery in post["deliveries"].as_array_mut().unwrap(){
   if delivery["status"]=="completed"{continue}
@@ -48,7 +57,7 @@ fn collect(root:&Path,d:&mut Value)->Result<()>{
   }
  }}
  if d["collaboration"]==true{let gid=d["id"].clone();for p in d["posts"].as_array_mut().unwrap(){if p["from"]=="user"{continue}if let Ok(s)=load(root,p["from"].as_str().unwrap_or("")){let ids:HashSet<_>=s["messages"].as_array().unwrap().iter().filter(|m|m["discussion"]["id"]==gid&&m["discussion"]["post_id"]==p["id"]&&m["discussion"]["purpose"]=="result").filter_map(|m|m["id"].as_str()).collect();p["summaries"]=json!(s["messages"].as_array().unwrap().iter().filter(|m|m["role"]=="assistant"&&ids.contains(m["reply_to"].as_str().unwrap_or(""))).collect::<Vec<_>>());}}}
- if d["posts"]!=before||d["collaboration"]==true{write(root,d)?;}Ok(())
+ if persist&&(d["posts"]!=before||d["collaboration"]==true){write(root,d)?;}Ok(())
 }
 fn deliver(root:&Path,d:&Value,p:&Value)->Result<()>{
  for delivery in p["deliveries"].as_array().unwrap(){
@@ -83,7 +92,7 @@ pub(super) fn attachment_action(root:&Path,gid:&str,args:&Value)->Result<Value>{
 }
 pub(super) fn action(root:&Path,args:&Value,actor:Option<&Value>)->Result<Value>{
  let action=args["action"].as_str().unwrap_or("list").trim_start_matches("discussion_");
- if action=="list"{let mut list:Vec<_>=all(root)?.into_iter().filter(|d|actor.is_none_or(|s|d["members"].as_array().unwrap().contains(&s["id"]))).map(|mut d|{d["total"]=json!(d["posts"].as_array().unwrap().len());d.as_object_mut().unwrap().remove("posts");d.as_object_mut().unwrap().remove("files");d}).collect();list.sort_by_key(|d|std::cmp::Reverse(d["updated_at"].as_u64().unwrap_or(0)));return Ok(json!({"discussions":list}));}
+ if action=="list"{let mut list:Vec<_>=all(root)?.into_iter().filter(|d|actor.is_none_or(|s|d["members"].as_array().unwrap().contains(&s["id"]))).map(|mut d|{collect(root,&mut d,false)?;d["last_message_at"]=json!(last_message_at(&d));d["total"]=json!(d["posts"].as_array().unwrap().len());d.as_object_mut().unwrap().remove("posts");d.as_object_mut().unwrap().remove("files");Ok(d)}).collect::<Result<Vec<_>>>()?;list.sort_by_key(|d|std::cmp::Reverse(d["updated_at"].as_u64().unwrap_or(0)));return Ok(json!({"discussions":list}));}
  if action=="create"{
   if actor.is_some(){return Err(err("Create groups from the local interface"));}
   let gid=id(&args["discussion_id"])?;let name=text(&args["title"],160)?;let goal=if args["goal"].as_str().unwrap_or("").is_empty(){String::new()}else{text(&args["goal"],2000)?};let ids=members(root,&args["member_chat_ids"])?;
@@ -117,12 +126,12 @@ pub(super) fn action(root:&Path,args:&Value,actor:Option<&Value>)->Result<Value>
    };deliver(root,&d,&p)?;
   },"read"=>(),_=>return Err(err("Unknown discussion action"))
  }
- collect(root,&mut d)?;Ok(json!({"ok":true,"persisted":true,"discussion":projection(root,&d,args)?,"post_id":args["message_id"]}))
+ collect(root,&mut d,true)?;Ok(json!({"ok":true,"persisted":true,"discussion":projection(root,&d,args)?,"post_id":args["message_id"]}))
 }
 pub(super) fn inbox(root:&Path,cid:&str)->Result<()>{
  for mut d in all(root)?{
   if !d["posts"].as_array().unwrap().iter().any(|p|p["from"]==cid&&p["purpose"]=="task"){continue}
-  collect(root,&mut d)?;
+  collect(root,&mut d,true)?;
   for p in d["posts"].as_array().unwrap().iter().filter(|p|p["from"]==cid&&p["purpose"]=="task"){for delivery in p["deliveries"].as_array().unwrap(){
    let status=delivery["status"].as_str().unwrap_or("");if !["completed","awaiting_user","closed","unavailable"].contains(&status){continue}
    let last=delivery["replies"].as_array().and_then(|a|a.last());let result_id=last.and_then(|v|v["id"].as_str()).unwrap_or(status);
@@ -138,6 +147,12 @@ pub(super) fn inbox(root:&Path,cid:&str)->Result<()>{
 #[cfg(test)]
 mod tests {
  use super::*;
+ #[test]
+ fn activity_uses_posts_and_replies_not_metadata(){
+  let d=json!({"created_at":10,"updated_at":9999,"posts":[{"created_at":20,"summaries":[{"created_at":35}],"deliveries":[{"replies":[{"created_at":30},{"created_at":40}]}]}]});
+  assert_eq!(last_message_at(&d),40);
+  assert_eq!(last_message_at(&json!({"created_at":10,"updated_at":9999,"posts":[]})),10);
+ }
  #[test]
  fn group_attachments_are_independent_retryable_and_keep_original_labels(){
   use base64::{engine::general_purpose::STANDARD,Engine};

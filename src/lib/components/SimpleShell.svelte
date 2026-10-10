@@ -10,6 +10,11 @@
   import Globe from '@lucide/svelte/icons/globe';
   import {localDesktop} from '$lib/api/distribution';
   import MobileSheet from './MobileSheet.svelte';
+  import { navigationSessions, acquireNavigation } from '$lib/chat/navigation-state';
+  import { conversationOrder } from '$lib/chat/navigation';
+  import { conversationSwipe } from '$lib/chat/conversation-swipe';
+  import { discussionLocation } from '$lib/chat/discussion-navigation';
+  import PresenceDot from '$lib/components/chat/PresenceDot.svelte';
   import { mobileViewport } from '$lib/chat/mobile-viewport';
   import Menu from '@lucide/svelte/icons/menu';
   import Search from '@lucide/svelte/icons/search';
@@ -48,6 +53,7 @@
   import { t } from '$lib/i18n';
   import type { MessageKey } from '$lib/i18n/catalog';
   let { children, settingsNav, onAddWorkspace, onQuickSetup }: { children: Snippet; settingsNav?: Snippet; onQuickSetup?: () => void; onAddWorkspace?: () => void | Promise<void> } = $props();
+  onMount(acquireNavigation);
   let shareOpen=$state(false),aboutOpen=$state(false),mobileNavMore=$state(false);
   onMount(()=>{if(localDesktop())void checkAppUpdate()});
   $effect(()=>{if(!mobileNav)mobileNavMore=false});
@@ -70,6 +76,15 @@
   const entries=[{id:'assets',icon:Images},{id:'scheduled',icon:Clock},{id:'skills',icon:Library},{id:'plugins',icon:Blocks}];
   onMount(()=>{const media=matchMedia('(max-width:700px)');const resize=()=>{mobileScreen=media.matches;if(!media.matches)mobileNav=false};resize();media.addEventListener('change',resize);try{pinned=localStorage.getItem('ctmcp-nav-pinned')!=='0';width=navigationWidth(localStorage.getItem('ctmcp-nav-width'));if(media.matches)pinned=false;}catch{}const stop=startScheduleRunner();return()=>{media.removeEventListener('change',resize);stop()}});
   $effect(()=>{const route=$page.url.href;mobileNav=false;mobileMore=false;settingsOpen=false;menuElement?.hidePopover();if(typeof window!=='undefined'&&window.innerWidth<700){pinned=false;hovered=false}});
+  function beginConversationSwipe(){
+    if(mobileNav||mobileMore||settingsOpen||searchOpen)return null;
+    const id=panel==='discussions'?'discussion:'+$page.url.searchParams.get('discussion'):$page.url.searchParams.get('chat');
+    if(!id || (panel&&panel!=='discussions'))return null;
+    const ordered=groups.flatMap(group=>($navigationSessions[group.key]??[]).filter(chat=>!chat.archived&&!chat.closed).map(chat=>({group,chat}))).sort((a,b)=>conversationOrder(a.chat,b.chat));
+    const index=ordered.findIndex(item=>item.chat.id===id&&item.group.workspace.id===$page.params.id&&item.group.folder.id===$page.url.searchParams.get('folder'));
+    if(index<0)return null;
+    return (direction:-1|1)=>{const next=ordered[index+direction];if(next)void goto(appUrl(next.chat.discussionId?discussionLocation(next.group.workspace.id,next.group.folder.id,next.chat.discussionId):chatLocation(next.group.workspace.id,next.group.folder.id,next.chat.id)),{noScroll:true})};
+  }
   function pin(){pinned=!pinned;hovered=false;try{localStorage.setItem('ctmcp-nav-pinned',pinned?'1':'0')}catch{}}
   function resize(value:number){width=navigationWidth(value);try{localStorage.setItem('ctmcp-nav-width',String(width))}catch{}}
   async function newChat(connect=false){
@@ -113,7 +128,7 @@
 {#if searchOpen}<ConversationSearch onClose={()=>searchOpen=false} onNewChat={async()=>{await newChat()}} onOpenWorkspace={onAddWorkspace} canSearchFiles={!!group} onSearchFiles={()=>{assetSearchRequest++;openPanel('assets')}}/>{/if}
 <svelte:window onkeydown={shortcuts} onresize={()=>{if(innerWidth<700){pinned=false;hovered=false}}}/>
 {#if mobileMore}<MobileSheet title={$t('mobile.chatActions')} onClose={()=>mobileMore=false}><nav class="mobile-destinations"><button onclick={()=>{mobileMore=false;void newChat()}}><SquarePen size={19}/>{$t('shell.newChat')}</button><button onclick={()=>{mobileMore=false;searchOpen=true}}><Search size={19}/>{$t('chat.100')}</button><button onclick={()=>{mobileMore=false;settingsOpen=true}}><Settings size={19}/>{$t('Settings')}</button></nav></MobileSheet>{/if}
-{#if mobileNav}<MobileSheet title="Coding Tools" edge="left" onClose={()=>mobileNav=false}>
+{#if mobileScreen}<MobileSheet title="Coding Tools" edge="left" open={mobileNav} onClose={()=>mobileNav=false}>
   <nav class="mobile-destinations compact-nav" aria-label={$t('chat.106')}>
     <div class="nav-essentials"><button onclick={()=>{mobileNav=false;searchOpen=true}}><Search size={19}/>{$t('chat.100')}</button><button aria-expanded={mobileNavMore} onclick={()=>mobileNavMore=!mobileNavMore}><Ellipsis size={19}/>{$t('shell.more')}</button></div>
     {#if mobileNavMore}<div class="nav-more">
@@ -127,7 +142,7 @@
   <div class="mobile-projects" role="presentation" ontouchmove={()=>mobileNavMore=false} onwheel={()=>mobileNavMore=false} onscrollcapture={()=>mobileNavMore=false}><ProjectNavigator {onAddWorkspace} {recent} onSearch={()=>{mobileNav=false;searchOpen=true}}/></div>
 </MobileSheet>{/if}
 <div class="shell-frame" use:mobileViewport>
-<header class="mobile-topbar"><button aria-label={$t('mobile.navigation')} onclick={()=>mobileNav=true}><Menu size={21}/></button><div class="mobile-title"><strong title={$mobileChat?.title}>{$mobileChat?.title??(customizing?$t('features.customize'):panel==='assets'?$t('shell.assets'):panel==='scheduled'?$t('shell.scheduled'):'Coding Tools')}</strong>{#if $mobileChat}<span class="mobile-status"><i class:online={$mobileChat.online}></i>{$mobileChat.status}</span>{/if}</div><button aria-label={$t('mobile.chatActions')} onclick={()=>{$mobileChat?$mobileChat.openMenu():mobileMore=true}}><Ellipsis size={21}/></button></header>
+<header class="mobile-topbar"><button aria-label={$t('mobile.navigation')} onclick={()=>mobileNav=true}><Menu size={21}/></button><div class="mobile-title"><strong title={$mobileChat?.title}>{$mobileChat?.title??(customizing?$t('features.customize'):panel==='assets'?$t('shell.assets'):panel==='scheduled'?$t('shell.scheduled'):'Coding Tools')}</strong>{#if $mobileChat}<span class="mobile-status"><PresenceDot state={$mobileChat.presence??($mobileChat.online?'online':'offline')} label={$mobileChat.status}/>{$mobileChat.status}</span>{/if}</div><button aria-label={$t('mobile.chatActions')} onclick={()=>{$mobileChat?$mobileChat.openMenu():mobileMore=true}}><Ellipsis size={21}/></button></header>
 <header class="shell-topbar" data-tauri-drag-region>
   <button title={`${$t('shell.back')} (Ctrl+[)`} aria-label={$t('shell.back')} onclick={()=>history.back()}><ArrowLeft size={15}/></button>
   <button title={`${$t('shell.forward')} (Ctrl+])`} aria-label={$t('shell.forward')} onclick={()=>history.forward()}><ArrowRight size={15}/></button>
@@ -151,7 +166,7 @@
       <button class="resize-handle" aria-label={$t('chat.108')} title={$t('chat.108')} onpointerdown={event=>{drag={x:event.clientX,width};event.currentTarget.setPointerCapture(event.pointerId)}} onpointermove={event=>{if(drag)resize(drag.width+event.clientX-drag.x)}} onpointerup={()=>drag=null} onpointercancel={()=>drag=null} onkeydown={event=>{if(event.key==='ArrowLeft'||event.key==='ArrowRight'){event.preventDefault();resize(width+(event.key==='ArrowRight'?20:-20))}}}></button>
     </aside>{/if}
   </div>
-  <main class="sx-main">
+  <main class="sx-main" use:conversationSwipe={beginConversationSwipe}>
   {#if error}<div class="shell-error" role="alert">{error}<button onclick={()=>error=''} aria-label={$t('Close')}>×</button></div>{/if}
   {#if customizing}
     {#if group}<WorkspaceFeatureControls workspaceId={group.workspace.id} initialTab={panel==='skills'?'skills':$page.url.searchParams.get('featureTab')==='hooks'?'hooks':'mcp'} catalog onCatalogTab={openFeatureTab}>
@@ -208,5 +223,5 @@
  .unified-shell{width:100%;zoom:1!important}.sx-main{width:100%}.shell-settings{top:62px;left:12px;max-height:calc(100% - 78px);width:calc(100% - 24px)}
 }
 
-.mobile-title{display:grid;gap:3px;min-width:0;flex:1;text-align:center}.mobile-title strong{display:block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.mobile-status{display:flex;align-items:center;justify-content:center;gap:5px;min-width:0;font-size:10px;line-height:14px;color:var(--color-text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.mobile-status i{width:5px;height:5px;border-radius:50%;background:var(--color-text-muted);flex:none}.mobile-status i.online{background:#49a476}
+.mobile-title{display:grid;gap:3px;min-width:0;flex:1;text-align:center}.mobile-title strong{display:block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.mobile-status{display:flex;align-items:center;justify-content:center;gap:5px;min-width:0;font-size:10px;line-height:14px;color:var(--color-text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 </style>

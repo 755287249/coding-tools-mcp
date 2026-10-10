@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { startVisiblePolling, reconcileSnapshot } from '$lib/chat/polling';
+  import { navigationSessions as navigation, navigationErrors as navErrors, acquireNavigation } from '$lib/chat/navigation-state';
+  import PresenceDot from './PresenceDot.svelte';
   import { goto } from '$app/navigation';
   import { page } from '$app/stores';
   import { appUrl } from '$lib/app-path';
@@ -9,7 +10,7 @@
   import { localDiscussion, localChat } from '$lib/api/chat';
   import { discussionNavigation, discussionLocation, type NavigationChat as ChatSession } from '$lib/chat/discussion-navigation';
   import { chatLocation } from '$lib/chat/location';
-  import { sessionPresence, isConnectedConversation } from '$lib/chat/navigation';
+  import { sessionPresence, isConnectedConversation, conversationOrder, recentConversationOrder } from '$lib/chat/navigation';
   import { t } from '$lib/i18n';
   import WorkspaceRemoveDialog from '$lib/components/WorkspaceRemoveDialog.svelte';
   import { getBackend } from '$lib/backend';
@@ -63,17 +64,17 @@
   }
   async function togglePin(workspace:string,folder:string,chat:ChatSession){
     if(pinSaving)return;pinSaving=scope(scope(workspace,folder),chat.id);
-    try{const result=await updateConversation(workspace,folder,chat,{pinned:!chat.pinned});if(result.session)sessions={...sessions,[scope(workspace,folder)]:(sessions[scope(workspace,folder)]??[]).map(item=>item.id===chat.id?result.session!:item).sort((a,b)=>Number(!!a.archived)-Number(!!b.archived)||Number(!!b.pinned)-Number(!!a.pinned)||b.updated_at-a.updated_at)};chatMenu?.hidePopover();}
-    catch(error){errors={...errors,[scope(workspace,folder)]:String(error)}}finally{pinSaving=''}
+    try{const result=await updateConversation(workspace,folder,chat,{pinned:!chat.pinned});if(result.session)$navigation={...$navigation,[scope(workspace,folder)]:($navigation[scope(workspace,folder)]??[]).map(item=>item.id===chat.id?result.session!:item).sort(conversationOrder)};chatMenu?.hidePopover();}
+    catch(error){$navErrors={...$navErrors,[scope(workspace,folder)]:String(error)}}finally{pinSaving=''}
   }
   $effect(()=>{const route=$page.url.href;chatMenu?.hidePopover();});
-  const sortChats=(list:ChatSession[])=>[...list].sort((a,b)=>Number(!!a.archived)-Number(!!b.archived)||Number(!!b.pinned)-Number(!!a.pinned)||b.updated_at-a.updated_at);
+  const sortChats=(list:ChatSession[])=>[...list].sort(conversationOrder);
   let deleteArmed=$state(false);
   let showArchived=$state<Record<string,boolean>>({});
   async function toggleArchive(workspace:string,folder:string,chat:ChatSession){
     if(pinSaving)return;pinSaving=scope(scope(workspace,folder),chat.id);
-    try{const result=await updateConversation(workspace,folder,chat,{archived:!chat.archived});if(result.session)sessions={...sessions,[scope(workspace,folder)]:sortChats((sessions[scope(workspace,folder)]??[]).map(item=>item.id===chat.id?result.session!:item))};chatMenu?.hidePopover();}
-    catch(error){errors={...errors,[scope(workspace,folder)]:String(error)}}finally{pinSaving=''}
+    try{const result=await updateConversation(workspace,folder,chat,{archived:!chat.archived});if(result.session)$navigation={...$navigation,[scope(workspace,folder)]:sortChats(($navigation[scope(workspace,folder)]??[]).map(item=>item.id===chat.id?result.session!:item))};chatMenu?.hidePopover();}
+    catch(error){$navErrors={...$navErrors,[scope(workspace,folder)]:String(error)}}finally{pinSaving=''}
   }
   async function deleteChat(workspace:string,folder:string,chat:ChatSession){
     if(pinSaving)return;
@@ -83,18 +84,18 @@
       if(chat.status==='connected'||chat.status==='waiting')await localChat(workspace,folder,{action:'detach',chat_id:chat.id});
       const result=await localChat(workspace,folder,{action:'delete',chat_id:chat.id});
       if(result.deleted!==true)throw new Error('Conversation deletion was not confirmed.');
-      sessions={...sessions,[scope(workspace,folder)]:(sessions[scope(workspace,folder)]??[]).filter(item=>item.id!==chat.id)};
+      $navigation={...$navigation,[scope(workspace,folder)]:($navigation[scope(workspace,folder)]??[]).filter(item=>item.id!==chat.id)};
       chatMenu?.hidePopover();
       if($page.params.id===workspace&&$page.url.searchParams.get('folder')===folder&&activeId===chat.id)open(workspace,folder);
     }
-    catch(error){errors={...errors,[scope(workspace,folder)]:String(error)}}finally{pinSaving='';deleteArmed=false}
+    catch(error){$navErrors={...$navErrors,[scope(workspace,folder)]:String(error)}}finally{pinSaving='';deleteArmed=false}
   }
   let picker = $state<HTMLDivElement>();
   let pickerTrigger=$state<HTMLButtonElement>();
   let pickerLeft=$state(62), pickerTop=$state(90);
   let collapsed = $state<Record<string, boolean>>({});
-  let sessions = $state<Record<string, ChatSession[]>>({});
-  let errors = $state<Record<string, string>>({});
+  onMount(acquireNavigation);
+
   let rename = $state('');
   let title = $state('');
   let editingNote=$state(false);
@@ -125,9 +126,9 @@
   const groups = $derived($workspaces.flatMap(workspace => workspaceFolders(workspace).map(folder => ({workspace, folder, key: scope(workspace.id, folder.id)}))));
   const activeGroup = $derived(groups.find(group => group.workspace.id === $page.params.id && group.folder.id === $page.url.searchParams.get('folder')));
   const activeId=$derived($page.url.searchParams.get('panel')==='discussions'&&$page.url.searchParams.get('discussion')?'discussion:'+$page.url.searchParams.get('discussion'):$page.url.searchParams.get('chat'));
-  const activeChat = $derived(activeGroup ? sessions[activeGroup.key]?.find(chat => chat.id === activeId) : undefined);
-  const pickerItems = $derived(groups.flatMap(group => (sessions[group.key] ?? []).filter(isConnectedConversation).map(chat => ({group, chat})))
-    .sort((a, b) => b.chat.updated_at - a.chat.updated_at));
+  const activeChat = $derived(activeGroup ? $navigation[activeGroup.key]?.find(chat => chat.id === activeId) : undefined);
+  const pickerItems = $derived(groups.flatMap(group => ($navigation[group.key] ?? []).filter(isConnectedConversation).map(chat => ({group, chat})))
+    .sort((a, b) => conversationOrder(a.chat,b.chat)));
   $effect(() => { const route = $page.url.href; picker?.hidePopover(); });
   function positionPicker() {
     if(!pickerTrigger||!picker?.matches(':popover-open'))return;
@@ -135,42 +136,26 @@
     pickerLeft=Math.max(8,Math.min(anchor.left,innerWidth-picker.offsetWidth-8));
     pickerTop=Math.max(8,Math.min(anchor.bottom+6,innerHeight-picker.offsetHeight-8));
   }
-  const recentItems = $derived(groups.flatMap(group => (sessions[group.key] ?? []).filter(chat => !chat.archived && (recentFilter==='all' || (chat.mode??'work')===recentFilter)).map(chat => ({group, chat}))).sort((a,b) => Number(!!b.chat.pinned)-Number(!!a.chat.pinned)||b.chat.updated_at-a.chat.updated_at).slice(0,40));
-  const presenceLabels = { online:'chat.98', offline:'chat.22', working:'chat.70', error:'chat.71', closed:'chat.21' } as const;
+  const recentItems = $derived(groups.flatMap(group => ($navigation[group.key] ?? []).filter(chat => !chat.archived && (recentFilter==='all' || (chat.mode??'work')===recentFilter)).map(chat => ({group, chat}))).sort((a,b) => recentConversationOrder(a.chat,b.chat)).slice(0,40));
+  const presenceLabels = { online:'chat.98', offline:'chat.22', working:'chat.70', error:'chat.71', closed:'chat.21', queued:'chat.81', awaiting_user:'chat.73' } as const;
   onMount(() => { try { const value=JSON.parse(localStorage.getItem('ctmcp-project-collapse') ?? '{}'); if(value && typeof value==='object' && !Array.isArray(value)) collapsed=value; } catch {} });
-  $effect(() => {
-    const targets = groups;
-    let stopped=false;
-    async function poll() {
-      // Query summaries only; no transcript or authentication material is loaded by navigation.
-      for(let offset=0;offset<targets.length;offset+=4) {
-        if(stopped || document.hidden) return;
-        await Promise.all(targets.slice(offset,offset+4).map(async group => {
-          try { const [result,discussions]=await Promise.all([localChat(group.workspace.id,group.folder.id,{action:'list'}),localDiscussion(group.workspace.id,group.folder.id,{action:'discussion_list'})]); if(!stopped){const next=reconcileSnapshot(sessions[group.key]??[],sortChats([...(result.sessions??[]),...(discussions.discussions??[]).map(d=>discussionNavigation(d,result.sessions??[]))]));if(next!==sessions[group.key])sessions={...sessions,[group.key]:next};if(errors[group.key])errors={...errors,[group.key]:''};} }
-          catch(error){if(!stopped)errors={...errors,[group.key]:String(error)}}
-        }));
-      }
-    }
-    const stop=startVisiblePolling(poll,()=>3000);
-    return()=>{stopped=true;stop()};
-  });
   function unread(ws:string,folder:string,chat:ChatSession){try{const saved=JSON.parse(localStorage.getItem(`ctmcp-chat-seen:${ws}:${folder}`)??'{}');return Math.max(0,(chat.assistant_message_count??0)-(Number(saved?.[chat.id])||0))}catch{return 0}}
   function visibleChats(ws:string,folder:string){
-    const list=(sessions[scope(ws,folder)]??[]).filter(chat=>!chat.archived);
+    const list=($navigation[scope(ws,folder)]??[]).filter(chat=>!chat.archived);
     if(expandedChats[scope(ws,folder)])return list;
     const first=list.slice(0,4);
     const active=$page.params.id===ws&&$page.url.searchParams.get('folder')===folder?list.find(chat=>chat.id===activeId):undefined;
     if(active&&!first.includes(active))first.push(active);
     return first;
   }
-  function archivedChats(ws:string,folder:string){return (sessions[scope(ws,folder)]??[]).filter(chat=>chat.archived);}
+  function archivedChats(ws:string,folder:string){return ($navigation[scope(ws,folder)]??[]).filter(chat=>chat.archived);}
   function toggle(id:string){collapsed={...collapsed,[id]:!collapsed[id]};try{localStorage.setItem('ctmcp-project-collapse',JSON.stringify(collapsed))}catch{}}
-  function open(workspace:string,folder:string,chat?:string){const item=sessions[scope(workspace,folder)]?.find(s=>s.id===chat);void goto(appUrl(item?.discussionId?discussionLocation(workspace,folder,item.discussionId):chatLocation(workspace,folder,chat)),{noScroll:true});}
+  function open(workspace:string,folder:string,chat?:string){const item=$navigation[scope(workspace,folder)]?.find(s=>s.id===chat);void goto(appUrl(item?.discussionId?discussionLocation(workspace,folder,item.discussionId):chatLocation(workspace,folder,chat)),{noScroll:true});}
   function editProject(id:string){uiMode.set('advanced');void goto(appUrl(`/workspace/${encodeURIComponent(id)}?tab=settings`));}
   async function renameChat(workspace:string,folder:string,chat:ChatSession){
     const value=title.trim();if(saving||(!editingNote&&!value))return;saving=true;
-    try{const result=await updateConversation(workspace,folder,chat,editingNote?{note:value}:{title:value});if(result.session)sessions={...sessions,[scope(workspace,folder)]:(sessions[scope(workspace,folder)]??[]).map(item=>item.id===chat.id?result.session!:item)};rename=''}
-    catch(error){errors={...errors,[scope(workspace,folder)]:String(error)}}finally{saving=false}
+    try{const result=await updateConversation(workspace,folder,chat,editingNote?{note:value}:{title:value});if(result.session)$navigation={...$navigation,[scope(workspace,folder)]:($navigation[scope(workspace,folder)]??[]).map(item=>item.id===chat.id?result.session!:item)};rename=''}
+    catch(error){$navErrors={...$navErrors,[scope(workspace,folder)]:String(error)}}finally{saving=false}
   }
 </script>
 
@@ -209,7 +194,7 @@
               </div>
               {#if !collapsed[workspace.id]}
                 {#each projectGroups as group (group.key)}
-                  {@const activeCount=(sessions[group.key]??[]).filter(chat=>!chat.archived).length}
+                  {@const activeCount=($navigation[group.key]??[]).filter(chat=>!chat.archived).length}
                   {@const archived=archivedChats(workspace.id,group.folder.id)}
                   {#if projectGroups.length>1}<button class="folder-name" onclick={() => open(workspace.id,group.folder.id)}><Folder size={12}/>{group.folder.name}</button>{/if}
                   {#each visibleChats(workspace.id,group.folder.id) as chat (chat.id)}
@@ -220,7 +205,7 @@
                     <button class="empty-project archived-toggle" aria-expanded={!!showArchived[group.key]} onclick={()=>showArchived={...showArchived,[group.key]:!showArchived[group.key]}}><Archive size={12}/>{$t('chat.archived')} ({archived.length})<ChevronDown size={12}/></button>
                     {#if showArchived[group.key]}{#each archived as chat (chat.id)}{@render chatRow(workspace.id,group.folder.id,chat,false,'archived')}{/each}{/if}
                   {/if}
-                  {#if errors[group.key]}<p class="load-error" role="status">{errors[group.key]}</p>{/if}
+                  {#if $navErrors[group.key]}<p class="load-error" role="status">{$navErrors[group.key]}</p>{/if}
                 {/each}
               {/if}
             </div>
@@ -264,7 +249,7 @@
     {#if rename===key}
       <form onsubmit={event=>{event.preventDefault();void renameChat(ws,folder,chat)}}><input bind:this={renameInput} aria-label={$t(editingNote?'chat.note':'chat.86')} bind:value={title} maxlength="240" disabled={saving} onkeydown={event=>{if(event.key==='Escape')rename=''}}/><button disabled={saving||(!editingNote&&!title.trim())}>{$t('Save')}</button></form>
     {:else}
-      <button class="chat-link" onclick={()=>open(ws,folder,chat.id)} aria-current={active?'page':undefined} title={`${chat.title} · ${$t(presenceLabels[presence])}`}><i class:group-dot={chat.mode==='group'} title={$t(presenceLabels[presence])}></i><span>{chat.title}{#if chat.note}<span class="conversation-note" title={chat.note}>{chat.note}</span>{/if}{#if showProject}<small>{$workspaces.find(item=>item.id===ws)?.name}</small>{/if}</span><em class="chat-mode-tag">#{$t(chat.mode==='group'?'chat.group':'chat.work')}</em>{#if newCount}<b class="unread-count" aria-label={`${$t('chat.90')}: ${newCount}`}>{newCount>99?'99+':newCount}</b>{/if}</button>
+      <button class="chat-link" onclick={()=>open(ws,folder,chat.id)} aria-current={active?'page':undefined} title={`${chat.title} · ${$t(presenceLabels[presence])}`}><PresenceDot state={presence} label={$t(presenceLabels[presence])} group={chat.mode==='group'}/><span>{chat.title}{#if chat.note}<span class="conversation-note" title={chat.note}>{chat.note}</span>{/if}{#if showProject}<small>{$workspaces.find(item=>item.id===ws)?.name}</small>{/if}</span><em class="chat-mode-tag">#{$t(chat.mode==='group'?'chat.group':'chat.work')}</em>{#if newCount}<b class="unread-count" aria-label={`${$t('chat.90')}: ${newCount}`}>{newCount>99?'99+':newCount}</b>{/if}</button>
       <div class="chat-row-actions"><button title={$t('chat.conversationActions')} aria-label={`${$t('chat.conversationActions')}: ${chat.title}`} onclick={event=>showChatMenu(ws,folder,chat,source,event)}><Ellipsis size={15}/></button><button class:pinned={chat.pinned} disabled={!!pinSaving} title={$t(chat.pinned?'chat.unpin':'chat.pin')} aria-label={`${$t(chat.pinned?'chat.unpin':'chat.pin')}: ${chat.title}`} onclick={()=>togglePin(ws,folder,chat)}><Pin size={14} class={chat.pinned?'pin-icon is-pinned':'pin-icon'}/></button></div>
     {/if}
   </div>
@@ -276,16 +261,16 @@
 .recent-menu{position:fixed;inset:auto;margin:0;width:200px;max-width:calc(100vw - 16px);padding:6px;border:1px solid var(--color-border);border-radius:12px;background:var(--surface-2);color:var(--color-text);box-shadow:0 12px 32px #0007}.recent-menu button{display:flex;align-items:center;justify-content:space-between;width:100%;gap:10px;padding:9px 10px;font-size:13px;text-align:left}
 :global(.pin-icon){transform:rotate(35deg)}:global(.pin-icon.is-pinned){transform:none;fill:currentColor}
 
-.chat-link i.group-dot{border-radius:1px}.chat-mode-tag{display:inline;font-size:11px;font-style:normal;color:var(--color-text-muted);white-space:nowrap;flex:none}.tree-chat:hover .chat-mode-tag,.tree-chat:focus-within .chat-mode-tag{display:inline}
+.chat-mode-tag{display:inline;font-size:11px;font-style:normal;color:var(--color-text-muted);white-space:nowrap;flex:none}.tree-chat:hover .chat-mode-tag,.tree-chat:focus-within .chat-mode-tag{display:inline}
 
 .session-picker-trigger{display:flex;align-items:center;gap:7px;min-width:0;max-width:calc(100% - 25px);padding:6px;text-align:left}.session-picker-trigger strong{font-size:18px;font-weight:600;line-height:26px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.session-picker-trigger :global(svg){flex:none}.conversation-picker{position:fixed;inset:auto;margin:0;width:min(260px,calc(100vw - 16px));max-height:calc(100dvh - 72px);overflow:auto;padding:6px;border:1px solid var(--color-border);border-radius:12px;background:var(--color-bg);color:var(--color-text);box-shadow:0 10px 32px #0005}.picker-list{max-height:50dvh;overflow:auto}.picker-chat{display:flex;align-items:center;gap:10px;width:100%;text-align:left;padding:10px;border-radius:8px}.picker-chat[aria-current=page]{background:var(--surface-hover)}.picker-chat>span{flex:1;min-width:0}.picker-chat strong,.picker-chat small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.picker-chat strong{font-size:14px;font-weight:500}.picker-chat small{font-size:11px;color:var(--color-text-muted);margin-top:4px}
 
-.project-nav{height:100%;display:flex;flex-direction:column;padding:14px 10px;color:var(--color-text);min-width:0}header{display:flex;align-items:center;justify-content:space-between;padding:2px 9px 16px;font-size:15px}button{cursor:pointer}button{border-radius:6px}button:hover{background:var(--surface-hover)}button:focus-visible,input:focus-visible{outline:2px solid var(--primary);outline-offset:1px}.new-conversation{display:flex;align-items:center;gap:10px;padding:9px;margin-bottom:14px;text-align:left;font-size:12px}.nav-scroll{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;margin-right:-10px;padding-right:10px}.section-heading{display:flex;align-items:center;justify-content:space-between;color:var(--color-text-muted);padding:0 6px 8px;font-size:14px;font-weight:600}.section-heading button{display:flex;align-items:center;gap:5px;padding:4px}.project-group{margin-bottom:16px}.project-heading{display:flex;align-items:center;gap:3px;padding:0 4px}.project-heading.current{background:color-mix(in srgb,var(--color-text) 5%,transparent);border-radius:7px}.project-heading>button:last-child{padding:4px;flex:none}.project-name{display:flex;align-items:center;gap:8px;min-width:0;flex:1;text-align:left;padding:8px 4px;font-size:12px}.project-name span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.tree-chat{display:flex;align-items:center;margin:2px 0 2px 22px;border-radius:7px;min-width:0}.tree-chat.active{background:var(--surface-hover)}.chat-link{display:flex;gap:7px;align-items:center;min-width:0;flex:1;text-align:left;padding:8px 6px;font-size:12px}.chat-link>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}.chat-link small{display:block;font-size:9px;color:var(--color-text-muted)}.chat-link i{width:5px;height:5px;border-radius:50%;background:#888;flex:none}.tree-chat[data-presence=online] i{background:#31a56c}.tree-chat[data-presence=working] i{background:#6a9bd4}.tree-chat[data-presence=error] i{background:#db7969}.tree-chat form{display:flex;gap:3px;width:100%;padding:5px;font-size:11px}.tree-chat input{width:0;flex:1;min-width:0;background:var(--card-bg);border:1px solid var(--color-border);padding:4px}.folder-name,.empty-project{display:flex;align-items:center;gap:5px;margin-left:28px;font-size:10px;color:var(--color-text-muted);padding:6px}.load-error{font-size:10px;color:var(--danger);overflow-wrap:anywhere;padding:7px}.muted{font-size:11px;color:var(--color-text-muted);padding:8px}
+.project-nav{height:100%;display:flex;flex-direction:column;padding:14px 10px;color:var(--color-text);min-width:0}header{display:flex;align-items:center;justify-content:space-between;padding:2px 9px 16px;font-size:15px}button{cursor:pointer}button{border-radius:6px}button:hover{background:var(--surface-hover)}button:focus-visible,input:focus-visible{outline:2px solid var(--primary);outline-offset:1px}.new-conversation{display:flex;align-items:center;gap:10px;padding:9px;margin-bottom:14px;text-align:left;font-size:12px}.nav-scroll{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;margin-right:-10px;padding-right:10px}.section-heading{display:flex;align-items:center;justify-content:space-between;color:var(--color-text-muted);padding:0 6px 8px;font-size:14px;font-weight:600}.section-heading button{display:flex;align-items:center;gap:5px;padding:4px}.project-group{margin-bottom:16px}.project-heading{display:flex;align-items:center;gap:3px;padding:0 4px}.project-heading.current{background:color-mix(in srgb,var(--color-text) 5%,transparent);border-radius:7px}.project-heading>button:last-child{padding:4px;flex:none}.project-name{display:flex;align-items:center;gap:8px;min-width:0;flex:1;text-align:left;padding:8px 4px;font-size:12px}.project-name span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.tree-chat{display:flex;align-items:center;margin:2px 0 2px 22px;border-radius:7px;min-width:0}.tree-chat.active{background:var(--surface-hover)}.chat-link{display:flex;gap:7px;align-items:center;min-width:0;flex:1;text-align:left;padding:8px 6px;font-size:12px}.chat-link>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}.chat-link small{display:block;font-size:9px;color:var(--color-text-muted)}.tree-chat form{display:flex;gap:3px;width:100%;padding:5px;font-size:11px}.tree-chat input{width:0;flex:1;min-width:0;background:var(--card-bg);border:1px solid var(--color-border);padding:4px}.folder-name,.empty-project{display:flex;align-items:center;gap:5px;margin-left:28px;font-size:10px;color:var(--color-text-muted);padding:6px}.load-error{font-size:10px;color:var(--danger);overflow-wrap:anywhere;padding:7px}.muted{font-size:11px;color:var(--color-text-muted);padding:8px}
 .unread-count{min-width:14px;border-radius:8px;background:#55749a;color:white;font:9px/14px system-ui;text-align:center;padding:0 3px}
 
 .project-info-trigger{padding:4px;flex:none}.project-info-card{position:fixed;inset:auto;margin:0;width:min(340px,calc(100vw - 16px));max-height:calc(100dvh - 16px);overflow:auto;padding:15px;border:1px solid var(--color-border);border-radius:12px;background:var(--color-bg);color:var(--color-text);box-shadow:0 12px 36px #0007;font-size:12px}.project-info-card p{overflow-wrap:anywhere;color:var(--color-text-muted);margin:9px 0}.project-info-card button{display:flex;align-items:center;gap:8px;width:100%;padding:9px;border-radius:7px;text-align:left;cursor:pointer}.project-info-card button:hover{background:var(--surface-hover)}.project-info-card .remove-workspace{color:var(--danger);margin-top:4px}
 
-.project-name,.chat-link,.new-conversation{font-size:14px}.project-name{padding-top:7px;padding-bottom:7px}.project-group{margin-bottom:10px}.tree-chat{margin:2px 0 2px 4px}.chat-link{padding:7px 8px;gap:10px}.chat-link i{width:6px;height:6px}.project-heading .project-info-trigger,.project-heading>button:last-child,.chat-row-actions{opacity:0;pointer-events:none}.project-heading:hover .project-info-trigger,.project-heading:hover>button:last-child,.project-heading:focus-within .project-info-trigger,.project-heading:focus-within>button:last-child,.tree-chat:hover .chat-row-actions,.tree-chat:focus-within .chat-row-actions{opacity:1;pointer-events:auto}.chat-row-actions{display:flex;align-items:center;flex:none;gap:1px;margin-right:4px}.chat-row-actions button{display:grid;place-items:center;width:24px;height:26px;color:var(--color-text-muted)}.chat-row-actions button.pinned{color:#88b5f8}.chat-actions-menu{position:fixed;inset:auto;margin:0;width:210px;max-width:calc(100vw - 16px);padding:5px;border:1px solid var(--color-border);border-radius:11px;background:var(--color-bg);color:var(--color-text);box-shadow:0 12px 32px #0007}.chat-actions-menu button{display:flex;align-items:center;gap:10px;padding:10px;width:100%;font-size:13px;text-align:left}
+.project-name,.chat-link,.new-conversation{font-size:14px}.project-name{padding-top:7px;padding-bottom:7px}.project-group{margin-bottom:10px}.tree-chat{margin:2px 0 2px 4px}.chat-link{padding:7px 8px;gap:10px}.project-heading .project-info-trigger,.project-heading>button:last-child,.chat-row-actions{opacity:0;pointer-events:none}.project-heading:hover .project-info-trigger,.project-heading:hover>button:last-child,.project-heading:focus-within .project-info-trigger,.project-heading:focus-within>button:last-child,.tree-chat:hover .chat-row-actions,.tree-chat:focus-within .chat-row-actions{opacity:1;pointer-events:auto}.chat-row-actions{display:flex;align-items:center;flex:none;gap:1px;margin-right:4px}.chat-row-actions button{display:grid;place-items:center;width:24px;height:26px;color:var(--color-text-muted)}.chat-row-actions button.pinned{color:#88b5f8}.chat-actions-menu{position:fixed;inset:auto;margin:0;width:210px;max-width:calc(100vw - 16px);padding:5px;border:1px solid var(--color-border);border-radius:11px;background:var(--color-bg);color:var(--color-text);box-shadow:0 12px 32px #0007}.chat-actions-menu button{display:flex;align-items:center;gap:10px;padding:10px;width:100%;font-size:13px;text-align:left}
 .tree-chat{transition:background-color .12s}.tree-chat:hover,.tree-chat:focus-within{background:var(--surface-hover)}.tree-chat button:hover{background:transparent}.tree-chat:hover .chat-link,.tree-chat:hover .chat-row-actions button{color:var(--color-text)}.chat-row-actions button:hover{color:var(--color-text);background:color-mix(in srgb,var(--color-text) 10%,transparent)}.tree-chat.archived-row{opacity:.72}
 .chat-actions-menu hr{border:0;border-top:1px solid var(--color-border);margin:4px 2px}.chat-actions-menu button.danger{color:#e5786d}.chat-actions-menu button.danger.armed{background:#e5786d22;font-weight:600}.archived-toggle{display:flex;align-items:center;gap:6px}
 @media(hover:none){.project-heading .project-info-trigger,.project-heading>button:last-child,.chat-row-actions{opacity:1;pointer-events:auto}}

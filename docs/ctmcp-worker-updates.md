@@ -16,7 +16,7 @@ For a single-file dashboard Worker, paste the helper without its `export` keywor
 
 ## Runtime configuration
 
-- `CTMCP_CHANNEL`: `stable` by default. Set `beta` for this repository’s existing personal-release workflow, which publishes prereleases. Beta selects the greatest version among the newest 100 published releases carrying the exact Coding Tools EXE name; drafts and other products are excluded.
+- `CTMCP_CHANNEL`: `stable` by default. The personal-release workflow publishes prereleases by default; dispatch it with `publish_release=true` and `stable_release=true` for the built-in updater. Set `beta` only when prereleases should be offered. Beta selects the greatest version among the newest 100 published releases carrying the exact Coding Tools EXE name; drafts and other products are excluded.
 - `CTMCP_REPO`: `755287249/coding-tools-mcp` (independent of legacy `REPO`).
 - `CTMCP_GH_TOKEN`: optional GitHub release read secret. When omitted, the existing `GH_TOKEN` can be reused if it has access to both repositories. Public repositories need no token for CTMCP routes.
 - Keep all existing legacy variables, secrets and KV bindings intact.

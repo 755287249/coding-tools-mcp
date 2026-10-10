@@ -341,6 +341,12 @@ fn view(root: &Path, s: &Value) -> Result<Value> {
         })
     };
     o.insert("work_state".into(), json!(work_state));
+    let messages = s["messages"].as_array();
+    let last_message_at = messages.into_iter().flatten().filter_map(|m| m["created_at"].as_u64()).max().unwrap_or(s["created_at"].as_u64().unwrap_or(0));
+    let latest_user = messages.into_iter().flatten().rev().find(|m| m["role"] == "user");
+    let awaiting_user = work_state.is_none() && latest_user.is_some_and(|user| messages.into_iter().flatten().any(|m| m["role"] == "assistant" && m["reply_to"] == user["id"] && m["final"] == true && m["awaiting_user"] == true));
+    o.insert("last_message_at".into(), json!(last_message_at));
+    o.insert("awaiting_user".into(), json!(awaiting_user));
     o.insert("assistant_message_count".into(), json!(s["messages"].as_array().map_or(0, |messages| messages.iter().filter(|m| m["role"] == "assistant").count())));
     o.insert(
         "archive_path".into(),
@@ -1652,6 +1658,17 @@ mod tests {
         assert!(fs::read_to_string(file(root, cid.as_str().unwrap()).unwrap().with_extension("md")).unwrap().contains("Attachment: result.txt"));
         ui(root, &json!({"action":"detach","chat_id":cid})).unwrap();
         assert!(tool(root, "chat_upload", &args).is_err());
+    }
+    #[test]
+    fn summary_activity_uses_messages_not_metadata() {
+        let dir=tempfile::tempdir().unwrap();let root=dir.path();
+        let created=ui(root,&json!({"action":"create","title":"Activity"})).unwrap();
+        let mut session=load(root,created["session"]["id"].as_str().unwrap()).unwrap();
+        session["created_at"]=json!(10);session["updated_at"]=json!(900);
+        session["messages"]=json!([{"id":"u","role":"user","text":"Task","created_at":20,"received_at":800},{"id":"a","role":"assistant","reply_to":"u","text":"Choose?","created_at":30,"final":true,"awaiting_user":true}]);
+        let summary=view(root,&session).unwrap();assert_eq!(summary["last_message_at"],30);assert_eq!(summary["awaiting_user"],true);
+        session["messages"].as_array_mut().unwrap().push(json!({"id":"answer","role":"user","text":"Yes","created_at":40}));
+        let summary=view(root,&session).unwrap();assert_eq!(summary["last_message_at"],40);assert_eq!(summary["awaiting_user"],false);
     }
     #[tokio::test]
     async fn summary_work_state_tracks_pickup_final_and_close() {

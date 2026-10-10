@@ -6,6 +6,7 @@ export interface MobileChatHeader {
   title: string;
   status: string;
   online: boolean;
+  presence?:ReturnType<typeof import('./navigation').sessionPresence>;
   openMenu: () => void;
 }
 export interface MobileHeaderContext {

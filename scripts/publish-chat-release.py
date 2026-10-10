@@ -42,7 +42,7 @@ class GitHub:
             raise RuntimeError(f"GitHub HTTP {error.code}: {method} {parsed.path}") from None
 
 
-def publish(api, directory, repository, owner, version, commit):
+def publish(api, directory, repository, owner, version, commit, stable=False):
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) or repository.split('/')[0] != owner:
         raise RuntimeError("Repository owner mismatch")
     if not re.fullmatch(r"\d+\.\d+\.\d+", version) or not re.fullmatch(r"[a-f0-9]{40}", commit):
@@ -79,7 +79,7 @@ def publish(api, directory, repository, owner, version, commit):
     if not release:
         release = api.request("POST", f"{prefix}/releases", {
             "tag_name": tag, "target_commitish": commit, "name": f"Coding Tools MCP {version}",
-            "draft": True, "prerelease": True,
+            "draft": True, "prerelease": not stable,
             "body": f"Windows standalone EXE. Download and run directly.\n\nCommit: {commit}\n\nSHA-256: `{digest}`",
         })
     asset_path = f"{prefix}/releases/{int(release['id'])}/assets?per_page=100"
@@ -99,8 +99,10 @@ def publish(api, directory, repository, owner, version, commit):
     assets = api.request("GET", asset_path)
     if len(assets) != 1 or assets[0].get("name") != name or assets[0].get("digest") != expected or assets[0].get("size") != len(binary):
         raise RuntimeError("Release must contain exactly one verified versioned EXE")
-    if release.get("draft"):
-        release = api.request("PATCH", f"{prefix}/releases/{int(release['id'])}", {"draft": False})
+    if release.get("draft") or (stable and release.get("prerelease")):
+        changes = {"draft": False}
+        if stable: changes.update(prerelease=False, make_latest="true")
+        release = api.request("PATCH", f"{prefix}/releases/{int(release['id'])}", changes)
     return release["html_url"]
 
 
@@ -108,7 +110,7 @@ def main():
     token = os.environ.get("PERSONAL_RELEASE_TOKEN", "")
     if not token:
         raise RuntimeError("PERSONAL_RELEASE_TOKEN is required; no bot-token fallback")
-    return publish(GitHub(token), sys.argv[1], os.environ["RELEASE_REPOSITORY"], os.environ["RELEASE_OWNER"], os.environ["RELEASE_VERSION"], os.environ["RELEASE_COMMIT"])
+    return publish(GitHub(token), sys.argv[1], os.environ["RELEASE_REPOSITORY"], os.environ["RELEASE_OWNER"], os.environ["RELEASE_VERSION"], os.environ["RELEASE_COMMIT"], stable=os.environ.get("RELEASE_STABLE") == "true")
 
 
 if __name__ == "__main__":

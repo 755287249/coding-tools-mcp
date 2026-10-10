@@ -6,10 +6,16 @@ on:
   workflow_dispatch:
     inputs:
       publish_release:
-        description: Publish the verified build as a personal GitHub prerelease
+        description: Publish the verified build as a personal GitHub release
         type: boolean
         required: false
         default: true
+
+      stable_release:
+        description: Publish a stable release visible to the built-in updater
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -144,6 +150,7 @@ jobs:
           PERSONAL_RELEASE_TOKEN: ${{ secrets.PERSONAL_RELEASE_TOKEN }}
           RELEASE_REPOSITORY: ${{ github.repository }}
           RELEASE_OWNER: ${{ github.repository_owner }}
+          RELEASE_STABLE: ${{ inputs.stable_release && 'true' || 'false' }}
           RELEASE_COMMIT: ${{ github.sha }}
           RELEASE_VERSION: ${{ needs.windows-portable.outputs.version }}
         run: python3 scripts/publish-chat-release.py release-files

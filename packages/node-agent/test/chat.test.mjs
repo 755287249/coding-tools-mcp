@@ -724,3 +724,19 @@ test('message whitespace survives send, retry, merged queues, replies and tool d
  assert.equal(chatTool(root,'chat_wait',args).message.text,`队列1：\n\n${text}\n\n队列2：\n\n${text}`);
  assert.throws(()=>chatUi(root,{...send,message_id:'too-big',text:' '.repeat(32000)+'x'}),/bytes/);
 });
+
+for (const grouped of [false,true]) test(`summary activity ignores rename, pin, pickup and heartbeats (${grouped})`,t=>{
+ const {root,args}=fixture(t);
+ if(grouped)chatUi(root,{action:'set_mode',chat_id:args.chat_id,mode:'group'});
+ let clock=Date.now()+1000;t.mock.method(Date,'now',()=>clock);
+ chatUi(root,{action:'send',chat_id:args.chat_id,message_id:'activity-u',text:'Question'});
+ const summary=()=>chatUi(root,{action:'list'}).sessions.find(s=>s.id===args.chat_id);
+ const sent=summary().last_message_at;clock+=1000;
+ chatTool(root,'chat_wait',args);assert.equal(summary().last_message_at,sent);
+ chatUi(root,{action:'rename',chat_id:args.chat_id,title:'Renamed'});chatUi(root,{action:'pin',chat_id:args.chat_id,pinned:true});
+ assert.equal(summary().last_message_at,sent);assert.equal(summary().updated_at,clock);
+ chatTool(root,'chat_reply',{...args,message_id:'activity-a',reply_to:'activity-u',text:'Choose?',final:true,awaiting_user:true});
+ assert.equal(summary().last_message_at,clock);assert.equal(summary().awaiting_user,true);
+ clock+=1000;chatTool(root,'chat_wait',args);assert.equal(summary().last_message_at,clock-1000);
+ chatUi(root,{action:'send',chat_id:args.chat_id,message_id:'activity-answer',text:'Yes'});assert.equal(summary().awaiting_user,false);
+});

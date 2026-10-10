@@ -74,6 +74,13 @@ class PublishTests(unittest.TestCase):
         self.assertIn('name=ctmcp-0.1.67-win64.exe', writes[1][1])
         self.assertEqual(len(api.assets),1)
 
+    def test_stable_release_becomes_latest_only_after_verification(self):
+        api=API()
+        release.publish(api,self.root,'owner/repo','owner','0.1.67','a'*40,stable=True)
+        writes=[c for c in api.calls if c[0]!='GET']
+        self.assertFalse(writes[0][2]['prerelease'])
+        self.assertEqual(writes[-1][2],{'draft':False,'prerelease':False,'make_latest':'true'})
+
     def test_existing_asset_is_not_overwritten(self):
         api=API(existing={'id':123,'target_commitish':'a'*40,'author':{'login':'owner'},'assets':[{'name':'ctmcp-0.1.67-win64.exe','digest':'sha256:wrong'}]})
         with self.assertRaisesRegex(RuntimeError,'Existing asset'):self.publish(api)

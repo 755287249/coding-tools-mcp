@@ -39,14 +39,17 @@ function members(io:DiscussionStore,value:unknown):string[]{
   for(const id of ids){const s=io.load(id);if(s.closed||s.archived||s.mode==='group')throw Error('Choose active independent conversations');}
   return ids;
 }
+function lastMessageAt(d:Discussion):number {
+  return d.posts.reduce((latest,post)=>Math.max(latest,post.created_at,...post.deliveries.flatMap(delivery=>delivery.replies.map(reply=>reply.created_at)),...(post.summaries??[]).map(reply=>reply.created_at)),d.created_at);
+}
 function projection(io:DiscussionStore,d:Discussion,offset:unknown=0){
   const start=Number(offset);if(!Number.isInteger(start)||start<0||start>1000)throw Error('Invalid history offset');
   const end=Math.max(0,d.posts.length-start),begin=Math.max(0,end-50);
   const {files,...publicGroup}=d;
-  return {...publicGroup,archive_path:`${DIR}/${d.id}.md`,posts:d.posts.slice(begin,end),next_offset:begin?start+end-begin:null,total:d.posts.length,
+  return {...publicGroup,last_message_at:lastMessageAt(d),archive_path:`${DIR}/${d.id}.md`,posts:d.posts.slice(begin,end),next_offset:begin?start+end-begin:null,total:d.posts.length,
     member_details:d.members.map(id=>{try{const s=io.load(id),pending=s.messages.find(m=>m.role==='user'&&!s.messages.some(r=>r.role==='assistant'&&r.reply_to===m.id&&r.final)),replies=pending?s.messages.filter(r=>r.role==='assistant'&&r.reply_to===pending.id):[];return {id,title:d.aliases?.[id]??s.agent_name??s.title,note:s.note??'',busy:!!pending&&(!!pending.received_at||replies.length>0),error:replies.filter(r=>r.tool_event).at(-1)?.tool_event?.status==='failed',status:s.closed?'closed':s.lease_until>Date.now()?'connected':'offline'}}catch{return {id,title:id,status:'missing'}}})};
 }
-function collect(io:DiscussionStore,d:Discussion){
+function collect(io:DiscussionStore,d:Discussion,persist=true){
   const before=JSON.stringify(d.posts);
   for(const post of d.posts)for(const delivery of post.deliveries){
     if(delivery.status==='completed')continue;
@@ -62,7 +65,7 @@ function collect(io:DiscussionStore,d:Discussion){
   if(d.collaboration)for(const post of d.posts.filter(p=>p.from!=='user')){
     try{const s=io.load(post.from);const ids=new Set(s.messages.filter(m=>m.discussion?.id===d.id&&m.discussion.post_id===post.id&&m.discussion.purpose==='result').map(m=>m.id));post.summaries=s.messages.filter(m=>m.role==='assistant'&&ids.has(m.reply_to??''));}catch{/* Retain collected results if the source is no longer available. */}
   }
-  if(before!==JSON.stringify(d.posts)||d.collaboration)write(io,d);
+  if(persist&&(before!==JSON.stringify(d.posts)||d.collaboration))write(io,d);
 }
 function deliver(io:DiscussionStore,d:Discussion,p:DiscussionPost){
   // The durable post is the outbox intent. A retry repairs only missing deliveries.
@@ -92,7 +95,7 @@ function postFiles(io:DiscussionStore,d:Discussion,args:Record<string,unknown>,a
 }
 export function discussionAction(io:DiscussionStore,args:Record<string,unknown>,actor?:ChatSession):Record<string,unknown>{
   const action=String(args.action??'list').replace(/^discussion_/,'');
-  if(action==='list')return {discussions:all(io).filter(d=>!actor||d.members.includes(actor.id)).map(({posts,files,...d})=>({...d,total:posts.length})).sort((a,b)=>b.updated_at-a.updated_at)};
+  if(action==='list')return {discussions:all(io).filter(d=>!actor||d.members.includes(actor.id)).map(d=>{collect(io,d,false);const {posts,files,...summary}=d;return {...summary,last_message_at:lastMessageAt(d),total:posts.length}}).sort((a,b)=>b.updated_at-a.updated_at)};
   if(action==='create'){
     if(actor)throw Error('Create groups from the local interface');
     const gid=io.validateId(args.discussion_id),name=io.text(args.title,160),goal=args.goal?io.text(args.goal,2000):'',ids=members(io,args.member_chat_ids);

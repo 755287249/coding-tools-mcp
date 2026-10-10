@@ -9,7 +9,7 @@ export function discussionNavigation(d: Discussion, sources: ChatSession[]): Nav
  const live = sources.filter(s=>d.members.includes(s.id) && !s.closed && !s.archived);
  const online = !d.paused && live.some(s=>s.status==='connected'||s.status==='waiting');
  return {id:`discussion:${d.id}`,discussionId:d.id,title:d.name,mode:'group',pinned:d.pinned,
-  archived:d.archived,closed:false,created_at:d.updated_at,updated_at:d.updated_at,
+  archived:d.archived,closed:false,created_at:d.created_at??0,updated_at:d.updated_at,last_message_at:d.last_message_at,
   archive_path:d.archive_path??'',status:online?'connected':'offline',
   work_state:!d.paused&&live.some(s=>s.work_state==='processing')?'processing':null};
 }

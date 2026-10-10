@@ -181,3 +181,14 @@ test('group messages preserve code indentation, blank lines and exact retry iden
  const post=ui(send).discussion.posts[0];assert.equal(post.text,text);assert.equal(ui(send).discussion.posts.length,1);
  assert.throws(()=>ui({...send,text:text.trim()}),/conflict/);assert.ok(wb().message.text.includes(text));
 });
+
+test('discussion recent timestamp includes member replies but excludes metadata updates',t=>{
+ const {root,ui,tool,b,bb,wb}=fixture(t);let clock=Date.now()+1000;t.mock.method(Date,'now',()=>clock);
+ ui({action:'discussion_post',discussion_id:'group1',message_id:'activity-post',text:'Task',recipient_chat_ids:[b]});
+ const summary=()=>ui({action:'discussion_list'}).discussions.find(d=>d.id==='group1');
+ assert.equal(summary().last_message_at,clock);clock+=1000;
+ ui({action:'discussion_update',discussion_id:'group1',title:'Renamed',pinned:true});assert.equal(summary().last_message_at,clock-1000);
+ const message=wb().message;tool(b,bb.attachment_id,'chat_reply',{message_id:'activity-reply',reply_to:message.id,text:'Result',final:true});
+ const archive=path.join(root,'docs/chat-sessions/discussions/group1.json'),before=readFileSync(archive,'utf8');
+ assert.equal(summary().last_message_at,clock);assert.equal(summary().posts,undefined);assert.equal(readFileSync(archive,'utf8'),before,'listing must not rewrite the archive');
+});

@@ -70,3 +70,19 @@ test('navigation preference tolerates invalid storage and bounds resizing', asyn
   for(const status of ['connected','waiting'])for(const work_state of [null,'processing','queued'])assert.equal(isConnectedConversation({status,work_state,closed:false}),true);
   for(const session of [{status:'offline'},{status:'offline',work_state:'processing'},{status:'closed'},{status:'connected',closed:true},{status:'waiting',archived:true}])assert.equal(isConnectedConversation(session),false);
 });
+
+test('live conversations first; recent uses only actual messages and ignores pins/metadata',async()=>{
+ const {conversationOrder,recentConversationOrder}=await import(moduleUrl(source));
+ const old={id:'a',created_at:1,updated_at:9999,last_message_at:20,pinned:true,status:'offline'};
+ const live={id:'b',created_at:2,updated_at:2,last_message_at:10,status:'waiting'};
+ const fresh={id:'c',created_at:3,updated_at:3,last_message_at:30,status:'offline'};
+ assert.deepEqual([old,fresh,live].sort(conversationOrder).map(s=>s.id),['b','a','c']);
+ assert.deepEqual([old,live,fresh].sort(recentConversationOrder).map(s=>s.id),['c','a','b']);
+ assert.equal(sessionPresence({...live,work_state:'queued'}),'queued');
+ assert.equal(sessionPresence({...live,awaiting_user:true}),'awaiting_user');
+});
+test('mobile swipe direction requires distance, horizontal intent and a short gesture',async()=>{
+ const {swipeDirection}=await import('../src/lib/chat/conversation-swipe.ts');
+ assert.equal(swipeDirection(-100,15,300),1);assert.equal(swipeDirection(100,-15,300),-1);
+ for(const args of [[40,0,300],[100,80,300],[100,0,900]])assert.equal(swipeDirection(...args),null);
+});
