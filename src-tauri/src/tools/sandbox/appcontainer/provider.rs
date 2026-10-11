@@ -5186,6 +5186,53 @@ console.log('ancestor-isolation-ok');
             .is_none());
     }
 
+    fn set_fixture_owner_to_current_user(paths: &[&std::path::Path]) {
+        use std::os::windows::io::{FromRawHandle, OwnedHandle};
+        use windows::core::HSTRING;
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::Security::Authorization::{SetNamedSecurityInfoW, SE_FILE_OBJECT};
+        use windows::Win32::Security::{
+            GetTokenInformation, TokenUser, OWNER_SECURITY_INFORMATION, TOKEN_QUERY, TOKEN_USER,
+        };
+        use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+        let mut token = HANDLE::default();
+        unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }
+            .expect("open fixture creator token");
+        let _token_guard = unsafe { OwnedHandle::from_raw_handle(token.0) };
+        let mut size = 0;
+        let _ = unsafe { GetTokenInformation(token, TokenUser, None, 0, &mut size) };
+        assert!(size as usize >= std::mem::size_of::<TOKEN_USER>());
+        let mut storage = vec![0usize; (size as usize).div_ceil(std::mem::size_of::<usize>())];
+        unsafe {
+            GetTokenInformation(
+                token,
+                TokenUser,
+                Some(storage.as_mut_ptr().cast()),
+                size,
+                &mut size,
+            )
+        }
+        .expect("read fixture creator SID");
+        let user = unsafe { &*storage.as_ptr().cast::<TOKEN_USER>() }.User.Sid;
+        for path in paths {
+            let name = HSTRING::from(path.as_os_str().to_string_lossy().as_ref());
+            unsafe {
+                SetNamedSecurityInfoW(
+                    &name,
+                    SE_FILE_OBJECT,
+                    OWNER_SECURITY_INFORMATION,
+                    Some(user),
+                    None,
+                    None,
+                    None,
+                )
+            }
+            .ok()
+            .expect("set synthetic Git fixture owner");
+        }
+    }
+
     #[tokio::test]
     async fn git_status_reads_repository_from_nested_workspace() {
         let root = tempfile::tempdir().expect("root");
@@ -5206,6 +5253,10 @@ console.log('ancestor-isolation-ok');
             String::from_utf8_lossy(&initialized.stderr)
         );
         fs::write(nested.join("fixture.txt"), "fixture").expect("repository fixture");
+        // Elevated Windows CI defaults the owner to Administrators. The sandbox
+        // drops that group's authority, so use the actual test user as owner of
+        // this synthetic repository. Keep Git's safe.directory check enabled.
+        set_fixture_owner_to_current_user(&[&workspace, &workspace.join(".git")]);
         let model = Workspace::new(workspace).expect("workspace");
         let state = tempfile::tempdir().expect("state");
         let prepared =
