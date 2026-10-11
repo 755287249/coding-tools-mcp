@@ -28,7 +28,7 @@
   function ask(args:Record<string,unknown>,label:MessageKey,count=1){confirmation={args,label,count};}
   function toggle(id:string,checked:boolean){selected=checked?[...selected.filter(item=>item!==id),id]:selected.filter(item=>item!==id);}
   async function reissue(seed:SeedRow){
-    if(busy)return;busy=true;error='';const generation=scope;
+    if(busy||refreshing)return;busy=true;error='';const generation=scope;
     try{
       const endpoint=pairingAddress(address,folderId);
       const result=await seedRequest<{batch:SeedTicket[]}>(workspaceId,folderId,{action:'seed_reissue',seed_id:seed.id});
@@ -48,7 +48,7 @@
   });});
   $effect(()=>{const value=search,label=keyword;const timer=setTimeout(()=>{debouncedSearch=value;debouncedKeyword=label;page=0;},300);return()=>clearTimeout(timer);});
   $effect(()=>{const ws=workspaceId,folder=folderId,query={action:'seed_list',limit:50,offset:page*50,account:filter,status,search:debouncedSearch,source:sourceFilter,keyword:debouncedKeyword,include_archived:history};refreshKey;
-    const generation=++scope;loading=untrack(()=>updatedAt===0);
+    const generation=++scope;selected=[];loading=untrack(()=>updatedAt===0);
     let stopped=false,failures=0,timer:ReturnType<typeof setTimeout>;
     const refresh=async()=>{
       if(stopped)return;
@@ -61,8 +61,8 @@
     void refresh();return()=>{stopped=true;clearTimeout(timer);};
   });
   function query(){return {limit:50,offset:page*50,account:filter,status,search:debouncedSearch,source:sourceFilter,keyword:debouncedKeyword,include_archived:history};}
-  async function action(args:Record<string,unknown>){if(busy)return;busy=true;error='';const generation=scope;try{const result=await seedRequest(workspaceId,folderId,{...query(),...args});if(generation===scope){notice=result.affected_count===undefined?$t('seeds.actionSaved'):$t('seeds.affected',{count:result.affected_count});selected=[];showToast(notice,{kind:'success'});refreshKey++;}}catch(e){if(generation===scope){error=e instanceof Error?e.message:String(e);showToast(error,{kind:'error'});}}finally{busy=false;}}
-  async function connect(){if(busy)return;busy=true;error='';notice='';const generation=scope,ws=workspaceId,folder=folderId;try{
+  async function action(args:Record<string,unknown>){if(busy||refreshing)return;busy=true;error='';const generation=scope;try{const result=await seedRequest(workspaceId,folderId,{...query(),...args});if(generation===scope){notice=result.affected_count===undefined?$t('seeds.actionSaved'):$t('seeds.affected',{count:result.affected_count});selected=[];showToast(notice,{kind:'success'});refreshKey++;}}catch(e){if(generation===scope){error=e instanceof Error?e.message:String(e);showToast(error,{kind:'error'});}}finally{busy=false;}}
+  async function connect(){if(busy||refreshing)return;busy=true;error='';notice='';const generation=scope,ws=workspaceId,folder=folderId;try{
     const saved={address:pairingAddress(address,folder),token:token.trim()};
     if(!/^[a-f0-9]{64}$/.test(saved.token))throw Error($t('seeds.tokenInvalid'));
     const result=await seedRequest(ws,folder,{...query(),action:'seed_pairing',token:saved.token});
@@ -74,11 +74,11 @@
   function details(seed:SeedRow){return [seed.account,`${$t('seeds.source')}: ${seed.source}`,`${$t('seeds.prefix')}: ${seed.prefix||'—'}`,seed.metadata?.repo_name||seed.repo_id,seed.branch,`ID: ${seed.id}`,...Object.entries(seed.metadata??{}).filter(([,v])=>v).map(([k,v])=>`${k}: ${v}`),`${$t('seeds.created')}: ${date(seed.created_at)}`,`${$t('seeds.lastSeen')}: ${date(seed.last_seen)}`,`${$t('seeds.hostTask')}: ${seed.host_task_id||'—'}`,`${$t('seeds.conversation')}: ${seed.chat_id||'—'}`,`${$t('seeds.generation')}: ${seed.generation}`,`${$t('seeds.unresolved')}: ${seed.unresolved_operations}`,seed.reason?$t(`seeds.reason.${seed.reason}` as MessageKey):''].filter(Boolean).join('\n');}
 </script>
 <div class="seed-library" aria-busy={busy||refreshing}>
-  <header class="library-header"><h2>{$t('seeds.library')}</h2><button disabled={refreshing||busy} onclick={()=>refreshKey++}>{$t(refreshing?'seeds.refreshing':'seeds.refresh')}</button><span class="muted">{$t('seeds.updated')}: {date(updatedAt)}</span><label><input type="checkbox" checked={inventory.enabled} disabled={busy||loading} onchange={e=>action({action:'seed_settings',enabled:e.currentTarget.checked})}/>{$t('seeds.auto')}</label><button class="primary" onclick={()=>addOpen=true}>{$t('seeds.addSeeds')}</button></header>
+  <header class="library-header"><h2>{$t('seeds.library')}</h2><button disabled={refreshing||busy} onclick={()=>refreshKey++}>{$t(refreshing?'seeds.refreshing':'seeds.refresh')}</button><span class="muted">{$t('seeds.updated')}: {date(updatedAt)}</span><label><input type="checkbox" checked={inventory.enabled} disabled={busy||refreshing||loading} onchange={e=>action({action:'seed_settings',enabled:e.currentTarget.checked})}/>{$t('seeds.auto')}</label><button class="primary" onclick={()=>addOpen=true}>{$t('seeds.addSeeds')}</button></header>
   <div class="overview" aria-label={$t('seeds.globalSummary')}>
     {#each ['ready','assigned','preparing','offline','retired'] as state}<button class:active={status===state} onclick={()=>{status=status===state?'':state;view='seeds';page=0;}}><span>{$t(`seeds.${state}` as MessageKey)}</span><strong>{counts[state]??0}</strong></button>{/each}
   </div>
-  <div class="toolbar"><button disabled={busy||loading} onclick={()=>ask({action:'seed_cleanup'},'seeds.cleanup',0)}>{$t('seeds.cleanup')}</button><span class="muted">{$t('seeds.globalSummary')} · {$t('seeds.total')}: {inventory.total??0} / {inventory.capacity??10000}</span></div>
+  <div class="toolbar"><button disabled={busy||refreshing||loading} onclick={()=>ask({action:'seed_cleanup'},'seeds.cleanup',0)}>{$t('seeds.cleanup')}</button><span class="muted">{$t('seeds.globalSummary')} · {$t('seeds.total')}: {inventory.total??0} / {inventory.capacity??10000}</span></div>
   {#if busy}<p class="notice" role="status">{$t('Working…')}</p>{/if}
   {#if error}<p role="alert">{error}</p>{/if}
   {#if notice}<p class="notice" role="status">{notice}</p>{/if}
@@ -88,8 +88,8 @@
     <p class="notice">{$t('seeds.pairHelp')}</p>
     <form onsubmit={e=>{e.preventDefault();void connect();}}>
       <label>{$t('seeds.pairAddress')}<div class="input-row"><input bind:value={address} type="url" required placeholder="https://example.com/mcp"/><button type="button" onclick={()=>copy(address)}>{$t('seeds.copy')}</button></div></label>
-      <label>{$t('seeds.pairToken')}<div class="input-row"><input bind:value={token} type={showToken?'text':'password'} autocomplete="off" maxlength="64" required/><button type="button" aria-pressed={showToken} onclick={()=>showToken=!showToken}>{$t(showToken?'sharing.hidePassword':'sharing.showPassword')}</button><button type="button" onclick={()=>copy(token)}>{$t('seeds.copy')}</button><button type="button" disabled={busy} onclick={()=>{token=newPairingToken();notice=$t('seeds.tokenUnsaved');}}>{$t('seeds.generateToken')}</button></div></label>
-      <div class="toolbar"><button class="primary" disabled={busy}>{$t('seeds.savePair')}</button><button type="button" disabled={busy||!inventory.pairing_enabled} onclick={()=>action({action:'seed_pairing',enabled:false})}>{$t('seeds.revokePair')}</button><a href={`https://github.com/755287249/coding-tools-mcp/releases/download/v${APP_VERSION}/coderabbit-seeds.user.js`} target="_blank" rel="noreferrer">{$t('seeds.install')}</a></div>
+      <label>{$t('seeds.pairToken')}<div class="input-row"><input bind:value={token} type={showToken?'text':'password'} autocomplete="off" maxlength="64" required/><button type="button" aria-pressed={showToken} onclick={()=>showToken=!showToken}>{$t(showToken?'sharing.hidePassword':'sharing.showPassword')}</button><button type="button" onclick={()=>copy(token)}>{$t('seeds.copy')}</button><button type="button" disabled={busy||refreshing} onclick={()=>{token=newPairingToken();notice=$t('seeds.tokenUnsaved');}}>{$t('seeds.generateToken')}</button></div></label>
+      <div class="toolbar"><button class="primary" disabled={busy||refreshing}>{$t('seeds.savePair')}</button><button type="button" disabled={busy||refreshing||!inventory.pairing_enabled} onclick={()=>action({action:'seed_pairing',enabled:false})}>{$t('seeds.revokePair')}</button><a href={`https://github.com/755287249/coding-tools-mcp/releases/download/v${APP_VERSION}/coderabbit-seeds.user.js`} target="_blank" rel="noreferrer">{$t('seeds.install')}</a></div>
     </form>
   </details>
   <ManualSeed {workspaceId} {folderId} {address} onCreated={()=>refreshKey++}/>
@@ -130,34 +130,34 @@
     </div>
   {:else}
 
-  <div class="toolbar selection-bar"><label><input type="checkbox" checked={inventory.seeds.length>0&&selected.length===inventory.seeds.length} onchange={e=>selected=e.currentTarget.checked?inventory.seeds.map(seed=>seed.id):[]}/>{$t('seeds.selectPage')}</label><span class="muted">{$t('seeds.selected',{count:selected.length})}</span>
-    {#if selected.length}<button disabled={busy||unsettled} onclick={()=>ask({action:'seed_retire',seed_ids:selected},'seeds.retire',selected.length)}>{$t('seeds.retire')}</button><button disabled={busy||unsettled||selectedRows.some(seed=>!seed.retired_at)} onclick={()=>ask({action:'seed_purge',seed_ids:selected},'seeds.purge',selected.length)}>{$t('seeds.purge')}</button>{/if}
+  <div class="toolbar selection-bar"><label><input type="checkbox" disabled={busy||refreshing} checked={inventory.seeds.length>0&&selected.length===inventory.seeds.length} onchange={e=>selected=e.currentTarget.checked?inventory.seeds.map(seed=>seed.id):[]}/>{$t('seeds.selectPage')}</label><span class="muted">{$t('seeds.selected',{count:selected.length})}</span>
+    {#if selected.length}<button disabled={busy||refreshing||unsettled} onclick={()=>ask({action:'seed_retire',seed_ids:selected},'seeds.retire',selected.length)}>{$t('seeds.retire')}</button><button disabled={busy||refreshing||unsettled||selectedRows.some(seed=>!seed.retired_at)} onclick={()=>ask({action:'seed_purge',seed_ids:selected},'seeds.purge',selected.length)}>{$t('seeds.purge')}</button>{/if}
   </div>
-  {#if selected.length}<form class="batch-labels" onsubmit={e=>{e.preventDefault();void action({action:'seed_label',seed_ids:selected,source:batchSource,prefix:batchPrefix});}}><label>{$t('seeds.source')}<input bind:value={batchSource} maxlength="200" placeholder={$t('seeds.keepSource')}/></label><label>{$t('seeds.prefix')}<input bind:value={batchPrefix} maxlength="200"/></label><button disabled={busy}>{$t('seeds.batchLabel')}</button><span class="muted">{$t('seeds.batchLabelHelp')}</span></form>{/if}
+  {#if selected.length}<form class="batch-labels" onsubmit={e=>{e.preventDefault();void action({action:'seed_label',seed_ids:selected,source:batchSource,prefix:batchPrefix});}}><label>{$t('seeds.source')}<input bind:value={batchSource} maxlength="200" placeholder={$t('seeds.keepSource')}/></label><label>{$t('seeds.prefix')}<input bind:value={batchPrefix} maxlength="200"/></label><button disabled={busy||refreshing}>{$t('seeds.batchLabel')}</button><span class="muted">{$t('seeds.batchLabelHelp')}</span></form>{/if}
   {#if unsettled}<p class="notice">{$t('seeds.unresolvedHelp')}</p>{/if}
   <div class="seed-list">{#each inventory.seeds as seed(seed.id)}
     <details class="seed-row" animate:flip={{duration:motionMs}} transition:slide={{duration:motionMs}}>
-      <summary title={details(seed)}><input type="checkbox" aria-label={`${$t('seeds.select')} ${seed.id}`} checked={selected.includes(seed.id)} onclick={e=>e.stopPropagation()} onchange={e=>toggle(seed.id,e.currentTarget.checked)}/><span class="dot" class:alive={seed.status==='ready'||seed.status==='assigned'||seed.status==='working'}></span><strong>{seed.account}</strong><span class="identity">{seed.source} · {seed.prefix||seed.metadata?.repo_name||seed.repo_id||$t('seeds.unlabelled')}</span><code>{seed.id.slice(0,8)}</code><span class="badge">{$t(`seeds.${seed.status}` as MessageKey)}</span></summary>
+      <summary title={details(seed)}><input type="checkbox" disabled={busy||refreshing} aria-label={`${$t('seeds.select')} ${seed.id}`} checked={selected.includes(seed.id)} onclick={e=>e.stopPropagation()} onchange={e=>toggle(seed.id,e.currentTarget.checked)}/><span class="dot" class:alive={seed.status==='ready'||seed.status==='assigned'||seed.status==='working'}></span><strong>{seed.account}</strong><span class="identity">{seed.source} · {seed.prefix||seed.metadata?.repo_name||seed.repo_id||$t('seeds.unlabelled')}</span><code>{seed.id.slice(0,8)}</code><span class="badge">{$t(`seeds.${seed.status}` as MessageKey)}</span></summary>
       <div class="row-details"><pre>{details(seed)}</pre>
         <form class="row-labels" onsubmit={e=>{e.preventDefault();const fields=new FormData(e.currentTarget);void action({action:'seed_label',seed_id:seed.id,source:fields.get('source'),prefix:fields.get('prefix')});}}>
           <label>{$t('seeds.source')}<input name="source" required value={seed.source} maxlength="200"/></label>
           <label>{$t('seeds.prefix')}<input name="prefix" value={seed.prefix} maxlength="200"/></label>
-          <button disabled={busy}>{$t('seeds.saveLabel')}</button>
+          <button disabled={busy||refreshing}>{$t('seeds.saveLabel')}</button>
         </form><div class="toolbar">
         {#if seed.chat_id}<a href={appUrl(`/workspace/${encodeURIComponent(workspaceId)}?folder=${encodeURIComponent(folderId)}&chat=${encodeURIComponent(seed.chat_id)}`)}>{$t('seeds.conversation')}</a>{/if}
         {#if seed.host_task_id}<a href={`https://app.coderabbit.ai/code/tasks/${encodeURIComponent(seed.host_task_id)}`} target="_blank" rel="noreferrer">{$t('seeds.hostTask')}</a>{/if}
-        {#if !seed.retired_at}<button disabled={busy||seed.unresolved_operations>0} onclick={()=>ask({action:'seed_retire',seed_id:seed.id},'seeds.retire')}>{$t('seeds.retire')}</button>{/if}
+        {#if !seed.retired_at}<button disabled={busy||refreshing||seed.unresolved_operations>0} onclick={()=>ask({action:'seed_retire',seed_id:seed.id},'seeds.retire')}>{$t('seeds.retire')}</button>{/if}
         {#if seed.unresolved_operations>0}<span class="muted">{$t('seeds.unresolvedHelp')}</span>{/if}
-        {#if seed.retired_at}<button disabled={busy||seed.unresolved_operations>0} onclick={()=>ask({action:'seed_purge',seed_id:seed.id},'seeds.purge')}>{$t('seeds.purge')}</button>{/if}
-        {#if !seed.retired_at&&seed.chat_id}<button disabled={busy||seed.unresolved_operations>0} onclick={()=>ask({action:'seed_release',seed_id:seed.id},'seeds.release')}>{$t('seeds.release')}</button>{/if}
-        {#if !seed.retired_at&&!seed.redeemed_at&&seed.enrollment_until&&seed.enrollment_until<updatedAt}<button disabled={busy||seed.unresolved_operations>0} onclick={()=>void reissue(seed)}>{$t('seeds.reissue')}</button>{/if}
+        {#if seed.retired_at}<button disabled={busy||refreshing||seed.unresolved_operations>0} onclick={()=>ask({action:'seed_purge',seed_id:seed.id},'seeds.purge')}>{$t('seeds.purge')}</button>{/if}
+        {#if !seed.retired_at&&seed.chat_id}<button disabled={busy||refreshing||seed.unresolved_operations>0} onclick={()=>ask({action:'seed_release',seed_id:seed.id},'seeds.release')}>{$t('seeds.release')}</button>{/if}
+        {#if !seed.retired_at&&!seed.redeemed_at&&seed.enrollment_until&&seed.enrollment_until<updatedAt}<button disabled={busy||refreshing||seed.unresolved_operations>0} onclick={()=>void reissue(seed)}>{$t('seeds.reissue')}</button>{/if}
       </div></div>
     </details>
   {:else}<div class="empty">{$t('seeds.empty')}</div>{/each}</div>
   <div class="toolbar pagination"><button disabled={page===0} onclick={()=>page--}>{$t('seeds.previous')}</button><span>{page+1} / {pageCount}</span><button disabled={page+1>=pageCount} onclick={()=>page++}>{$t('seeds.next')}</button></div>
   {/if}
 </div>
-{#if confirmation}<dialog class="add-dialog" use:openModal onclose={()=>confirmation=null} aria-label={$t(confirmation.label)}><h2>{$t(confirmation.label)}{#if confirmation.count>0} · {confirmation.count}{/if}</h2><p class="notice">{$t(confirmation.args.action==='seed_purge'?'seeds.purgeConfirm':confirmation.args.action==='seed_release'?'seeds.releaseConfirm':'seeds.retireConfirm')}</p><div class="toolbar"><button onclick={()=>confirmation=null}>{$t('Cancel')}</button><button class="primary" disabled={busy} onclick={()=>{const args=confirmation?.args;confirmation=null;if(args)void action(args);}}>{$t('seeds.confirm')}</button></div></dialog>{/if}
+{#if confirmation}<dialog class="add-dialog" use:openModal onclose={()=>confirmation=null} aria-label={$t(confirmation.label)}><h2>{$t(confirmation.label)}{#if confirmation.count>0} · {confirmation.count}{/if}</h2><p class="notice">{$t(confirmation.args.action==='seed_purge'?'seeds.purgeConfirm':confirmation.args.action==='seed_release'?'seeds.releaseConfirm':'seeds.retireConfirm')}</p><div class="toolbar"><button onclick={()=>confirmation=null}>{$t('Cancel')}</button><button class="primary" disabled={busy||refreshing} onclick={()=>{const args=confirmation?.args;confirmation=null;if(args)void action(args);}}>{$t('seeds.confirm')}</button></div></dialog>{/if}
 {#if reissuedPrompt}<dialog class="add-dialog" use:openModal onclose={()=>reissuedPrompt=''} aria-label={$t('seeds.reissue')}><h2>{$t('seeds.reissue')}</h2><p class="notice">{$t('seeds.reissueHelp')}</p><textarea readonly value={reissuedPrompt} rows="7" aria-label={$t('seeds.manualPrompt')}></textarea><div class="toolbar"><button onclick={()=>copy(reissuedPrompt)}>{$t('seeds.copyPrompt')}</button><button onclick={()=>reissuedPrompt=''}>{$t('Close')}</button></div></dialog>{/if}
 <style>
 .skeleton{display:grid;gap:14px}.skeleton span{display:block;height:44px;border-radius:8px;background:var(--color-border)}
