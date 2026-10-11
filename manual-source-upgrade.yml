@@ -1,0 +1,92 @@
+name: Manual source upgrade (Windows)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: manual-source-upgrade-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify-and-build:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: pnpm/setup@v2
+        with:
+          version: 12.0.0
+          install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: pnpm
+      - name: Provide pnpm.cmd for Windows child processes
+        shell: pwsh
+        run: |
+          $pnpmExe = (Get-Command pnpm.exe -CommandType Application -ErrorAction Stop).Source
+          $shim = Join-Path (Split-Path -Parent $pnpmExe) 'pnpm.cmd'
+          @('@echo off', ('"{0}" %*' -f $pnpmExe), 'exit /b %errorlevel%') |
+            Set-Content -LiteralPath $shim -Encoding ascii
+          node -e "const { spawnSync } = require('node:child_process'); const r = spawnSync(process.env.ComSpec ?? 'cmd.exe', ['/d', '/s', '/c', 'pnpm.cmd --version'], { cwd: 'packages/node-agent', stdio: 'inherit' }); if (r.error) throw r.error; process.exit(r.status ?? 1);"
+          if ($LASTEXITCODE -ne 0) { throw 'pnpm.cmd child-process smoke check failed' }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run version:check
+      - run: pnpm run check
+      - run: pnpm run node-agent:parity:check
+      - run: pnpm run node-agent:verify-repo
+      - name: Verify Windows AppContainer provider and isolation
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib tools::sandbox::appcontainer::provider::tests -- --test-threads=1
+      - name: Verify GitHub CLI runtime without credentials
+        run: |
+          gh --version
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib gh_uses_exact_identity_and_isolated_configuration -- --ignored --test-threads=1
+      - name: Verify desktop startup handoff
+        shell: powershell
+        run: |
+          ./tests/desktop-startup-handoff.Tests.ps1
+          ./tests/desktop-startup-handoff.Integration.ps1
+      - name: Build embedded UI and Windows executable
+        run: pnpm run desktop:portable
+      - name: Verify release files and checksums
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $exe = "dist-portable/ctmcp-$version-win64.exe"
+          $zip = "dist-portable/ctmcp-$version-win64.zip"
+          foreach ($file in @($exe, $zip)) {
+            if (!(Test-Path $file) -or (Get-Item $file).Length -lt 2000000) {
+              throw "Missing or invalid build output: $file"
+            }
+          }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [IO.Compression.ZipFile]::OpenRead((Resolve-Path $zip))
+          try {
+            $entry = $archive.GetEntry("ctmcp-$version-win64/ctmcp.exe")
+            if (!$entry -or $entry.Length -lt 2000000) { throw "Invalid portable archive" }
+          } finally { $archive.Dispose() }
+          $hashes = foreach ($file in @($exe, $zip)) {
+            "$((Get-FileHash $file -Algorithm SHA256).Hash.ToLowerInvariant())  $([IO.Path]::GetFileName($file))"
+          }
+          $hashes | Set-Content dist-portable/SHA256SUMS.txt
+          "Version: $version; source commit: $env:GITHUB_SHA" >> $env:GITHUB_STEP_SUMMARY
+          $hashes >> $env:GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-source-upgrade-${{ github.sha }}
+          path: |
+            dist-portable/*.exe
+            dist-portable/*.zip
+            dist-portable/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
