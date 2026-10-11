@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createToolContext } from '../dist/server.js';
@@ -262,7 +262,8 @@ test('configured root symlink replacement cannot redirect a retained operation',
     await rm(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
-  assert.equal(ctx.config.folders[0].path, original);
+  // Compare canonical paths while retaining the original short-path fixture input.
+  assert.equal(ctx.config.folders[0].path, await realpath(original));
   await select(ctx, meta, 'linked');
   const blocked = await callTool(ctx, 'file_ops', {
     operations: [{ type: 'create', path: 'bound.txt', content: 'original' }]

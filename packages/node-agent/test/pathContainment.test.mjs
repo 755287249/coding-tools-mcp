@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile
+  lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -196,6 +196,8 @@ test('safe in-workspace ancestor symlinks resolve to canonical targets for reads
   const realDirectory = path.join(root, 'real-dir');
   const aliasDirectory = path.join(root, 'alias-dir');
   await mkdir(realDirectory);
+  // Windows temp paths may use 8.3 aliases; runtime results are canonical.
+  const canonicalRealDirectory = await realpath(realDirectory);
   await writeFile(path.join(realDirectory, 'value.txt'), 'before\n');
   await writeFile(path.join(realDirectory, 'config.json'), '{"enabled":true}\n');
   if (!await createSymlinkOrSkip(t, realDirectory, aliasDirectory, 'dir')) return;
@@ -203,7 +205,7 @@ test('safe in-workspace ancestor symlinks resolve to canonical targets for reads
   const selectedCwd = await callTool(ctx, 'set_default_cwd', { path: 'alias-dir' }, meta);
   assert.equal(selectedCwd.ok, true, JSON.stringify(selectedCwd));
   assert.equal(selectedCwd.default_cwd, 'real-dir');
-  assert.equal(selectedCwd.resolved_cwd, realDirectory);
+  assert.equal(selectedCwd.resolved_cwd, canonicalRealDirectory);
   let command = await callTool(ctx, 'exec_command', {
     program: nodeProgram,
     args: ['-e', 'process.stdout.write(process.cwd())'],
@@ -220,8 +222,8 @@ test('safe in-workspace ancestor symlinks resolve to canonical targets for reads
   }
   assert.equal(command.ok, true, JSON.stringify(command));
   assert.equal(command.command_ok, true, JSON.stringify(command));
-  assert.equal(command.cwd, realDirectory);
-  assert.equal(command.stdout, realDirectory);
+  assert.equal(command.cwd, canonicalRealDirectory);
+  assert.equal(command.stdout, canonicalRealDirectory);
 
   const read = await callTool(ctx, 'read_file', { path: 'alias-dir/value.txt' }, meta);
   assert.equal(read.ok, true, JSON.stringify(read));
