@@ -4216,3 +4216,18 @@ html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
 
 /* Invert the app mark together with the surrounding application chrome. */
 .title-space img { filter: var(--app-icon-filter); }
+
+/* Shared top-layer motion. Independent translate preserves positioned menus. */
+@media (prefers-reduced-motion: no-preference) {
+  dialog, [popover] {
+    transition: opacity 140ms ease, translate 140ms ease, display 140ms allow-discrete, overlay 140ms allow-discrete;
+    opacity: 0;
+    translate: 0 6px;
+  }
+  dialog[open], [popover]:popover-open { opacity: 1; translate: 0 0; }
+  @starting-style {
+    dialog[open], [popover]:popover-open { opacity: 0; translate: 0 6px; }
+  }
+  dialog::backdrop { transition: opacity 140ms ease, display 140ms allow-discrete, overlay 140ms allow-discrete; }
+  @starting-style { dialog[open]::backdrop { opacity: 0; } }
+}

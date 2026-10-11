@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { confirmFolderRemoval } from "$lib/workspace/confirm-folder-removal";
   import { onMount, untrack } from "svelte";
   import { page } from "$app/stores";
   import { replaceState } from "$app/navigation";
@@ -223,14 +224,18 @@
     }
   }
 
+  let removingFolder=$state('');
   async function removeFolder(folderId: string) {
-    localError = "";
+    if(removingFolder||folders.length<=1)return;
+    const folder=folders.find(item=>item.id===folderId);if(!folder)return;
+    localError = "";removingFolder=folderId;
     try {
+      if(!await confirmFolderRemoval(id,folder))return;
       await removeWorkspaceFolder(id, folderId);
       applyProfiles(await listWorkspaces());
     } catch (error) {
       localError = messageOf(error);
-    }
+    } finally { removingFolder=""; }
   }
 
   async function writeClipboard(value: string) {
@@ -339,7 +344,7 @@
           <Folder size={12} aria-hidden="true" />
           <span class="truncate">{folder.path}</span>
           {#if folders.length > 1}
-            <button type="button" class="sx-folder-x" title={$t("Remove")} aria-label={$t("Remove")} onclick={() => void removeFolder(folder.id)}>
+            <button type="button" class="sx-folder-x" disabled={!!removingFolder} title={$t("Remove")} aria-label={$t("Remove")} onclick={() => void removeFolder(folder.id)}>
               <X size={12} />
             </button>
           {/if}

@@ -51,7 +51,7 @@
   import MessageSquare from '@lucide/svelte/icons/message-square';
   import ArrowLeft from '@lucide/svelte/icons/arrow-left';
   import Trash2 from '@lucide/svelte/icons/trash-2';
-  import { workspaceBlocked } from "$lib/stores/workspace-lifecycle";
+  import { workspaceBlocked, workspaceEpoch } from "$lib/stores/workspace-lifecycle";
   import WorkspaceRemoveDialog from '$lib/components/WorkspaceRemoveDialog.svelte';
   let removingWorkspace = $state<{id:string;name:string}|null>(null);
   import ListChecks from '@lucide/svelte/icons/list-checks';
@@ -300,20 +300,25 @@
 
   async function refreshMcpRuntime(id = workspaceId) {
     if (!id) return null;
+    const epoch=workspaceEpoch(id);
     const runtime = await measure("runtime.mcp", () => getRuntimeStatus(id));
+    if(epoch!==workspaceEpoch(id))return null;
     applyMcpRuntime(runtime, id);
     return runtime;
   }
 
   async function refreshActionsRuntime(id = workspaceId) {
     if (!id) return null;
+    const epoch=workspaceEpoch(id);
     const runtime = await measure("runtime.actions", () => getActionsRuntimeStatus(id));
+    if(epoch!==workspaceEpoch(id))return null;
     applyActionsRuntime(runtime, id);
     return runtime;
   }
 
   async function load(id = workspaceId) {
     if (!id) return;
+    const epoch=workspaceEpoch(id);
     const generation = ++loadGeneration;
     const [items, profiles] = await measure("load.workspace-data", () =>
       Promise.all([
@@ -321,7 +326,7 @@
         capabilities.frpManagement ? listFrpProfiles() : Promise.resolve([]),
       ]),
     );
-    if (generation !== loadGeneration || id !== workspaceId) return;
+    if (generation !== loadGeneration || id !== workspaceId || workspaceBlocked(id) || epoch!==workspaceEpoch(id)) return;
 
     workspaces.set(items);
     frpProfiles = profiles;
@@ -340,15 +345,16 @@
         : Promise.resolve(null),
       measure("load.last-workspace", () => setLastWorkspace(nextProfile.id)),
     ]);
-    if (generation !== loadGeneration || id !== workspaceId) return;
+    if (generation !== loadGeneration || id !== workspaceId || workspaceBlocked(id) || epoch!==workspaceEpoch(id)) return;
     applyMcpRuntime(mcpRuntime, id);
     if (actionsRuntime) applyActionsRuntime(actionsRuntime, id);
   }
 
   async function refreshProfile(id = workspaceId): Promise<WorkspaceProfile | null> {
     if (!id) return null;
+    const epoch=workspaceEpoch(id);
     const items = await measure("profile.refresh", () => listWorkspaces());
-    if (id !== workspaceId) return null;
+    if (id !== workspaceId || workspaceBlocked(id) || epoch!==workspaceEpoch(id)) return null;
     workspaces.set(items);
     const nextProfile = items.find((item) => item.id === id) ?? null;
     profile = nextProfile;

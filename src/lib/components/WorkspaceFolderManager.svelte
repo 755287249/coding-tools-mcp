@@ -1,8 +1,9 @@
 <script lang="ts">
+  import { confirmFolderRemoval } from "$lib/workspace/confirm-folder-removal";
   import FolderOpen from "@lucide/svelte/icons/folder-open";
   import FolderPlus from "@lucide/svelte/icons/folder-plus";
   import Trash2 from "@lucide/svelte/icons/trash-2";
-  import { confirm, pickDirectory } from "$lib/api/native";
+  import { pickDirectory } from "$lib/api/native";
   import { getBackend } from "$lib/backend";
   import DirectoryPicker from "$lib/components/DirectoryPicker.svelte";
   import WslFolderDialog from "$lib/components/WslFolderDialog.svelte";
@@ -125,21 +126,13 @@
     }
   }
 
-  async function removeFolder(folderId: string, folderName: string) {
+  async function removeFolder(folderId: string) {
     if (busyAction || folders.length <= 1) return;
-    const confirmed = await confirm(
-      $t("Remove folder “{name}” from the workspace? Files on disk will not be deleted.", { name: folderName }),
-      {
-        title: $t("Remove folder"),
-        kind: "warning",
-        okLabel: $t("Remove"),
-        cancelLabel: $t("Cancel"),
-      },
-    );
-    if (!confirmed) return;
-
+    const folder=folders.find(item=>item.id===folderId);
+    if(!folder)return;
     busyAction = `remove:${folderId}`;
     try {
+      if(!await confirmFolderRemoval(profile.id,folder))return;
       const updated = await removeWorkspaceFolder(profile.id, folderId);
       await onChanged(updated);
       await onFoldersChanged?.(updated);
@@ -226,7 +219,7 @@
               class="tx-btn-ghost px-2.5 py-1.5 text-xs text-[var(--danger)]"
               disabled={Boolean(busyAction) || folders.length <= 1}
               title={folders.length <= 1 ? $t("A workspace must keep at least one folder") : $t("Remove from workspace")}
-              onclick={() => void removeFolder(folder.id, folder.name)}
+              onclick={() => void removeFolder(folder.id)}
             >
               <Trash2 size={14} class="inline-block" />
               <span class="ml-1">{$t("Remove")}</span>
