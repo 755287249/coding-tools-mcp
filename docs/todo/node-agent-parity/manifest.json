@@ -5,9 +5,9 @@
     "audited_at": "2026-10-10",
     "repository_head": "f7ab8735dd61d1cc8fb5eeba7da8a980add2af90",
     "head_policy": "ancestor",
-    "desktop_client_version": "0.1.129",
+    "desktop_client_version": "0.1.130",
     "node_agent_version": "0.29.35",
-    "client_compatibility_version": "0.1.129"
+    "client_compatibility_version": "0.1.130"
   },
   "status_values": ["todo", "in_progress", "blocked", "done", "excluded"],
   "priority_values": ["P0", "P1", "P2"],
@@ -388,7 +388,7 @@
       "id": "ND-002",
       "title": "Tauri desktop shell, tray, and native auto-start",
       "status": "excluded",
-      "reason": "The Node Agent is a headless service with an optional local PWA, not a Tauri desktop application.",
+      "reason": "The Node Agent is a headless service with an optional local PWA, not a Tauri desktop application. Native desktop EXE update download progress uses a Tauri IPC channel and application-owned UI state; the Node live-update service protocol is separate and unchanged.",
       "shared_assertion_ids": []
     },
     {

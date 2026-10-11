@@ -1,7 +1,7 @@
 import { browserInvoke } from "./browser-session";
 import { getCurrentWindow, Effect } from "@tauri-apps/api/window";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, Channel } from "@tauri-apps/api/core";
 import { confirm, message, open } from "@tauri-apps/plugin-dialog";
 import { setBackend } from "./index";
 import { createTauriBackend } from "./tauri";
@@ -32,6 +32,6 @@ export function installDesktopBackend(): void {
 
 /** Native APIs are exported only by the desktop host adapter. */
 export const desktopWindowApi = {
-  getCurrentWindow, Effect, WebviewWindow, invoke,
+  getCurrentWindow, Effect, WebviewWindow, invoke, Channel,
   available: () => typeof window !== "undefined" && "__TAURI_INTERNALS__" in window,
 };
