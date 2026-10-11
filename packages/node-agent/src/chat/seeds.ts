@@ -59,7 +59,7 @@ function eligibleChat(chat:ChatSession):boolean {
 }
 function publicSeed(s:Seed,now:number){
   const state=s.retired_at?'retired':s.inflight.length||s.operations.length?'working':!s.redeemed_at?'preparing':now-s.last_seen>SEED_SUSPECT_MS?'offline':s.chat_id?'assigned':s.ready?'ready':'preparing';
-  return {id:s.id,source:sourceOf(s),prefix:s.prefix??'',manual:s.manual===true,account:s.account,repo_id:s.repo_id,branch:s.branch,metadata:s.metadata??{},created_at:s.created_at,last_seen:s.last_seen,status:state,reason:s.reason,archived:s.archived,retired_at:s.retired_at,host_task_id:s.host_task_id,chat_id:s.chat_id,generation:s.generation,unresolved_operations:s.inflight.length+s.operations.length};
+  return {enrollment_until:s.enrollment_until,redeemed_at:s.redeemed_at,access_until:s.access_until,id:s.id,source:sourceOf(s),prefix:s.prefix??'',manual:s.manual===true,account:s.account,repo_id:s.repo_id,branch:s.branch,metadata:s.metadata??{},created_at:s.created_at,last_seen:s.last_seen,status:state,reason:s.reason,archived:s.archived,retired_at:s.retired_at,host_task_id:s.host_task_id,chat_id:s.chat_id,generation:s.generation,unresolved_operations:s.inflight.length+s.operations.length};
 }
 function inventory(data:Library,args:Record<string,unknown>,now:number){
   const groups=new Map<string,{source:string;prefix:string;total:number;ready:number}>();
@@ -125,18 +125,37 @@ export function seedUi(store:SeedStore,args:Record<string,unknown>):Record<strin
       data.seeds.push(seed);batch.push({seed_id:seed.id,ticket,url_key,source:seed.source,prefix,manual,repo_id,branch,account,expires_at:seed.enrollment_until});
     }
     saveSeeds(store,data);return {batch};
-  } else if(args.action==='seed_label') {
-    const seed=data.seeds.find(s=>s.id===uid(args.seed_id));if(!seed)throw Error('Seed not found');
-    seed.source=optionalLabel(args.source).toLowerCase()||sourceOf(seed);seed.prefix=optionalLabel(args.prefix);saveSeeds(store,data);seedInvalidate(store);
-  } else if(args.action==='seed_retire') {
-    const seed=data.seeds.find(s=>s.id===uid(args.seed_id));if(!seed)throw Error('Seed not found');
-    if(seed.inflight.length||seed.operations.length)throw Error('Seed has unresolved operations; finish or inspect them before retirement');
-    if(!seed.retired_at)retirement(seed,'manual',now);saveSeeds(store,data);
+  } else if(['seed_label','seed_retire','seed_purge','seed_release'].includes(String(args.action))) {
+    const values=Array.isArray(args.seed_ids)?args.seed_ids:[args.seed_id];
+    if(!values.length||values.length>100)throw Error('Select 1–100 seeds');
+    const ids=values.map(uid),selected=new Set(ids);
+    if(ids.length!==selected.size)throw Error('Duplicate seed ID');
+    const seeds=ids.map(id=>{const seed=data.seeds.find(s=>s.id===id);if(!seed)throw Error('Seed not found');return seed;});
+    const source=optionalLabel(args.source).toLowerCase(),prefix=optionalLabel(args.prefix);
+    for(const seed of seeds){
+      if(args.action!=='seed_label')ensureSettled(seed);
+      if(args.action==='seed_purge'&&!seed.retired_at)throw Error('Only retired seeds can be permanently deleted');
+      if(args.action==='seed_release'&&seed.retired_at)throw Error('Retired seeds cannot be released');
+    }
+    for(const seed of seeds){
+      if(args.action==='seed_label'){seed.source=source||sourceOf(seed);seed.prefix=prefix;}
+      if(args.action==='seed_retire'&&!seed.retired_at)retirement(seed,'manual',now);
+      if(args.action==='seed_release')releaseSeed(store,seed);
+    }
+    if(args.action==='seed_purge')data.seeds=data.seeds.filter(s=>!selected.has(s.id));
+    saveSeeds(store,data);seedInvalidate(store);return {...inventory(data,args,now),affected_count:selected.size};
+  } else if(args.action==='seed_reissue') {
+    const seed=data.seeds.find(s=>s.id===uid(args.seed_id));if(!seed)throw Error('Seed not found');ensureSettled(seed);
+    if(seed.retired_at||seed.redeemed_at||now<=seed.enrollment_until||seed.chat_id)throw Error('Only expired, unconnected seeds can be reissued');
+    const ticket=randomBytes(32).toString('hex'),url_key=hash('seed-url-v1\0'+ticket);
+    seed.enrollment_hash=hash(ticket);seed.url_hash=hash(url_key);seed.enrollment_until=now+3600_000;seed.reason='reissued';seed.host_task_id='';
+    saveSeeds(store,data);return {batch:[{seed_id:seed.id,ticket,url_key,source:sourceOf(seed),prefix:seed.prefix,manual:seed.manual,account:seed.account,repo_id:seed.repo_id,branch:seed.branch,expires_at:seed.enrollment_until}]};
   } else if(args.action==='seed_cleanup') {
+    let affected=0;
     for(const s of data.seeds){
-      if(!s.retired_at&&s.reason!=='workspace_removed'&&!s.chat_id&&!s.inflight.length&&!s.operations.length&&((!s.redeemed_at&&now>s.enrollment_until)||(s.redeemed_at&&now-s.last_seen>SEED_REPLACE_MS)))retirement(s,'inactive',now);
+      if(!s.retired_at&&s.reason!=='workspace_removed'&&!s.chat_id&&!s.inflight.length&&!s.operations.length&&((!s.redeemed_at&&now>s.enrollment_until)||(s.redeemed_at&&now-s.last_seen>SEED_REPLACE_MS))){retirement(s,'inactive',now);affected++;}
       if(s.retired_at)s.archived=true;
-    }saveSeeds(store,data);
+    }saveSeeds(store,data);return {...inventory(data,args,now),affected_count:affected};
   } else if(args.action==='seed_resume_chat') {
     const chat=store.read(uid(args.chat_id));if(chat.closed||chat.mode==='group')throw Error('Only open work chats support seeds');chat.seed_auto=true;store.save(chat);
   } else if(args.action!=='seed_list')throw Error('Unknown seed action');
@@ -151,7 +170,7 @@ export function seedProvision(store:SeedStore,token:string,args:Record<string,un
     if(args.action!=='batch')throw Error('Pairing only supports status and batch');
     const request=uid(args.request_id),key=hash(token+'\0'+request),existing=data.seeds.filter(s=>s.provision_key===key);
     if(existing.length){
-      if(existing.length!==args.count||existing.some(s=>s.account!==args.account||s.repo_id!==args.repo_id||s.branch!==args.branch||(s.prefix??'')!==optionalLabel(args.prefix)||s.retired_at||s.enrollment_until<=Date.now()))throw Error('Provision request changed or expired; use a new request ID');
+      if(existing.length!==args.count||existing.some(s=>s.account!==args.account||s.repo_id!==args.repo_id||s.branch!==args.branch||(s.prefix??'')!==optionalLabel(args.prefix)||s.retired_at||s.enrollment_hash!==hash(hash(token+'\0'+key+'\0'+s.id))||s.enrollment_until<=Date.now()))throw Error('Provision request changed or expired; use a new request ID');
       return {batch:existing.map(s=>({seed_id:s.id,ticket:hash(token+'\0'+key+'\0'+s.id),...(s.url_hash?{url_key:hash('seed-url-v1\0'+hash(token+'\0'+key+'\0'+s.id))}:{}),source:sourceOf(s),prefix:s.prefix??'',manual:s.manual===true,repo_id:s.repo_id,branch:s.branch,account:s.account,expires_at:s.enrollment_until}))};
     }
     return seedUi(store,{action:'seed_batch',source:'coderabbit',prefix:args.prefix,account:args.account,repo_id:args.repo_id,branch:args.branch,count:args.count,metadata:args.metadata,_provision_key:key,_provision_token:token});

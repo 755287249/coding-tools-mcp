@@ -183,7 +183,7 @@ fn public(s: &Seed, time: u64) -> Value {
     } else {
         "preparing"
     };
-    json!({"id":s.id,"source":s.source,"prefix":s.prefix,"manual":s.manual,"account":s.account,"repo_id":s.repo_id,"branch":s.branch,"metadata":s.metadata,"created_at":s.created_at,"last_seen":s.last_seen,"status":status,"reason":s.reason,"archived":s.archived,"retired_at":s.retired_at,"host_task_id":s.host_task_id,"chat_id":s.chat_id,"generation":s.generation,"unresolved_operations":s.inflight.len()+s.operations.len()})
+    json!({"enrollment_until":s.enrollment_until,"redeemed_at":s.redeemed_at,"access_until":s.access_until,"id":s.id,"source":s.source,"prefix":s.prefix,"manual":s.manual,"account":s.account,"repo_id":s.repo_id,"branch":s.branch,"metadata":s.metadata,"created_at":s.created_at,"last_seen":s.last_seen,"status":status,"reason":s.reason,"archived":s.archived,"retired_at":s.retired_at,"host_task_id":s.host_task_id,"chat_id":s.chat_id,"generation":s.generation,"unresolved_operations":s.inflight.len()+s.operations.len()})
 }
 fn inventory(data: &Library, args: &Value, time: u64) -> Value {
     let mut grouped = std::collections::BTreeMap::<(String, String), (usize, usize)>::new();
@@ -473,39 +473,97 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
             write(root, &data)?;
             return Ok(json!({"batch":batch}));
         }
-        "seed_label" => {
+        "seed_label" | "seed_retire" | "seed_purge" | "seed_release" => {
+            let ids = if let Some(ids) = args["seed_ids"].as_array() {
+                ids.clone()
+            } else {
+                vec![args["seed_id"].clone()]
+            };
+            if ids.is_empty() || ids.len() > 100 {
+                return Err(err("Select 1–100 seeds"));
+            }
+            let mut selected = std::collections::HashSet::new();
+            for value in &ids {
+                let sid = id(value)?;
+                if !selected.insert(sid.to_owned()) {
+                    return Err(err("Duplicate seed ID"));
+                }
+                if !data.seeds.iter().any(|s| s.id == sid) {
+                    return Err(err("Seed not found"));
+                }
+            }
+            let action = args["action"].as_str().unwrap();
+            let source = optional_label(&args["source"])?;
+            let prefix = optional_label(&args["prefix"])?;
+            for seed in data.seeds.iter().filter(|s| selected.contains(&s.id)) {
+                if action != "seed_label" {
+                    ensure_settled(seed)?;
+                }
+                if action == "seed_purge" && seed.retired_at == 0 {
+                    return Err(err("Only retired seeds can be permanently deleted"));
+                }
+                if action == "seed_release" && seed.retired_at > 0 {
+                    return Err(err("Retired seeds cannot be released"));
+                }
+            }
+            for seed in data.seeds.iter_mut().filter(|s| selected.contains(&s.id)) {
+                match action {
+                    "seed_label" => {
+                        if !source.is_empty() {
+                            seed.source = source.to_lowercase();
+                        }
+                        seed.prefix = prefix.clone();
+                    }
+                    "seed_retire" => {
+                        if seed.retired_at == 0 {
+                            retire(seed, "manual", time);
+                        }
+                    }
+                    "seed_release" => release_seed(root, seed)?,
+                    _ => (),
+                }
+            }
+            if action == "seed_purge" {
+                data.seeds.retain(|s| !selected.contains(&s.id));
+            }
+            write(root, &data)?;
+            invalidate(root);
+            let mut result = inventory(&data, args, time);
+            result["affected_count"] = json!(selected.len());
+            return Ok(result);
+        }
+        "seed_reissue" => {
             let sid = id(&args["seed_id"])?;
             let seed = data
                 .seeds
                 .iter_mut()
                 .find(|s| s.id == sid)
                 .ok_or_else(|| err("Seed not found"))?;
-            let source = optional_label(&args["source"])?;
-            if !source.is_empty() {
-                seed.source = source.to_lowercase();
+            ensure_settled(seed)?;
+            if seed.retired_at > 0
+                || seed.redeemed_at > 0
+                || time <= seed.enrollment_until
+                || !seed.chat_id.is_empty()
+            {
+                return Err(err("Only expired, unconnected seeds can be reissued"));
             }
-            seed.prefix = optional_label(&args["prefix"])?;
+            let ticket = format!(
+                "{}{}",
+                uuid::Uuid::new_v4().simple(),
+                uuid::Uuid::new_v4().simple()
+            );
+            let url_key = digest(format!("seed-url-v1\0{ticket}").as_bytes());
+            seed.enrollment_hash = digest(ticket.as_bytes());
+            seed.url_hash = digest(url_key.as_bytes());
+            seed.enrollment_until = time + 3600_000;
+            seed.reason = "reissued".into();
+            seed.host_task_id.clear();
+            let ticket = json!({"seed_id":seed.id,"ticket":ticket,"url_key":url_key,"source":seed.source,"prefix":seed.prefix,"manual":seed.manual,"account":seed.account,"repo_id":seed.repo_id,"branch":seed.branch,"expires_at":seed.enrollment_until});
             write(root, &data)?;
-            invalidate(root);
-        }
-        "seed_retire" => {
-            let sid = id(&args["seed_id"])?;
-            let s = data
-                .seeds
-                .iter_mut()
-                .find(|s| s.id == sid)
-                .ok_or_else(|| err("Seed not found"))?;
-            if !s.inflight.is_empty() || !s.operations.is_empty() {
-                return Err(err(
-                    "Seed has unresolved operations; finish or inspect them before retirement",
-                ));
-            }
-            if s.retired_at == 0 {
-                retire(s, "manual", time);
-            }
-            write(root, &data)?;
+            return Ok(json!({"batch":[ticket]}));
         }
         "seed_cleanup" => {
+            let mut affected = 0;
             for s in &mut data.seeds {
                 if s.retired_at == 0
                     && s.reason != "workspace_removed"
@@ -516,12 +574,16 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
                         || (s.redeemed_at > 0 && time.saturating_sub(s.last_seen) > REPLACE_MS))
                 {
                     retire(s, "inactive", time);
+                    affected += 1;
                 }
                 if s.retired_at > 0 {
                     s.archived = true;
                 }
             }
             write(root, &data)?;
+            let mut result = inventory(&data, args, time);
+            result["affected_count"] = json!(affected);
+            return Ok(result);
         }
         "seed_resume_chat" => {
             let mut chat = load(root, id(&args["chat_id"])?)?;
@@ -569,6 +631,8 @@ pub fn provision(root: &Path, token: &str, args: &Value) -> Result<Value> {
                     || args["branch"] != s.branch
                     || args["prefix"].as_str().unwrap_or("").trim() != s.prefix
                     || s.retired_at > 0
+                    || s.enrollment_hash
+                        != digest(digest(format!("{token}\0{key}\0{}", s.id).as_bytes()).as_bytes())
                     || s.enrollment_until <= now()
             })
         {
@@ -1062,6 +1126,73 @@ mod tests {
         write(root.path(), &data).unwrap();
         assert!(release_workspace(root.path()).is_err());
         assert!(read(root.path()).unwrap().enabled);
+    }
+
+    #[test]
+    fn batch_changes_preflight_all_records_and_only_purge_retired() {
+        let (root, batch, _) = fixture();
+        let ids: Vec<_> = batch.iter().map(|s| s["seed_id"].clone()).collect();
+        let run = |args: Value| super::super::ui(root.path(), &args);
+        assert!(run(json!({"action":"seed_retire","seed_ids":[ids[0],"missing"]})).is_err());
+        assert_eq!(read(root.path()).unwrap().seeds[0].retired_at, 0);
+        assert!(run(json!({"action":"seed_purge","seed_ids":ids})).is_err());
+        assert!(run(json!({"action":"seed_retire","seed_ids":[ids[0],ids[0]]})).is_err());
+        assert_eq!(
+            run(json!({"action":"seed_label","seed_ids":ids,"source":"Arena","prefix":"Opus"}))
+                .unwrap()["affected_count"],
+            ids.len()
+        );
+        assert!(read(root.path())
+            .unwrap()
+            .seeds
+            .iter()
+            .all(|s| s.source == "arena" && s.prefix == "Opus"));
+        run(json!({"action":"seed_retire","seed_ids":[ids[0],ids[1]]})).unwrap();
+        assert!(run(json!({"action":"seed_purge","seed_ids":ids})).is_err());
+        let purged = run(json!({"action":"seed_purge","seed_ids":[ids[0],ids[1]]})).unwrap();
+        assert_eq!(purged["affected_count"], 2);
+        assert_eq!(purged["total"], ids.len() - 2);
+    }
+
+    #[test]
+    fn reissue_rotates_expired_unconnected_credentials_and_rejects_stale_provision() {
+        let (root, batch, _) = fixture();
+        let run = |args: Value| super::super::ui(root.path(), &args);
+        assert!(run(json!({"action":"seed_reissue","seed_id":batch[0]["seed_id"]})).is_err());
+        let token = "7".repeat(64);
+        run(json!({"action":"seed_pairing","token":token})).unwrap();
+        let request = json!({"action":"batch","request_id":"reissue-test","count":1,"account":"browser","repo_id":"repo","branch":"main"});
+        let old = provision(root.path(), &token, &request).unwrap()["batch"][0].clone();
+        assert!(run(json!({"action":"seed_reissue","seed_id":old["seed_id"]})).is_err());
+        let mut data = read(root.path()).unwrap();
+        data.seeds
+            .iter_mut()
+            .find(|s| s.id == old["seed_id"])
+            .unwrap()
+            .enrollment_until = now() - 1;
+        write(root.path(), &data).unwrap();
+        let fresh = run(json!({"action":"seed_reissue","seed_id":old["seed_id"]})).unwrap()
+            ["batch"][0]
+            .clone();
+        assert_eq!(fresh["seed_id"], old["seed_id"]);
+        assert_ne!(fresh["url_key"], old["url_key"]);
+        assert!(initialize(
+            root.path(),
+            old["seed_id"].as_str().unwrap(),
+            old["ticket"].as_str().unwrap()
+        )
+        .is_err());
+        assert!(url(root.path(), old["url_key"].as_str().unwrap(), true).is_err());
+        assert!(provision(root.path(), &token, &request).is_err());
+        assert!(initialize(
+            root.path(),
+            fresh["seed_id"].as_str().unwrap(),
+            fresh["ticket"].as_str().unwrap()
+        )
+        .is_ok());
+        let persisted = fs::read_to_string(safe(root.path(), FILE).unwrap()).unwrap();
+        assert!(!persisted.contains(fresh["ticket"].as_str().unwrap()));
+        assert!(!persisted.contains(fresh["url_key"].as_str().unwrap()));
     }
 
     #[test]

@@ -297,3 +297,34 @@ test('workspace seed release refuses unresolved process ownership without partia
  const data=JSON.parse(readFileSync(file));data.seeds[1].operations=['running-operation'];writeFileSync(file,JSON.stringify(data));
  const before=readFileSync(file,'utf8');assert.throws(()=>seedReleaseWorkspace(store),/unresolved/);assert.equal(readFileSync(file,'utf8'),before);
 });
+
+test('seed batch changes preflight all IDs and purge only settled retired records',t=>{
+ const {root,batch}=fixture(t,3),ids=batch.map(s=>s.seed_id),file=path.join(root,'docs/chat-sessions/seed-library.seeds.json');
+ const before=readFileSync(file,'utf8');
+ assert.throws(()=>chatUi(root,{action:'seed_retire',seed_ids:[ids[0],'missing']}),/not found/);
+ assert.equal(readFileSync(file,'utf8'),before);
+ assert.throws(()=>chatUi(root,{action:'seed_purge',seed_ids:ids}),/Only retired/);
+ assert.throws(()=>chatUi(root,{action:'seed_retire',seed_ids:[ids[0],ids[0]]}),/Duplicate/);
+ const labelled=chatUi(root,{action:'seed_label',seed_ids:ids,source:'Arena',prefix:'Opus'});
+ assert.equal(labelled.affected_count,3);assert.ok(labelled.seeds.every(s=>s.source==='arena'&&s.prefix==='Opus'));
+ assert.equal(chatUi(root,{action:'seed_retire',seed_ids:ids.slice(0,2)}).affected_count,2);
+ assert.throws(()=>chatUi(root,{action:'seed_purge',seed_ids:ids}),/Only retired/);
+ const purged=chatUi(root,{action:'seed_purge',seed_ids:ids.slice(0,2)});assert.equal(purged.affected_count,2);assert.equal(purged.total,1);assert.equal(purged.seeds[0].id,ids[2]);
+});
+
+test('reissue rotates only expired unconnected enrollment and rejects stale browser retries',t=>{
+ const {root,store,batch}=fixture(t,1);
+ assert.throws(()=>chatUi(root,{action:'seed_reissue',seed_id:batch[0].seed_id}),/Only expired/);
+ const pair='7'.repeat(64);chatUi(root,{action:'seed_pairing',token:pair});
+ const request={action:'batch',request_id:'reissue-test',count:1,account:'browser',repo_id:'repo',branch:'main'};
+ const old=seedProvision(store,pair,request).batch[0];
+ assert.throws(()=>chatUi(root,{action:'seed_reissue',seed_id:old.seed_id}),/Only expired/);
+ const file=path.join(root,'docs/chat-sessions/seed-library.seeds.json'),data=JSON.parse(readFileSync(file));data.seeds.find(s=>s.id===old.seed_id).enrollment_until=Date.now()-1;writeFileSync(file,JSON.stringify(data));
+ const fresh=chatUi(root,{action:'seed_reissue',seed_id:old.seed_id}).batch[0];
+ assert.equal(fresh.seed_id,old.seed_id);assert.notEqual(fresh.url_key,old.url_key);
+ assert.throws(()=>seedInitialize(store,old.seed_id,old.ticket),/invalid/);
+ assert.throws(()=>seedProvision(store,pair,request),/changed or expired/);
+ assert.doesNotThrow(()=>seedInitialize(store,fresh.seed_id,fresh.ticket));
+ assert.equal(chatUi(root,{action:'seed_list'}).total,2);
+ const persisted=readFileSync(file,'utf8');assert.ok(!persisted.includes(fresh.ticket));assert.ok(!persisted.includes(fresh.url_key));
+});
