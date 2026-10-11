@@ -230,12 +230,29 @@ fn inventory(data: &Library, args: &Value, time: u64) -> Value {
                     }))
         })
         .collect();
+    // Aggregate the full filtered inventory before slicing the detail page.
+    let mut summaries = std::collections::BTreeMap::<
+        String,
+        (usize, usize, std::collections::BTreeMap<String, usize>),
+    >::new();
+    for seed in &filtered {
+        let group = summaries
+            .entry(seed["account"].as_str().unwrap_or("").to_owned())
+            .or_default();
+        let status = seed["status"].as_str().unwrap_or("");
+        group.0 += 1;
+        *group.2.entry(status.to_owned()).or_default() += 1;
+        if matches!(status, "ready" | "assigned" | "working") {
+            group.1 += 1;
+        }
+    }
+    let account_summaries: Vec<_> = summaries.into_iter().map(|(account, (total, valid, counts))| json!({"account":account,"total":total,"valid":valid,"counts":counts})).collect();
     let offset = args["offset"].as_u64().unwrap_or(0) as usize;
     let limit = args["limit"]
         .as_u64()
         .map(|v| v.clamp(1, 200) as usize)
         .unwrap_or(all.len());
-    json!({"groups":groups,"sources":sources,"enabled":data.enabled,"seeds":filtered.iter().skip(offset).take(limit).collect::<Vec<_>>(),"retired_count":counts.get("retired").copied().unwrap_or(0),"total":all.len(),"filtered_total":filtered.len(),"offset":offset,"limit":limit,"counts":counts,"accounts":accounts,"pairing_enabled":!data.pairing_hash.is_empty(),"capacity":LIBRARY_LIMIT})
+    json!({"account_summaries":account_summaries,"groups":groups,"sources":sources,"enabled":data.enabled,"seeds":filtered.iter().skip(offset).take(limit).collect::<Vec<_>>(),"retired_count":counts.get("retired").copied().unwrap_or(0),"total":all.len(),"filtered_total":filtered.len(),"offset":offset,"limit":limit,"counts":counts,"accounts":accounts,"pairing_enabled":!data.pairing_hash.is_empty(),"capacity":LIBRARY_LIMIT})
 }
 /// Caller owns the chat lock; no nested locking.
 pub fn ui(root: &Path, args: &Value) -> Result<Value> {
@@ -852,6 +869,76 @@ mod tests {
             })
             .collect();
         (root, batch, tokens)
+    }
+    #[test]
+    fn account_cards_summarize_all_filtered_seeds_before_pagination() {
+        let (root, _, _) = fixture();
+        let mut data = read(root.path()).unwrap();
+        let template = data.seeds[0].clone();
+        let time = now();
+        data.seeds = (0..60)
+            .map(|i| {
+                let mut seed = template.clone();
+                seed.id = format!("summary-{i}");
+                seed.account = "account-a".into();
+                seed.prefix = "Astra".into();
+                seed.ready = true;
+                seed.last_seen = time;
+                match i % 6 {
+                    1 => seed.chat_id = "assigned-chat".into(),
+                    2 => seed.inflight.push("operation".into()),
+                    3 => seed.redeemed_at = 0,
+                    4 => seed.last_seen = time - 700_000,
+                    5 => seed.retired_at = time,
+                    _ => {}
+                }
+                seed.archived = i == 59;
+                seed
+            })
+            .collect();
+        let mut other = template;
+        other.id = "summary-b".into();
+        other.account = "__proto__".into();
+        other.source = "custom".into();
+        other.prefix = "Sol".into();
+        other.ready = true;
+        other.last_seen = time;
+        data.seeds.push(other);
+        let list = |mut args: Value| {
+            if args["include_archived"].is_null() {
+                args["include_archived"] = json!(false);
+            }
+            inventory(&data, &args, time)
+        };
+        let page = list(json!({"limit":1,"offset":40}));
+        let expected = json!({"account":"account-a","total":59,"valid":30,"counts":{"ready":10,"assigned":10,"working":10,"preparing":10,"offline":10,"retired":9}});
+        assert_eq!(page["seeds"].as_array().unwrap().len(), 1);
+        assert_eq!(page["filtered_total"], 60);
+        assert_eq!(page["account_summaries"][1], expected);
+        assert_eq!(
+            page["account_summaries"],
+            list(json!({"limit":1}))["account_summaries"]
+        );
+        assert_eq!(page["account_summaries"][0]["valid"], 1);
+        assert_eq!(
+            list(json!({"include_archived":true}))["account_summaries"][1]["total"],
+            60
+        );
+        for filter in [
+            json!({"account":"account-a"}),
+            json!({"source":"coderabbit","keyword":"ASTRA"}),
+            json!({"search":"ACCOUNT-A"}),
+        ] {
+            assert_eq!(list(filter)["account_summaries"], json!([expected]));
+        }
+        assert_eq!(
+            list(json!({"account":"account-a","status":"offline"}))["account_summaries"],
+            json!([{"account":"account-a","total":10,"valid":0,"counts":{"offline":10}}])
+        );
+        assert_eq!(
+            list(json!({"keyword":"no-match"}))["account_summaries"],
+            json!([])
+        );
     }
     #[test]
     fn classified_pools_keep_initial_and_replacement_routing_across_host_repositories() {

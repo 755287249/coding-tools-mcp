@@ -69,9 +69,12 @@ function inventory(data:Library,args:Record<string,unknown>,now:number){
   for(const s of all)counts[s.status]=(counts[s.status]??0)+1;
   const search=typeof args.search==='string'?args.search.trim().toLowerCase():'';
   const filtered=all.filter(s=>matches(s as unknown as Seed,selection)&&(args.include_archived!==false||!s.archived)&&(!args.account||s.account===args.account)&&(!args.status||s.status===args.status)&&(!search||[s.id,s.account,s.source,s.prefix,s.repo_id,s.branch,s.host_task_id,...Object.values(s.metadata)].some(v=>v.toLowerCase().includes(search))));
+  const summaries=new Map<string,{account:string;total:number;valid:number;counts:Record<string,number>}>();
+  for(const seed of filtered){const group=summaries.get(seed.account)??{account:seed.account,total:0,valid:0,counts:{}};group.total++;group.counts[seed.status]=(group.counts[seed.status]??0)+1;if(['ready','assigned','working'].includes(seed.status))group.valid++;summaries.set(seed.account,group);}
+  const account_summaries=accounts.flatMap(account=>{const group=summaries.get(account);return group?[group]:[];});
   const limit=Number.isInteger(args.limit)?Math.max(1,Math.min(200,Number(args.limit))):all.length;
   const offset=Number.isInteger(args.offset)?Math.max(0,Number(args.offset)):0;
-  return {groups:[...groups.values()],sources:[...new Set(all.map(s=>s.source))].sort(),enabled:data.enabled,seeds:filtered.slice(offset,offset+limit),retired_count:counts.retired??0,total:all.length,filtered_total:filtered.length,offset,limit,counts,accounts,pairing_enabled:!!data.pairing_hash,capacity:SEED_LIBRARY_LIMIT};
+  return {account_summaries,groups:[...groups.values()],sources:[...new Set(all.map(s=>s.source))].sort(),enabled:data.enabled,seeds:filtered.slice(offset,offset+limit),retired_count:counts.retired??0,total:all.length,filtered_total:filtered.length,offset,limit,counts,accounts,pairing_enabled:!!data.pairing_hash,capacity:SEED_LIBRARY_LIMIT};
 }
 // Called by chatUi while it already owns the folder lock.
 export function seedUi(store:SeedStore,args:Record<string,unknown>):Record<string,unknown> {

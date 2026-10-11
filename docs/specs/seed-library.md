@@ -121,3 +121,12 @@ The new-chat page creates automatically for a single available classification;
 multiple classifications first offer a source/keyword picker. A non-modal pulse
 shows while waiting and an online empty chat shows readiness. The filter remains
 visible in the chat. Manual enrollment prompts remain in page memory only.
+
+## Account overview (0.1.137)
+
+The default inventory view groups seeds into account cards. Each card shows valid
+(ready + assigned + working) / total, plus the status breakdown. Account summaries
+are computed over the complete filtered inventory before detail pagination; source,
+prefix, account, status, text and archive filters apply consistently. Global overview
+counts remain unfiltered. Open an account only when individual seed management is
+needed; detail pages retain classification, links and retirement actions.

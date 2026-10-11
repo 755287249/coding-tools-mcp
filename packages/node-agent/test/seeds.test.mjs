@@ -178,3 +178,26 @@ test('paired prefix is stable across retries and existing seeds can be classifie
  assert.throws(()=>seedProvision(store,token,{...args,prefix:'grok'}),/changed/);
  chatUi(root,{action:'seed_label',seed_id:batch[0].seed_id,source:'coderabbit',prefix:'astra-old'});assert.equal(chatUi(root,{action:'seed_list',keyword:'astra'}).seeds.length,2);
 });
+
+test('account cards summarize every filtered seed before detail pagination',t=>{
+ const {root}=fixture(t,1),file=path.join(root,'docs/chat-sessions/seed-library.seeds.json');
+ const data=JSON.parse(readFileSync(file)),template=data.seeds[0],now=Date.now();
+ data.seeds=Array.from({length:60},(_,i)=>({...template,id:'summary-'+i,account:'account-a',prefix:'Astra',ready:true,last_seen:now,
+   ...(i%6===1?{chat_id:'assigned-chat'}:{}),...(i%6===2?{inflight:['operation']}:{}),
+   ...(i%6===3?{redeemed_at:0}:{}),...(i%6===4?{last_seen:now-700000}:{}),
+   ...(i%6===5?{retired_at:now}:{}),archived:i===59}));
+ data.seeds.push({...template,id:'summary-b',account:'__proto__',source:'custom',prefix:'Sol',ready:true,last_seen:now});
+ writeFileSync(file,JSON.stringify(data));
+ const list=args=>chatUi(root,{action:'seed_list',include_archived:false,...args});
+ const page=list({limit:1,offset:40}),a=page.account_summaries.find(s=>s.account==='account-a');
+ assert.equal(page.seeds.length,1);assert.equal(page.filtered_total,60);
+ assert.deepEqual(a,{account:'account-a',total:59,valid:30,counts:{ready:10,assigned:10,working:10,preparing:10,offline:10,retired:9}});
+ assert.deepEqual(page.account_summaries,list({limit:1,offset:0}).account_summaries);
+ assert.equal(page.account_summaries.find(s=>s.account==='__proto__').valid,1);
+ assert.equal(list({include_archived:true}).account_summaries.find(s=>s.account==='account-a').total,60);
+ for(const filter of [{account:'account-a'},{source:'coderabbit',keyword:'ASTRA'},{search:'ACCOUNT-A'}]){
+  assert.deepEqual(list(filter).account_summaries,[a]);
+ }
+ assert.deepEqual(list({account:'account-a',status:'offline'}).account_summaries,[{account:'account-a',total:10,valid:0,counts:{offline:10}}]);
+ assert.deepEqual(list({keyword:'no-match'}).account_summaries,[]);
+});
