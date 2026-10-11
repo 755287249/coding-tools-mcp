@@ -1,3 +1,4 @@
+import { renameChatFileSync } from './rename.js';
 import { scheduleAction, tickSchedules } from './schedules.js';
 import {seedUi, readSeeds, seedInvalidate, parseSeedFilter, type SeedFilter, type SeedStore} from './seeds.js';
 import {parseQuestions,validateQuestionContext,answerQuestions,activeQuestionId,questionsMarkdown,type ChatQuestion,type QuestionResponse} from './questions.js';
@@ -105,12 +106,12 @@ function save(root: string, s: ChatSession): void {
   const target = file(root, s.id);
   const temporary = safe(root, `${DIR}/${s.id}.${randomUUID()}.tmp`);
   writeFileSync(temporary, body, { mode: 0o600, flag: 'wx' });
-  try { renameSync(temporary, target); } finally { rmSync(temporary, { force: true }); }
+  try { renameChatFileSync(temporary, target); } finally { rmSync(temporary, { force: true }); }
   seedInvalidate(seedStore(root));
   // JSON is authoritative. An export failure is surfaced; retries rebuild the projection.
   const md = safe(root, `${DIR}/${s.id}.md`);
   const mdTemp = safe(root, `${DIR}/${s.id}.${randomUUID()}.tmp`);
-  try { writeFileSync(mdTemp, chatMarkdown(s), { mode: 0o600, flag: 'wx' }); renameSync(mdTemp, md); }
+  try { writeFileSync(mdTemp, chatMarkdown(s), { mode: 0o600, flag: 'wx' }); renameChatFileSync(mdTemp, md); }
   finally { rmSync(mdTemp, { force: true }); }
 }
 function locked<T>(root: string, callback: () => T): T {
