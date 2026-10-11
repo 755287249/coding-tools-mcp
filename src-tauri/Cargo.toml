@@ -1,6 +1,6 @@
 [package]
 name = "coding-tools-mcp-desktop"
-version = "0.1.59"
+version = "0.1.143"
 description = "Coding Tools MCP desktop client"
 authors = ["Coding Tools MCP Contributors"]
 edition = "2021"
@@ -92,12 +92,14 @@ windows = { version = "0.61", features = [
     "Win32_System_Com",
     "Win32_System_JobObjects",
     "Win32_System_Pipes",
+    "Win32_System_Registry",
     "Win32_System_SystemInformation",
     "Win32_System_SystemServices",
     "Win32_Security_Isolation",
     "Win32_System_Threading",
     "Win32_UI_Shell",
     "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 windows-core = "0.61.2"
 

@@ -1,6 +1,6 @@
 {
   "name": "coding-tools-mcp-desktop",
-  "version": "0.1.59",
+  "version": "0.1.143",
   "description": "Coding Tools MCP desktop client",
   "type": "module",
   "packageManager": "pnpm@12.0.0",
@@ -63,8 +63,11 @@
   "license": "Apache-2.0",
   "dependencies": {
     "@lucide/svelte": "^1.31.0",
+    "@noble/hashes": "2.0.1",
     "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-dialog": "^2"
+    "@tauri-apps/plugin-dialog": "^2",
+    "entities": "^8.1.0",
+    "marked": "^18.1.0"
   },
   "devDependencies": {
     "@sveltejs/adapter-static": "^3.0.6",
