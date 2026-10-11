@@ -55,7 +55,7 @@ fn service_routes_for_prefix(prefix: &str) -> Router<ListenerState> {
         )
         .route(
             &prefixed_route(prefix, "/mcp/seeds/{folder_id}/{seed_id}"),
-            post(super::seeds::post),
+            post(super::seeds::post).get(super::seeds::get),
         )
         .route(
             &prefixed_route(prefix, "/mcp/seed-library/{folder_id}"),

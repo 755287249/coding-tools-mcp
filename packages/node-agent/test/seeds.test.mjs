@@ -221,3 +221,52 @@ test('exact prefix and account selection fence initial and replacement owners an
  assert.equal(seedPoll(store,batch[4].seed_id,tokens[4],future).status,'idle');assert.equal(seedPoll(store,batch[5].seed_id,tokens[5],future).chat_id,unlabeled.id);
  for(const field of ['prefix','account'])assert.throws(()=>chatUi(root,{action:'create',seed_filter:{[field]:{bad:true}}}),/Invalid seed/);
 });
+
+test('URL-only HTTP onboarding discovers rules, registers, waits, opens and replies without identity parameters',async t=>{
+ const f=await createMcpFixture(t);chatUi(f.root,{action:'seed_settings',enabled:true});
+ const seed=chatUi(f.root,{action:'seed_manual',account:'url-fixture'}).batch[0],endpoint=`${f.endpoint}/seeds/repo/${seed.url_key}`;let seq=0;
+ const rpc=async(method,params={},target=endpoint,notification=false)=>{const r=await fetch(target,{method:'POST',headers:{'content-type':'application/json','MCP-Protocol-Version':'2025-03-26'},body:JSON.stringify({jsonrpc:'2.0',...(!notification?{id:++seq}:{}),method,params})});return r.status===202?{accepted:true}:r.json();};
+ const call=(name,args={})=>rpc('tools/call',{name,arguments:args});
+ const intro=await fetch(endpoint);assert.equal(intro.status,200);assert.equal(intro.headers.get('cache-control'),'no-store');assert.match((await intro.json()).instructions,/seed_connect/);
+ assert.equal(chatUi(f.root,{action:'seed_list'}).seeds[0].status,'preparing');
+ assert.ok((await call('seed_connect')).error,'GET did not redeem');
+ assert.ok((await rpc('initialize',{},`${f.endpoint}/seeds/repo/${seed.seed_id}`)).error,'public ID is not a capability');
+ assert.ok((await rpc('initialize',{},`${f.endpoint}/seeds/other/${seed.url_key}`)).error);
+ const init=await rpc('initialize');assert.match(init.result.instructions,/chat_wait/);assert.equal(init.result._meta,undefined);
+ assert.deepEqual(await rpc('notifications/initialized',{},endpoint,true),{accepted:true});
+ const catalog=(await rpc('tools/list')).result.tools;assert.ok(catalog.some(t=>t.name==='seed_connect'));
+ for(const name of ['chat_wait','chat_reply','chat_open'])assert.ok(!catalog.find(t=>t.name===name).inputSchema.required?.includes('chat_id'));
+ assert.equal((await rpc('resources/read',{uri:'coding-tools://skills/seed-connect'})).result.contents[0].text,init.result.instructions);
+ const ready=(await call('seed_connect')).result.structuredContent;assert.equal(ready.registered,true);assert.equal(ready.seed_id,seed.seed_id);assert.equal(ready.workspace_folder_id,'repo');
+ assert.equal(chatUi(f.root,{action:'seed_list'}).seeds[0].status,'ready');
+ assert.equal((await call('chat_wait',{timeout_ms:0})).result.structuredContent.status,'idle');
+ assert.ok((await call('read_file',{path:'sample.txt'})).error);
+ const waiting=call('chat_wait',{timeout_ms:1000});await new Promise(r=>setTimeout(r,80));
+ assert.match((await call('chat_wait',{timeout_ms:0})).error.message,/already active/);
+ const chat=chatUi(f.root,{action:'create'}).session;chatUi(f.root,{action:'send',chat_id:chat.id,message_id:'url-message',text:'Do the work'});
+ const opened=(await waiting).result.structuredContent;assert.equal(opened.status,'assigned');assert.equal(opened.chat_id,chat.id);assert.ok(opened.skill.text);assert.ok(opened.session);
+ assert.ok((await call('chat_wait',{timeout_ms:0,chat_id:'other'})).error);
+ const message=(await call('chat_wait',{timeout_ms:0})).result.structuredContent;assert.equal(message.status,'message');assert.equal(message.message.id,'url-message');
+ assert.equal((await call('chat_reply',{message_id:'url-reply',reply_to:'url-message',text:'Done',final:true})).result.structuredContent.persisted,true);
+ assert.equal((await call('chat_wait',{timeout_ms:0})).result.structuredContent.status,'idle');
+ assert.ok((await rpc('initialize')).result,'reinitialize needs no exchange receipt');
+ const again=(await call('seed_connect')).result.structuredContent;assert.equal(again.attachment_id,opened.attachment_id);
+ for(const body of [readFileSync(path.join(f.root,'docs/chat-sessions/seed-library.seeds.json'),'utf8'),JSON.stringify(chatUi(f.root,{action:'seed_list'})),JSON.stringify(init)])assert.ok(!body.includes(seed.url_key));
+ assert.equal((await call('chat_close')).result.structuredContent.ok,true);
+ const retired=(await call('chat_wait',{timeout_ms:0})).result.structuredContent;
+ assert.equal(retired.status,'retired');assert.match(retired.instruction,/Stop waiting/);
+ chatUi(f.root,{action:'seed_retire',seed_id:seed.seed_id});assert.ok((await rpc('initialize')).error);assert.equal((await fetch(endpoint)).status,404);
+});
+
+test('URL capability survives a new store, keeps fixed expiry, and isolates folders',async t=>{
+ const {seedUrl}=await import('../dist/chat/seeds.js');
+ const root=mkdtempSync(path.join(tmpdir(),'seed-url-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
+ const seed=chatUi(root,{action:'seed_manual',account:'url'}).batch[0],store=seedStore(root),now=Date.now();
+ assert.throws(()=>seedUrl(store,seed.url_key,true,now+3600001),/expired/);
+ assert.equal(seedUrl(store,seed.url_key,true,now),seed.seed_id);
+ const first=JSON.parse(readFileSync(path.join(root,'docs/chat-sessions/seed-library.seeds.json'))).seeds[0];
+ assert.equal(seedUrl(seedStore(root),seed.url_key,true,now+3600001),seed.seed_id);
+ assert.equal(JSON.parse(readFileSync(path.join(root,'docs/chat-sessions/seed-library.seeds.json'))).seeds[0].access_until,first.access_until);
+ assert.throws(()=>seedUrl(store,seed.url_key,true,now+8*86400000),/expired/);
+ const other=fixture(t,1);assert.throws(()=>seedUrl(other.store,seed.url_key,true),/invalid/);
+});

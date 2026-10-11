@@ -141,3 +141,35 @@ New filter fields prefix (exact, including empty) and account are optional; old
 source/keyword filters preserve their substring semantics. Initial assignment and
 replacement enforce the same filter. Standby scan caches distinguish exact prefix
 and account so one account cannot suppress another eligible poll.
+
+## URL-first bootstrap (0.1.139)
+
+New manual and browser batches return a separate `url_key`. Their prompt is only
+`<MCP>/seeds/<folder>/<url_key>` followed by the requested short connection sentence.
+The key derives from the enrollment ticket with the `seed-url-v1` domain separator;
+only its SHA-256 digest is persisted. Public seed IDs remain inventory/task receipt
+identifiers and cannot authenticate a URL connection. Older records and clients
+retain their ticket/Bearer exchange. Provision retries return the same new URL key.
+
+The exact URL supports standard stateless Streamable HTTP initialization without
+OAuth or custom credential exchange. GET provides bootstrap instructions without
+redeeming the capability. POST initialize redeems it once, with a fixed seven-day
+access expiry; reinitialization after lost responses or process restart preserves
+that expiry and chat ownership. Enrollment remains one hour. Retirement revokes
+both access methods immediately. Inventory and host receipts exclude the URL key.
+
+The shared `skills/seed-connect/SKILL.md` is embedded in initialize.instructions,
+returned by seed_connect, and exposed as a resource. seed_connect confirms ready
+registration and the single folder. chat_wait supports standby before assignment,
+automatically opens the assigned attachment and returns its complete Skill/history,
+then delivers messages on the next wait. Chat/plan schemas allow bound identity
+parameters to be omitted; explicitly wrong IDs still fail. One active wait per seed
+is enforced across standby and chat waits. seed_wait remains available for old hosts.
+
+Prompt brevity cannot make an unavailable or paused host execute: successful
+registration is measured by `registered=true`, not GET or a created host task.
+The URL is a credential; keep it in host configuration/client memory and omit it
+from project files, logs and replies. Built-in tunnel request telemetry redacts the
+seed route suffix and drops query strings; a separately deployed tunnel needs the
+corresponding server update. External reverse proxies must avoid logging capability
+URLs. Ordinary OAuth and its catalog are unaffected.

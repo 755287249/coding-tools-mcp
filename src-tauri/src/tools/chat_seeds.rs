@@ -27,6 +27,8 @@ pub struct Seed {
     pub repo_id: String,
     pub branch: String,
     pub created_at: u64,
+    #[serde(default)]
+    pub url_hash: String,
     pub enrollment_hash: String,
     pub access_hash: String,
     pub enrollment_until: u64,
@@ -364,6 +366,7 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
                         uuid::Uuid::new_v4().simple()
                     )
                 };
+                let url_key = digest(format!("seed-url-v1\0{ticket}").as_bytes());
                 let mut metadata = std::collections::BTreeMap::new();
                 for key in [
                     "account_id",
@@ -387,6 +390,7 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
                     repo_id: repo_id.clone(),
                     branch: branch.clone(),
                     created_at: time,
+                    url_hash: digest(url_key.as_bytes()),
                     enrollment_hash: digest(ticket.as_bytes()),
                     access_hash: String::new(),
                     enrollment_until: time + 3600_000,
@@ -404,7 +408,7 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
                     inflight: vec![],
                     operations: vec![],
                 };
-                batch.push(json!({"seed_id":s.id,"ticket":ticket,"source":source,"prefix":prefix,"manual":manual,"repo_id":repo_id,"branch":branch,"account":account,"expires_at":s.enrollment_until}));
+                batch.push(json!({"seed_id":s.id,"ticket":ticket,"url_key":url_key,"source":source,"prefix":prefix,"manual":manual,"repo_id":repo_id,"branch":branch,"account":account,"expires_at":s.enrollment_until}));
                 data.seeds.push(s);
             }
             write(root, &data)?;
@@ -512,9 +516,12 @@ pub fn provision(root: &Path, token: &str, args: &Value) -> Result<Value> {
                 "Provision request changed or expired; use a new request ID",
             ));
         }
-        return Ok(
-            json!({"batch":existing.iter().map(|s|json!({"seed_id":s.id,"ticket":digest(format!("{token}\0{key}\0{}",s.id).as_bytes()),"source":s.source,"prefix":s.prefix,"manual":s.manual,"repo_id":s.repo_id,"branch":s.branch,"account":s.account,"expires_at":s.enrollment_until})).collect::<Vec<_>>()}),
-        );
+        return Ok(json!({"batch":existing.iter().map(|s| {
+                let ticket = digest(format!("{token}\0{key}\0{}",s.id).as_bytes());
+                let mut row = json!({"seed_id":s.id,"ticket":ticket,"source":s.source,"prefix":s.prefix,"manual":s.manual,"repo_id":s.repo_id,"branch":s.branch,"account":s.account,"expires_at":s.enrollment_until});
+                if !s.url_hash.is_empty() { row["url_key"] = json!(digest(format!("seed-url-v1\0{ticket}").as_bytes())); }
+                row
+            }).collect::<Vec<_>>()}));
     }
     ui(
         root,
@@ -563,6 +570,45 @@ pub fn initialize(root: &Path, sid: &str, ticket: &str) -> Result<String> {
     exchanges.insert(key, (token.clone(), time + 60000));
     Ok(token)
 }
+/// URL keys are separate from public seed IDs and stored only as digests.
+pub fn url(root: &Path, key: &str, redeem: bool) -> Result<String> {
+    let _lock = lock(root)?;
+    if key.len() != 64
+        || !key
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        return Err(err("Seed URL invalid or expired"));
+    }
+    let mut data = read(root)?;
+    let s = data
+        .seeds
+        .iter_mut()
+        .find(|s| s.url_hash == digest(key.as_bytes()))
+        .ok_or_else(|| err("Seed URL invalid or expired"))?;
+    let time = now();
+    if s.retired_at > 0
+        || time
+            > if s.redeemed_at > 0 {
+                s.access_until
+            } else {
+                s.enrollment_until
+            }
+    {
+        return Err(err("Seed URL invalid or expired"));
+    }
+    let sid = s.id.clone();
+    if redeem && s.redeemed_at == 0 {
+        s.redeemed_at = time;
+        s.access_until = time + 7 * 86400_000;
+        s.last_seen = time;
+        write(root, &data)?;
+    }
+    Ok(sid)
+}
+pub fn skill() -> Value {
+    json!({"uri":"coding-tools://skills/seed-connect","name":"seed-connect","mimeType":"text/markdown","text":include_str!("../../../skills/seed-connect/SKILL.md").replace("\r\n", "\n")})
+}
 fn authorized(data: &Library, sid: &str, token: &str, time: u64) -> Result<usize> {
     let index = data
         .seeds
@@ -571,9 +617,9 @@ fn authorized(data: &Library, sid: &str, token: &str, time: u64) -> Result<usize
         .ok_or_else(|| err("Seed unavailable"))?;
     let s = &data.seeds[index];
     if s.retired_at > 0
-        || s.access_hash.is_empty()
+        || s.redeemed_at == 0
         || token.is_empty()
-        || digest(token.as_bytes()) != s.access_hash
+        || (digest(token.as_bytes()) != s.access_hash && digest(token.as_bytes()) != s.url_hash)
         || time > s.access_until
     {
         return Err(err("Seed access expired, retired or invalid"));
@@ -773,7 +819,7 @@ fn poll_at(root: &Path, sid: &str, token: &str, time: u64) -> Result<Value> {
     Ok(if s.chat_id.is_empty() {
         json!({"status":"idle","instruction":"Make one new independent seed_wait(timeout_ms:25000). Idle is normal. Respect host execution limits."})
     } else {
-        json!({"status":"assigned","chat_id":s.chat_id,"attachment_id":s.attachment_id,"generation":s.generation,"instruction":"Call chat_open with this chat_id and attachment_id. Read the complete returned skill and history. Preserve the existing pending message, plan and user constraints; inspect files and prior operation results before resuming. Work through this MCP workspace. Do not replay completed actions or use an old host sandbox as the project source."})
+        json!({"status":"assigned","needs_open":load(root, &s.chat_id)?["seed_pending"] == true,"chat_id":s.chat_id,"attachment_id":s.attachment_id,"generation":s.generation,"instruction":"Call chat_open with this chat_id and attachment_id. Read the complete returned skill and history. Preserve the existing pending message, plan and user constraints; inspect files and prior operation results before resuming. Work through this MCP workspace. Do not replay completed actions or use an old host sandbox as the project source."})
     })
 }
 pub fn begin(
@@ -1344,6 +1390,36 @@ mod tests {
             ui(root.path(), &json!({"action":"seed_list"})).unwrap()["retired_count"],
             0
         );
+    }
+    #[test]
+    fn url_capability_persists_without_receipts_and_does_not_extend_expiry() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let issued = super::super::ui(root, &json!({"action":"seed_manual","account":"url"}))
+            .unwrap()["batch"][0]
+            .clone();
+        let key = issued["url_key"].as_str().unwrap();
+        let sid = issued["seed_id"].as_str().unwrap();
+        assert_eq!(url(root, key, false).unwrap(), sid);
+        assert!(authenticate(root, sid, key).is_err());
+        assert_eq!(url(root, key, true).unwrap(), sid);
+        authenticate(root, sid, key).unwrap();
+        let expires = read(root).unwrap().seeds[0].access_until;
+        assert_eq!(url(root, key, true).unwrap(), sid);
+        assert_eq!(read(root).unwrap().seeds[0].access_until, expires);
+        assert!(url(tempfile::tempdir().unwrap().path(), key, true).is_err());
+        let serialized = fs::read_to_string(safe(root, FILE).unwrap()).unwrap();
+        assert!(!serialized.contains(key));
+        assert!(!serialized.contains(issued["ticket"].as_str().unwrap()));
+        let mut data = read(root).unwrap();
+        data.seeds[0].access_until = now() - 1;
+        write(root, &data).unwrap();
+        assert!(url(root, key, true).is_err());
+        assert!(authenticate(root, sid, key).is_err());
+        data.seeds[0].redeemed_at = 0;
+        data.seeds[0].enrollment_until = now() - 1;
+        write(root, &data).unwrap();
+        assert!(url(root, key, true).is_err());
     }
     #[test]
     fn seed_exchange_is_scoped_and_no_secrets_are_stored() {

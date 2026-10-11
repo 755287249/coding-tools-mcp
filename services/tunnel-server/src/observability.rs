@@ -635,6 +635,13 @@ impl Observability {
         client_id: &str,
         service: &str,
     ) -> RequestGuard {
+        let safe_path = path.split('?').next().unwrap_or(path);
+        let safe_path = if let Some((prefix, _)) = safe_path.split_once("/mcp/seeds/") {
+            format!("{prefix}/mcp/seeds/[REDACTED]")
+        } else {
+            safe_path.to_owned()
+        };
+        let path = safe_path.as_str();
         self.inner.total_requests.fetch_add(1, Ordering::Relaxed);
         self.inner
             .in_flight_requests
@@ -822,6 +829,28 @@ fn now_unix_ms() -> u64 {
 mod tests {
     use super::*;
 
+    #[test]
+    fn seed_url_capabilities_never_reach_request_logs() {
+        let telemetry = Observability::new();
+        let secret = "a".repeat(64);
+        let mut request = telemetry.begin_request(
+            "seed",
+            "POST",
+            &format!("/clients/test/mcp/seeds/folder/{secret}?token=private"),
+            "client",
+            "mcp",
+        );
+        request.finish(200);
+        let logs = telemetry.logs(LogFilter {
+            limit: 100,
+            ..Default::default()
+        });
+        assert!(!logs.is_empty());
+        for entry in logs {
+            assert!(!entry.message.contains(&secret));
+            assert!(!entry.message.contains("private"));
+        }
+    }
     #[test]
     fn filters_logs_and_tracks_request_totals() {
         let telemetry = Observability::new();

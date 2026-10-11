@@ -13,7 +13,7 @@ export interface Seed {
   source?:string; prefix?:string; manual?:boolean;
   provision_key?:string; metadata?:Record<string,string>;
   id:string; account:string; repo_id:string; branch:string; created_at:number;
-  enrollment_hash:string; access_hash:string; enrollment_until:number; redeemed_at:number;
+  url_hash?:string; enrollment_hash:string; access_hash:string; enrollment_until:number; redeemed_at:number;
   access_until:number; last_seen:number; ready:boolean; retired_at:number; reason:string;
   archived:boolean; host_task_id:string; chat_id:string; attachment_id:string;
   generation:number; inflight:string[]; operations:string[];
@@ -96,9 +96,10 @@ export function seedUi(store:SeedStore,args:Record<string,unknown>):Record<strin
     for(let i=0;i<count;i++){
       const id=randomUUID(),provision_key=String(args._provision_key??'');
       const ticket=provision_key?hash(String(args._provision_token)+'\0'+provision_key+'\0'+id):randomBytes(32).toString('hex');
+      const url_key=hash('seed-url-v1\0'+ticket);
       const metadata:Record<string,string>={};for(const key of ['account_id','provider_user_id','repo_name','organization_id','workspace_id'])if((args.metadata as Record<string,unknown>|undefined)?.[key])metadata[key]=label((args.metadata as Record<string,unknown>)[key]);
-      const seed:Seed={id,source:source.toLowerCase(),prefix,manual,provision_key,metadata,account,repo_id,branch,created_at:now,enrollment_hash:hash(ticket),access_hash:'',enrollment_until:now+3600_000,redeemed_at:0,access_until:0,last_seen:0,ready:false,retired_at:0,reason:'',archived:false,host_task_id:'',chat_id:'',attachment_id:'',generation:0,inflight:[],operations:[]};
-      data.seeds.push(seed);batch.push({seed_id:seed.id,ticket,source:seed.source,prefix,manual,repo_id,branch,account,expires_at:seed.enrollment_until});
+      const seed:Seed={id,source:source.toLowerCase(),prefix,manual,provision_key,metadata,account,repo_id,branch,created_at:now,url_hash:hash(url_key),enrollment_hash:hash(ticket),access_hash:'',enrollment_until:now+3600_000,redeemed_at:0,access_until:0,last_seen:0,ready:false,retired_at:0,reason:'',archived:false,host_task_id:'',chat_id:'',attachment_id:'',generation:0,inflight:[],operations:[]};
+      data.seeds.push(seed);batch.push({seed_id:seed.id,ticket,url_key,source:seed.source,prefix,manual,repo_id,branch,account,expires_at:seed.enrollment_until});
     }
     saveSeeds(store,data);return {batch};
   } else if(args.action==='seed_label') {
@@ -128,7 +129,7 @@ export function seedProvision(store:SeedStore,token:string,args:Record<string,un
     const request=uid(args.request_id),key=hash(token+'\0'+request),existing=data.seeds.filter(s=>s.provision_key===key);
     if(existing.length){
       if(existing.length!==args.count||existing.some(s=>s.account!==args.account||s.repo_id!==args.repo_id||s.branch!==args.branch||(s.prefix??'')!==optionalLabel(args.prefix)||s.retired_at||s.enrollment_until<=Date.now()))throw Error('Provision request changed or expired; use a new request ID');
-      return {batch:existing.map(s=>({seed_id:s.id,ticket:hash(token+'\0'+key+'\0'+s.id),source:sourceOf(s),prefix:s.prefix??'',manual:s.manual===true,repo_id:s.repo_id,branch:s.branch,account:s.account,expires_at:s.enrollment_until}))};
+      return {batch:existing.map(s=>({seed_id:s.id,ticket:hash(token+'\0'+key+'\0'+s.id),...(s.url_hash?{url_key:hash('seed-url-v1\0'+hash(token+'\0'+key+'\0'+s.id))}:{}),source:sourceOf(s),prefix:s.prefix??'',manual:s.manual===true,repo_id:s.repo_id,branch:s.branch,account:s.account,expires_at:s.enrollment_until}))};
     }
     return seedUi(store,{action:'seed_batch',source:'coderabbit',prefix:args.prefix,account:args.account,repo_id:args.repo_id,branch:args.branch,count:args.count,metadata:args.metadata,_provision_key:key,_provision_token:token});
   });
@@ -145,9 +146,19 @@ export function seedInitialize(store:SeedStore,seedId:string,ticket:string,now=D
     exchanges.set(key,{token,expires:now+60000});return token;
   });
 }
+/** Resolve a URL capability without reflecting it. GET never redeems or renews it. */
+export function seedUrl(store:SeedStore,key:string,redeem=false,now=Date.now()):string {
+  return store.locked(()=>{
+    if(!/^[a-f0-9]{64}$/.test(key))throw Error('Seed URL invalid or expired');
+    const data=readSeeds(store),s=data.seeds.find(s=>s.url_hash===hash(key));
+    if(!s||s.retired_at||now>(s.redeemed_at?s.access_until:s.enrollment_until))throw Error('Seed URL invalid or expired');
+    if(redeem&&!s.redeemed_at){s.redeemed_at=now;s.access_until=now+7*86400_000;s.last_seen=now;saveSeeds(store,data);}
+    return s.id;
+  });
+}
 function authorized(data:Library,id:string,token:string,now:number):Seed {
   const s=data.seeds.find(s=>s.id===uid(id));
-  if(!s||s.retired_at||!s.access_hash||!token||hash(token)!==s.access_hash||now>s.access_until)throw Error('Seed access expired, retired or invalid');
+  if(!s||s.retired_at||!s.redeemed_at||!token||(hash(token)!==s.access_hash&&hash(token)!==s.url_hash)||now>s.access_until)throw Error('Seed access expired, retired or invalid');
   return s;
 }
 export function seedCreated(store:SeedStore,id:string,ticket:string,taskId:string):void {
@@ -186,7 +197,7 @@ export function seedPoll(store:SeedStore,id:string,token:string,now=Date.now()):
       }
     }
     if(dirty)saveSeeds(store,data);
-    return s.chat_id?{status:'assigned',chat_id:s.chat_id,attachment_id:s.attachment_id,generation:s.generation,instruction:'Call chat_open with this chat_id and attachment_id. Read the complete returned skill and history. Preserve the existing pending message, plan and user constraints; inspect files and prior operation results before resuming. Work through this MCP workspace. Do not replay completed actions or use an old host sandbox as the project source.'}:{status:'idle',instruction:'Make one new independent seed_wait(timeout_ms:25000). Idle is normal. Respect host execution limits.'};
+    return s.chat_id?{status:'assigned',needs_open:store.read(s.chat_id).seed_pending===true,chat_id:s.chat_id,attachment_id:s.attachment_id,generation:s.generation,instruction:'Call chat_open with this chat_id and attachment_id. Read the complete returned skill and history. Preserve the existing pending message, plan and user constraints; inspect files and prior operation results before resuming. Work through this MCP workspace. Do not replay completed actions or use an old host sandbox as the project source.'}:{status:'idle',instruction:'Make one new independent seed_wait(timeout_ms:25000). Idle is normal. Respect host execution limits.'};
   });
 }
 export function seedBegin(store:SeedStore,id:string,token:string,name:string,args:Record<string,unknown>,requestId:string):{chat_id:string;attachment_id:string;call_id:string} {

@@ -29,6 +29,8 @@ use std::{
 pub const LOCAL_CHAT_SKILL_URI: &str = "coding-tools://skills/local-chat";
 const LOCAL_CHAT_SKILL: &str = include_str!("../../../skills/local-chat/SKILL.md");
 
+pub fn seed_connect_skill() -> Value { seeds::skill() }
+
 pub fn local_chat_skill() -> Value {
     json!({"uri": LOCAL_CHAT_SKILL_URI, "name": "local-chat", "title": "Local continuous chat",
         "mimeType": "text/markdown", "text": LOCAL_CHAT_SKILL.replace("\r\n", "\n")})

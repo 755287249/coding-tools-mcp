@@ -16,13 +16,16 @@ function escapePattern(value) {
 
 test('every Rust catalog tool has an explicit Node regression reference', async () => {
   const catalog = await read('packages/node-agent/src/rustCatalog.generated.ts');
-  const toolNames = [...catalog.matchAll(/\n\s+"name": "([^"]+)"/g)].map(match => match[1]);
+  const generatedTools = catalog.match(/export const rustCatalog: readonly ToolDefinition\[\] = (\[[\s\S]*?\n\]);/);
+  assert.ok(generatedTools, 'generated tool catalog export is present');
+  const toolNames = JSON.parse(generatedTools[1]).map(tool => tool.name);
   const directory = path.join(root, 'packages', 'node-agent', 'test');
   const testFiles = (await readdir(directory)).filter(name => name.endsWith('.test.mjs'));
   const testSource = (await Promise.all(testFiles.map(name => readFile(path.join(directory, name), 'utf8')))).join('\n');
   const missing = toolNames.filter(name => !new RegExp(`\\b${escapePattern(name)}\\b`).test(testSource));
 
-  assert.equal(toolNames.length, 72);
+  assert.equal(toolNames.length, 71);
+  assert.equal(new Set(toolNames).size, toolNames.length);
   assert.deepEqual(missing, []);
 });
 

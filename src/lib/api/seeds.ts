@@ -6,7 +6,7 @@ export interface SeedRow {source:string;prefix:string;manual?:boolean;id:string;
 export interface SeedAccountSummary {account:string;total:number;valid:number;counts:Record<string,number>}
 export interface ReadySeedGroup {source:string;prefix:string;account:string;ready:number}
 export interface SeedInventory {ready_groups?:ReadySeedGroup[];account_summaries?:SeedAccountSummary[];groups?:SeedGroup[];sources?:string[];enabled:boolean;seeds:SeedRow[];retired_count:number;total?:number;filtered_total?:number;counts?:Record<string,number>;accounts?:string[];pairing_enabled?:boolean;capacity?:number}
-export interface SeedTicket {source?:string;prefix?:string;manual?:boolean;seed_id:string;ticket:string;repo_id:string;branch:string;account:string;expires_at:number}
+export interface SeedTicket {source?:string;prefix?:string;manual?:boolean;seed_id:string;ticket:string;url_key?:string;repo_id:string;branch:string;account:string;expires_at:number}
 export async function seedRequest<T=SeedInventory>(workspaceId:string,folderId:string,args:Record<string,unknown>):Promise<T>{
   return await getBackend().chat.request(workspaceId,folderId,args as ChatAction) as T;
 }
