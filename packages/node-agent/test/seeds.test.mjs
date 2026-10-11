@@ -83,26 +83,29 @@ test('concurrent HTTP seed waits allocate one owner and reject a duplicate waite
  assert.equal((await waiting).result.structuredContent.status,'idle');
 });
 
-// Configuration corrections only revoke unused enrollment tickets, never a live project binding.
-test('correcting unconnected batches requires confirmation, retires old tickets and retains history',t=>{
- const root=mkdtempSync(path.join(tmpdir(),'seed-correction-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
- const args={action:'seed_batch',count:1,account:'a',repo_id:'1232',branch:'main'};
+test('mixed host repositories preserve pending, connected and retired seeds without changing folder scope',t=>{
+ const root=mkdtempSync(path.join(tmpdir(),'seed-mixed-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
+ const args={action:'seed_batch',count:1,account:'a',repo_id:'repo-a',branch:'main'};
  const first=chatUi(root,args).batch[0],store=seedStore(root);
- assert.throws(()=>chatUi(root,{...args,repo_id:'1412803600'}),/Confirm/);
- const next=chatUi(root,{...args,repo_id:'1412803600',replace_unconnected:true}).batch[0];
- assert.throws(()=>seedInitialize(store,first.seed_id,first.ticket),/invalid/);
- assert.equal(chatUi(root,{action:'seed_list'}).retired_count,1);
- assert.doesNotThrow(()=>chatUi(root,{...args,repo_id:'1412803600'}));
- seedInitialize(store,next.seed_id,next.ticket);
- chatUi(root,{action:'seed_retire',seed_id:next.seed_id});
- assert.throws(()=>chatUi(root,{...args,repo_id:'other',replace_unconnected:true}),/Connected/);
+ const registry=()=>JSON.parse(readFileSync(path.join(root,'docs/chat-sessions/seed-library.seeds.json')));
+ const before=registry().seeds[0];
+ const other={...args,account:'b',repo_id:'repo-b',branch:'develop',replace_unconnected:true};
+ const next=chatUi(root,other).batch[0];assert.deepEqual(registry().seeds[0],before);
+ const access=seedInitialize(store,first.seed_id,first.ticket);seedInitialize(store,next.seed_id,next.ticket);
+ assert.doesNotThrow(()=>chatUi(root,other));assert.doesNotThrow(()=>seedAuthenticate(store,first.seed_id,access));
+ const separate=fixture(t,1);assert.throws(()=>seedAuthenticate(separate.store,first.seed_id,access));
+ chatUi(root,{action:'seed_retire',seed_id:first.seed_id});assert.doesNotThrow(()=>chatUi(root,other));
+ const list=chatUi(root,{action:'seed_list'});assert.equal(list.retired_count,1);assert.equal(list.total,4);
+ assert.equal(next.repo_id,'repo-b');assert.equal(next.branch,'develop');
 });
-test('a recorded host task prevents configuration correction even before initialization',t=>{
+test('a recorded host task survives another repository batch',t=>{
  const root=mkdtempSync(path.join(tmpdir(),'seed-submitted-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
  const args={action:'seed_batch',count:1,account:'a',repo_id:'repo',branch:'main'};
  const first=chatUi(root,args).batch[0];seedCreated(seedStore(root),first.seed_id,first.ticket,'task-id');
- assert.throws(()=>chatUi(root,{...args,branch:'different',replace_unconnected:true}),/Connected/);
- assert.equal(chatUi(root,{action:'seed_list'}).retired_count,0);
+ const registry=()=>JSON.parse(readFileSync(path.join(root,'docs/chat-sessions/seed-library.seeds.json')));
+ const before=registry().seeds[0];
+ assert.doesNotThrow(()=>chatUi(root,{...args,repo_id:'other-repo',branch:'different'}));
+ assert.deepEqual(registry().seeds[0],before);assert.equal(chatUi(root,{action:'seed_list'}).retired_count,0);
 });
 
 test('pairing capability rotates, isolates folders, retries exactly and never persists raw secrets',t=>{
@@ -110,7 +113,7 @@ test('pairing capability rotates, isolates folders, retries exactly and never pe
  chatUi(root,{action:'seed_pairing',token});
  const args={action:'batch',request_id:'attempt-1',count:2,account:'test',repo_id:'repo-id',branch:'main',metadata:{repo_name:'owner/repo',organization_id:'org'}};
  const first=seedProvision(store,token,args);assert.deepEqual(seedProvision(store,token,args),first);
- assert.throws(()=>seedProvision(store,token,{...args,count:3}),/changed/);assert.throws(()=>seedProvision(store,token,{action:'read_file'}),/only/);
+ assert.throws(()=>seedProvision(store,token,{...args,count:3}),/changed/);assert.throws(()=>seedProvision(store,token,{...args,repo_id:'different'}),/changed/);assert.throws(()=>seedProvision(store,token,{...args,branch:'different'}),/changed/);assert.throws(()=>seedProvision(store,token,{action:'read_file'}),/only/);
  assert.throws(()=>seedProvision(store,next,{action:'status'}),/invalid/);
  const other=fixture(t,1);assert.throws(()=>seedProvision(other.store,token,{action:'status'}),/invalid/);
  for(const body of [readFileSync(path.join(root,'docs/chat-sessions/seed-library.seeds.json'),'utf8'),JSON.stringify(chatUi(root,{action:'seed_list'}))]){assert.ok(!body.includes(token));for(const s of first.batch)assert.ok(!body.includes(s.ticket));}
@@ -140,7 +143,8 @@ test('paired HTTP endpoint is exact, folder scoped, no-store and cannot authenti
 });
 
 test('source and prefix route initial and replacement owners; another warm pool cannot suppress matching scans',t=>{
- const {root,store,batch,tokens}=fixture(t,3);
+ const {root,store,batch,tokens}=fixture(t,1);
+ for(let i=1;i<3;i++){const seed=chatUi(root,{action:'seed_batch',count:1,account:'host-'+i,repo_id:'repo-'+i,branch:'branch-'+i}).batch[0];batch.push(seed);tokens.push(seedInitialize(store,seed.seed_id,seed.ticket));}
  for(let i=0;i<3;i++)chatUi(root,{action:'seed_label',seed_id:batch[i].seed_id,source:'coderabbit',prefix:i===1?'GPT-6-sol':'GPT-6-astra'});
  for(let i=0;i<3;i++)assert.equal(seedPoll(store,batch[i].seed_id,tokens[i]).status,'idle');
  const chat=chatUi(root,{action:'create',seed_filter:{source:'coderabbit',keyword:'ASTRA'}}).session;
@@ -156,14 +160,14 @@ test('source and prefix route initial and replacement owners; another warm pool 
  assert.equal(seedPoll(store,batch[1].seed_id,tokens[1]).status,'idle');assert.equal(chatUi(root,{action:'read',chat_id:unavailable.id}).session.seed_owner,undefined);
  assert.equal(chatUi(root,{action:'create',seed_manual:true}).session.seed_auto,undefined);
 });
-test('manual enrollment has no host repo requirement and classifies independently without weakening browser repo binding',t=>{
+test('manual enrollment has no host repo requirement and classifies independently alongside mixed browser host repositories',t=>{
  const {root,store}=fixture(t,1);
  const manual=chatUi(root,{action:'seed_manual',source:'Arena',prefix:'Opus',account:'personal'}).batch[0];assert.equal(manual.repo_id,'');assert.equal(manual.branch,'');assert.equal(manual.source,'arena');
  const access=seedInitialize(store,manual.seed_id,manual.ticket);
  const chat=chatUi(root,{action:'create',seed_filter:{source:'arena',keyword:'opus'}}).session;
  assert.equal(seedPoll(store,manual.seed_id,access).chat_id,chat.id);
  assert.doesNotThrow(()=>chatUi(root,{action:'seed_batch',count:1,account:'test',repo_id:'repo-id',branch:'main'}));
- assert.throws(()=>chatUi(root,{action:'seed_batch',count:1,account:'test',repo_id:'other',branch:'main',replace_unconnected:true}),/Connected/);
+ assert.doesNotThrow(()=>chatUi(root,{action:'seed_batch',count:1,account:'test',repo_id:'other',branch:'main',replace_unconnected:true}));
  const list=chatUi(root,{action:'seed_list',source:'arena',keyword:'OPUS'});assert.equal(list.seeds.length,1);assert.equal(list.groups.find(g=>g.source==='arena').prefix,'Opus');
  assert.ok(!JSON.stringify(list).includes(manual.ticket));
 });

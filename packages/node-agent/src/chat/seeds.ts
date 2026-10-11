@@ -86,13 +86,8 @@ export function seedUi(store:SeedStore,args:Record<string,unknown>):Record<strin
     const manual=args.action==='seed_manual',source=optionalLabel(args.source)|| (manual?'custom':'coderabbit'),prefix=optionalLabel(args.prefix);
     const count=manual?1:Number(args.count);if(!Number.isInteger(count)||count<1||count>50||data.seeds.length+count>SEED_LIBRARY_LIMIT)throw Error('Batch must contain 1–50 seeds (library limit 10000)');
     const account=label(args.account),repo_id=manual?'':label(args.repo_id),branch=manual?'':label(args.branch),batch=[];
-    const mismatched=data.seeds.filter(s=>!manual&&!s.manual&&(s.repo_id!==repo_id||s.branch!==branch));
-    if(mismatched.length){
-      if(mismatched.some(s=>s.redeemed_at||s.host_task_id||s.chat_id||s.inflight.length||s.operations.length))throw Error('Connected seeds bind this folder to another repository or branch; use a separate project folder');
-      const pending=mismatched.filter(s=>!s.retired_at);
-      if(pending.length&&args.replace_unconnected!==true)throw Error('Confirm replacing unconnected batches to correct the repository or branch');
-      for(const s of pending){retirement(s,'configuration_corrected',now);s.archived=true;}
-    }
+    // Repository/branch describe this host task, not the MCP folder's pool.
+    // Adding another host must not revoke pending tickets or existing owners.
     for(let i=0;i<count;i++){
       const id=randomUUID(),provision_key=String(args._provision_key??'');
       const ticket=provision_key?hash(String(args._provision_token)+'\0'+provision_key+'\0'+id):randomBytes(32).toString('hex');
@@ -130,7 +125,7 @@ export function seedProvision(store:SeedStore,token:string,args:Record<string,un
       if(existing.length!==args.count||existing.some(s=>s.account!==args.account||s.repo_id!==args.repo_id||s.branch!==args.branch||(s.prefix??'')!==optionalLabel(args.prefix)||s.retired_at||s.enrollment_until<=Date.now()))throw Error('Provision request changed or expired; use a new request ID');
       return {batch:existing.map(s=>({seed_id:s.id,ticket:hash(token+'\0'+key+'\0'+s.id),source:sourceOf(s),prefix:s.prefix??'',manual:s.manual===true,repo_id:s.repo_id,branch:s.branch,account:s.account,expires_at:s.enrollment_until}))};
     }
-    return seedUi(store,{action:'seed_batch',source:'coderabbit',prefix:args.prefix,account:args.account,repo_id:args.repo_id,branch:args.branch,count:args.count,metadata:args.metadata,replace_unconnected:args.replace_unconnected===true,_provision_key:key,_provision_token:token});
+    return seedUi(store,{action:'seed_batch',source:'coderabbit',prefix:args.prefix,account:args.account,repo_id:args.repo_id,branch:args.branch,count:args.count,metadata:args.metadata,_provision_key:key,_provision_token:token});
   });
 }
 export function seedInitialize(store:SeedStore,seedId:string,ticket:string,now=Date.now()):string {

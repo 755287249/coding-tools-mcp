@@ -301,35 +301,8 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
                 text(&args["branch"], 200)?
             };
             let mut batch = vec![];
-            let mismatched: Vec<_> = data
-                .seeds
-                .iter()
-                .filter(|s| !manual && !s.manual && (s.repo_id != repo_id || s.branch != branch))
-                .collect();
-            if mismatched.iter().any(|s| {
-                s.redeemed_at > 0
-                    || !s.host_task_id.is_empty()
-                    || !s.chat_id.is_empty()
-                    || !s.inflight.is_empty()
-                    || !s.operations.is_empty()
-            }) {
-                return Err(err("Connected seeds bind this folder to another repository or branch; use a separate project folder"));
-            }
-            if mismatched.iter().any(|s| s.retired_at == 0) && args["replace_unconnected"] != true {
-                return Err(err(
-                    "Confirm replacing unconnected batches to correct the repository or branch",
-                ));
-            }
-            for s in &mut data.seeds {
-                if !manual
-                    && !s.manual
-                    && (s.repo_id != repo_id || s.branch != branch)
-                    && s.retired_at == 0
-                {
-                    retire(s, "configuration_corrected", time);
-                    s.archived = true;
-                }
-            }
+            // Host repository metadata belongs to each seed, not the whole folder.
+            // Preserve existing tickets, owners and history when another host joins.
             for _ in 0..count {
                 let sid = uuid::Uuid::new_v4().to_string();
                 let provision_key = args["_provision_key"].as_str().unwrap_or("").to_owned();
@@ -504,7 +477,7 @@ pub fn provision(root: &Path, token: &str, args: &Value) -> Result<Value> {
     }
     ui(
         root,
-        &json!({"action":"seed_batch","source":"coderabbit","prefix":args["prefix"],"account":args["account"],"repo_id":args["repo_id"],"branch":args["branch"],"count":args["count"],"metadata":args["metadata"],"replace_unconnected":args["replace_unconnected"]==true,"_provision_key":key,"_provision_token":token}),
+        &json!({"action":"seed_batch","source":"coderabbit","prefix":args["prefix"],"account":args["account"],"repo_id":args["repo_id"],"branch":args["branch"],"count":args["count"],"metadata":args["metadata"],"_provision_key":key,"_provision_token":token}),
     )
 }
 pub fn initialize(root: &Path, sid: &str, ticket: &str) -> Result<String> {
@@ -881,8 +854,27 @@ mod tests {
         (root, batch, tokens)
     }
     #[test]
-    fn classified_pools_keep_initial_and_replacement_routing() {
-        let (root, batch, tokens) = fixture();
+    fn classified_pools_keep_initial_and_replacement_routing_across_host_repositories() {
+        let root = tempfile::tempdir().unwrap();
+        super::super::ui(
+            root.path(),
+            &json!({"action":"seed_settings","enabled":true}),
+        )
+        .unwrap();
+        let mut batch = vec![];
+        let mut tokens = vec![];
+        for i in 0..3 {
+            let seed = ui(root.path(), &json!({"action":"seed_batch","count":1,"account":format!("account-{i}"),"repo_id":format!("host-{i}"),"branch":format!("branch-{i}")})).unwrap()["batch"][0].clone();
+            tokens.push(
+                initialize(
+                    root.path(),
+                    seed["seed_id"].as_str().unwrap(),
+                    seed["ticket"].as_str().unwrap(),
+                )
+                .unwrap(),
+            );
+            batch.push(seed);
+        }
         for i in 0..3 {
             ui(root.path(),&json!({"action":"seed_label","seed_id":batch[i]["seed_id"],"source":"coderabbit","prefix":if i==1{"GPT-6-sol"}else{"GPT-6-astra"}})).unwrap();
             assert_eq!(
@@ -998,9 +990,14 @@ mod tests {
         let mut other = args;
         other["prefix"] = json!("grok");
         assert!(provision(root.path(), &paired, &other).is_err());
-        other["repo_id"] = json!("wrong");
-        other["request_id"] = json!("other");
+        other["prefix"] = first["batch"][0]["prefix"].clone();
+        other["repo_id"] = json!("another-host");
         assert!(provision(root.path(), &paired, &other).is_err());
+        other["request_id"] = json!("other");
+        assert_eq!(
+            provision(root.path(), &paired, &other).unwrap()["batch"][0]["repo_id"],
+            "another-host"
+        );
     }
     #[test]
     fn pairing_rotation_retry_and_large_inventory() {
@@ -1068,43 +1065,47 @@ mod tests {
         );
     }
     #[test]
-    fn correction_only_retires_unconnected_batches() {
+    fn mixed_host_repositories_preserve_pending_connected_and_retired_seeds() {
         let root = tempfile::tempdir().unwrap();
-        let original =
-            json!({"action":"seed_batch","count":1,"account":"a","repo_id":"1232","branch":"main"});
+        let original = json!({"action":"seed_batch","count":1,"account":"a","repo_id":"repo-a","branch":"main"});
         let first = super::super::ui(root.path(), &original).unwrap()["batch"][0].clone();
-        let mut corrected = original.clone();
-        corrected["repo_id"] = json!("1412803600");
-        assert!(super::super::ui(root.path(), &corrected).is_err());
-        corrected["replace_unconnected"] = json!(true);
-        let next = super::super::ui(root.path(), &corrected).unwrap()["batch"][0].clone();
-        assert!(initialize(
+        let before = serde_json::to_value(&read(root.path()).unwrap().seeds[0]).unwrap();
+        let other = json!({"action":"seed_batch","count":1,"account":"b","repo_id":"repo-b","branch":"develop","replace_unconnected":true});
+        let next = ui(root.path(), &other).unwrap()["batch"][0].clone();
+        assert_eq!(
+            serde_json::to_value(&read(root.path()).unwrap().seeds[0]).unwrap(),
+            before
+        );
+        let token = initialize(
             root.path(),
             first["seed_id"].as_str().unwrap(),
-            first["ticket"].as_str().unwrap()
+            first["ticket"].as_str().unwrap(),
         )
-        .is_err());
-        assert_eq!(
-            super::super::ui(root.path(), &json!({"action":"seed_list"})).unwrap()["retired_count"],
-            1
-        );
-        assert!(super::super::ui(root.path(), &corrected).is_ok());
+        .unwrap();
         initialize(
             root.path(),
             next["seed_id"].as_str().unwrap(),
             next["ticket"].as_str().unwrap(),
         )
         .unwrap();
+        assert!(ui(root.path(), &other).is_ok());
+        authenticate(root.path(), first["seed_id"].as_str().unwrap(), &token).unwrap();
+        let separate = tempfile::tempdir().unwrap();
+        assert!(authenticate(separate.path(), first["seed_id"].as_str().unwrap(), &token).is_err());
         ui(
             root.path(),
-            &json!({"action":"seed_retire","seed_id":next["seed_id"]}),
+            &json!({"action":"seed_retire","seed_id":first["seed_id"]}),
         )
         .unwrap();
-        corrected["branch"] = json!("other");
-        assert!(super::super::ui(root.path(), &corrected).is_err());
+        assert!(ui(root.path(), &other).is_ok());
+        let list = ui(root.path(), &json!({"action":"seed_list"})).unwrap();
+        assert_eq!(list["retired_count"], 1);
+        assert_eq!(list["total"], 4);
+        assert_eq!(next["repo_id"], "repo-b");
+        assert_eq!(next["branch"], "develop");
     }
     #[test]
-    fn submitted_host_task_blocks_correction() {
+    fn submitted_host_task_survives_another_repository_batch() {
         let root = tempfile::tempdir().unwrap();
         let mut args =
             json!({"action":"seed_batch","count":1,"account":"a","repo_id":"repo","branch":"main"});
@@ -1116,11 +1117,16 @@ mod tests {
             "task-id",
         )
         .unwrap();
-        args["replace_unconnected"] = json!(true);
+        let before = serde_json::to_value(&read(root.path()).unwrap().seeds[0]).unwrap();
+        args["repo_id"] = json!("other-repo");
         args["branch"] = json!("other");
-        assert!(super::super::ui(root.path(), &args).is_err());
+        assert!(ui(root.path(), &args).is_ok());
         assert_eq!(
-            super::super::ui(root.path(), &json!({"action":"seed_list"})).unwrap()["retired_count"],
+            serde_json::to_value(&read(root.path()).unwrap().seeds[0]).unwrap(),
+            before
+        );
+        assert_eq!(
+            ui(root.path(), &json!({"action":"seed_list"})).unwrap()["retired_count"],
             0
         );
     }

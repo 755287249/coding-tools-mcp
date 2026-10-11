@@ -23,11 +23,12 @@ lifetime; replacement retains the local conversation and all durable history.
   recovery. No arbitrary JSON/Markdown edits by the AI are part of the protocol.
 - Allocation leaves the chat offline until the assigned seed acknowledges with
   `chat_open`; project calls before acknowledgement are rejected.
-- A folder is bound to one exact host repository ID and branch once any seed
-  redeems its ticket or records a host task (including retired history). Before
-  that point, an explicit `replace_unconnected: true` batch request can correct
-  the binding by retiring unmatched pending seeds atomically. Old tickets stop
-  working; history remains. Connected bindings require a separate folder.
+- One MCP folder can pool seeds from different host repositories, branches and
+  accounts. These fields describe each host task; they do not bind the whole
+  local project. Provisioning another host preserves pending tickets, connected
+  owners and retired history. The legacy `replace_unconnected` flag is ignored;
+  explicit retirement remains available for unwanted seeds. Pairing credentials,
+  seed capabilities and project operations remain scoped to the MCP folder.
 - New work-mode conversations opt into auto assignment when the library is
   enabled. Explicit detach disables auto assignment; close/archive/group mode
   and waiting for a user decision prevent automatic takeover.
@@ -102,8 +103,8 @@ concurrency guarantee follows from synthetic registry performance measurements.
 
 Seeds add backward-compatible source (default `coderabbit`), prefix (default
 empty), and manual (default false). `seed_manual` creates one folder-scoped
-capability without a host repo or branch; these records do not participate in
-CodeRabbit repo binding. Existing nonmanual bindings remain enforced. `seed_label`
+capability without a host repo or branch; manual and browser-created seeds may
+share the folder regardless of their host repositories. `seed_label`
 changes classification; inventory adds source/keyword filters and grouped counts.
 Browser provisioning fixes source to `coderabbit`, accepts a prefix, preserves it
 in retry validation and task titles, and snapshots it for the whole creation round.
