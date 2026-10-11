@@ -44,7 +44,8 @@ jobs:
           cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib tools::chat::seeds
           cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib mcp::listener::seeds
       - name: Test global project isolation, remembered sessions and schedules
-        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib -- data:: workspace::canonical mcp::listener::gateway actions:: tools::chat_schedules browser_share:: updates::
+        run: |
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib -- data:: workspace::canonical mcp::listener::gateway actions:: tools::chat_schedules browser_share:: updates::
       - name: Test native taskbar icon slots and theme pixels
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib icon_theme
       - name: Test group chat dispatch and member isolation
