@@ -9,6 +9,9 @@
   import {workspaces} from '$lib/stores/app';
   import {APP_VERSION} from '$lib/app-version';
   import {appUrl} from '$lib/app-path';
+  import RotateCw from '@lucide/svelte/icons/rotate-cw';
+  import Pencil from '@lucide/svelte/icons/pencil';
+  import ArrowLeft from '@lucide/svelte/icons/arrow-left';
   import {untrack,onMount} from 'svelte';
   import {flip} from 'svelte/animate';
   import {slide} from 'svelte/transition';
@@ -21,6 +24,10 @@
   let busy=$state(false),error=$state(''),notice=$state(''),history=$state(false),filter=$state(''),status=$state(''),search=$state(''),page=$state(0),sourceFilter=$state(''),keyword=$state('');
   let pairingOpen=$state(true),showToken=$state(false),view=$state<'accounts'|'seeds'>('accounts'),loading=$state(true);
   let addOpen=$state(false),refreshing=$state(false),updatedAt=$state(0),refreshKey=$state(0),debouncedSearch=$state(''),debouncedKeyword=$state('');
+  let refreshingAccount=$state('');
+  function refreshAccount(account:string){if(busy||refreshing)return;refreshingAccount=account;refreshKey++;}
+  function accountHue(account:string){let hash=0;for(const char of account)hash=(Math.imul(hash,31)+char.charCodeAt(0))>>>0;return [215,270,155,32,335,185][hash%6];}
+  function editSeed(event:MouseEvent){event.preventDefault();event.stopPropagation();const row=(event.currentTarget as HTMLElement).closest('details');if(row){row.open=true;row.querySelector<HTMLInputElement>('.row-labels input')?.focus();}}
   let moreFilters=$state(false),selected=$state<string[]>([]),batchSource=$state(''),batchPrefix=$state(''),reissuedPrompt=$state('');
   let confirmation=$state<{args:Record<string,unknown>;label:MessageKey;count:number}|null>(null);
   const selectedRows=$derived(inventory.seeds.filter(seed=>selected.includes(seed.id)));
@@ -56,7 +63,7 @@
       refreshing=true;
       try{const result=await seedRequest(ws,folder,query);if(!stopped&&scope===generation){inventory=result;selected=selected.filter(id=>result.seeds.some(seed=>seed.id===id));updatedAt=Date.now();error='';failures=0;const last=Math.max(0,Math.ceil((result.filtered_total??0)/50)-1);if(page>last)page=last;}}
       catch(e){if(!stopped&&scope===generation){error=e instanceof Error?e.message:String(e);failures++;}}
-      finally{if(!stopped&&scope===generation){loading=false;refreshing=false;timer=setTimeout(refresh,Math.min(60000,5000*2**failures));}}
+      finally{if(!stopped&&scope===generation){loading=false;refreshing=false;refreshingAccount='';timer=setTimeout(refresh,Math.min(60000,5000*2**failures));}}
     };
     void refresh();return()=>{stopped=true;clearTimeout(timer);};
   });
@@ -105,7 +112,7 @@
     {#if moreFilters}<input aria-label={$t('seeds.keyword')} placeholder={$t('seeds.keyword')} bind:value={keyword}/><label><input type="checkbox" bind:checked={history} onchange={()=>page=0}/>{$t('seeds.history')}</label>{/if}
   </div>
   {#if filter}
-    <div class="toolbar account-heading"><button onclick={()=>{filter='';view='accounts';page=0;}}>{$t('seeds.backAccounts')}</button><h2>{filter}</h2></div>
+    <div class="toolbar account-heading"><button class="back-accounts" onclick={()=>{filter='';view='accounts';page=0;}}><ArrowLeft size={16}/>{$t('seeds.backAccounts')}</button><h2>{filter}</h2></div>
   {/if}
   <div class="list-head muted"><span>{$t(view==='seeds'?'seeds.hoverDetails':'seeds.accountSummaryHelp')}</span><span>{inventory.filtered_total??0} {$t('seeds.items')}</span></div>
   {#if loading}
@@ -113,8 +120,8 @@
   {:else if view==='accounts'}
     <div class="account-grid">
       {#each inventory.account_summaries??[] as account(account.account)}
-        <article class="account-card" animate:flip={{duration:motionMs}} transition:slide={{duration:motionMs}}>
-          <header><span class="dot" class:alive={account.valid>0}></span><h2 title={account.account}>{account.account}</h2></header>
+        <article class="account-card" style={`--account-hue:${accountHue(account.account)}`} animate:flip={{duration:motionMs}} transition:slide={{duration:motionMs}}>
+          <header><span class="dot" class:alive={account.valid>0}></span><h2 title={account.account}>{account.account}</h2><button class="account-refresh" disabled={busy||refreshing} aria-label={`${$t('seeds.refresh')} ${account.account}`} title={$t('seeds.refresh')} onclick={()=>refreshAccount(account.account)}><RotateCw size={15} class={refreshingAccount===account.account?'refresh-spin':''}/></button></header>
           <div class="account-ratio"><strong>{account.valid}</strong><span>/ {account.total}</span></div>
           <p class="ratio-label" title={$t('seeds.validHelp')}>{$t('seeds.validTotal')}</p>
           <dl class="account-stats">
@@ -137,7 +144,7 @@
   {#if unsettled}<p class="notice">{$t('seeds.unresolvedHelp')}</p>{/if}
   <div class="seed-list">{#each inventory.seeds as seed(seed.id)}
     <details class="seed-row" animate:flip={{duration:motionMs}} transition:slide={{duration:motionMs}}>
-      <summary title={details(seed)}><input type="checkbox" disabled={busy||refreshing} aria-label={`${$t('seeds.select')} ${seed.id}`} checked={selected.includes(seed.id)} onclick={e=>e.stopPropagation()} onchange={e=>toggle(seed.id,e.currentTarget.checked)}/><span class="dot" class:alive={seed.status==='ready'||seed.status==='assigned'||seed.status==='working'}></span><strong>{seed.account}</strong><span class="identity">{seed.source} · {seed.prefix||seed.metadata?.repo_name||seed.repo_id||$t('seeds.unlabelled')}</span><code>{seed.id.slice(0,8)}</code><span class="badge">{$t(`seeds.${seed.status}` as MessageKey)}</span></summary>
+      <summary title={details(seed)}><input type="checkbox" disabled={busy||refreshing} aria-label={`${$t('seeds.select')} ${seed.id}`} checked={selected.includes(seed.id)} onclick={e=>e.stopPropagation()} onchange={e=>toggle(seed.id,e.currentTarget.checked)}/><span class="dot" class:alive={seed.status==='ready'||seed.status==='assigned'||seed.status==='working'}></span><strong>{seed.account}</strong><span class="identity">{seed.source} · {seed.prefix||seed.metadata?.repo_name||seed.repo_id||$t('seeds.unlabelled')}</span><code>{seed.id.slice(0,8)}</code><span class="badge">{$t(`seeds.${seed.status}` as MessageKey)}</span><button class="seed-edit" disabled={busy||refreshing} aria-label={`${$t('shell.edit')} ${seed.id}`} title={$t('shell.edit')} onclick={editSeed}><Pencil size={14}/><span>{$t('shell.edit')}</span></button></summary>
       <div class="row-details"><pre>{details(seed)}</pre>
         <form class="row-labels" onsubmit={e=>{e.preventDefault();const fields=new FormData(e.currentTarget);void action({action:'seed_label',seed_id:seed.id,source:fields.get('source'),prefix:fields.get('prefix')});}}>
           <label>{$t('seeds.source')}<input name="source" required value={seed.source} maxlength="200"/></label>
@@ -160,12 +167,22 @@
 {#if confirmation}<dialog class="add-dialog" use:openModal onclose={()=>confirmation=null} aria-label={$t(confirmation.label)}><h2>{$t(confirmation.label)}{#if confirmation.count>0} · {confirmation.count}{/if}</h2><p class="notice">{$t(confirmation.args.action==='seed_purge'?'seeds.purgeConfirm':confirmation.args.action==='seed_release'?'seeds.releaseConfirm':'seeds.retireConfirm')}</p><div class="toolbar"><button onclick={()=>confirmation=null}>{$t('Cancel')}</button><button class="primary" disabled={busy||refreshing} onclick={()=>{const args=confirmation?.args;confirmation=null;if(args)void action(args);}}>{$t('seeds.confirm')}</button></div></dialog>{/if}
 {#if reissuedPrompt}<dialog class="add-dialog" use:openModal onclose={()=>reissuedPrompt=''} aria-label={$t('seeds.reissue')}><h2>{$t('seeds.reissue')}</h2><p class="notice">{$t('seeds.reissueHelp')}</p><textarea readonly value={reissuedPrompt} rows="7" aria-label={$t('seeds.manualPrompt')}></textarea><div class="toolbar"><button onclick={()=>copy(reissuedPrompt)}>{$t('seeds.copyPrompt')}</button><button onclick={()=>reissuedPrompt=''}>{$t('Close')}</button></div></dialog>{/if}
 <style>
+.account-refresh{display:inline-flex;align-items:center;justify-content:center;padding:7px;background:color-mix(in srgb,hsl(var(--account-hue) 65% 65%) 14%,var(--card-bg));flex-shrink:0}
+.back-accounts{display:inline-flex;gap:7px;align-items:center;background:#2563eb;color:#fff;border-color:#3b82f6;box-shadow:0 2px 8px #2563eb26}
+.seed-row .seed-edit{display:inline-flex;gap:5px;align-items:center;padding:5px 8px;background:var(--surface-1);font-size:12px;opacity:0;pointer-events:none;transition:opacity 120ms}
+.seed-row:hover .seed-edit,.seed-row:focus-within .seed-edit,.seed-row[open] .seed-edit{opacity:1;pointer-events:auto}
+:global(.refresh-spin){animation:seed-refresh-spin 900ms linear infinite}
+@keyframes seed-refresh-spin{to{transform:rotate(360deg)}}
+@media(pointer:coarse),(max-width:700px){.seed-row .seed-edit{opacity:1;pointer-events:auto}}
+@media(max-width:700px){.seed-edit span{display:none}}
+@media(prefers-reduced-motion:reduce){.seed-edit{transition:none}:global(.refresh-spin){animation:none}}
+
 .skeleton{display:grid;gap:14px}.skeleton span{display:block;height:44px;border-radius:8px;background:var(--color-border)}
 
 .selection-bar{margin:14px 0}.batch-labels{display:flex;align-items:end;flex-wrap:wrap;margin:12px 0}.add-dialog textarea{width:100%;padding:12px;background:var(--card-bg);border:1px solid var(--color-border);border-radius:8px;font-size:12px}
 
 .library-header{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.library-header h2{margin:0 auto 0 0;font-size:17px}.library-header label{display:flex;gap:6px;align-items:center;font-size:12px}.tabs{margin-top:18px}.tabs [aria-pressed=true]{border-color:var(--primary);color:var(--primary)}.add-dialog{margin:auto;width:min(740px,calc(100vw - 32px));max-height:85dvh;overflow:auto;padding:24px;border:1px solid var(--color-border);border-radius:16px;background:var(--surface-1);color:var(--color-text);box-shadow:var(--dialog-shadow)}.add-dialog::backdrop{background:var(--backdrop)}
 
-.account-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,270px),1fr));gap:14px}.account-card{border:1px solid var(--color-border);border-radius:12px;background:var(--card-bg);padding:20px;min-width:0}.account-card header{display:flex;align-items:center;gap:9px}.account-card h2,.account-heading h2{font-size:14px;margin:0;overflow-wrap:anywhere}.account-card h2{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.account-ratio{display:flex;align-items:baseline;gap:8px;margin-top:22px;font-variant-numeric:tabular-nums}.account-ratio strong{font-size:34px;line-height:1.2}.account-ratio span{font-size:20px;color:var(--color-text-muted)}.ratio-label{font-size:12px;color:var(--color-text-muted);margin:6px 0 18px}.account-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:14px 10px;border-top:1px solid var(--color-border);padding-top:16px;margin:0 0 18px}.account-stats dt{font-size:11px;color:var(--color-text-muted)}.account-stats dd{font-size:15px;font-weight:600;margin:4px 0 0;font-variant-numeric:tabular-nums}.account-manage{width:100%;font-size:12px}.account-heading{margin:18px 0 12px}button:focus-visible{outline:2px solid #6366f1;outline-offset:3px}
+.account-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,270px),1fr));gap:14px}.account-card{border:1px solid color-mix(in srgb,hsl(var(--account-hue) 65% 65%) 30%,var(--color-border));border-radius:12px;background:color-mix(in srgb,hsl(var(--account-hue) 65% 65%) 9%,var(--card-bg));padding:20px;min-width:0}.account-card header{display:flex;align-items:center;gap:9px}.account-card h2,.account-heading h2{font-size:14px;margin:0;overflow-wrap:anywhere}.account-card h2{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.account-ratio{display:flex;align-items:baseline;gap:8px;margin-top:22px;font-variant-numeric:tabular-nums}.account-ratio strong{font-size:34px;line-height:1.2}.account-ratio span{font-size:20px;color:var(--color-text-muted)}.ratio-label{font-size:12px;color:var(--color-text-muted);margin:6px 0 18px}.account-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:14px 10px;border-top:1px solid var(--color-border);padding-top:16px;margin:0 0 18px}.account-stats dt{font-size:11px;color:var(--color-text-muted)}.account-stats dd{font-size:15px;font-weight:600;margin:4px 0 0;font-variant-numeric:tabular-nums}.account-manage{width:100%;font-size:12px}.account-heading{margin:18px 0 12px}button:focus-visible{outline:2px solid #6366f1;outline-offset:3px}
 .seed-library{max-width:1180px;margin:auto}.overview{display:flex;flex-wrap:nowrap;overflow-x:auto;gap:8px;margin:16px 0;padding-bottom:4px}.overview>button{flex:1;min-width:88px;text-align:left}.overview>button.active{border-color:var(--primary)}.overview>button{border:1px solid var(--color-border);border-radius:10px;padding:10px;display:grid;gap:4px;background:var(--card-bg)}.overview span,.muted,.notice,.identity{font-size:12px;color:var(--color-text-muted);line-height:1.7}.overview strong{font-size:21px}.toolbar,.input-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.toolbar label{display:flex;align-items:center;gap:6px}.notice{margin:12px 0}.pairing{border:1px solid var(--color-border);padding:16px;border-radius:12px;margin:18px 0}.pairing summary{display:flex;justify-content:space-between}.pairing summary span{font-size:12px;color:var(--color-text-muted)}.pairing summary span.connected{color:#16a34a}summary{cursor:pointer}form{display:grid;gap:14px;margin-top:16px}form label{display:grid;gap:6px;font-size:12px}.input-row input{flex:1;min-width:160px}input:not([type=checkbox]),select{padding:9px 10px;border:1px solid var(--color-border);border-radius:8px;background:var(--card-bg);min-width:0}button{padding:8px 12px;border:1px solid var(--color-border);border-radius:8px;cursor:pointer;white-space:nowrap}button:disabled{opacity:.5;cursor:default}.primary{background:#2563eb;color:white}.filters{margin:18px 0}.search{flex:1;min-width:180px!important}.list-head{display:flex;justify-content:space-between;margin:8px 0}.seed-list{border:1px solid var(--color-border);border-radius:12px;overflow:hidden}.seed-row+ .seed-row{border-top:1px solid var(--color-border)}.seed-row summary{display:flex;align-items:center;gap:12px;padding:13px 16px;background:var(--card-bg)}.seed-row summary:hover{background:var(--color-border)}.seed-row strong{font-size:13px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.identity{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.dot{width:7px;height:7px;border-radius:50%;background:#94a3b8;flex-shrink:0}.dot.alive{background:#22c55e}.badge{font-size:11px;border-radius:12px;padding:3px 8px;background:var(--color-border);white-space:nowrap}code{font-size:11px;color:var(--color-text-muted)}.row-labels{display:flex;align-items:end;flex-wrap:wrap;margin-bottom:14px}.row-details{padding:0 16px 16px}.row-details pre{font:12px/1.8 system-ui;white-space:pre-wrap;overflow-wrap:anywhere;margin:12px 0;color:var(--color-text-muted)}.empty{padding:36px;color:var(--color-text-muted);text-align:center}.pagination{justify-content:center;margin:18px 0;font-size:12px}[role=alert]{color:var(--danger);overflow-wrap:anywhere}a{color:#3b82f6;cursor:pointer;font-size:12px}@media(max-width:700px){.overview strong{font-size:18px}.seed-row summary{gap:7px;padding:12px 8px}.seed-row code{display:none}.seed-row strong{max-width:110px}.input-row button{padding:8px}.identity{font-size:11px}}
 </style>

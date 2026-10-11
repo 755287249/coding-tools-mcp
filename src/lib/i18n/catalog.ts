@@ -26,6 +26,9 @@ export const MESSAGES = {
 
   "seeds.library": ["Seed library", "種子庫", "种子库", "シードライブラリ"],
   "seeds.addSeeds": ["Add seeds", "加入種子", "添加种子", "シードを追加"],
+  "setup.resumeMcp": ["Start MCP with saved settings", "使用現有設定啟動 MCP", "使用现有配置启动 MCP", "保存済みの設定で MCP を起動"],
+  "setup.temporaryTunnel": ["Temporary tunnel (default)", "臨時隧道（預設）", "临时隧道（默认）", "一時トンネル（既定）"],
+  "setup.fixedTunnel": ["Fixed tunnel", "固定隧道", "固定隧道", "固定トンネル"],
   "seeds.refresh": ["Refresh", "重新整理", "刷新", "更新"],
   "seeds.refreshing": ["Refreshing…", "更新中…", "刷新中…", "更新中…"],
   "seeds.updated": ["Updated", "更新時間", "更新时间", "更新日時"],

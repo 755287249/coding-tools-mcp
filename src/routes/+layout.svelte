@@ -25,6 +25,7 @@
     listWorkspaces,
   } from "$lib/api/workspaces";
   import { getLastWorkspaceId } from "$lib/api/settings";
+  import { startupSetupTarget } from "$lib/quick-setup/startup";
   import { actionsRuntimeStates, mcpRuntimeStates, workspaces } from "$lib/stores/app";
   import { showToast } from "$lib/stores/toast";
   import { t } from "$lib/i18n";
@@ -60,12 +61,14 @@
     workspaces.set(items);
 
     const mcpStates: Record<string, RuntimeState> = {};
+    const discoveredStates: Partial<Record<string, RuntimeState>> = {};
     const actionsStates: Record<string, RuntimeState> = {};
     await Promise.all(
       items.map(async (item) => {
         try {
           const mcp = await getRuntimeStatus(item.id);
           mcpStates[item.id] = mcp.state;
+          discoveredStates[item.id] = mcp.state;
         } catch {
           mcpStates[item.id] = "stopped";
         }
@@ -83,6 +86,23 @@
     );
     mcpRuntimeStates.set(mcpStates);
     actionsRuntimeStates.set(actionsStates);
+    return { items, discoveredStates };
+  }
+
+  async function initializeWorkspaceNavigation() {
+    const initialUrl = $page.url.href;
+    try {
+      const { items, discoveredStates } = await refreshWorkspaces();
+      if (capabilities.runtimeSupervisor) startSessionPolling();
+      if (!capabilities.guidedSetup) return;
+      const lastId = await getLastWorkspaceId().catch(() => null);
+      // A slow status request must not override navigation the user already made.
+      if ($page.url.href !== initialUrl) return;
+      const target = startupSetupTarget(routePath($page.url.pathname), items.map(item => item.id), discoveredStates, lastId);
+      if (target) await goto(appUrl(target), { replaceState: true });
+    } catch (error) {
+      showToast(String(error), { kind: "error" });
+    }
   }
 
   async function finishAddWorkspace(selected: string) {
@@ -166,14 +186,12 @@
     // behind the pre-JavaScript loading screen if a backend is slow or offline.
     document.getElementById("startup-splash")?.remove();
     if (remoteDesktop && !$browserAuthenticated) return;
-    await refreshWorkspaces();
-    if (capabilities.runtimeSupervisor) startSessionPolling();
-
+    await initializeWorkspaceNavigation();
   });
 </script>
 
 {#if remoteDesktop && !$browserAuthenticated}
-  <BrowserLogin onLogin={refreshWorkspaces}/>
+  <BrowserLogin onLogin={initializeWorkspaceNavigation}/>
 {:else}
 <div class="win-root" class:is-desktop={desktopWindow}>
   <div class="win-body">

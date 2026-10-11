@@ -62,13 +62,14 @@
   ];
 
   let step = $state<WizardStep>("provider");
-  let provider = $state<TunnelProvider | null>(null);
+  let provider = $state<TunnelProvider | null>(cloudflareAvailable ? "cloudflare" : "builtin");
   let profile = $state<WorkspaceProfile | null>(null);
-  let service = $state<SetupService | null>(null);
+  let service = $state<SetupService | null>("mcp");
   let workspaceName = $state("");
   let runtimeStatus = $state<RuntimeStatus | null>(null);
   let busy = $state(false);
   let errorMessage = $state("");
+  let loadingWorkspace = $state(true);
 
   const currentStepIndex = $derived(steps.findIndex((item) => item.value === step));
   const selectedActions = $derived(profile ? actionsConfig(profile) : null);
@@ -80,13 +81,42 @@
     return items.find((item) => item.id === workspaceId) ?? null;
   }
 
-  async function loadNodeWorkspace() {
-    if (!isNodeHost) return;
-    const items = await listWorkspaces();
-    workspaces.set(items);
-    const requestedId = $page.url.searchParams.get("workspace");
-    profile = items.find((item) => item.id === requestedId) ?? items[0] ?? null;
-    workspaceName = profile?.name ?? "";
+  async function loadExistingWorkspace() {
+    loadingWorkspace = true;
+    try {
+      const items = await listWorkspaces();
+      workspaces.set(items);
+      const requestedId = $page.url.searchParams.get("workspace");
+      profile = items.find((item) => item.id === requestedId) ?? (isNodeHost ? items[0] ?? null : null);
+      workspaceName = profile?.name ?? "";
+      const savedProvider = profile?.tunnel.type;
+      if ((savedProvider === "builtin" && /^https:\/\//i.test(profile?.tunnel.public_url ?? "")) || (savedProvider === "frp" && frpAvailable) || (savedProvider === "cloudflare" && cloudflareAvailable)) provider = savedProvider;
+    } finally {
+      loadingWorkspace = false;
+    }
+  }
+
+  async function resumeExistingMcp() {
+    if (!profile || busy) return;
+    busy = true;
+    errorMessage = "";
+    const workspaceId = profile.id;
+    try {
+      if (isNodeHost) await startTunnel(workspaceId, "mcp");
+      const status = isNodeHost ? await getRuntimeStatus(workspaceId) : await startRuntime(workspaceId);
+      if (status.state !== "running") throw new Error(status.localMessage || status.publicMessage || $t("The service failed to start"));
+      const tunnel = await testTunnel(workspaceId, "mcp");
+      if (!tunnel.success || !tunnel.publicUrl || !tunnel.keptRunning) throw new Error(tunnel.message || $t("The tunnel could not be verified."));
+      runtimeStatus = status;
+      profile = (await refreshWorkspaceStore(workspaceId)) ?? profile;
+      service = "mcp";
+      mcpRuntimeStates.update(current => ({ ...current, [workspaceId]: status.state }));
+      step = "complete";
+    } catch (error) {
+      errorMessage = String(error);
+    } finally {
+      busy = false;
+    }
   }
 
   function chooseProvider(nextProvider: TunnelProvider) {
@@ -285,12 +315,12 @@
 
   function resetWizard() {
     step = "provider";
-    provider = null;
-    service = null;
+    provider = cloudflareAvailable ? "cloudflare" : "builtin";
+    service = "mcp";
     runtimeStatus = null;
     errorMessage = "";
     if (isNodeHost) {
-      void loadNodeWorkspace();
+      void loadExistingWorkspace().catch(error => errorMessage = String(error));
     } else {
       profile = null;
       workspaceName = "";
@@ -298,7 +328,7 @@
   }
 
   onMount(() => {
-    if (isNodeHost) void loadNodeWorkspace();
+    void loadExistingWorkspace().catch(error => errorMessage = String(error));
   });
 </script>
 
@@ -345,32 +375,41 @@
           <p class="mt-2 text-sm text-[var(--color-text-secondary)]">
             {$t("This choice determines whether you need an invitation link, frpc, or cloudflared.")}
           </p>
+          {#if profile && (profile.tunnel.type === 'cloudflare' || profile.tunnel.type === 'frp' || (profile.tunnel.type === 'builtin' && /^https:\/\//i.test(profile.tunnel.public_url)))}
+            <div class="tx-info-block mt-5 flex flex-wrap items-center justify-between gap-3">
+              <span class="text-sm">{profile.name}</span>
+              <button type="button" class="tx-btn-primary" disabled={busy || loadingWorkspace} onclick={()=>void resumeExistingMcp()}>{busy ? $t('Testing and starting…') : $t('setup.resumeMcp')}</button>
+            </div>
+          {/if}
           <div class="mt-6 grid gap-3 md:grid-cols-3">
             <button
               type="button"
-              class="rounded-xl border p-5 text-left hover:bg-[var(--color-surface-hover)]"
+              class="setup-choice rounded-xl border p-5 text-left"
               class:border-[var(--primary)]={provider === "builtin"}
               class:bg-[var(--primary-soft)]={provider === "builtin"}
               class:border-[var(--color-border)]={provider !== "builtin"}
               aria-pressed={provider === "builtin"}
+              disabled={busy || loadingWorkspace}
               onclick={() => chooseProvider("builtin")}
             >
+              {#if provider === "builtin"}<Check size={18} class="choice-check" aria-hidden="true"/>{/if}
               <ShieldCheck size={23} class="text-[var(--primary)]" />
-              <span class="mt-4 block font-semibold">{$t("Built-in WSS tunnel (recommended)")}</span>
+              <span class="mt-4 block font-semibold">{$t("Built-in WSS tunnel")}</span>
               <span class="mt-2 block text-sm text-[var(--color-text-secondary)]">
                 {$t("No extra software. Continue with a one-time invitation link from your server administrator.")}
               </span>
             </button>
             <button
               type="button"
-              class="rounded-xl border p-5 text-left hover:bg-[var(--color-surface-hover)]"
+              class="setup-choice choice-frp rounded-xl border p-5 text-left"
               class:border-[var(--primary)]={provider === "frp"}
               class:bg-[var(--primary-soft)]={provider === "frp"}
               class:border-[var(--color-border)]={provider !== "frp"}
               aria-pressed={provider === "frp"}
-              disabled={!frpAvailable}
+              disabled={!frpAvailable || busy || loadingWorkspace}
               onclick={() => chooseProvider("frp")}
             >
+              {#if provider === "frp"}<Check size={18} class="choice-check" aria-hidden="true"/>{/if}
               <Server size={23} class="text-[var(--primary)]" />
               <span class="mt-4 block font-semibold">{$t("FRP")}</span>
               <span class="mt-2 block text-sm text-[var(--color-text-secondary)]">
@@ -379,14 +418,15 @@
             </button>
             <button
               type="button"
-              class="rounded-xl border p-5 text-left hover:bg-[var(--color-surface-hover)]"
+              class="setup-choice choice-cloudflare rounded-xl border p-5 text-left"
               class:border-[var(--primary)]={provider === "cloudflare"}
               class:bg-[var(--primary-soft)]={provider === "cloudflare"}
               class:border-[var(--color-border)]={provider !== "cloudflare"}
               aria-pressed={provider === "cloudflare"}
-              disabled={!cloudflareAvailable}
+              disabled={!cloudflareAvailable || busy || loadingWorkspace}
               onclick={() => chooseProvider("cloudflare")}
             >
+              {#if provider === "cloudflare"}<Check size={18} class="choice-check" aria-hidden="true"/>{/if}
               <Cloud size={23} class="text-[var(--primary)]" />
               <span class="mt-4 block font-semibold">{$t("Cloudflare")}</span>
               <span class="mt-2 block text-sm text-[var(--color-text-secondary)]">
@@ -394,7 +434,7 @@
               </span>
             </button>
           </div>
-          <button type="button" class="tx-btn-primary mt-6" disabled={!provider} onclick={() => (step = "workspace")}>
+          <button type="button" class="tx-btn-primary mt-6" disabled={!provider || busy || loadingWorkspace} onclick={() => (step = "workspace")}>
             {$t("Continue")}
           </button>
         </div>
@@ -408,7 +448,7 @@
                 {$t("One workspace can include multiple project folders. They share one connection while keeping separate project context.")}
               </p>
             </div>
-            <button type="button" class="tx-btn-ghost" disabled={busy} onclick={goBack}><ArrowLeft size={16} /> {$t("Back")}</button>
+            <button type="button" class="tx-btn-ghost setup-back" disabled={busy} onclick={goBack}><ArrowLeft size={16} /> {$t("Back")}</button>
           </div>
           {#if !isNodeHost}
             <label class="tx-field mt-6 max-w-xl">
@@ -450,25 +490,26 @@
               <h3 class="text-xl font-semibold">{$t("How do you want to connect ChatGPT?")}</h3>
               <p class="mt-2 text-sm text-[var(--color-text-secondary)]">{$t("Choose one for this guided setup. You can enable the other later from the workspace page.")}</p>
             </div>
-            <button type="button" class="tx-btn-ghost" onclick={goBack}><ArrowLeft size={16} /> {$t("Back")}</button>
+            <button type="button" class="tx-btn-ghost setup-back" onclick={goBack}><ArrowLeft size={16} /> {$t("Back")}</button>
           </div>
           <div class="mt-6 grid gap-3 md:grid-cols-2">
             <button
               type="button"
-              class="rounded-xl border p-5 text-left hover:bg-[var(--color-surface-hover)]"
+              class="setup-choice choice-mcp rounded-xl border p-5 text-left"
               class:border-[var(--primary)]={service === "mcp"}
               class:bg-[var(--primary-soft)]={service === "mcp"}
               class:border-[var(--color-border)]={service !== "mcp"}
               aria-pressed={service === "mcp"}
               onclick={() => (service = "mcp")}
             >
+              {#if service === "mcp"}<Check size={18} class="choice-check" aria-hidden="true"/>{/if}
               <PlugZap size={22} class="text-[var(--primary)]" />
               <span class="mt-4 block font-semibold">{$t("MCP Connector")}</span>
               <span class="mt-1 block text-sm text-[var(--color-text-secondary)]">{$t("Recommended when your ChatGPT plan supports custom MCP connectors. Uses the public MCP endpoint and OAuth.")}</span>
             </button>
             <button
               type="button"
-              class="rounded-xl border p-5 text-left hover:bg-[var(--color-surface-hover)]"
+              class="setup-choice choice-actions rounded-xl border p-5 text-left"
               class:border-[var(--primary)]={service === "actions"}
               class:bg-[var(--primary-soft)]={service === "actions"}
               class:border-[var(--color-border)]={service !== "actions"}
@@ -476,6 +517,7 @@
               disabled={!capabilities.actions}
               onclick={() => (service = "actions")}
             >
+              {#if service === "actions"}<Check size={18} class="choice-check" aria-hidden="true"/>{/if}
               <Workflow size={22} class="text-[var(--primary)]" />
               <span class="mt-4 block font-semibold">{$t("GPT Actions")}</span>
               <span class="mt-1 block text-sm text-[var(--color-text-secondary)]">{$t("Use this when building a custom GPT. Import the OpenAPI schema and configure a Bearer API key.")}</span>
@@ -491,7 +533,7 @@
               <h3 class="text-xl font-semibold">{$t("Prepare and enable {service}", { service: service === "mcp" ? $t("MCP") : $t("Actions") })}</h3>
               <p class="mt-2 text-sm text-[var(--color-text-secondary)]">{$t("The wizard checks every required value before it saves, tests, and starts the service.")}</p>
             </div>
-            <button type="button" class="tx-btn-ghost" disabled={busy} onclick={goBack}><ArrowLeft size={16} /> {$t("Back")}</button>
+            <button type="button" class="tx-btn-ghost setup-back" disabled={busy} onclick={goBack}><ArrowLeft size={16} /> {$t("Back")}</button>
           </div>
           <QuickTunnelSetup
             {provider}
@@ -537,3 +579,14 @@
     </div>
   </div>
 </section>
+
+<style>
+  .setup-choice{--choice-hue:255;position:relative;background:color-mix(in srgb,hsl(var(--choice-hue) 65% 65%) 8%,var(--card-bg));border-color:color-mix(in srgb,hsl(var(--choice-hue) 65% 65%) 25%,var(--color-border));transition:background 140ms,border-color 140ms,box-shadow 140ms}
+  .choice-frp{--choice-hue:210}.choice-cloudflare{--choice-hue:32}.choice-mcp{--choice-hue:155}.choice-actions{--choice-hue:270}
+  .setup-choice:hover:not(:disabled){background:color-mix(in srgb,hsl(var(--choice-hue) 65% 65%) 14%,var(--card-bg))}
+  .setup-choice[aria-pressed=true]{background:color-mix(in srgb,hsl(var(--choice-hue) 65% 65%) 18%,var(--card-bg));border-color:hsl(var(--choice-hue) 65% 58%);box-shadow:0 0 0 1px hsl(var(--choice-hue) 65% 58%)}
+  .setup-choice:disabled{opacity:.45}.setup-choice:focus-visible{outline:2px solid #3b82f6;outline-offset:4px}
+  :global(.choice-check){position:absolute;top:16px;right:16px;color:hsl(var(--choice-hue) 65% 58%)}
+  .setup-back{background:color-mix(in srgb,#3b82f6 18%,var(--card-bg));border-color:#3b82f680;color:var(--color-text)}
+  @media(prefers-reduced-motion:reduce){.setup-choice{transition:none}}
+</style>

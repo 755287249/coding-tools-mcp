@@ -42,8 +42,8 @@ test("the first step keeps all providers for desktop and gates unsupported Node 
   assert.match(wizard, /chooseProvider\("builtin"\)/);
   assert.match(wizard, /chooseProvider\("frp"\)/);
   assert.match(wizard, /chooseProvider\("cloudflare"\)/);
-  assert.match(wizard, /disabled=\{!frpAvailable\}/);
-  assert.match(wizard, /disabled=\{!cloudflareAvailable\}/);
+  assert.match(wizard, /disabled=\{!frpAvailable \|\| busy \|\| loadingWorkspace\}/);
+  assert.match(wizard, /disabled=\{!cloudflareAvailable \|\| busy \|\| loadingWorkspace\}/);
   assert.match(wizard, /\{ value: "provider", label: "Tunnel" \}/);
 });
 
@@ -83,9 +83,9 @@ test("Node quick setup reuses the selected existing workspace instead of invokin
   const wizard = await readFile(wizardPath, "utf8");
 
   assert.match(wizard, /const isNodeHost = capabilities\.host === "node"/);
-  assert.match(wizard, /async function loadNodeWorkspace\(\)/);
+  assert.match(wizard, /async function loadExistingWorkspace\(\)/);
   assert.match(wizard, /\$page\.url\.searchParams\.get\("workspace"\)/);
-  assert.match(wizard, /items\.find\(\(item\) => item\.id === requestedId\) \?\? items\[0\] \?\? null/);
+  assert.match(wizard, /items\.find\(\(item\) => item\.id === requestedId\) \?\? \(isNodeHost \? items\[0\] \?\? null : null\)/);
   assert.match(wizard, /\{:else if isNodeHost\}[\s\S]*Continue with this workspace/);
 });
 

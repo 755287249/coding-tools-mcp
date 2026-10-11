@@ -313,13 +313,19 @@
 
 {#if provider === "cloudflare"}
   <div class="mt-5 grid gap-4">
-    <label class="tx-field">
-      <span class="tx-label">{$t("Cloudflare mode")}</span>
-      <select class="tx-input" bind:value={cloudflareMode} disabled={busy}>
-        <option value="quick">{$t("Quick Tunnel")}</option>
-        <option value="named">{$t("Named Tunnel")}</option>
-      </select>
-    </label>
+    <fieldset class="tunnel-modes" disabled={busy}>
+      <legend class="tx-label">{$t("Cloudflare mode")}</legend>
+      <div class="mode-options">
+        <label class:chosen={cloudflareMode==='quick'}>
+          <input type="radio" name="cloudflare-mode" value="quick" bind:group={cloudflareMode}/>
+          <span><strong>{$t('setup.temporaryTunnel')}</strong><small>Quick Tunnel</small></span>
+        </label>
+        <label class:chosen={cloudflareMode==='named'}>
+          <input type="radio" name="cloudflare-mode" value="named" bind:group={cloudflareMode}/>
+          <span><strong>{$t('setup.fixedTunnel')}</strong><small>Named Tunnel</small></span>
+        </label>
+      </div>
+    </fieldset>
 
     {#if cloudflareMode === "quick"}
       <div class="tx-info-block text-sm text-[var(--color-text-secondary)]">
@@ -381,3 +387,7 @@
     ? $t("Testing and starting…")
     : $t("Configure and enable {service}", { service: service === "mcp" ? $t("MCP") : $t("Actions") })}
 </button>
+
+<style>
+.tunnel-modes{border:0;padding:0;margin:0;min-width:0}.mode-options{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:8px}.mode-options label{display:flex;align-items:center;gap:10px;padding:16px;border:1px solid var(--color-border);border-radius:12px;background:color-mix(in srgb,#60a5fa 7%,var(--card-bg));cursor:pointer}.mode-options label+label{background:color-mix(in srgb,#a78bfa 7%,var(--card-bg))}.mode-options label.chosen{border-color:#3b82f6;background:color-mix(in srgb,#60a5fa 17%,var(--card-bg));box-shadow:0 0 0 1px #3b82f6}.mode-options label:focus-within{outline:2px solid #3b82f6;outline-offset:3px}.mode-options input{accent-color:#2563eb}.mode-options strong,.mode-options small{display:block}.mode-options strong{font-size:13px}.mode-options small{margin-top:4px;color:var(--color-text-secondary);font-size:11px}.tunnel-modes:disabled{opacity:.5}
+</style>
