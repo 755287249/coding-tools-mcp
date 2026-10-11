@@ -267,12 +267,10 @@ pub async fn download_app_update(
     repo: String,
     expected_version: String,
     expected_sha256: String,
-    on_progress: Option<tauri::ipc::Channel<DownloadProgress>>,
+    on_progress: tauri::ipc::Channel<DownloadProgress>,
 ) -> Result<Value, String> {
     download_update(repo, expected_version, expected_sha256, |event| {
-        if let Some(channel) = &on_progress {
-            let _ = channel.send(event);
-        }
+        let _ = on_progress.send(event);
     })
     .await
 }
