@@ -6,9 +6,8 @@ mod startup_handoff;
 mod actions;
 mod app_state;
 mod application;
-mod browser_share;
-mod updates;
 mod auth;
+mod browser_share;
 #[cfg(feature = "desktop")]
 mod commands;
 mod data;
@@ -25,6 +24,7 @@ mod settings;
 mod task_runtime;
 pub mod tools;
 mod tunnel;
+mod updates;
 #[cfg(feature = "desktop")]
 mod window_corners;
 mod workspace;
@@ -98,29 +98,32 @@ pub fn export_behavioral_parity_fixtures() -> serde_json::Value {
 use app_state::AppState;
 #[cfg(feature = "desktop")]
 use commands::{
-    add_workspace_folder, add_wsl_workspace_folder, create_workspace, delete_frp_profile,
-    delete_workspace, export_shared_workspace, export_workspace_pack, get_actions_runtime_status,
-    get_app_settings, get_download_config, get_frp_snippet, get_last_workspace_id, get_proxy,
-    get_runtime_status, get_shared_secret, get_workspace_extensions, get_workspace_secret,
-    get_workspace_skills, import_workspace_pack, install_software, list_frp_profiles,
-    local_chat, list_history_sessions, list_sandbox_backends, list_software, list_workspaces,
-    list_wsl_distributions, open_external_url, open_shared_workspace, open_workspace_directory, read_history_session,
-    read_workspace_logs, read_workspace_telemetry, regenerate_shared_secret,
-    clear_workspace_activity, get_windows_build, read_workspace_activity,
-    read_workspace_activity_detail,
-    regenerate_workspace_secret, remove_workspace_folder, restart_actions_runtime, restart_runtime,
-    restart_tunnel, run_health_checks, save_frp_profile, set_download_config, set_last_workspace,
-    set_proxy, set_shared_secret, set_workspace_extension_active, set_workspace_extension_enabled,
-    set_workspace_secret, set_workspace_skill_enabled, set_workspace_skills_active,
-    start_actions_runtime, start_runtime, start_tunnel, stop_actions_runtime, stop_runtime,
-    stop_tunnel, test_tunnel, uninstall_software, update_workspace,
+    add_workspace_folder, add_wsl_workspace_folder, clear_workspace_activity, create_workspace,
+    delete_frp_profile, delete_workspace, export_shared_workspace, export_workspace_pack,
+    get_actions_runtime_status, get_app_settings, get_download_config, get_frp_snippet,
+    get_last_workspace_id, get_mcp_connection, get_mcp_connection_health, get_proxy,
+    get_runtime_status, get_shared_secret, get_windows_build, get_workspace_extensions,
+    get_workspace_secret, get_workspace_skills, import_workspace_pack, install_software,
+    list_frp_profiles, list_history_sessions, list_sandbox_backends, list_software,
+    list_workspaces, list_wsl_distributions, local_chat, open_external_url, open_shared_workspace,
+    open_workspace_directory, read_history_session, read_workspace_activity,
+    read_workspace_activity_detail, read_workspace_logs, read_workspace_telemetry,
+    regenerate_shared_secret, regenerate_workspace_secret, remove_workspace_folder,
+    restart_actions_runtime, restart_runtime, restart_tunnel, run_health_checks, save_frp_profile,
+    set_download_config, set_last_workspace, set_proxy, set_shared_secret,
+    set_workspace_extension_active, set_workspace_extension_enabled, set_workspace_secret,
+    set_workspace_skill_enabled, set_workspace_skills_active, start_actions_runtime, start_runtime,
+    start_tunnel, stop_actions_runtime, stop_runtime, stop_tunnel, test_tunnel, uninstall_software,
+    update_workspace,
 };
 #[cfg(feature = "desktop")]
 use tauri::Manager;
 
 #[cfg(feature = "desktop")]
 #[tauri::command]
-fn quit_app(app: tauri::AppHandle) { app.exit(0); }
+fn quit_app(app: tauri::AppHandle) {
+    app.exit(0);
+}
 
 #[cfg(feature = "desktop")]
 fn show_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
@@ -166,7 +169,9 @@ fn acquire_single_instance() -> bool {
 pub fn run() {
     if !acquire_single_instance() {
         #[cfg(all(target_os = "windows", not(debug_assertions)))]
-        if let Err(error) = startup_handoff::schedule() { eprintln!("Desktop handoff: {error}"); }
+        if let Err(error) = startup_handoff::schedule() {
+            eprintln!("Desktop handoff: {error}");
+        }
         return;
     }
     tauri::Builder::default()
@@ -215,7 +220,9 @@ pub fn run() {
                         show_main_window(tray.app_handle());
                     }
                 });
-            if let Some(icon) = icon_theme::icon(app.handle(), icon_theme::light_surface(app.handle())) {
+            if let Some(icon) =
+                icon_theme::icon(app.handle(), icon_theme::light_surface(app.handle()))
+            {
                 tray_builder = tray_builder.icon(icon).icon_as_template(true);
             }
             tray_builder.build(app)?;
@@ -245,6 +252,7 @@ pub fn run() {
                 .expect("failed to load runtime auto-start state");
             app.manage(state);
             browser_share::init(app.handle().clone());
+            commands::start_schedule_worker(app.handle().clone());
             if !mcp_auto_start_ids.is_empty() || !actions_auto_start_ids.is_empty() {
                 let app_handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
@@ -289,9 +297,12 @@ pub fn run() {
             updates::check_app_update,
             updates::download_app_update,
             updates::install_app_update,
+            updates::get_app_update_outcome,
             browser_share::desktop::browser_sharing_status,
             browser_share::desktop::configure_browser_sharing,
             list_workspaces,
+            get_mcp_connection,
+            get_mcp_connection_health,
             local_chat,
             list_history_sessions,
             read_history_session,

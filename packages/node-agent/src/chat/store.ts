@@ -1,3 +1,4 @@
+import { scheduleAction, tickSchedules } from './schedules.js';
 import {seedUi, readSeeds, seedInvalidate, parseSeedFilter, type SeedFilter, type SeedStore} from './seeds.js';
 import {parseQuestions,validateQuestionContext,answerQuestions,activeQuestionId,questionsMarkdown,type ChatQuestion,type QuestionResponse} from './questions.js';
 import {packHistory, unpackHistory, agentContext, HISTORY_PAGE_BYTES} from './history.js';
@@ -20,7 +21,7 @@ import { resolveChatPath } from './reveal.js';
 export interface ChatFile { label?: string; local_reference?: boolean; id: string; name: string; path: string; mime: string; size: number; sha256: string }
 export interface ToolEvent { name: string; status: 'running' | 'completed' | 'failed'; input?: string; output?: string; output_truncated?: boolean }
 export interface ChatMessage { questions?:ChatQuestion[];question_answer?:QuestionResponse;question_response?:QuestionResponse;questions_active?:boolean; discussion?:{hidden?:boolean;id:string;post_id:string;source_chat_id:string;purpose:string}; received_by?:string[]; agent_id?:string;agent_name?:string;recipient_ids?:string[];agent_plans?:{agent_id:string;plan:ChatTaskPlan}[]; task_plan?:ChatTaskPlan; kind?: 'connection_request' | 'assignment'; awaiting_user?: boolean; received_at?: number; attachments?: ChatFile[]; tool_event?: ToolEvent; id: string; role: 'user' | 'assistant'; text: string; created_at: number; reply_to?: string; final?: boolean }
-export interface ChatSession {seed_filter?:SeedFilter;seed_auto?:boolean;seed_pending?:boolean;seed_owner?:string;seed_generation?:number;pending_pairing?:string; note?:string; title_agent_name?:string; work_member?:ChatMember; mode?:'work'|'group';members?:ChatMember[];agent_name?:string; pinned?: boolean; archived?: boolean; queue?: ChatMessage[]; queue_mode?: 'merge' | 'split'; queue_receipts?: Record<string,string>; title_custom?: boolean; files?: ChatFile[]; version: 1|2; id: string; title: string; created_at: number; updated_at: number; closed: boolean; messages: ChatMessage[]; attachment_id: string; lease_until: number }
+export interface ChatSession {terminal_attachment_hashes?:string[];seed_filter?:SeedFilter;seed_auto?:boolean;seed_pending?:boolean;seed_owner?:string;seed_generation?:number;pending_pairing?:string; note?:string; title_agent_name?:string; work_member?:ChatMember; mode?:'work'|'group';members?:ChatMember[];agent_name?:string; pinned?: boolean; archived?: boolean; queue?: ChatMessage[]; queue_mode?: 'merge' | 'split'; queue_receipts?: Record<string,string>; title_custom?: boolean; files?: ChatFile[]; version: 1|2; id: string; title: string; created_at: number; updated_at: number; closed: boolean; messages: ChatMessage[]; attachment_id: string; lease_until: number }
 const DIR = 'docs/chat-sessions';
 const ASSET_DIR = 'mcp-assistant/chat-assets';
 const ARTIFACT_DIR = 'mcp-assistant/artifacts/';
@@ -264,7 +265,11 @@ export function chatUi(root: string, args: Record<string, unknown>): Record<stri
   // Readers use complete atomic snapshots; mutations always retain the shared
   // cross-process lock. In particular, unknown/discussion actions are not exempt.
   const readOnly = ['list', 'read', 'read_attachment', 'read_attachment_chunk', 'read_artifact', 'reveal_path'].includes(String(action));
-  const run = (): Record<string, unknown> => {
+  return readOnly ? chatUiUnlocked(root,args) : locked(root,()=>chatUiUnlocked(root,args));
+}
+function chatUiUnlocked(root:string,args:Record<string,unknown>):Record<string,unknown> {
+    const action=args.action;
+    if(String(action).startsWith('schedule_'))return scheduleAction(scheduleStore(root),args);
     if(String(action).startsWith('seed_'))return seedUi(seedStore(root),args);
     if(String(action).startsWith('discussion_'))return discussionAction(discussionStore(root),args);
     if (action === 'list') {
@@ -356,11 +361,14 @@ export function chatUi(root: string, args: Record<string, unknown>): Record<stri
     else if (action === 'set_note') { if(typeof args.note!=='string'||Buffer.byteLength(args.note)>1000)throw new Error('Note must be a string of at most 1000 bytes'); s.note=args.note.trim()?text(args.note,1000).replace(/\s+/gu,' '):'';s.updated_at=Date.now();save(root,s); }
     else if (action === 'rename') { s.title = text(args.title, 240).replace(/\s+/gu, ' '); s.title_custom = true; s.updated_at = Date.now(); save(root, s); }
     else if (action === 'detach') { s.seed_auto=false; for(const m of group.members(s)){m.lease_until=0;m.paused=true;}s.attachment_id = ''; s.lease_until = 0; s.updated_at = Date.now(); save(root, s); }
-    else if (action === 'close') { s.closed = true; s.attachment_id = ''; s.lease_until = 0; s.updated_at = Date.now(); save(root, s); }
+    else if (action === 'close') { recordTerminalAttachments(s); s.closed = true; s.attachment_id = ''; s.lease_until = 0; s.updated_at = Date.now(); save(root, s); }
     else if (action !== 'read') throw new Error('Unknown chat action');
     return { session: localView(root, s) };
-  };
-  return readOnly ? run() : locked(root, run);
+}
+function scheduleStore(root:string) {return {safe:(relative:string)=>safe(root,relative), validateChat:(id:string)=>{if(load(root,id).closed)throw Error("Conversation is closed")}, send:(args:Record<string,unknown>)=>chatUiUnlocked(root,args)};}
+export function runSchedules(root:string) {
+  if(!existsSync(safe(root,`${DIR}/.schedules.json`)))return;
+  locked(root,()=>tickSchedules(scheduleStore(root)));
 }
 /** Removes the JSON record, Markdown projection, `<id>.*` sidecars, pasted `<id>-*.<image>` files and chat assets. */
 function deleteSessionFiles(root: string, id: string): void {
@@ -384,6 +392,18 @@ function owned(s: ChatSession, attachment: unknown): void {
   if(group.grouped(s)){group.memberFor(s,attachment);return;}
   // The lease only governs takeover by another AI; the holder keeps working through long tasks.
   if (!attachment || attachment !== s.attachment_id) throw new Error('Chat attachment expired; call chat_open again');
+}
+function recordTerminalAttachments(session:ChatSession):void {
+  session.terminal_attachment_hashes=[session.attachment_id,...group.members(session).map(member=>member.attachment_id)].filter(Boolean).map(value=>createHash('sha256').update(value).digest('hex'));
+}
+export function authorizeProjectAttachment(root:string,args:Record<string,unknown>,allowClosed=false):void {
+  const session=load(root,validId(args.chat_id));
+  if(session.closed){
+    const token=typeof args.attachment_id==='string'?args.attachment_id:'';
+    if(allowClosed&&token&&session.terminal_attachment_hashes?.includes(createHash('sha256').update(token).digest('hex')))return;
+    throw new Error('Conversation is closed');
+  }
+  owned(session,args.attachment_id);
 }
 /** Called under the folder storage lock: deleted names are available, resumes keep their number. */
 function assignAgentTitle(root:string,s:ChatSession,name:string|undefined):void {
@@ -453,7 +473,7 @@ export function chatTool(root: string, name: string, args: Record<string, unknow
       }
       group.renew(s,args.attachment_id); save(root, s); return { ok: true, persisted: true, message_id: id, instruction: final ? CHAT_FINAL_INSTRUCTION : CHAT_PROGRESS_INSTRUCTION };
     }
-    if (name === 'chat_close') { if(group.grouped(s)&&group.memberFor(s,args.attachment_id).role!=='coordinator')throw new Error('Only the coordinator can close the group');s.closed = true; s.attachment_id = ''; s.lease_until = 0; save(root, s); return { ok: true, status: 'closed', instruction: CHAT_CLOSED_INSTRUCTION }; }
+    if (name === 'chat_close') { if(group.grouped(s)&&group.memberFor(s,args.attachment_id).role!=='coordinator')throw new Error('Only the coordinator can close the group');recordTerminalAttachments(s); s.closed = true; s.attachment_id = ''; s.lease_until = 0; save(root, s); return { ok: true, status: 'closed', instruction: CHAT_CLOSED_INSTRUCTION }; }
     if (name === 'chat_wait') {
       publishQueued(s);
       group.renew(s,args.attachment_id);

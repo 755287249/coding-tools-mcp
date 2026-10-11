@@ -95,6 +95,7 @@ export interface EditProposalRecord {
 }
 
 export interface AgentConfig {
+  globalConnection?: boolean;
   workspaceId?: string;
   workspaceName?: string;
   host: string;
@@ -152,6 +153,7 @@ export interface AgentConfig {
 }
 
 export interface AgentConfigDocument {
+  globalConnection?: boolean;
   schema_version: 1;
   host?: string;
   port?: number;
@@ -202,6 +204,8 @@ export interface WorkspaceRegistryEntry {
 
 export interface WorkspaceRegistryDocument {
   schema_version: 1;
+  migrationPending?: boolean;
+  connection?: WorkspaceRegistryEntry;
   workspaces: WorkspaceRegistryEntry[];
 }
 
@@ -267,6 +271,8 @@ export interface FolderRuntime {
 }
 
 export interface ToolContext {
+  readonly projectIsolation?:boolean;
+  runtimeClosed?: boolean;
   config: AgentConfig;
   conversations: ConversationStoreContract;
   workspaceProfileId: string;

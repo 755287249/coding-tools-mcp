@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { stat } from 'node:fs/promises';
+import { GLOBAL_MCP_ID } from './projectIsolation.js';
 import { ApplicationConfigStore, loadApplication } from './application.js';
 import { restartSupervisedFromArgv } from './cliOptions.js';
 import { CANONICAL_SCHEMA_VERSION } from './config.js';
@@ -20,7 +22,7 @@ const workspaceStore = new ApplicationConfigStore(application, async id => {
     running.splice(running.indexOf(item), 1);
     runtimeRegistry.delete(id);
   }
-});
+}, async profile => { await startProject(profile.id,profile.name,profile.store.current); });
 const runtimeRegistry = new Map<string, WorkspaceRuntimeRecord>();
 
 const RESTART_EXIT_CODE = 75;
@@ -30,7 +32,7 @@ interface RunningWorkspace {
   name: string;
   primary: boolean;
   runtime: AgentRuntime;
-  tunnel: BuiltinTunnelManager;
+  tunnel?: BuiltinTunnelManager;
 }
 const running: RunningWorkspace[] = [];
 let stopping = false;
@@ -42,7 +44,7 @@ async function closeRuntime(item: RunningWorkspace): Promise<void> {
   const closing = item.runtime.close();
   const timer = setTimeout(() => item.runtime.server.closeAllConnections(), 5000);
   try {
-    const results = await Promise.allSettled([item.tunnel.stop(), closing]);
+    const results = await Promise.allSettled([item.tunnel?.stop(), closing]);
     const errors = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
     if (errors.length) throw new AggregateError(errors.map(r => r.reason), 'Workspace shutdown failed');
   } finally {
@@ -68,9 +70,21 @@ const requestRestart = restartSupervised ? () => {
 } : undefined;
 
 const acceptedUpdateIds = new Set<string>();
+async function startProject(id:string,name:string,config:import('./types.js').AgentConfig):Promise<void> {
+  for(const folder of config.folders) {
+    try { if (!(await stat(folder.path)).isDirectory()) throw new Error('Not a directory'); }
+    catch(error) { console.error(`[${name}] Project unavailable at its fixed directory: ${error instanceof Error ? error.message : String(error)}`);return; }
+  }
+  const store = workspaceStore.workspace(id).store;
+  const runtime = await createAgentRuntime({...structuredClone(config),workspaceId:id,workspaceName:name,management:{enabled:false}}, {
+    projectIsolation:true,runtimeRegistry,secretResolver:reference=>store.secretValue(reference)
+  });
+  running.push({id,name,primary:false,runtime});
+}
 
 try {
-  for (const workspace of application.workspaces) {
+  for (const workspace of application.workspaces) await startProject(workspace.id,workspace.name,workspace.loaded.config);
+  for (const workspace of application.connection ? [application.connection] : []) {
     const primary = workspace.id === workspaceStore.primaryWorkspaceId;
     const config = structuredClone(workspace.loaded.config);
     config.management.enabled = primary && !noUi && config.management.enabled;
@@ -159,7 +173,7 @@ console.log(`Coding Tools MCP Node Agent ${AGENT_VERSION}`);
 console.log(`Desktop Client compatibility: ${CLIENT_COMPAT_VERSION}`);
 console.log(`Workspace registry: ${application.registryPath}`);
 console.log(`Workspace profiles: ${running.length}`);
-for (const item of running) {
+for (const item of running.filter(item => item.id === GLOBAL_MCP_ID)) {
   const workspace = workspaceStore.workspace(item.id);
   const config = item.runtime.context.config;
   console.log(`\n[${item.name}] ${item.id}`);

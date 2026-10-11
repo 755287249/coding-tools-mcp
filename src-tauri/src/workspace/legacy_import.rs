@@ -18,7 +18,7 @@ pub fn legacy_app_home() -> Option<PathBuf> {
 }
 
 pub fn import_legacy_profiles_if_empty(data: &mut AppData) -> AppResult<usize> {
-    if !data.profiles.is_empty() {
+    if !data.profiles.is_empty() || data.mcp_connection.is_some() {
         return Ok(0);
     }
     let Some(legacy_home) = legacy_app_home() else {
@@ -76,7 +76,10 @@ fn migrate_legacy_secrets(
         .entry(profile_id.to_string())
         .or_default();
     for (legacy_key, store_key) in mappings {
-        if let Some(value) = secrets.get(legacy_key).filter(|value| !value.trim().is_empty()) {
+        if let Some(value) = secrets
+            .get(legacy_key)
+            .filter(|value| !value.trim().is_empty())
+        {
             store.insert(store_key.to_string(), value.clone());
         }
     }
@@ -97,10 +100,9 @@ mod tests {
     fn legacy_home_points_under_user_home() {
         let home = legacy_app_home();
         assert!(home.is_some());
-        assert!(
-            home.unwrap()
-                .to_string_lossy()
-                .contains(".coding-tools-mcp-desktop")
-        );
+        assert!(home
+            .unwrap()
+            .to_string_lossy()
+            .contains(".coding-tools-mcp-desktop"));
     }
 }

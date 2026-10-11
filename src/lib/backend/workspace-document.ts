@@ -180,7 +180,9 @@ export function parseCanonicalWorkspace(value: unknown): CanonicalWorkspace {
     throw new Error(`Unsupported workspace schemaVersion ${schemaVersion}`);
   }
   const folders = parseFolders(value.folders);
-  if (folders.length < 1) throw new Error('workspace document must contain at least one folder');
+  if (text(value.id) === '00000000000000000000000000000001') {
+    if (folders.length !== 0) throw new Error('global connection must not contain project folders');
+  } else if (folders.length < 1) throw new Error('workspace document must contain at least one folder');
   const bind = recordValue(value.bind);
   const auth = recordValue(value.auth);
   const policy = recordValue(value.policy);
@@ -343,7 +345,7 @@ export function migrateDesktopProfile(value: unknown): CanonicalWorkspace {
   const tunnel = recordValue(value.tunnel);
   const actions = recordValue(value.actions);
   const sandbox = recordValue(runtime.sandbox);
-  const folders = Array.isArray(value.folders) && value.folders.length
+  const folders = text(value.id) === '00000000000000000000000000000001' ? parseFolders(value.folders) : Array.isArray(value.folders) && value.folders.length
     ? parseFolders(value.folders)
     : parseFolders([{ id: 'legacy', name: text(value.name), path: text(value.path) }]);
   const tunnelType = text(tunnel.type, 'none') || 'none';

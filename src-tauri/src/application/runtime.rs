@@ -27,7 +27,7 @@ fn validate_start_resources(
     id: &str,
     service: WorkspaceService,
 ) -> AppResult<()> {
-    state.with_workspaces(|store| validate_service_start(store.list(), id, service))
+    state.with_workspaces(|store| validate_service_start(&store.resource_profiles(), id, service))
 }
 
 fn persist_mcp_runtime_enabled(state: &AppState, id: &str, enabled: bool) -> AppResult<()> {
@@ -144,6 +144,9 @@ pub async fn stop_mcp_runtime(state: &AppState, id: &str) -> AppResult<RuntimeSt
     let port = profile.runtime.local_port;
     let handle = state.with_runtime(|runtime| Ok(runtime.begin_stop(id, ServiceKind::Mcp)))?;
 
+    if id == crate::data::GLOBAL_MCP_ID {
+        crate::mcp::stop_project(None).await;
+    }
     await_listener_shutdown(handle, port).await;
 
     state.with_runtime(|runtime| {

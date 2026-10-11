@@ -34,6 +34,7 @@ pub type ShutdownSender = oneshot::Sender<()>;
 
 #[derive(Clone)]
 struct AppState {
+    global_connection: bool,
     router: Arc<HubRouter>,
     openapi: Arc<RwLock<Value>>,
     auth: Arc<AuthConfig>,
@@ -161,6 +162,12 @@ async fn serve(
     execution_limits: ExecutionLimits,
     shutdown: oneshot::Receiver<()>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let global_connection = profile_id == crate::data::GLOBAL_MCP_ID;
+    let folders = if global_connection {
+        vec![crate::data::control_folder().map_err(std::io::Error::other)?]
+    } else {
+        folders
+    };
     let router = HubRouter::new(
         profile_id.to_string(),
         folders,
@@ -180,14 +187,18 @@ async fn serve(
         },
     )
     .map_err(std::io::Error::other)?;
-    let tools: Vec<Value> = tools::list_tools()
-        .into_iter()
-        .filter(|tool| {
-            tool.get("name")
-                .and_then(Value::as_str)
-                .is_some_and(|name| tools::policy::validate_actions_exposure(name).is_ok())
-        })
-        .collect();
+    let tools: Vec<Value> = (if global_connection {
+        crate::mcp::project_scoped_tools("advanced")
+    } else {
+        tools::list_tools()
+    })
+    .into_iter()
+    .filter(|tool| {
+        tool.get("name")
+            .and_then(Value::as_str)
+            .is_some_and(|name| tools::policy::validate_actions_exposure(name).is_ok())
+    })
+    .collect();
     let public_base_url = if configured_public_url.is_empty() {
         format!("http://{}:{actions_port}", url_host_for_bind(&bind_address))
     } else {
@@ -204,6 +215,7 @@ async fn serve(
     ));
 
     let state = AppState {
+        global_connection,
         router,
         openapi: Arc::new(RwLock::new(openapi_doc)),
         auth: auth.clone(),
@@ -397,6 +409,10 @@ async fn execute_action(
         None => json!({}),
     };
 
+    if state.global_connection {
+        return execute_global_action(&tool_name, arguments).await;
+    }
+
     let workspace_folder_id = match take_workspace_folder_id(&mut arguments) {
         Ok(value) => value,
         Err(detail) => {
@@ -439,6 +455,82 @@ async fn execute_action(
         Some(&routed.folder_id),
         Some(&routed.folder.path),
         structured,
+    )
+}
+
+async fn execute_global_action(name: &str, arguments: Value) -> Response {
+    let denied =
+        |message: String| (StatusCode::FORBIDDEN, Json(json!({"detail":message}))).into_response();
+    if tools::policy::validate_actions_exposure(name).is_err()
+        || !crate::tools::project_scope::allowed(name)
+    {
+        return denied("Use exec_command inside the project sandbox for this operation".into());
+    }
+    if name == "list_workspace_folders" {
+        return match crate::mcp::project_folders() {
+            Ok(list) => action_response(name, None, None, list),
+            Err(e) => denied(e),
+        };
+    }
+    let scope = arguments.clone();
+    let folder = scope["workspace_folder_id"].as_str().unwrap_or("");
+    let context = match crate::mcp::project_context(folder) {
+        Ok(context) => context,
+        Err(e) => return denied(e),
+    };
+    execute_global_project_action(context, name, arguments).await
+}
+async fn execute_global_project_action(
+    context: crate::tools::SharedToolContext,
+    name: &str,
+    mut arguments: Value,
+) -> Response {
+    let denied =
+        |message: String| (StatusCode::FORBIDDEN, Json(json!({"detail":message}))).into_response();
+    let scope = arguments.clone();
+    let folder = scope["workspace_folder_id"].as_str().unwrap_or("");
+    if name != "chat_open"
+        || scope["attachment_id"]
+            .as_str()
+            .is_some_and(|v| !v.is_empty())
+    {
+        if let Err(e) = crate::tools::chat::authorize_project_attachment(
+            context.workspace.root(),
+            &scope,
+            name == "chat_wait",
+        ) {
+            return denied(e.message());
+        }
+    } else if scope["chat_id"].as_str().is_none_or(str::is_empty) {
+        return denied("chat_id is required".into());
+    }
+    let runtime = context.runtime_config();
+    let tools = crate::tools::list_tools_for_profile(&runtime.tool_profile);
+    let Some(tool) = tools.iter().find(|tool| tool["name"] == name) else {
+        return denied("Tool is not enabled for this project".into());
+    };
+    if let Some(args) = arguments.as_object_mut() {
+        for field in ["workspace_folder_id", "chat_id", "attachment_id"] {
+            if tool["inputSchema"]["properties"].get(field).is_none() {
+                args.remove(field);
+            }
+        }
+    }
+    let root = context.workspace.root().to_string_lossy().to_string();
+    let response=crate::mcp::handle_project_request(context,json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":arguments,"_meta":{"openai/session":format!("project-chat:{}",scope["attachment_id"].as_str().unwrap_or("opening"))}}})).await;
+    if !response["error"].is_null() {
+        return denied(
+            response["error"]["message"]
+                .as_str()
+                .unwrap_or("Project operation rejected")
+                .into(),
+        );
+    }
+    action_response(
+        name,
+        Some(folder),
+        Some(&root),
+        response["result"]["structuredContent"].clone(),
     )
 }
 
@@ -528,7 +620,45 @@ fn action_response(
 mod tests {
     use serde_json::{json, Value};
 
-    use super::{bind_listener, routing_error, take_workspace_folder_id};
+    use super::{
+        bind_listener, execute_global_project_action, routing_error, take_workspace_folder_id, Arc,
+        StatusCode,
+    };
+
+    #[tokio::test]
+    async fn global_actions_requires_attachment_and_keeps_native_commands_sandboxed() {
+        let root = tempfile::tempdir().unwrap();
+        let harness = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("allowed.txt"), "allowed").unwrap();
+        let context = Arc::new(
+            crate::tools::ToolContext::for_test(root.path().into(), harness.path().into()).unwrap(),
+        );
+        context.shared_runtime_config().require_project_isolation();
+        let chat = crate::tools::chat::ui(root.path(), &json!({"action":"create"})).unwrap()
+            ["session"]["id"]
+            .clone();
+        let opened =
+            crate::tools::chat::tool(root.path(), "chat_open", &json!({"chat_id":chat})).unwrap();
+        let mut args = json!({"chat_id":chat,"workspace_folder_id":"project","attachment_id":opened["attachment_id"],"path":"allowed.txt"});
+        let allowed =
+            execute_global_project_action(context.clone(), "read_file", args.clone()).await;
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(allowed.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["ok"], true, "{body}");
+        args["attachment_id"] = json!("forged");
+        assert_eq!(
+            execute_global_project_action(context.clone(), "read_file", args)
+                .await
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        let denied = crate::tools::call_tool(&context, "git_status", &json!({}));
+        assert_eq!(denied["error"]["code"], "PROJECT_ISOLATION_REQUIRED");
+    }
 
     #[test]
     fn workspace_folder_selector_is_removed_before_tool_dispatch() {

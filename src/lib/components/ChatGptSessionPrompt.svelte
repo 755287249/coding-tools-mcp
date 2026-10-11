@@ -1,4 +1,5 @@
 <script lang="ts">
+  import {copyText} from "$lib/browser-tools";
   import Check from "@lucide/svelte/icons/check";
   import ChevronDown from "@lucide/svelte/icons/chevron-down";
   import Copy from "@lucide/svelte/icons/copy";
@@ -22,7 +23,7 @@
     errorMessage = "";
     if (resetTimer) clearTimeout(resetTimer);
     try {
-      await navigator.clipboard.writeText(sessionPrompt);
+      await copyText(sessionPrompt);
       copied = true;
       showToast($t("The new-session prompt was copied. Paste it into ChatGPT."), {
         title: $t("Copy successful"),

@@ -80,7 +80,7 @@ test("sandbox settings stay backend-neutral and fail closed", async () => {
   assert.match(model, /"appcontainer"\.to_string\(\)/);
   assert.doesNotMatch(settings, /async function saveEnabled/);
   assert.match(settings, /let enabled = \$state\(false\)/);
-  assert.match(settings, /await onSave\(\{ enabled, backend, external_paths: pendingExternalPaths, options \}\)/);
+  assert.match(settings, /await onSave\(\{ enabled:projectIsolation\|\|enabled, backend, external_paths:projectIsolation\?\[\]:pendingExternalPaths, options \}\)/);
   assert.match(settings, /bind:checked=\{enabled\}/);
   assert.match(settings, /enabled && !selected\.enforcementReady/);
   assert.doesNotMatch(settings, /Command sandboxing is always enabled/);
@@ -119,27 +119,18 @@ test("MCP and Actions share a sandbox selection that can switch live between com
   assert.match(appContainer, /revoke_acl_grant_via_handle_direct/);
   assert.match(page, /const sandboxLocked = false/);
   assert.doesNotMatch(page, /const requiresRestart = current\.enabled !== config\.enabled/);
-  assert.match(page, /sandbox: config/);
+  assert.match(page, /sandbox:fixedConfig/);
   assert.match(page, /Workspace settings could not be loaded/);
   assert.match(workspaceSettings, /<SandboxSettings/);
   assert.match(workspaceSettings, /locked=\{sandboxLocked\}/);
 });
 
-test("disabling the desktop sandbox saves first and automatically starts or restarts MCP", async () => {
+test("project sandbox settings cannot disable isolation or add external grants", async () => {
   const page = await source("src/routes/workspace/[id]/+page.svelte");
-
-  assert.match(page, /const disablingSandbox = current\.enabled && !config\.enabled;/);
-  assert.match(page, /if \(!disablingSandbox\) return;/);
-  assert.match(page, /const wasRunning = mcpStatus === "running";/);
-  assert.match(page, /wasRunning \? "service\.mcp\.restart\.sandbox-disabled" : "service\.mcp\.start\.sandbox-disabled"/);
-  assert.match(page, /\(\) => \(wasRunning \? restartRuntime\(targetWorkspaceId\) : startRuntime\(targetWorkspaceId\)\)/);
-
-  const persisted = page.indexOf('persistProfile("save.workspace.sandbox", next, targetWorkspaceId)');
-  const disableGate = page.indexOf('if (!disablingSandbox) return;', persisted);
-  const launch = page.indexOf('restartRuntime(targetWorkspaceId) : startRuntime(targetWorkspaceId)', disableGate);
-  assert.ok(persisted >= 0, "sandbox settings must be persisted before runtime handling");
-  assert.ok(disableGate > persisted, "automatic runtime handling must only run after the sandbox save succeeds");
-  assert.ok(launch > disableGate, "MCP start/restart must occur only for an actual enabled-to-disabled transition");
+  const save = page.slice(page.indexOf("async function saveSandbox"),page.indexOf("async function saveWorkspaceName"));
+  assert.match(save,/enabled:true,external_paths:\[\]/);
+  assert.match(save,/persistProfile\("save\.workspace\.sandbox"/);
+  assert.doesNotMatch(save,/restartRuntime|startRuntime/);
 });
 
 test("desktop sandbox restart never force-closes its own Windows listener", async () => {

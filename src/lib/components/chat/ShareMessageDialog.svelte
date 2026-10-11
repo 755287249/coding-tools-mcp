@@ -6,7 +6,6 @@
   import {localChat,type ChatMessage,type ChatSession} from '$lib/api/chat';
   import {createMessageTransfer,forwardMessage,type MessageTransfer} from '$lib/chat/message-actions';
   import {randomId} from '$lib/browser-tools';
-  import {messageBytes} from '$lib/chat/autogrow';
   import {t} from '$lib/i18n';
   import X from '@lucide/svelte/icons/x';
   import MessageSquare from '@lucide/svelte/icons/message-square';
@@ -26,7 +25,6 @@
   });
   async function share(){
     const target=targets.find(t=>t.key===selected);if(!target||sending||done)return;
-    if(messageBytes(message.text)>32000){error=$t('chat.tooLong');return;}
     sending=true;error='';
     try{let transfer=transfers.get(target.key);if(!transfer){transfer=createMessageTransfer(randomId);transfers.set(target.key,transfer);}await forwardMessage(message,chatId,target.session.id,args=>localChat(workspaceId,folderId,args),args=>localChat(target.workspace,target.folder,args),transfer,randomId);done=true;}
     catch(e){error=String(e)}finally{sending=false;}

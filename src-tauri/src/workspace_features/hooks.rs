@@ -562,6 +562,7 @@ mod tests {
     #[tokio::test]
     async fn session_start_state_is_scoped_by_session_and_folder() {
         let runtime = RuntimeFeatures {
+            isolated: std::sync::atomic::AtomicBool::new(false),
             folders: Vec::new(),
             config: std::sync::RwLock::new(crate::workspace_features::FeatureConfig {
                 skills: crate::workspace::canonical::CanonicalToggle::default(),

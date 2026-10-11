@@ -5,7 +5,7 @@
   import ChatMarkdown from './ChatMarkdown.svelte';
   import ChatStatusIcon from './ChatStatusIcon.svelte';
   import ChatAttachment from './ChatAttachment.svelte';
-  let { messages, settled, workspaceId, folderId, chatId }: { messages: ChatMessage[]; settled: boolean; workspaceId: string; folderId: string; chatId: string } = $props();
+  let { messages, settled, workspaceId, folderId, chatId, showTimes=true }: { showTimes?:boolean; messages: ChatMessage[]; settled: boolean; workspaceId: string; folderId: string; chatId: string } = $props();
   const summary = $derived(summarizeToolActivity(messages, settled));
   const running = $derived(summary.running > 0);
   const state = $derived(running ? 'running' : summary.failed ? 'failed' : summary.unresolved ? 'interrupted' : 'completed');
@@ -17,7 +17,7 @@
 </script>
 <details class="tool-activity" bind:open={expanded} data-running={running}>
   <summary>
-    <ChatStatusIcon {state} label={running ? $t('chat.55') : summary.failed ? $t('chat.58') : summary.unresolved ? $t('chat.95') : $t('chat.56')}/>
+    <ChatStatusIcon {state} animate={false} label={running ? $t('chat.55') : summary.failed ? $t('chat.58') : summary.unresolved ? $t('chat.95') : $t('chat.56')}/>
     <span>{$t('chat.92')} {summary.calls}</span>
     {#if running}<span class="working">{$t('chat.55')} {summary.running}</span>{/if}
     {#if summary.failed}<span class="failed">{$t('chat.58')} {summary.failed}</span>{/if}
@@ -28,7 +28,7 @@
     {#each messages as message (message.id)}
       {#if message.tool_event}
         <details class="tool-report">
-          <summary><span>{message.tool_event.name}</span><ChatStatusIcon state={message.tool_event.status === 'running' ? 'queued' : message.tool_event.status} label={message.tool_event.status === 'running' ? $t('chat.93') : message.tool_event.status === 'failed' ? $t('chat.58') : $t('chat.56')}/><time>{new Date(message.created_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</time></summary>
+          <summary><span>{message.tool_event.name}</span><ChatStatusIcon state={message.tool_event.status === 'running' ? 'queued' : message.tool_event.status} label={message.tool_event.status === 'running' ? $t('chat.93') : message.tool_event.status === 'failed' ? $t('chat.58') : $t('chat.56')}/>{#if showTimes}<time>{new Date(message.created_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</time>{/if}</summary>
           <ChatMarkdown text={message.text} {workspaceId} {folderId} {chatId}/>
           {#if message.tool_event.input}<h4>{$t('chat.76')}</h4><pre>{message.tool_event.input}</pre>{/if}
           {#if message.tool_event.output}<h4>{$t('chat.77')}</h4><pre>{message.tool_event.output}</pre>{/if}

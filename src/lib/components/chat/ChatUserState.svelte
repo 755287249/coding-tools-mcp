@@ -2,12 +2,12 @@
   import { t } from '$lib/i18n';
   import { USER_MESSAGE_STATUS_KEYS, type chatUserState } from '$lib/chat/status';
   import ChatStatusIcon from './ChatStatusIcon.svelte';
-  let { state }: {state: ReturnType<typeof chatUserState>} = $props();
+  let { state, hideProcessing=false }: {hideProcessing?:boolean;state: ReturnType<typeof chatUserState>} = $props();
 </script>
 {#if state}
   <div class="receipt" role="group" aria-label={$t('chat.84')}>
     <ChatStatusIcon state={state.read ? 'read' : 'unread'} label={$t(state.read ? 'chat.79' : 'chat.80')}/>
-    <ChatStatusIcon state={state.status} label={$t(USER_MESSAGE_STATUS_KEYS[state.status])}/>
+    {#if !hideProcessing||state.status!=='processing'}<ChatStatusIcon state={state.status} label={$t(USER_MESSAGE_STATUS_KEYS[state.status])}/>{/if}
   </div>
 {/if}
 <style>

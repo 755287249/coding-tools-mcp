@@ -67,6 +67,9 @@ struct PendingCode {
 
 #[derive(Serialize, Deserialize)]
 struct TokenClaims {
+    /// Stable server-issued grant identity, preserved across refresh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    gid: Option<String>,
     iss: String,
     aud: String,
     iat: i64,
@@ -148,6 +151,31 @@ impl OAuthRuntime {
             return true;
         }
         constant_time_eq_str(client_id, &self.client_id)
+    }
+
+    pub fn access_grant_id(&self, token: &str, server_url: &str) -> Option<String> {
+        let issuer = server_url.trim_end_matches('/');
+        let resource = format!("{issuer}/mcp");
+        let mut validation = Validation::new(Algorithm::HS256);
+        validation.set_audience(&[resource.as_str(), issuer]);
+        validation.set_issuer(&[issuer]);
+        let claims = decode::<TokenClaims>(
+            token,
+            &DecodingKey::from_secret(self.token_secret.as_bytes()),
+            &validation,
+        )
+        .ok()?
+        .claims;
+        if claims.typ.is_some() {
+            return None;
+        }
+        claims.gid.filter(|id| {
+            !id.is_empty()
+                && id.len() <= 80
+                && id
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+        })
     }
 
     pub fn verify_access_token(&self, token: &str, server_url: &str) -> bool {
@@ -473,9 +501,23 @@ fn refresh_audience(issuer: &str) -> String {
 }
 
 fn issue_token_pair(oauth: &OAuthRuntime, issuer: &str, client_id: &str) -> Response {
+    issue_token_pair_for_grant(oauth, issuer, client_id, &uuid::Uuid::new_v4().to_string())
+}
+fn issue_token_pair_for_grant(
+    oauth: &OAuthRuntime,
+    issuer: &str,
+    client_id: &str,
+    grant: &str,
+) -> Response {
     let audience = format!("{issuer}/mcp");
-    let access = create_access_token(issuer, &audience, &oauth.token_secret, oauth.token_ttl_seconds);
-    let refresh = create_refresh_token(issuer, client_id, &oauth.token_secret);
+    let access = create_access_token(
+        issuer,
+        &audience,
+        &oauth.token_secret,
+        oauth.token_ttl_seconds,
+        grant,
+    );
+    let refresh = create_refresh_token_for_grant(issuer, client_id, &oauth.token_secret, grant);
     match (access, refresh) {
         (Ok(access_token), Ok(refresh_token)) => (
             StatusCode::OK,
@@ -520,12 +562,31 @@ fn refresh_exchange(oauth: &OAuthRuntime, form: &TokenForm, server_url: &str) ->
     if !constant_time_eq_str(&bound_client, &form.client_id) {
         return token_error("invalid_grant", "client_id mismatch");
     }
-    issue_token_pair(oauth, &issuer, &form.client_id)
+    // Old refresh tokens converge to a stable identity even when replayed.
+    let grant = claims
+        .gid
+        .unwrap_or_else(|| format!("{:x}", Sha256::digest(form.refresh_token.as_bytes())));
+    issue_token_pair_for_grant(oauth, &issuer, &form.client_id, &grant)
 }
 
+#[cfg(test)]
 fn create_refresh_token(issuer: &str, client_id: &str, token_secret: &str) -> Result<String, ()> {
+    create_refresh_token_for_grant(
+        issuer,
+        client_id,
+        token_secret,
+        &uuid::Uuid::new_v4().to_string(),
+    )
+}
+fn create_refresh_token_for_grant(
+    issuer: &str,
+    client_id: &str,
+    token_secret: &str,
+    grant: &str,
+) -> Result<String, ()> {
     let now = unix_now() as i64;
     let claims = TokenClaims {
+        gid: Some(grant.into()),
         iss: issuer.to_string(),
         aud: refresh_audience(issuer),
         iat: now,
@@ -547,9 +608,11 @@ fn create_access_token(
     audience: &str,
     token_secret: &str,
     ttl: i64,
+    grant: &str,
 ) -> Result<String, ()> {
     let now = unix_now() as i64;
     let claims = TokenClaims {
+        gid: Some(grant.into()),
         iss: issuer.to_string(),
         aud: audience.to_string(),
         iat: now,
@@ -760,35 +823,123 @@ mod tests {
     }
 
     #[test]
+    fn grants_are_distinct_verified_and_stable_across_refresh() {
+        let base = "https://grant.example";
+        let oauth = OAuthRuntime::try_new(
+            base.into(),
+            "grant-client".into(),
+            None,
+            Some("synthetic-password".into()),
+            Some("synthetic-signing".into()),
+        )
+        .unwrap();
+        let a = token_json(issue_token_pair(&oauth, base, "grant-client"));
+        let b = token_json(issue_token_pair(&oauth, base, "grant-client"));
+        let first = oauth
+            .access_grant_id(a["access_token"].as_str().unwrap(), base)
+            .unwrap();
+        assert_ne!(
+            Some(first.clone()),
+            oauth.access_grant_id(b["access_token"].as_str().unwrap(), base)
+        );
+        assert_eq!(
+            None,
+            oauth.access_grant_id(a["refresh_token"].as_str().unwrap(), base)
+        );
+        assert_eq!(
+            None,
+            oauth.access_grant_id(
+                a["access_token"].as_str().unwrap(),
+                "https://foreign.example"
+            )
+        );
+        let refreshed = token_json(token_exchange(
+            &oauth,
+            &HeaderMap::new(),
+            TokenForm {
+                grant_type: "refresh_token".into(),
+                client_id: "grant-client".into(),
+                refresh_token: a["refresh_token"].as_str().unwrap().into(),
+                ..Default::default()
+            },
+            base,
+        ));
+        assert_eq!(
+            Some(first),
+            oauth.access_grant_id(refreshed["access_token"].as_str().unwrap(), base)
+        );
+    }
+
+    #[test]
     fn corrected_exchange_preserves_code_until_one_success_even_under_concurrency() {
         let oauth = OAuthRuntime::try_new(
-            "https://audit.example".into(), "audit-client".into(), None,
-            Some("synthetic-password".into()), Some("synthetic-signing-secret".into()),
-        ).unwrap();
+            "https://audit.example".into(),
+            "audit-client".into(),
+            None,
+            Some("synthetic-password".into()),
+            Some("synthetic-signing-secret".into()),
+        )
+        .unwrap();
         let verifier = "a".repeat(43);
-        oauth.pending.lock().unwrap().insert("audit-code".into(), PendingCode {
-            code_challenge: URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes())),
-            client_id: "audit-client".into(), redirect_uri: "http://127.0.0.1:8765/callback".into(),
-            state: "state".into(), expires_at: unix_now() + 300, server_url: "https://audit.example".into(),
-        });
+        oauth.pending.lock().unwrap().insert(
+            "audit-code".into(),
+            PendingCode {
+                code_challenge: URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes())),
+                client_id: "audit-client".into(),
+                redirect_uri: "http://127.0.0.1:8765/callback".into(),
+                state: "state".into(),
+                expires_at: unix_now() + 300,
+                server_url: "https://audit.example".into(),
+            },
+        );
         let form = || TokenForm {
-            grant_type: "authorization_code".into(), code: "audit-code".into(),
-            client_id: "audit-client".into(), redirect_uri: "http://127.0.0.1:8765/callback".into(),
-            code_verifier: "a".repeat(43), ..Default::default()
+            grant_type: "authorization_code".into(),
+            code: "audit-code".into(),
+            client_id: "audit-client".into(),
+            redirect_uri: "http://127.0.0.1:8765/callback".into(),
+            code_verifier: "a".repeat(43),
+            ..Default::default()
         };
-        let mut wrong = form(); wrong.redirect_uri = "http://127.0.0.1:8766/callback".into();
-        assert_eq!(token_exchange(&oauth, &HeaderMap::new(), wrong, "https://audit.example").status(), StatusCode::BAD_REQUEST);
-        let mut wrong = form(); wrong.code_verifier = "b".repeat(43);
-        assert_eq!(token_exchange(&oauth, &HeaderMap::new(), wrong, "https://audit.example").status(), StatusCode::BAD_REQUEST);
+        let mut wrong = form();
+        wrong.redirect_uri = "http://127.0.0.1:8766/callback".into();
+        assert_eq!(
+            token_exchange(&oauth, &HeaderMap::new(), wrong, "https://audit.example").status(),
+            StatusCode::BAD_REQUEST
+        );
+        let mut wrong = form();
+        wrong.code_verifier = "b".repeat(43);
+        assert_eq!(
+            token_exchange(&oauth, &HeaderMap::new(), wrong, "https://audit.example").status(),
+            StatusCode::BAD_REQUEST
+        );
         assert!(oauth.pending.lock().unwrap().contains_key("audit-code"));
         let barrier = Arc::new(std::sync::Barrier::new(2));
-        let handles: Vec<_> = (0..2).map(|_| {
-            let runtime = oauth.clone(); let barrier = barrier.clone(); let request = form();
-            std::thread::spawn(move || { barrier.wait(); token_exchange(&runtime, &HeaderMap::new(), request, "https://audit.example").status() })
-        }).collect();
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let runtime = oauth.clone();
+                let barrier = barrier.clone();
+                let request = form();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    token_exchange(
+                        &runtime,
+                        &HeaderMap::new(),
+                        request,
+                        "https://audit.example",
+                    )
+                    .status()
+                })
+            })
+            .collect();
         let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
         assert_eq!(results.iter().filter(|&&s| s == StatusCode::OK).count(), 1);
-        assert_eq!(results.iter().filter(|&&s| s == StatusCode::BAD_REQUEST).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|&&s| s == StatusCode::BAD_REQUEST)
+                .count(),
+            1
+        );
         assert!(oauth.pending.lock().unwrap().is_empty());
     }
 
@@ -823,34 +974,88 @@ mod tests {
             client_id: client.into(),
             ..Default::default()
         };
-        let response = token_exchange(&oauth, &HeaderMap::new(), form(&refresh, "chatgpt-client-test"), base);
+        let response = token_exchange(
+            &oauth,
+            &HeaderMap::new(),
+            form(&refresh, "chatgpt-client-test"),
+            base,
+        );
         assert_eq!(response.status(), StatusCode::OK);
         let body = token_json(response);
         let access = body["access_token"].as_str().expect("access token");
         assert!(oauth.verify_access_token(access, base));
-        let rotated = body["refresh_token"].as_str().expect("rotated refresh token");
+        let rotated = body["refresh_token"]
+            .as_str()
+            .expect("rotated refresh token");
         assert!(!oauth.verify_access_token(rotated, base));
 
         // An access token cannot be used as a refresh token.
-        let misuse = token_exchange(&oauth, &HeaderMap::new(), form(access, "chatgpt-client-test"), base);
+        let misuse = token_exchange(
+            &oauth,
+            &HeaderMap::new(),
+            form(access, "chatgpt-client-test"),
+            base,
+        );
         assert_eq!(misuse.status(), StatusCode::BAD_REQUEST);
         // Garbage and empty refresh tokens are rejected.
-        let garbage = token_exchange(&oauth, &HeaderMap::new(), form("not-a-token", "chatgpt-client-test"), base);
+        let garbage = token_exchange(
+            &oauth,
+            &HeaderMap::new(),
+            form("not-a-token", "chatgpt-client-test"),
+            base,
+        );
         assert_eq!(garbage.status(), StatusCode::BAD_REQUEST);
-        let empty = token_exchange(&oauth, &HeaderMap::new(), form("", "chatgpt-client-test"), base);
+        let empty = token_exchange(
+            &oauth,
+            &HeaderMap::new(),
+            form("", "chatgpt-client-test"),
+            base,
+        );
         assert_eq!(empty.status(), StatusCode::BAD_REQUEST);
         let expired = TokenClaims {
-            iss: base.into(), aud: refresh_audience(base), iat: 1, exp: 2,
-            scope: "mcp".into(), typ: Some(REFRESH_TOKEN_TYPE.into()),
+            gid: None,
+            iss: base.into(),
+            aud: refresh_audience(base),
+            iat: 1,
+            exp: 2,
+            scope: "mcp".into(),
+            typ: Some(REFRESH_TOKEN_TYPE.into()),
             cid: Some("chatgpt-client-test".into()),
         };
-        let expired = encode(&Header::new(Algorithm::HS256), &expired,
-            &EncodingKey::from_secret(b"token-signing-secret")).unwrap();
-        assert_eq!(token_exchange(&oauth, &HeaderMap::new(), form(&expired, "chatgpt-client-test"), base).status(), StatusCode::BAD_REQUEST);
-        assert_eq!(token_exchange(&oauth, &HeaderMap::new(), form(&refresh, "chatgpt-client-test"), "https://other.example").status(), StatusCode::BAD_REQUEST);
+        let expired = encode(
+            &Header::new(Algorithm::HS256),
+            &expired,
+            &EncodingKey::from_secret(b"token-signing-secret"),
+        )
+        .unwrap();
+        assert_eq!(
+            token_exchange(
+                &oauth,
+                &HeaderMap::new(),
+                form(&expired, "chatgpt-client-test"),
+                base
+            )
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            token_exchange(
+                &oauth,
+                &HeaderMap::new(),
+                form(&refresh, "chatgpt-client-test"),
+                "https://other.example"
+            )
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
         // A token signed with another secret is rejected.
         let foreign = create_refresh_token(base, "chatgpt-client-test", "other-secret").unwrap();
-        let foreign = token_exchange(&oauth, &HeaderMap::new(), form(&foreign, "chatgpt-client-test"), base);
+        let foreign = token_exchange(
+            &oauth,
+            &HeaderMap::new(),
+            form(&foreign, "chatgpt-client-test"),
+            base,
+        );
         assert_eq!(foreign.status(), StatusCode::BAD_REQUEST);
     }
 
@@ -980,19 +1185,36 @@ mod tests {
 
     #[test]
     fn authorization_password_is_reusable_and_tokens_survive_runtime_restart() {
-        let create = || OAuthRuntime::try_new(
-            "https://lb.example.com".into(), "chatgpt-client-test".into(), None,
-            Some("test-password".into()), Some("token-signing-secret".into()),
-        ).unwrap();
+        let create = || {
+            OAuthRuntime::try_new(
+                "https://lb.example.com".into(),
+                "chatgpt-client-test".into(),
+                None,
+                Some("test-password".into()),
+                Some("token-signing-secret".into()),
+            )
+            .unwrap()
+        };
         let oauth = create();
         for state in ["first", "retry", "reconnect"] {
-            let response = authorize_post(&oauth, authorize_form("test-password", state), "https://lb.example.com");
+            let response = authorize_post(
+                &oauth,
+                authorize_form("test-password", state),
+                "https://lb.example.com",
+            );
             assert_eq!(response.status(), StatusCode::SEE_OTHER);
         }
         assert_eq!(*oauth.password.lock().unwrap(), "test-password");
-        let pair = token_json(issue_token_pair(&oauth, "https://lb.example.com", "chatgpt-client-test"));
+        let pair = token_json(issue_token_pair(
+            &oauth,
+            "https://lb.example.com",
+            "chatgpt-client-test",
+        ));
         assert_eq!(pair["expires_in"], OAUTH_TOKEN_TTL_SECONDS);
-        assert!(create().verify_access_token(pair["access_token"].as_str().unwrap(), "https://lb.example.com"));
+        assert!(create().verify_access_token(
+            pair["access_token"].as_str().unwrap(),
+            "https://lb.example.com"
+        ));
     }
 
     #[test]

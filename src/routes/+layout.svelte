@@ -2,7 +2,7 @@
   import "../app.css";
   import BrowserLogin from "$lib/components/BrowserLogin.svelte";
   import { browserAuthenticated, browserLogout } from "$lib/backend/browser-session";
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import { goto, afterNavigate } from "$app/navigation";
   import { resetActivityPanel } from "$lib/stores/activity-panel";
   import { page } from "$app/stores";
@@ -20,13 +20,14 @@
   import WorkspaceNavItem from "$lib/components/WorkspaceNavItem.svelte";
   import {
     createWorkspace,
+    getMcpConnection,
     getActionsRuntimeStatus,
     getRuntimeStatus,
     listWorkspaces,
   } from "$lib/api/workspaces";
   import { getLastWorkspaceId } from "$lib/api/settings";
   import { startupSetupTarget } from "$lib/quick-setup/startup";
-  import { actionsRuntimeStates, mcpRuntimeStates, workspaces } from "$lib/stores/app";
+  import { actionsRuntimeStates, mcpRuntimeStates, workspaces, mcpConnection } from "$lib/stores/app";
   import { showToast } from "$lib/stores/toast";
   import { t } from "$lib/i18n";
   import { connectionActions, uiMode } from "$lib/stores/ui-mode";
@@ -47,6 +48,10 @@
   const capabilities = getBackend().capabilities;
   const desktopWindow = isDesktopWindow();
   const remoteDesktop = capabilities.host === "desktop" && !desktopWindow;
+  let setupPrompt=$state(false);
+  function showSetupPrompt(node:HTMLDialogElement){node.showModal();return{destroy:()=>node.close()};}
+  let stopSessionPolling:(()=>void)|undefined;
+  onDestroy(()=>stopSessionPolling?.());
   let addWorkspacePickerOpen = $state(false);
   let workspaceFilter = $state("");
   const WORKSPACE_FILTER_THRESHOLD = 6;
@@ -60,46 +65,25 @@
     const items = await listWorkspaces();
     workspaces.set(items);
 
-    const mcpStates: Record<string, RuntimeState> = {};
-    const discoveredStates: Partial<Record<string, RuntimeState>> = {};
-    const actionsStates: Record<string, RuntimeState> = {};
-    await Promise.all(
-      items.map(async (item) => {
-        try {
-          const mcp = await getRuntimeStatus(item.id);
-          mcpStates[item.id] = mcp.state;
-          discoveredStates[item.id] = mcp.state;
-        } catch {
-          mcpStates[item.id] = "stopped";
-        }
-        if (!capabilities.actions) {
-          actionsStates[item.id] = "stopped";
-          return;
-        }
-        try {
-          const actions = await getActionsRuntimeStatus(item.id);
-          actionsStates[item.id] = actions.state;
-        } catch {
-          actionsStates[item.id] = "stopped";
-        }
-      }),
-    );
-    mcpRuntimeStates.set(mcpStates);
+    const connection=await getMcpConnection();
+    const runtime=await getRuntimeStatus(connection.id);
+    mcpRuntimeStates.set(Object.fromEntries([connection,...items].map(item=>[item.id,runtime.state])));
+    const actionsStates:Record<string,RuntimeState>={};
+    if(capabilities.actions)await Promise.all(items.map(async item=>{try{actionsStates[item.id]=(await getActionsRuntimeStatus(item.id)).state;}catch{actionsStates[item.id]='error';}}));
     actionsRuntimeStates.set(actionsStates);
-    return { items, discoveredStates };
+    return {items,connectionState:runtime.state,connectionConfigured:Boolean(connection.tunnel.public_url?.trim())};
   }
 
   async function initializeWorkspaceNavigation() {
     const initialUrl = $page.url.href;
     try {
-      const { items, discoveredStates } = await refreshWorkspaces();
-      if (capabilities.runtimeSupervisor) startSessionPolling();
+      const { items, connectionState, connectionConfigured } = await refreshWorkspaces();
+      if (capabilities.runtimeSupervisor && !stopSessionPolling) stopSessionPolling=startSessionPolling();
       if (!capabilities.guidedSetup) return;
-      const lastId = await getLastWorkspaceId().catch(() => null);
       // A slow status request must not override navigation the user already made.
       if ($page.url.href !== initialUrl) return;
-      const target = startupSetupTarget(routePath($page.url.pathname), items.map(item => item.id), discoveredStates, lastId);
-      if (target) await goto(appUrl(target), { replaceState: true });
+      const path=routePath($page.url.pathname);
+      if(items.length===0 && (!connectionConfigured||connectionState==='stopped'||connectionState==='error') && (path==='/'||path.startsWith('/workspace/')))setupPrompt=true;
     } catch (error) {
       showToast(String(error), { kind: "error" });
     }
@@ -107,14 +91,8 @@
 
   async function finishAddWorkspace(selected: string) {
     const profile = await createWorkspace(selected);
-    if (capabilities.agentRestart) {
-      showToast($t("Workspace added. Restart the Agent to start its MCP listener."), { kind: "success" });
-      await getBackend().agent.restart();
-      window.setTimeout(() => window.location.reload(), 2500);
-      return;
-    }
     await refreshWorkspaces();
-    const autostart = $uiMode === "auto" && capabilities.runtimeSupervisor ? "?autostart=1" : "";
+    const autostart = "";
     goto(appUrl(`/workspace/${profile.id}${autostart}`));
   }
 
@@ -141,12 +119,8 @@
   }
 
   function openQuickSetup() {
-    const currentPath = routePath($page.url.pathname);
-    const workspaceMatch = currentPath.match(/^\/workspace\/([^/]+)$/);
-    const target = workspaceMatch
-      ? `/quick-setup?workspace=${encodeURIComponent(workspaceMatch[1]!)}`
-      : "/quick-setup";
-    goto(appUrl(target));
+    setupPrompt=false;
+    void goto(appUrl('/quick-setup'));
   }
 
   function openFrpSettings() {
@@ -193,6 +167,7 @@
 {#if remoteDesktop && !$browserAuthenticated}
   <BrowserLogin onLogin={initializeWorkspaceNavigation}/>
 {:else}
+{#if setupPrompt}<dialog use:showSetupPrompt class="setup-prompt" aria-labelledby="setup-prompt-title" oncancel={()=>setupPrompt=false}><div class="tx-card p-8"><h2 id="setup-prompt-title" class="text-xl font-semibold">{$t('connection.firstTitle')}</h2><p class="mt-3 text-sm text-[var(--color-text-secondary)]">{$t('connection.firstHelp')}</p><div class="mt-6 flex justify-end gap-3"><button class="tx-btn-ghost" onclick={()=>setupPrompt=false}>{$t('connection.later')}</button><button class="tx-btn-primary" onclick={openQuickSetup}>{$t('connection.begin')}</button></div></div></dialog>{/if}
 <div class="win-root" class:is-desktop={desktopWindow}>
   <div class="win-body">
     <SimpleShell onQuickSetup={capabilities.guidedSetup ? openQuickSetup : undefined} onAddWorkspace={capabilities.workspaceLifecycle ? addWorkspace : undefined}>
@@ -283,3 +258,5 @@
 <ToastHost />
 
 {/if}
+
+<style>.setup-prompt{position:fixed;margin:auto;width:min(480px,calc(100vw - 40px));padding:0;border:0;border-radius:16px;background:transparent;color:var(--color-text)}.setup-prompt::backdrop{background:#0007}</style>

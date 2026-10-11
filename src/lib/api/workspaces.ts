@@ -1,3 +1,4 @@
+import { mcpConnection } from "$lib/stores/app";
 import { workspaceBlocked, assertWorkspaceAvailable } from "$lib/stores/workspace-lifecycle";
 import { getBackend } from "$lib/backend";
 import type { RuntimeStatus, SandboxBackendDescriptor, WorkspaceProfile } from "$lib/types";
@@ -22,7 +23,8 @@ export async function listSandboxBackends(): Promise<SandboxBackendDescriptor[]>
 }
 
 export async function updateWorkspace(profile: WorkspaceProfile): Promise<void> {
-  return getBackend().workspaces.update(profile);
+  await getBackend().workspaces.update(profile);
+  if(profile.id===GLOBAL_MCP_ID)await getMcpConnection();
 }
 
 export async function addWorkspaceFolder(
@@ -68,7 +70,7 @@ export async function stopRuntime(id: string): Promise<RuntimeStatus> {
 
 export async function getRuntimeStatus(id: string): Promise<RuntimeStatus> {
   assertWorkspaceAvailable(id);
-  return getBackend().workspaces.getRuntimeStatus(id);
+  return getBackend().workspaces.getRuntimeStatus(GLOBAL_MCP_ID);
 }
 
 export async function startActionsRuntime(id: string): Promise<RuntimeStatus> {
@@ -82,7 +84,7 @@ export async function stopActionsRuntime(id: string): Promise<RuntimeStatus> {
 
 export async function getActionsRuntimeStatus(id: string): Promise<RuntimeStatus> {
   assertWorkspaceAvailable(id);
-  return getBackend().workspaces.getActionsRuntimeStatus(id);
+  return getBackend().workspaces.getActionsRuntimeStatus(GLOBAL_MCP_ID);
 }
 
 export async function restartRuntime(id: string): Promise<RuntimeStatus> {
@@ -93,4 +95,11 @@ export async function restartRuntime(id: string): Promise<RuntimeStatus> {
 export async function restartActionsRuntime(id: string): Promise<RuntimeStatus> {
   assertWorkspaceAvailable(id);
   return getBackend().workspaces.restartActionsRuntime(id);
+}
+
+export const GLOBAL_MCP_ID = '00000000000000000000000000000001';
+export async function getMcpConnection(): Promise<WorkspaceProfile> {
+  const profile = await getBackend().workspaces.getConnection();
+  mcpConnection.set(profile);
+  return profile;
 }

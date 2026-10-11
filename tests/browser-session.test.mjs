@@ -100,3 +100,16 @@ test('login changes and expired browser sessions clear cached chat content',asyn
   assert.equal(chatSessionReader.snapshots.get('scope'),null);
  }finally{s.forgetBrowserSession();globalThis.fetch=oldFetch}
 });
+
+test('remembered login persists only the token and opting out or logging out clears persistent state',async()=>{
+ const oldFetch=globalThis.fetch,oldLocal=globalThis.localStorage,oldSession=globalThis.sessionStorage;
+ const local=new Map(),session=new Map();const storage=map=>({getItem:key=>map.get(key)??null,setItem:(key,v)=>map.set(key,v),removeItem:key=>map.delete(key)});
+ globalThis.localStorage=storage(local);globalThis.sessionStorage=storage(session);
+ const s=await import('../src/lib/backend/browser-session.ts');s.forgetBrowserSession();
+ try{
+  globalThis.fetch=async(url,init)=>{if(url==='/browser/login'){assert.equal(JSON.parse(init.body).remember,true);return Response.json({token:'remember-token'})}return Response.json({ok:true})};
+  await s.browserLogin('synthetic-password',true);assert.equal(local.get('ctmcp-browser-session'),'remember-token');assert.equal([...local.values()].includes('synthetic-password'),false);
+  globalThis.fetch=async()=>Response.json({token:'temporary-token'});await s.browserLogin('synthetic-password',false);assert.equal(local.size,0);assert.equal(session.get('ctmcp-browser-session'),'temporary-token');
+  globalThis.fetch=async()=>Response.json({token:'new-token'});await s.browserLogin('synthetic-password',true);await s.browserLogout();assert.equal(local.size,0);assert.equal(session.size,0);
+ }finally{s.forgetBrowserSession();globalThis.fetch=oldFetch;globalThis.localStorage=oldLocal;globalThis.sessionStorage=oldSession;}
+});

@@ -61,6 +61,8 @@ export function createTauriBackend(deps: TauriBackendDeps): FrontendBackend {
     native: createNative(deps.dialog, deps.invoke),
 
     workspaces: {
+      getConnection: () => invoke("get_mcp_connection"),
+      getConnectionHealth: () => invoke("get_mcp_connection_health"),
       list: () => invoke("list_workspaces"),
       create: (path, name) => invoke("create_workspace", { path, name }),
       listWslDistributions: () => invoke("list_wsl_distributions"),

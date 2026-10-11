@@ -3,11 +3,11 @@ import { get, writable } from "svelte/store";
 import { installSoftware, listSoftware } from "$lib/api/software";
 import { getWorkspaceSecret } from "$lib/api/secrets";
 import { startTunnel } from "$lib/api/tunnel";
-import { getRuntimeStatus, listWorkspaces, startRuntime, stopRuntime, updateWorkspace } from "$lib/api/workspaces";
+import { getMcpConnection, GLOBAL_MCP_ID, getRuntimeStatus, listWorkspaces, startRuntime, stopRuntime, updateWorkspace } from "$lib/api/workspaces";
 import { getBackend } from "$lib/backend";
 import { t, type MessageKey } from "$lib/i18n";
 import { isPortConflictError, serviceErrorMessage } from "$lib/runtime/service";
-import { mcpRuntimeStates, workspaces } from "$lib/stores/app";
+import { mcpRuntimeStates, mcpConnection, workspaces } from "$lib/stores/app";
 import type { RuntimeStatus, WorkspaceProfile } from "$lib/types";
 
 /**
@@ -74,6 +74,7 @@ export function tunnelUsable(profile: WorkspaceProfile): boolean {
 }
 
 async function refreshWorkspaceList(id: string): Promise<WorkspaceProfile | null> {
+  if(id===GLOBAL_MCP_ID)return getMcpConnection();
   const items = await listWorkspaces();
   workspaces.set(items);
   return items.find((item) => item.id === id) ?? null;
@@ -164,7 +165,7 @@ export async function turnOn(id: string): Promise<void> {
   if (workspaceBlocked(id) || sessionOf(get(sessions), id).working) return;
   patch(id, { working: true, phase: "Preparing the tunnel…", error: "" });
   try {
-    const profile = get(workspaces).find((item) => item.id === id) ?? (await refreshWorkspaceList(id));
+    const profile = id===GLOBAL_MCP_ID ? await getMcpConnection() : get(workspaces).find((item) => item.id === id) ?? (await refreshWorkspaceList(id));
     if (!profile) throw new Error("workspace not found");
     const prepared = await ensureTunnelReady(profile, (phase) => patch(id, { phase }));
 
@@ -229,7 +230,7 @@ export function startSessionPolling(intervalMs = 5000): () => void {
   const tick = () => {
     if (typeof document !== "undefined" && document.hidden) return;
     const all = get(sessions);
-    for (const item of get(workspaces)) {
+    for (const item of [get(mcpConnection)].filter((p):p is WorkspaceProfile=>Boolean(p))) {
       if (!sessionOf(all, item.id).working) void refreshSession(item.id);
     }
   };

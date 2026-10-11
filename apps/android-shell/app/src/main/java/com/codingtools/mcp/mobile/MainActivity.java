@@ -48,6 +48,7 @@ public final class MainActivity extends Activity {
     private WebView web;
     private ProfileStore store;
     private ValueCallback<Uri[]> fileCallback;
+    private DownloadBridge downloads;
     private int generation;
     private boolean busy;
     private long lastRenewal;
@@ -135,11 +136,13 @@ public final class MainActivity extends Activity {
         settings.setVisibility(View.VISIBLE);
         network.execute(() -> {
             try {
-                String token = NativeLogin.login(profile);
+                String cached = "";
+                try { cached = store.session(profile); } catch (Exception ignored) { /* Login repairs inaccessible old storage. */ }
+                String token = NativeLogin.resume(profile, cached, savePassword);
                 runOnUiThread(() -> {
                     if (isDestroyed() || request != generation) return;
                     busy = false; connect.setEnabled(true);
-                    try { store.save(profile, savePassword); }
+                    try { store.save(profile, savePassword, token); }
                     catch (Exception ignored) { Toast.makeText(this, "已连接，但无法保存口令；下次需重新输入。", Toast.LENGTH_LONG).show(); }
                     openPage(profile, token, request);
                 });
@@ -152,7 +155,7 @@ public final class MainActivity extends Activity {
             }
         });
     }
-    // The selected workbench is a JavaScript app; no JavaScript/native bridge is exposed.
+    // Only the selected origin's main frame receives the bounded file-save bridge.
     @SuppressLint("SetJavaScriptEnabled")
     private void openPage(ConnectionProfile profile, String token, int request) {
         destroyWeb();
@@ -162,10 +165,25 @@ public final class MainActivity extends Activity {
         options.setAllowFileAccess(false); options.setAllowContentAccess(true);
         options.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
         options.setSupportZoom(true); options.setBuiltInZoomControls(true); options.setDisplayZoomControls(false);
+        options.setUseWideViewPort(true); options.setLoadWithOverviewMode(false);
         options.setUserAgentString(options.getUserAgentString() + " CodingToolsMobile/0.1.0");
         CookieManager.getInstance().setAcceptThirdPartyCookies(page, false);
+        downloads = new DownloadBridge(this);
+        if (!downloads.attach(page, profile)) Toast.makeText(this, "请更新 Android System WebView 以启用文件保存。", Toast.LENGTH_LONG).show();
         page.setWebViewClient(new WebViewClient() {
             private String pendingToken = token;
+            private volatile boolean loggedOut;
+            @Override public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest resource) {
+                if (profile.sameOrigin(resource.getUrl().toString()) && "POST".equals(resource.getMethod())
+                        && "/browser/logout".equals(resource.getUrl().getPath())) {
+                    loggedOut = true;
+                    try { store.forgetCredentials(profile); } catch (Exception ignored) {
+                        runOnUiThread(() -> Toast.makeText(MainActivity.this, "无法清除保存的登录，请在连接页清除已保存连接。", Toast.LENGTH_LONG).show());
+                    }
+                    runOnUiThread(() -> { password.setText(""); remember.setChecked(false); });
+                }
+                return null;
+            }
             @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest navigation) {
                 String url = navigation.getUrl().toString();
                 if (profile.sameOrigin(url)) return false;
@@ -199,7 +217,7 @@ public final class MainActivity extends Activity {
             @Override public void onReceivedHttpError(WebView view, WebResourceRequest resource, WebResourceResponse response) {
                 if (request != generation || !profile.sameOrigin(resource.getUrl().toString())) return;
                 if (response.getStatusCode() == 401 && "/browser/invoke".equals(resource.getUrl().getPath())
-                        && !busy && android.os.SystemClock.elapsedRealtime() - lastRenewal > 30000) {
+                        && !loggedOut && !busy && (lastRenewal == 0 || android.os.SystemClock.elapsedRealtime() - lastRenewal > 30000)) {
                     lastRenewal = android.os.SystemClock.elapsedRealtime();
                     connect(profile, remember.isChecked());
                 } else if (resource.isForMainFrame() && response.getStatusCode() >= 400) {
@@ -223,6 +241,7 @@ public final class MainActivity extends Activity {
     }
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        if (request == DownloadBridge.SAVE_REQUEST && downloads != null) { downloads.result(result, data); return; }
         if (request == 41 && fileCallback != null) {
             Uri[] files = null;
             if (result == RESULT_OK && data != null) {
@@ -238,6 +257,7 @@ public final class MainActivity extends Activity {
         generation++; busy = false; connect.setEnabled(true); destroyWeb(); settings.setVisibility(View.VISIBLE);
     }
     private void destroyWeb() {
+        if (downloads != null) { downloads.close(); downloads = null; }
         if (fileCallback != null) { fileCallback.onReceiveValue(null); fileCallback = null; }
         if (web != null) { root.removeView(web); web.stopLoading(); web.destroy(); web = null; }
     }

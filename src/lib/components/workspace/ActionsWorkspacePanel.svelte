@@ -1,4 +1,7 @@
 <script lang="ts">
+  import {goto} from "$app/navigation";
+  import {appUrl} from "$lib/app-path";
+  import {GLOBAL_MCP_ID} from "$lib/api/workspaces";
   import ActionsAuthForm from "$lib/components/ActionsAuthForm.svelte";
   import ActionsPolicyForm, { type ActionsPolicyDraft } from "$lib/components/ActionsPolicyForm.svelte";
   import GptQuickCopy from "$lib/components/GptQuickCopy.svelte";
@@ -69,7 +72,6 @@
     { value: "service", label: $t("Service") },
     { value: "tunnel", label: $t("Tunnel") },
     { value: "auth", label: $t("Authentication") },
-    { value: "policy", label: $t("Policy") },
     { value: "logs", label: $t("Logs") },
     { value: "health", label: $t("Health") },
   ]);
@@ -101,7 +103,9 @@
   aria-labelledby={`actions-tabs-tab-${section}`}
   tabindex="0"
 >
-  {#if section === "service"}
+  {#if workspaceId!==GLOBAL_MCP_ID}
+    <section class="tx-card p-5"><p>{$t('connection.projectActions')}</p><button class="tx-btn-primary mt-4" onclick={()=>void goto(appUrl('/connection?service=actions'))}>{$t('connection.globalSettings')}</button></section>
+  {:else if section === "service"}
     <div class="flex flex-col gap-3">
       <ServicePanel
         title="Actions"

@@ -1,3 +1,4 @@
+import {enforceProjectContext,projectToolAllowed} from './projectIsolation.js';
 import {beginChatOperation,bindChatOperations} from './chat/operations.js';
 import { createHash } from 'node:crypto';
 import type { JsonObject, ToolContext } from './types.js';
@@ -532,6 +533,9 @@ export async function callTool(
   processLifecycle?: ProcessRequestLifecycle,
   bindingOverride?: ToolBindingOverride
 ): Promise<JsonObject> {
+  if(ctx.runtimeClosed&&ctx.projectIsolation)return normalizeToolResult(fail('PROJECT_STOPPED','Project runtime has stopped.','permission',false));
+  if(ctx.projectIsolation&&!projectToolAllowed(name))return normalizeToolResult(fail('PROJECT_ISOLATION_REQUIRED',"Use exec_command inside the project's OS sandbox for this operation.",'permission',false));
+  enforceProjectContext(ctx);
   const key = ctx.conversations.identity(meta).key;
   const cleanArgs = { ...args };
   const parsedRecovery = takeRecoveryContext(cleanArgs);

@@ -9,20 +9,44 @@ use axum::{
 };
 use serde_json::{json, Value};
 use std::sync::{Mutex, OnceLock};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tauri::Manager;
 static APP: OnceLock<tauri::AppHandle> = OnceLock::new();
 static ACCESS: OnceLock<Mutex<Access>> = OnceLock::new();
 fn access() -> &'static Mutex<Access> {
     ACCESS.get_or_init(|| Mutex::new(Access::default()))
 }
+fn wall_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+fn persist_sessions(gate: &Access) -> Result<(), String> {
+    let app = APP.get().ok_or("Desktop unavailable")?;
+    let mut config = saved_settings()?;
+    config["sessions"] = serde_json::to_value(gate.saved_sessions(Instant::now(), wall_seconds()))
+        .map_err(|_| "Unable to save sessions")?;
+    app.state::<crate::AppState>()
+        .with_data(|store| {
+            store.set_app_secret_preserving_on_error(
+                "browser-sharing",
+                "settings",
+                &config.to_string(),
+            )
+        })
+        .map_err(|_| "Unable to save remembered sessions".into())
+}
 fn saved_settings() -> Result<Value, String> {
     let app = APP.get().ok_or("Desktop unavailable")?;
-    app.state::<crate::AppState>().with_data(|store| {
-        let saved = store.get_app_secret("browser-sharing", "settings");
-        saved.map(|raw| serde_json::from_str(&raw).map_err(crate::error::AppError::from))
-            .unwrap_or_else(|| Ok(json!({"enabled":false,"origins":[]})))
-    }).map_err(|_| "Unable to load saved browser sharing settings".into())
+    app.state::<crate::AppState>()
+        .with_data(|store| {
+            let saved = store.get_app_secret("browser-sharing", "settings");
+            saved
+                .map(|raw| serde_json::from_str(&raw).map_err(crate::error::AppError::from))
+                .unwrap_or_else(|| Ok(json!({"enabled":false,"origins":[]})))
+        })
+        .map_err(|_| "Unable to load saved browser sharing settings".into())
 }
 pub fn init(app: tauri::AppHandle) {
     let _ = APP.set(app);
@@ -30,7 +54,16 @@ pub fn init(app: tauri::AppHandle) {
         if saved["enabled"] == true {
             let origins = serde_json::from_value(saved["origins"].clone()).unwrap_or_default();
             if let Ok(mut gate) = access().lock() {
-                let _ = gate.configure_password(origins, saved["password"].as_str().unwrap_or("").into());
+                if gate
+                    .configure_password(origins, saved["password"].as_str().unwrap_or("").into())
+                    .is_ok()
+                {
+                    gate.restore_sessions(
+                        serde_json::from_value(saved["sessions"].clone()).unwrap_or_default(),
+                        Instant::now(),
+                        wall_seconds(),
+                    );
+                }
             }
         }
     }
@@ -40,29 +73,71 @@ pub fn init(app: tauri::AppHandle) {
 pub fn browser_sharing_status() -> Result<Value, String> {
     let gate = access().lock().map_err(|_| "Sharing lock unavailable")?;
     let saved = saved_settings()?;
-    let lan_ip = std::net::UdpSocket::bind("0.0.0.0:0").ok().and_then(|socket| {
-        socket.connect("192.0.2.1:80").ok()?;
-        Some(socket.local_addr().ok()?.ip().to_string())
-    });
-    Ok(json!({"enabled":gate.enabled(),"origins":gate.origins(),"lanIp":lan_ip,
-        "password":gate.local_password().map(String::from).or_else(||saved["password"].as_str().map(String::from))}))
+    let lan_ip = std::net::UdpSocket::bind("0.0.0.0:0")
+        .ok()
+        .and_then(|socket| {
+            socket.connect("192.0.2.1:80").ok()?;
+            Some(socket.local_addr().ok()?.ip().to_string())
+        });
+    Ok(
+        json!({"enabled":gate.enabled(),"origins":gate.origins(),"lanIp":lan_ip,
+        "password":gate.local_password().map(String::from).or_else(||saved["password"].as_str().map(String::from))}),
+    )
 }
 #[tauri::command]
-pub fn configure_browser_sharing(enabled: bool, origins: Vec<String>, password: Option<String>, rotate: Option<bool>) -> Result<Value, String> {
+pub fn configure_browser_sharing(
+    enabled: bool,
+    origins: Vec<String>,
+    password: Option<String>,
+    rotate: Option<bool>,
+) -> Result<Value, String> {
     {
         let mut gate = access().lock().map_err(|_| "Sharing lock unavailable")?;
         let saved = saved_settings()?;
-        let secret = password.or_else(|| if rotate == Some(true) {None} else {saved["password"].as_str().map(String::from)})
-            .unwrap_or_else(||format!("{}{}",uuid::Uuid::new_v4().simple(),uuid::Uuid::new_v4().simple()));
+        let secret = password
+            .or_else(|| {
+                if rotate == Some(true) {
+                    None
+                } else {
+                    saved["password"].as_str().map(String::from)
+                }
+            })
+            .unwrap_or_else(|| {
+                format!(
+                    "{}{}",
+                    uuid::Uuid::new_v4().simple(),
+                    uuid::Uuid::new_v4().simple()
+                )
+            });
         // Validate before saving; storage failure leaves the live gate unchanged.
         let mut candidate = Access::default();
-        if enabled { candidate.configure_password(origins.clone(), secret.clone())?; }
-        else if secret.trim().is_empty() || secret.len()<8 || secret.len()>256 {return Err("Sharing password must contain 8–256 bytes".into());}
-        let config=json!({"enabled":enabled,"origins":if enabled {origins}else{vec![]},"password":secret});
-        APP.get().ok_or("Desktop unavailable")?.state::<crate::AppState>().with_data(|store| {
-            store.set_app_secret_preserving_on_error("browser-sharing","settings",&config.to_string())
-        }).map_err(|_| "Unable to save browser sharing settings; previous settings remain active")?;
-        *gate=candidate;
+        if enabled {
+            candidate.configure_password(origins.clone(), secret.clone())?;
+        } else if secret.trim().is_empty() || secret.len() < 8 || secret.len() > 256 {
+            return Err("Sharing password must contain 8–256 bytes".into());
+        }
+        if enabled && rotate != Some(true) && gate.local_password() == Some(secret.as_str()) {
+            candidate.restore_sessions(
+                gate.saved_sessions(Instant::now(), wall_seconds()),
+                Instant::now(),
+                wall_seconds(),
+            );
+        }
+        let config = json!({"enabled":enabled,"origins":if enabled {origins}else{vec![]},"password":secret,"sessions":candidate.saved_sessions(Instant::now(),wall_seconds())});
+        APP.get()
+            .ok_or("Desktop unavailable")?
+            .state::<crate::AppState>()
+            .with_data(|store| {
+                store.set_app_secret_preserving_on_error(
+                    "browser-sharing",
+                    "settings",
+                    &config.to_string(),
+                )
+            })
+            .map_err(|_| {
+                "Unable to save browser sharing settings; previous settings remain active"
+            })?;
+        *gate = candidate;
     }
     browser_sharing_status()
 }
@@ -100,12 +175,26 @@ async fn login(headers: HeaderMap, Json(body): Json<Value>) -> Response {
             json!({"error":"Sharing is disabled or host is not configured"}),
         );
     }
-    match gate.login(
+    let remember = body["remember"].as_bool().unwrap_or(false);
+    match gate.login_remembered(
         field(&headers, "origin"),
         body["password"].as_str().unwrap_or(""),
         Instant::now(),
+        remember,
     ) {
-        Ok(token) => reply(StatusCode::OK, json!({"token":token,"expiresIn":43200})),
+        Ok(token) => {
+            if remember && persist_sessions(&gate).is_err() {
+                gate.logout(&token);
+                return reply(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    json!({"error":"Unable to remember this device; retry login"}),
+                );
+            }
+            reply(
+                StatusCode::OK,
+                json!({"token":token,"expiresIn":if remember {super::access::REMEMBER_SECONDS}else{43200}}),
+            )
+        }
         Err(error) => reply(StatusCode::UNAUTHORIZED, json!({"error":error})),
     }
 }
@@ -140,7 +229,15 @@ async fn invoke(headers: HeaderMap, Json(body): Json<Value>) -> Response {
 }
 async fn logout(headers: HeaderMap) -> Response {
     if let Ok(mut gate) = access().lock() {
+        let previous = gate.clone();
         gate.logout(token(&headers));
+        if APP.get().is_some() && persist_sessions(&gate).is_err() {
+            *gate = previous;
+            return reply(
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!({"error":"Unable to revoke saved session; retry logout"}),
+            );
+        }
     }
     reply(StatusCode::OK, json!({"ok":true}))
 }
@@ -161,8 +258,12 @@ async fn asset(headers: HeaderMap, uri: Uri) -> Response {
     // Tauri's resolver silently falls back to index.html for absent assets.
     // Cache names once to avoid walking/decompressing the embedded bundle per request.
     static ASSET_NAMES: OnceLock<std::collections::HashSet<String>> = OnceLock::new();
-    let names = ASSET_NAMES.get_or_init(|| app.asset_resolver().iter()
-        .map(|(name, _)| name.trim_start_matches('/').to_string()).collect());
+    let names = ASSET_NAMES.get_or_init(|| {
+        app.asset_resolver()
+            .iter()
+            .map(|(name, _)| name.trim_start_matches('/').to_string())
+            .collect()
+    });
     if !names.contains(resolved) {
         return (StatusCode::NOT_FOUND, [("Cache-Control", "no-store")]).into_response();
     }
@@ -204,6 +305,24 @@ fn value<T: serde::Serialize>(result: crate::error::AppResult<T>) -> Result<Valu
 async fn dispatch(app: tauri::AppHandle, body: Value) -> Result<Value, String> {
     let args = &body["args"];
     match body["command"].as_str().unwrap_or("") {
+        "browse_host_directory" => {
+            let workspace_id: Option<String> = arg(args, "workspaceId")?;
+            let boundary = workspace_id
+                .map(|id| {
+                    app.state::<crate::AppState>().with_workspaces(|store| {
+                        store
+                            .get(&id)
+                            .map(|profile| std::path::PathBuf::from(&profile.path))
+                            .ok_or_else(|| {
+                                crate::error::AppError::Message("Workspace not found".into())
+                            })
+                    })
+                })
+                .transpose()
+                .map_err(|e| e.to_string())?;
+            let path: Option<String> = arg(args, "path")?;
+            super::directories::browse(path.as_deref(), boundary.as_deref())
+        }
         "read_workspace_activity" => value(crate::commands::read_workspace_activity(
             app.state::<crate::app_state::AppState>(),
             arg(args, "id")?,
@@ -403,6 +522,13 @@ async fn dispatch(app: tauri::AppHandle, body: Value) -> Result<Value, String> {
             )
             .await,
         ),
+        "get_mcp_connection_health" => value(
+            crate::commands::get_mcp_connection_health(app.state::<crate::app_state::AppState>())
+                .await,
+        ),
+        "get_mcp_connection" => value(crate::commands::get_mcp_connection(
+            app.state::<crate::app_state::AppState>(),
+        )),
         "list_workspaces" => value(crate::commands::list_workspaces(
             app.state::<crate::app_state::AppState>(),
         )),
@@ -441,7 +567,8 @@ async fn dispatch(app: tauri::AppHandle, body: Value) -> Result<Value, String> {
             crate::commands::delete_workspace(
                 app.state::<crate::app_state::AppState>(),
                 arg(args, "id")?,
-            ).await,
+            )
+            .await,
         ),
         "get_workspace_skills" => value(crate::commands::get_workspace_skills(
             app.state::<crate::app_state::AppState>(),

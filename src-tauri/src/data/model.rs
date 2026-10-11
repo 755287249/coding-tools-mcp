@@ -10,6 +10,15 @@ use crate::workspace::WorkspaceProfile;
 /// Unified on-disk payload stored in `data/profiles.json`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppData {
+    /// Global MCP transport; it grants no directory access on its own.
+    #[serde(default)]
+    pub mcp_connection: Option<WorkspaceProfile>,
+    #[serde(default)]
+    pub connection_migration_pending: bool,
+    #[serde(default)]
+    pub connection_project_origins: HashMap<String, String>,
+    #[serde(default)]
+    pub connection_feature_snapshots: HashMap<String, Value>,
     #[serde(default)]
     pub frp_profiles: Vec<FrpProfile>,
     #[serde(default)]

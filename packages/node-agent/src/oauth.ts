@@ -435,17 +435,17 @@ export class OAuthRuntime {
     return this.#issueTokens((data.issuer || base).replace(/\/$/, ''), clientId);
   }
 
-  #issueTokens(issuer: string, clientId: string): TokenResponse {
+  #issueTokens(issuer: string, clientId: string, grant = randomBytes(24).toString('hex')): TokenResponse {
     const issuedAt = Math.floor(this.#now() / 1000);
     return {
       status: 200,
       body: {
-        access_token: signJwt({ iss: issuer, aud: `${issuer}/mcp`, iat: issuedAt, exp: issuedAt + this.tokenTtlSeconds, scope: 'mcp' }, this.tokenSecret),
+        access_token: signJwt({ iss: issuer, aud: `${issuer}/mcp`, iat: issuedAt, exp: issuedAt + this.tokenTtlSeconds, scope: 'mcp', gid: grant }, this.tokenSecret),
         token_type: 'Bearer',
         expires_in: this.tokenTtlSeconds,
         refresh_token: signJwt({
           iss: issuer, aud: `${issuer}/oauth/refresh`, iat: issuedAt, exp: issuedAt + OAUTH_REFRESH_TTL_SECONDS,
-          scope: 'mcp', typ: 'refresh', cid: clientId
+          scope: 'mcp', typ: 'refresh', cid: clientId, gid: grant
         }, this.tokenSecret),
         scope: 'mcp'
       }
@@ -466,7 +466,7 @@ export class OAuthRuntime {
     if (typeof payload.cid !== 'string' || !constantTimeEqual(payload.cid, clientId)) {
       return tokenError('invalid_grant', 'client_id mismatch');
     }
-    return this.#issueTokens(issuer, clientId);
+    return this.#issueTokens(issuer, clientId, typeof payload.gid==='string'?payload.gid:createHash('sha256').update(token).digest('hex'));
   }
 
   #verifyJwt(token: string): Record<string, unknown> | undefined {
@@ -480,6 +480,12 @@ export class OAuthRuntime {
       if (header.alg !== 'HS256' || typeof payload.exp !== 'number' || payload.exp < this.#now() / 1000) return undefined;
       return payload;
     } catch { return undefined; }
+  }
+
+  accessGrantId(headers: IncomingHttpHeaders, base: string): string | undefined {
+    if(!this.verifyBearer(headers,base))return;
+    const payload=this.#verifyJwt(String(headers.authorization).slice(7));
+    return typeof payload?.gid==='string' && /^[A-Za-z0-9_-]{1,80}$/.test(payload.gid)?payload.gid:undefined;
   }
 
   verifyBearer(headers: IncomingHttpHeaders, base: string): boolean {

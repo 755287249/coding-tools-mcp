@@ -317,7 +317,10 @@ fn ensure_folders(document: &CanonicalWorkspace) -> Result<(), String> {
             document.schema_version
         ));
     }
-    if document.folders.is_empty() {
+    if document.id == crate::data::GLOBAL_MCP_ID && !document.folders.is_empty() {
+        return Err("Global connection must not expose project folders".into());
+    }
+    if document.folders.is_empty() && document.id != crate::data::GLOBAL_MCP_ID {
         return Err("workspace document must contain at least one folder".into());
     }
     Ok(())
@@ -508,7 +511,9 @@ fn policy_to_map(policy: &SecurityPolicy) -> Map<String, Value> {
 }
 
 pub fn canonical_from_desktop_profile(profile: &WorkspaceProfile) -> CanonicalWorkspace {
-    let folders = if profile.folders.is_empty() {
+    let folders = if profile.id == crate::data::GLOBAL_MCP_ID {
+        vec![]
+    } else if profile.folders.is_empty() {
         vec![CanonicalFolder {
             id: "legacy".into(),
             name: profile.name.clone(),

@@ -79,7 +79,7 @@ let effectKind: Promise<GlassEffectKind> | null = null;
 
 function resolveEffectKind(): Promise<GlassEffectKind> {
   effectKind ??= Promise.resolve()
-    .then(() => desktopWindowApi.invoke<number | null>("get_windows_build"))
+    .then(() => desktopWindowApi?.invoke<number | null>("get_windows_build"))
     .then(effectForBuild)
     .catch(() => "solid" as const)
     .then((kind) => {
@@ -112,13 +112,14 @@ const backdropWanted = derived(
   ([enabled, opacity]) => enabled && clamp(opacity) < GLASS_MAX,
 );
 
-if (browser && isDesktopWindow()) {
+if (browser && isDesktopWindow() && desktopWindowApi) {
+  const nativeWindowApi = desktopWindowApi;
   let applied: boolean | null = null;
   backdropWanted.subscribe((wanted) => {
     document.documentElement.classList.toggle("backdrop-off", !wanted);
     if (wanted === applied) return;
     applied = wanted;
-    void Promise.all([Promise.resolve(desktopWindowApi), resolveEffectKind()])
+    void Promise.all([Promise.resolve(nativeWindowApi), resolveEffectKind()])
       .then(([{ getCurrentWindow, Effect }, kind]) => {
         // A newer toggle may have landed while the build lookup was pending.
         if (applied !== wanted) return;

@@ -259,6 +259,7 @@ export async function startProcess(
   args: JsonObject,
   signal?: AbortSignal
 ): Promise<StartedProcess> {
+  if(ctx.runtimeClosed)throw new Error('Project runtime has stopped');
   const runtime = currentFolderRuntime(ctx, key);
   pruneProcessSessions(runtime);
   const { folder, root, cwd: defaultCwd } = rootAndCwd(ctx, key);
@@ -510,6 +511,7 @@ export async function startProcess(
     let controlled;
     try {
       controlled = await processStartupController.start(() => {
+        if(ctx.runtimeClosed)throw new Error('Project runtime has stopped');
         const launched = spawn(launchProgram, launchArgs, {
           cwd: sandboxLaunch || wsl ? undefined : cwd,
           env: launchEnvironment,
@@ -553,6 +555,7 @@ export async function startProcess(
       throw startupToolError(error);
     }
     const child = controlled.child;
+    if(ctx.runtimeClosed){await terminateUntrackedChild(child);lockRelease?.();await sandboxLaunch?.cleanup();throw new Error('Project runtime has stopped');}
     const sandboxStartupMs = sandboxStartupStartedAt === undefined ? undefined : Date.now() - sandboxStartupStartedAt;
     const interactive = args.tty === true;
     const session: ProcessSession = {
@@ -796,7 +799,7 @@ export async function disposeProcessSessions(ctx: ToolContext): Promise<void> {
   const sessions = runtimes.flatMap(runtime => [...runtime.sessions.values()]);
   await Promise.all(sessions.map(async session => {
     if (session.finalizedAt) return;
-    if (session.durableDirectory) {
+    if (session.durableDirectory && !ctx.projectIsolation) {
       if (session.durableMonitor) clearInterval(session.durableMonitor);
       session.durableMonitor = undefined;
       await persistDurableSession(session);

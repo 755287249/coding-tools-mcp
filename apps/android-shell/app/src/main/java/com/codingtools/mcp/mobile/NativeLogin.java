@@ -9,7 +9,8 @@ import java.nio.charset.StandardCharsets;
 import org.json.JSONObject;
 
 final class NativeLogin {
-    static String login(ConnectionProfile profile) throws Exception {
+    static String login(ConnectionProfile profile) throws Exception { return login(profile, false); }
+    static String login(ConnectionProfile profile, boolean remember) throws Exception {
         if (profile.password.isEmpty()) throw new IOException("请输入分享口令");
         HttpURLConnection connection = (HttpURLConnection) URI.create(profile.origin + "/browser/login").toURL().openConnection();
         try {
@@ -20,7 +21,7 @@ final class NativeLogin {
             connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
             connection.setRequestProperty("Origin", profile.origin);
             connection.setRequestProperty("User-Agent", "Coding-Tools-Mobile/0.1.0");
-            byte[] body = new JSONObject().put("password", profile.password).toString().getBytes(StandardCharsets.UTF_8);
+            byte[] body = new JSONObject().put("password", profile.password).put("remember", remember).toString().getBytes(StandardCharsets.UTF_8);
             connection.setFixedLengthStreamingMode(body.length);
             try (var output = connection.getOutputStream()) { output.write(body); }
             int status = connection.getResponseCode();
@@ -42,6 +43,27 @@ final class NativeLogin {
             if (!token.matches("[A-Za-z0-9_-]{16,4096}")) throw new IOException("该地址未返回有效的手机端会话");
             return token;
         } finally { connection.disconnect(); }
+    }
+    static String resume(ConnectionProfile profile, String cached, boolean remember) throws Exception {
+        if (cached != null && cached.matches("[A-Za-z0-9_-]{16,4096}")) {
+            HttpURLConnection connection = (HttpURLConnection) URI.create(profile.origin + "/browser/invoke").toURL().openConnection();
+            try {
+                connection.setInstanceFollowRedirects(false);
+                connection.setConnectTimeout(15000); connection.setReadTimeout(15000);
+                connection.setRequestMethod("POST"); connection.setDoOutput(true);
+                connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+                connection.setRequestProperty("Origin", profile.origin);
+                connection.setRequestProperty("Authorization", "Bearer " + cached);
+                connection.setRequestProperty("User-Agent", "Coding-Tools-Mobile/0.1.0");
+                byte[] body = "{\"command\":\"list_workspaces\",\"args\":{}}".getBytes(StandardCharsets.UTF_8);
+                connection.setFixedLengthStreamingMode(body.length);
+                try (var output = connection.getOutputStream()) { output.write(body); }
+                int status = connection.getResponseCode();
+                if (status == 200) return cached;
+                if (status != 401 && status != 403) throw new IOException("恢复连接失败（HTTP " + status + "），请检查网络后重试");
+            } finally { connection.disconnect(); }
+        }
+        return login(profile, remember);
     }
     static String sessionScript(ConnectionProfile profile, String token) {
         return "(()=>{if(location.origin!==" + JSONObject.quote(profile.origin) + ")return false;"

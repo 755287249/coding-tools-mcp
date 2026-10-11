@@ -42,11 +42,24 @@ test('cross-folder forwarding preserves chunked bytes, remaps references and ded
  assert.equal(sent.text,`@${copied.label} ${copied.path} @文件10`);assert.deepEqual(Buffer.from(chatUi(b,{action:'read_attachment',chat_id:targetChat,upload_id:copied.id}).data_base64,'base64'),bytes);
  assert.equal(ids,2,'retries must reuse message and upload identities');
 });
-test('forwarding refuses changed content, invalid ranges and oversize messages before sending',async()=>{
+test('forwarding refuses changed content and invalid ranges before sending',async()=>{
  const message={text:'body',attachments:[{...file,size:1}]};
  for(const read of [{attachment:{...file,size:1},data_base64:'YQ==',next_offset:2},{attachment:{...file,size:1,sha256:'changed'},data_base64:'YQ==',next_offset:1}]){
   let writes=0;await assert.rejects(()=>forwardMessage(message,'a','b',async()=>read,async()=>{writes++;return {};},createMessageTransfer(()=> 'id'),()=> 'file'),/content changed/);assert.equal(writes,0);
  }
  let sent=false;await assert.rejects(()=>forwardMessage(message,'a','b',async()=>({attachment:{...file,size:1},data_base64:'YQ==',next_offset:1}),async args=>{if(args.action==='send')sent=true;return {next_offset:1,attachment:{...file,size:1,sha256:'wrong'}};},createMessageTransfer(()=> 'id'),()=> 'file'),/integrity/);assert.equal(sent,false);
- await assert.rejects(()=>forwardMessage({text:'中'.repeat(11000)},'a','b',async()=>assert.fail(),async()=>assert.fail(),createMessageTransfer(()=> 'id'),()=> 'file'),/32000/);
+
+});
+
+test('oversize complete reply is shared as one intact Markdown document and retry sends once',async t=>{
+ const root=mkdtempSync(path.join(tmpdir(),'reply-share-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
+ const targetChat=chatUi(root,{action:'create',title:'Target'}).session.id;
+ const text='中文😀'.repeat(110000)+'\nEND';let sequence=0,lose=true;const state=createMessageTransfer(()=>`reply-${++sequence}`);
+ const target=async args=>{const result=chatUi(root,args);if(args.action==='send'&&lose){lose=false;throw Error('lost response')}return result};
+ const run=()=>forwardMessage({text},'source',targetChat,async()=>assert.fail(),target,state,()=>`reply-${++sequence}`);
+ await assert.rejects(run,/lost response/);await run();
+ const messages=chatUi(root,{action:'read',chat_id:targetChat}).session.messages;assert.equal(messages.length,1);assert.equal(messages[0].attachments.length,1);
+ const file=messages[0].attachments[0];assert.equal(file.name,'reply.md');
+ const body=chatUi(root,{action:'read_attachment',chat_id:targetChat,upload_id:file.id});assert.equal(Buffer.from(body.data_base64,'base64').toString(),text);
+ assert.ok(Buffer.byteLength(messages[0].text)<32000);assert.equal(sequence,2);
 });

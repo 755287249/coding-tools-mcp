@@ -1,3 +1,4 @@
+import { GLOBAL_INSTRUCTIONS, type ProjectGateway } from '../projectGateway.js';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import type { AgentConfig, JsonObject, ToolContext } from '../../types.js';
 import type { OAuthRuntime } from '../../oauth.js';
@@ -84,6 +85,7 @@ function requestedSubscriptionNotifications(request: JsonObject): JsonObject | u
 }
 
 interface McpRouteOptions {
+  projectGateway?: ProjectGateway;
   base: string;
   catalog: ToolCatalogSnapshot;
   config: AgentConfig;
@@ -100,7 +102,8 @@ export async function handleMcpRoute(
   res: ServerResponse,
   options: McpRouteOptions
 ): Promise<boolean> {
-  const { base, catalog, config, context, oauth, pathname, server, startedAt } = options;
+  const { base, config, oauth, pathname, server, startedAt } = options;
+  let { catalog, context } = options;
   if (pathname !== '/mcp') return false;
 
   const sendTransportIssue = (issue: McpTransportIssue, method?: string): void => {
@@ -163,7 +166,8 @@ export async function handleMcpRoute(
       sendTransportIssue(validated);
       return true;
     }
-    const request = validated.body;
+    let request = validated.body;
+    let selectedResult: unknown;
     requestId = validated.id;
     const method = validated.method ?? '';
     if (validated.kind === 'response') {
@@ -185,6 +189,10 @@ export async function handleMcpRoute(
       sendTransportIssue(modernIssue, method);
       return true;
     }
+    if (options.projectGateway) {
+      const selected = await options.projectGateway.select(context, request);
+      context = selected.context; catalog = selected.catalog; request = selected.request; selectedResult = selected.result;
+    }
     const requestedTool = method === 'tools/call'
       ? catalog.tools.find(tool => tool.name === String((request.params as JsonObject | undefined)?.name ?? ''))
       : undefined;
@@ -194,7 +202,7 @@ export async function handleMcpRoute(
       return true;
     }
     const missingElicitationIssue = requestedTool
-      ? missingElicitationPreflight(config, request, method)
+      ? missingElicitationPreflight(context.config, request, method)
       : undefined;
     if (missingElicitationIssue) {
       missingElicitationIssue.id = requestId;
@@ -263,7 +271,7 @@ export async function handleMcpRoute(
     let rpcResponse: JsonObject;
     try {
       if (method === 'tools/call') lifecycle = new McpToolCallLifecycle(context, req, res);
-      const result = await dispatchMcpMethod({
+      const result = selectedResult ?? await dispatchMcpMethod({
         catalog,
         context,
         method,
@@ -273,6 +281,9 @@ export async function handleMcpRoute(
         request,
         startedAt
       });
+      if (options.projectGateway && ['initialize', 'server/discover'].includes(method) && result && typeof result === 'object') {
+        (result as JsonObject).instructions = GLOBAL_INSTRUCTIONS;
+      }
       const wireResult = protocolVersion === MODERN_MCP_PROTOCOL_VERSION
         ? decorateModernMcpResult(result, method, {
             name: 'coding-tools-mcp-node',

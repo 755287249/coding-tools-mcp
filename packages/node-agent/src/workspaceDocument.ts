@@ -1,3 +1,4 @@
+import { GLOBAL_MCP_ID } from './projectIsolation.js';
 import { randomUUID } from 'node:crypto';
 import type {
   AgentConfigDocument,
@@ -212,7 +213,8 @@ export function parseCanonicalWorkspace(value: unknown): CanonicalWorkspace {
     throw new Error(`Unsupported workspace schemaVersion ${schemaVersion}`);
   }
   const folders = parseFolders(value.folders);
-  if (folders.length < 1) throw new Error('workspace document must contain at least one folder');
+  if (value.id === GLOBAL_MCP_ID && folders.length) throw new Error('Global connection must not expose project folders');
+  if (folders.length < 1 && value.id !== GLOBAL_MCP_ID) throw new Error('workspace document must contain at least one folder');
   const bind = recordValue(value.bind);
   const auth = recordValue(value.auth);
   const policy = recordValue(value.policy);
@@ -414,6 +416,7 @@ export function canonicalToAgentConfigDocument(canonical: CanonicalWorkspace): A
   }));
   const document: AgentConfigDocument = {
     schema_version: 1,
+    ...(canonical.id === GLOBAL_MCP_ID ? { globalConnection: true } : {}),
     host: canonical.bind.host,
     port: canonical.bind.port,
     permissionMode: canonical.permissionMode as PermissionMode,

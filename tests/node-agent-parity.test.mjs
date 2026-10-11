@@ -62,11 +62,11 @@ async function executableResults(overrides = {}) {
 test('Node Agent Rust parity roadmap is structurally valid and dependency ordered', async () => {
   const result = await validateParity();
   assert.deepEqual(result.errors, []);
-  assert.equal(result.items.length, 28);
-  assert.equal(result.assertions.length, 28);
+  assert.equal(result.items.length, 29);
+  assert.equal(result.assertions.length, 29);
   assert.deepEqual(result.ready.map(item => item.id), []);
   assert.deepEqual(result.pending.map(item => item.id), []);
-  assert.deepEqual(result.counts, { todo: 0, in_progress: 0, blocked: 0, done: 27, excluded: 1 });
+  assert.deepEqual(result.counts, { todo: 0, in_progress: 0, blocked: 0, done: 28, excluded: 1 });
   assert.equal(result.items.find(item => item.id === 'NP-016')?.status, 'excluded');
   assert.equal(result.baselineStatus.ancestor, true);
   assert.equal(result.manifest.intentional_divergences.length, 10);

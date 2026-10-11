@@ -75,6 +75,7 @@ impl ExecutionLimits {
 
 #[derive(Debug, Clone)]
 pub struct RuntimeToolConfig {
+    pub project_isolation: bool,
     pub policy: PolicySettings,
     pub tool_profile: String,
     pub permission_mode: String,
@@ -101,6 +102,7 @@ impl RuntimeToolConfig {
             crate::tools::registry::resolve_tool_profile(&tool_profile, &permission_mode)
         };
         Self {
+            project_isolation: false,
             policy,
             tool_profile: effective_profile.into(),
             permission_mode,
@@ -168,11 +170,33 @@ impl SharedRuntimeToolConfig {
         permission_mode: String,
         sandbox: SandboxConfig,
     ) {
-        *self
+        let mut current = self
             .inner
             .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let isolated = current.project_isolation;
+        let mut next =
             RuntimeToolConfig::normalized(policy, tool_profile, permission_mode, sandbox);
+        if isolated {
+            next.project_isolation = true;
+            next.policy.security_policy.enforce_workspace_boundary = true;
+            next.policy.sandbox_enabled = true;
+            next.sandbox.enabled = true;
+            next.sandbox.external_paths.clear();
+        }
+        *current = next;
+    }
+
+    pub fn require_project_isolation(&self) {
+        let mut config = self
+            .inner
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        config.project_isolation = true;
+        config.policy.security_policy.enforce_workspace_boundary = true;
+        config.policy.sandbox_enabled = true;
+        config.sandbox.enabled = true;
+        config.sandbox.external_paths.clear();
     }
 
     pub fn update_from_runtime(&self, runtime: &RuntimeConfig) {

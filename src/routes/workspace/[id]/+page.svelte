@@ -13,6 +13,7 @@
   import {
     getActionsRuntimeStatus,
     getRuntimeStatus,
+    getMcpConnection,
     listWorkspaces,
     restartActionsRuntime,
     restartRuntime,
@@ -28,7 +29,7 @@
   import { runServiceToggle, notifyStartFailure } from "$lib/runtime/service";
   import { showToast } from "$lib/stores/toast";
   import { promptServiceRestart } from "$lib/runtime/restart-hint";
-  import { actionsRuntimeStates, mcpRuntimeStates, workspaces } from "$lib/stores/app";
+  import { actionsRuntimeStates, mcpRuntimeStates, workspaces, mcpConnection } from "$lib/stores/app";
   import {
     actionsConfig,
     actionsLocalEndpoint,
@@ -387,56 +388,10 @@
   }
 
   async function toggleMcp() {
-    const id = workspaceId;
-    if (!id || mcpBusy) return;
-    const wasRunning = mcpStatus === "running";
-    mcpBusy = true;
-    try {
-      const runtime = await measure("service.mcp.toggle", () =>
-        runServiceToggle(
-          wasRunning,
-          () => startRuntime(id),
-          () => stopRuntime(id),
-          "MCP",
-        ),
-      );
-      if (runtime && id === workspaceId) {
-        applyMcpRuntime(runtime, id);
-        if (!wasRunning) {
-          if (runtime.state === "running") await afterServiceStart("mcp", runtime, id);
-          else notifyStartFailure("MCP", runtime);
-        }
-      }
-    } finally {
-      mcpBusy = false;
-    }
+    await goto(appUrl('/connection'));
   }
 
-  async function toggleActions() {
-    const id = workspaceId;
-    if (!id || actionsBusy) return;
-    const wasRunning = actionsStatus === "running";
-    actionsBusy = true;
-    try {
-      const runtime = await measure("service.actions.toggle", () =>
-        runServiceToggle(
-          wasRunning,
-          () => startActionsRuntime(id),
-          () => stopActionsRuntime(id),
-          "Actions",
-        ),
-      );
-      if (runtime && id === workspaceId) {
-        applyActionsRuntime(runtime, id);
-        if (!wasRunning) {
-          if (runtime.state === "running") await afterServiceStart("actions", runtime, id);
-          else notifyStartFailure("Actions", runtime);
-        }
-      }
-    } finally {
-      actionsBusy = false;
-    }
-  }
+  async function toggleActions() {await goto(appUrl('/connection?service=actions'));}
 
   async function saveMcpPort(port: number) {
     if (!profile || profile.runtime.local_port === port) return;
@@ -603,15 +558,6 @@
 
   async function saveMcpPolicy(draft: RuntimePolicyDraft) {
     if (!profile) return;
-    const currentSecurityPolicy = securityPolicyConfig(profile.runtime);
-    const requiresRestart =
-      draft.transportMode !== profile.runtime.transport_mode ||
-      JSON.stringify(draft.securityPolicy) !== JSON.stringify(currentSecurityPolicy) ||
-      draft.blockingAdmissionLimit !== profile.runtime.blocking_admission_limit ||
-      draft.processAdmissionLimit !== profile.runtime.process_admission_limit ||
-      draft.globalBlockingAdmissionLimit !== profile.runtime.global_blocking_admission_limit ||
-      draft.globalProcessAdmissionLimit !== profile.runtime.global_process_admission_limit ||
-      draft.activeSessionLimit !== profile.runtime.active_session_limit;
     const next: WorkspaceProfile = {
       ...profile,
       runtime: {
@@ -631,10 +577,6 @@
       },
     };
     if (!(await persistProfile("save.mcp.policy", next))) return;
-    if (requiresRestart) {
-      await promptServiceRestart(mcpStatus === "running", $t("MCP service"));
-      await promptServiceRestart(actionsStatus === "running", $t("Actions service"));
-    }
   }
 
   async function saveActionsPolicy(draft: ActionsPolicyDraft) {
@@ -698,35 +640,9 @@
   async function saveSandbox(config: SandboxConfig) {
     if (!profile || !workspaceId) return;
     const targetWorkspaceId = workspaceId;
-    const current = sandboxConfig(profile.runtime);
-    if (JSON.stringify(current) === JSON.stringify(config)) return;
-    const disablingSandbox = current.enabled && !config.enabled;
-    const next: WorkspaceProfile = {
-      ...profile,
-      runtime: {
-        ...profile.runtime,
-        sandbox: config,
-      },
-    };
-    if (!(await persistProfile("save.workspace.sandbox", next, targetWorkspaceId))) return;
-    if (!disablingSandbox) return;
-
-    const wasRunning = mcpStatus === "running";
-    mcpBusy = true;
-    try {
-      const runtime = await measure(
-        wasRunning ? "service.mcp.restart.sandbox-disabled" : "service.mcp.start.sandbox-disabled",
-        () => (wasRunning ? restartRuntime(targetWorkspaceId) : startRuntime(targetWorkspaceId)),
-      );
-      if (targetWorkspaceId !== workspaceId) return;
-      applyMcpRuntime(runtime, targetWorkspaceId);
-      if (runtime.state === "running") await afterServiceStart("mcp", runtime, targetWorkspaceId);
-      else notifyStartFailure("MCP", runtime);
-    } catch (error) {
-      showToast(String(error), { kind: "error", title: $t("The service failed to start") });
-    } finally {
-      if (targetWorkspaceId === workspaceId) mcpBusy = false;
-    }
+    const fixedConfig = {...config,enabled:true,external_paths:[]};
+    const next: WorkspaceProfile = {...profile,runtime:{...profile.runtime,sandbox:fixedConfig}};
+    await persistProfile("save.workspace.sandbox", next, targetWorkspaceId);
   }
 
   async function saveWorkspaceName(name: string) {
@@ -748,6 +664,7 @@
     if (!id) return;
     // Show the cached profile instantly; load() refreshes it in the background.
     profile = getStore(workspaces).find((item) => item.id === id) ?? null;
+    void getMcpConnection().catch(error=>showToast(String(error),{kind:"error"}));
     void load(id);
 
     return () => {
@@ -764,7 +681,7 @@
 {#if profile && activeWorkspaceTab === "chat"}
   <div class="ad-host chat-workspace">
     <div class="chat-workspace-main">
-      <ChatPanel onPlugins={capabilities.workspaceFeatureControls?openChatPlugins:undefined} tasksOpen={$activityPanelOpen} tasksExpanded={$activityPanelExpanded} onCloseTasks={()=>activityPanelOpen.set(false)} onToggleTasksExpanded={()=>activityPanelExpanded.update(value=>!value)} externalNavigation connectRequested={$page.url.searchParams.get('connect') === '1'} requestedChatId={$page.url.searchParams.get('chat') ?? ''} requestedFolderId={$page.url.searchParams.get('folder') ?? ''} startNew={$page.url.searchParams.get('new') === '1'} onNavigate={(folder, chat) => void goto(appUrl(chatLocation(profile!.id, folder, chat)), {noScroll:true})} workspaceId={profile.id} folders={workspaceFolders(profile)} activeFolderId={profile.active_folder_id} endpoint={mcpPublic || mcpLocal} auth={profile.auth}>
+      <ChatPanel onPlugins={capabilities.workspaceFeatureControls?openChatPlugins:undefined} tasksOpen={$activityPanelOpen} tasksExpanded={$activityPanelExpanded} onCloseTasks={()=>activityPanelOpen.set(false)} onToggleTasksExpanded={()=>activityPanelExpanded.update(value=>!value)} externalNavigation connectRequested={$page.url.searchParams.get('connect') === '1'} requestedChatId={$page.url.searchParams.get('chat') ?? ''} requestedFolderId={$page.url.searchParams.get('folder') ?? ''} startNew={$page.url.searchParams.get('new') === '1'} onNavigate={(folder, chat) => void goto(appUrl(chatLocation(profile!.id, folder, chat)), {noScroll:true})} workspaceId={profile.id} folders={workspaceFolders(profile)} activeFolderId={profile.active_folder_id} endpoint={mcpPublic || mcpLocal} auth={$mcpConnection?.auth??profile.auth} connectionId={$mcpConnection?.id}>
         {#snippet headerActions()}
           <button class="workspace-icon" class:active={$activityPanelOpen} title={$t('Task panel')} aria-label={$t('Task panel')} aria-expanded={$activityPanelOpen} onclick={() => activityPanelOpen.update(value => !value)}><ListChecks size={17}/></button>
           <button class="workspace-icon" title={$t('chat.43')} aria-label={$t('chat.43')} onclick={() => navigateWorkspace('overview')}><Settings size={17}/></button>
@@ -773,9 +690,7 @@
     </div>
   </div>
 {:else if profile && $uiMode === "auto"}
-  {#key profile.id}
-    <AutoWorkspaceView {profile} onProfileChange={applyWorkspaceProfile} />
-  {/key}
+  <section class="page-scroll"><div class="page-body"><div class="tx-card p-6"><h2 class="text-xl font-semibold">{profile.name}</h2><p class="mt-4 break-all">{profile.path}</p><p class="mt-3 text-sm text-[var(--color-text-muted)]">{$t('connection.fixedRoot')}</p><div class="mt-4 flex gap-3"><button class="tx-btn-primary" onclick={()=>void goto(appUrl('/connection'))}>{$t('connection.globalSettings')}</button><button class="tx-btn-ghost" onclick={()=>uiMode.set('advanced')}>{$t('connection.permissions')}</button></div></div></div></section>
 {:else if profile && actions}
   <section class="page-scroll">
     <header class="page-header">

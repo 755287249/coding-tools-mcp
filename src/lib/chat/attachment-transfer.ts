@@ -1,3 +1,4 @@
+import {sha256} from '@noble/hashes/sha2.js';
 import { attachmentCache } from './attachment-cache.js';
 import type { ChatFile, ChatAction, ChatResult } from '../api/chat';
 export const TRANSFER_CHUNK_BYTES = 512 * 1024;
@@ -37,7 +38,7 @@ async function readVerifiedFile(request: Request, chat: string, file: ChatFile):
     if (!chunk.length || offset+chunk.length>file.size || result.next_offset !== offset+chunk.length) throw new Error('Invalid attachment range');
     bytes.set(chunk,offset);offset+=chunk.length;
   }
-  const hash = [...new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))].map(b=>b.toString(16).padStart(2,'0')).join('');
+  const hash = [...sha256(bytes)].map(b=>b.toString(16).padStart(2,'0')).join('');
   if (hash !== file.sha256) throw new Error('Attachment content changed');
   return bytes;
 }

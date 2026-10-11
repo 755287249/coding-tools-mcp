@@ -16,3 +16,10 @@ pub(crate) use telemetry::{
     record_async_session_finalized, record_diagnostic_event, runtime_boot_id,
     tool_usage_log_health, AsyncSessionTelemetry,
 };
+
+pub(crate) use listener::gateway::{
+    folders as project_folders, project_context, scoped_tools as project_scoped_tools,
+    stop_project, unblock_project,
+};
+
+pub(crate) use server::handle_request_async as handle_project_request;

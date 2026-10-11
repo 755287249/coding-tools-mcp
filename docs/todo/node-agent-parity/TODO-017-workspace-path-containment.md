@@ -53,3 +53,5 @@ None. This is the first follow-up item because it closes a reproduced write esca
 ## Verification
 
 Implemented `pathContainment.test.mjs` with absolute POSIX/drive/UNC/extended paths, parent traversal, direct and ancestor symlinks, safe internal aliases, missing create leaves, patch tools, formatter, Git, cwd, process workdir, and source immutability checks. The complete Node Agent verification, Rust catalog check, Desktop compatibility check, roadmap validation, native dependency scan, and repository test suite pass.
+
+The global connection extension is tracked separately in NP-029.

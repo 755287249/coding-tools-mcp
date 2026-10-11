@@ -2,13 +2,29 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-#[derive(Default)]
+pub const REMEMBER_SECONDS: u64 = 30 * 24 * 60 * 60;
+
+#[derive(Clone)]
+struct Session {
+    origin: String,
+    expiry: Instant,
+    remembered: bool,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct SavedSession {
+    token_hash: String,
+    origin: String,
+    expires_at: u64,
+}
+
+#[derive(Default, Clone)]
 pub struct Access {
     password: Option<[u8; 32]>,
     // Decrypted only for local desktop controls; persistence uses the encrypted app secret store.
     display_password: Option<String>,
     origins: Vec<String>,
-    sessions: HashMap<String, (String, Instant)>,
+    sessions: HashMap<String, Session>,
     attempts: Vec<Instant>,
 }
 
@@ -46,9 +62,20 @@ impl Access {
         self.display_password.as_deref()
     }
     pub fn configure(&mut self, origins: Vec<String>) -> Result<String, String> {
-        self.configure_password(origins, format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple()))
+        self.configure_password(
+            origins,
+            format!(
+                "{}{}",
+                uuid::Uuid::new_v4().simple(),
+                uuid::Uuid::new_v4().simple()
+            ),
+        )
     }
-    pub fn configure_password(&mut self, origins: Vec<String>, password: String) -> Result<String, String> {
+    pub fn configure_password(
+        &mut self,
+        origins: Vec<String>,
+        password: String,
+    ) -> Result<String, String> {
         if password.trim().is_empty() || password.len() < 8 || password.len() > 256 {
             return Err("Sharing password must contain 8–256 bytes".into());
         }
@@ -84,6 +111,15 @@ impl Access {
         self.enabled() && self.origins.iter().any(|v| v == origin)
     }
     pub fn login(&mut self, origin: &str, password: &str, now: Instant) -> Result<String, String> {
+        self.login_remembered(origin, password, now, false)
+    }
+    pub fn login_remembered(
+        &mut self,
+        origin: &str,
+        password: &str,
+        now: Instant,
+        remember: bool,
+    ) -> Result<String, String> {
         if !self.origin_allowed(origin) {
             return Err("Browser sharing is disabled or this origin is not allowed".into());
         }
@@ -100,7 +136,7 @@ impl Access {
         {
             return Err("Invalid sharing password".into());
         }
-        self.sessions.retain(|_, (_, expiry)| *expiry > now);
+        self.sessions.retain(|_, session| session.expiry > now);
         if self.sessions.len() >= 32 {
             return Err("Too many browser sessions; reset sharing to revoke them".into());
         }
@@ -110,8 +146,17 @@ impl Access {
             uuid::Uuid::new_v4().simple()
         );
         self.sessions.insert(
-            token.clone(),
-            (origin.into(), now + Duration::from_secs(12 * 60 * 60)),
+            token_hash(&token),
+            Session {
+                origin: origin.into(),
+                expiry: now
+                    + Duration::from_secs(if remember {
+                        REMEMBER_SECONDS
+                    } else {
+                        12 * 60 * 60
+                    }),
+                remembered: remember,
+            },
         );
         Ok(token)
     }
@@ -119,12 +164,54 @@ impl Access {
         self.origin_allowed(origin)
             && self
                 .sessions
-                .get(token)
-                .is_some_and(|(bound, expiry)| bound == origin && *expiry > now)
+                .get(&token_hash(token))
+                .is_some_and(|session| session.origin == origin && session.expiry > now)
     }
     pub fn logout(&mut self, token: &str) {
-        self.sessions.remove(token);
+        self.sessions.remove(&token_hash(token));
     }
+    /// Persist only hashes, bound origins and absolute expiry in the encrypted store.
+    pub fn saved_sessions(&self, now: Instant, wall_seconds: u64) -> Vec<SavedSession> {
+        self.sessions
+            .iter()
+            .filter(|(_, session)| session.remembered && session.expiry > now)
+            .map(|(token_hash, session)| SavedSession {
+                token_hash: token_hash.clone(),
+                origin: session.origin.clone(),
+                expires_at: wall_seconds
+                    .saturating_add(session.expiry.duration_since(now).as_secs()),
+            })
+            .collect()
+    }
+    pub fn restore_sessions(
+        &mut self,
+        sessions: Vec<SavedSession>,
+        now: Instant,
+        wall_seconds: u64,
+    ) {
+        for saved in sessions.into_iter().take(32) {
+            let remaining = saved.expires_at.saturating_sub(wall_seconds);
+            if remaining == 0
+                || remaining > REMEMBER_SECONDS
+                || !self.origin_allowed(&saved.origin)
+                || saved.token_hash.len() != 64
+                || !saved.token_hash.bytes().all(|b| b.is_ascii_hexdigit())
+            {
+                continue;
+            }
+            self.sessions.insert(
+                saved.token_hash,
+                Session {
+                    origin: saved.origin,
+                    expiry: now + Duration::from_secs(remaining),
+                    remembered: true,
+                },
+            );
+        }
+    }
+}
+fn token_hash(token: &str) -> String {
+    format!("{:x}", Sha256::digest(token.as_bytes()))
 }
 #[cfg(test)]
 mod tests {
@@ -210,13 +297,90 @@ mod tests {
 
 #[cfg(test)]
 mod persistent_password_tests {
- use super::*;
- #[test]
- fn custom_password_restores_in_a_fresh_gate_and_rotation_revokes_sessions(){
-  let origin="https://share.example";let custom="synthetic-fixed-password";
-  let mut gate=Access::default();gate.configure_password(vec![origin.into()],custom.into()).unwrap();let now=Instant::now();let token=gate.login(origin,custom,now).unwrap();
-  assert!(gate.configure_password(vec![origin.into()],"short".into()).is_err());assert!(gate.authorized(origin,&token,now));
-  let mut restarted=Access::default();restarted.configure_password(vec![origin.into()],custom.into()).unwrap();assert!(restarted.login(origin,custom,now).is_ok());assert!(!restarted.authorized(origin,&token,now));
-  gate.configure_password(vec![origin.into()],"synthetic-changed-password".into()).unwrap();assert!(!gate.authorized(origin,&token,now));assert!(gate.login(origin,custom,now).is_err());
- }
+    use super::*;
+    #[test]
+    fn custom_password_restores_in_a_fresh_gate_and_rotation_revokes_sessions() {
+        let origin = "https://share.example";
+        let custom = "synthetic-fixed-password";
+        let mut gate = Access::default();
+        gate.configure_password(vec![origin.into()], custom.into())
+            .unwrap();
+        let now = Instant::now();
+        let token = gate.login(origin, custom, now).unwrap();
+        assert!(gate
+            .configure_password(vec![origin.into()], "short".into())
+            .is_err());
+        assert!(gate.authorized(origin, &token, now));
+        let mut restarted = Access::default();
+        restarted
+            .configure_password(vec![origin.into()], custom.into())
+            .unwrap();
+        assert!(restarted.login(origin, custom, now).is_ok());
+        assert!(!restarted.authorized(origin, &token, now));
+        gate.configure_password(vec![origin.into()], "synthetic-changed-password".into())
+            .unwrap();
+        assert!(!gate.authorized(origin, &token, now));
+        assert!(gate.login(origin, custom, now).is_err());
+    }
+}
+
+#[cfg(test)]
+mod remembered_session_tests {
+    use super::*;
+    #[test]
+    fn remembered_sessions_survive_restart_but_temporary_sessions_do_not() {
+        let origin = "https://share.example";
+        let password = "synthetic-remember-password";
+        let now = Instant::now();
+        let mut gate = Access::default();
+        gate.configure_password(vec![origin.into()], password.into())
+            .unwrap();
+        let remembered = gate.login_remembered(origin, password, now, true).unwrap();
+        let temporary = gate.login(origin, password, now).unwrap();
+        let saved = gate.saved_sessions(now, 1_000_000);
+        let json = serde_json::to_string(&saved).unwrap();
+        assert!(!json.contains(&remembered));
+        assert!(!json.contains(&temporary));
+        assert_eq!(saved.len(), 1);
+        let mut restarted = Access::default();
+        restarted
+            .configure_password(vec![origin.into()], password.into())
+            .unwrap();
+        restarted.restore_sessions(saved, now, 1_000_060);
+        assert!(restarted.authorized(origin, &remembered, now));
+        assert!(!restarted.authorized(origin, &temporary, now));
+        assert!(!restarted.authorized("https://other.example", &remembered, now));
+        assert!(!restarted.authorized(
+            origin,
+            &remembered,
+            now + Duration::from_secs(REMEMBER_SECONDS)
+        ));
+        restarted.logout(&remembered);
+        assert!(restarted.saved_sessions(now, 1_000_060).is_empty());
+    }
+    #[test]
+    fn expired_removed_origin_and_unbounded_saved_sessions_are_rejected() {
+        let origin = "https://share.example";
+        let password = "synthetic-remember-password";
+        let now = Instant::now();
+        let mut gate = Access::default();
+        gate.configure_password(vec![origin.into()], password.into())
+            .unwrap();
+        let token = gate.login_remembered(origin, password, now, true).unwrap();
+        let saved = gate.saved_sessions(now, 100);
+        for (origins, time) in [
+            (vec![origin.into()], 100 + REMEMBER_SECONDS),
+            (vec!["https://other.example".into()], 100),
+        ] {
+            let mut fresh = Access::default();
+            fresh.configure_password(origins, password.into()).unwrap();
+            fresh.restore_sessions(saved.clone(), now, time);
+            assert!(!fresh.authorized(origin, &token, now));
+        }
+        let mut excessive = saved;
+        excessive[0].expires_at = u64::MAX;
+        gate.sessions.clear();
+        gate.restore_sessions(excessive, now, 100);
+        assert!(!gate.authorized(origin, &token, now));
+    }
 }

@@ -11,6 +11,8 @@ description: 通过 Coding Tools MCP 接入指定本地会话，持续接收消�
 
 - `list_workspace_folders` 核对用户指定的 `workspace_folder_id`，不能猜测、换目录或创建新的 `chat_id`。聊天需要 trusted-core、guarded-core 或 advanced 工具集；read-only 不提供写入工具。
 - `chat_open` 成功后保存实际 `attachment_id`，先读取本次返回的 `skill.text` 和会话记录；工作、群聊及恢复接入都以本次服务端返回内容为准，不沿用记忆中的旧版 Skill。所有聊天调用带 `chat_id`、`workspace_folder_id` 和该接入 ID；支持目录参数的工作工具也明确带目标目录 ID。不能抢占其他 AI。
+- 使用全局 MCP 连接时，连接本身不授权任何项目。每个项目固定一个目录；`chat_open` 返回的接入是该项目的能力凭据。之后**每个工作工具调用**均携带同一 `chat_id`、`workspace_folder_id`、`attachment_id`；资源、提示词及任务方法放在 `params._meta`。不得把客户端 session header 当作权限，也不得用其他目录选择器切换项目。以 tools/list 当前 schema 为准。
+- 全局连接的项目命令强制使用操作系统沙箱。Git、格式化程序等通过 `exec_command` 执行；未提供独立工具时不得绕过沙箱或自行扩大外部路径授权。沙箱不可用时报告具体缺失的后端，先处理仍可执行的文件操作。
 - 立即实际调用 `chat_wait(timeout_ms:25000)`，显式传入超时；宿主上限更短时继续缩短，给 HTTP 往返和结果输出留余量。同时只有一个等待请求。具体调用边界和异常处理见下一节。
 - `status=idle` 是正常空闲，立即再次调用；不要将一次等待脚本的 exit 0 当作会话结束。`status=message` 处理该用户消息，最终回复持久化后再次等待。不计等待成本，不因空闲、耗时或任务完成主动结束。
 

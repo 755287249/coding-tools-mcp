@@ -48,8 +48,32 @@ pub fn write_wrapped_json(path: &Path, value: &serde_json::Value) -> AppResult<(
         std::fs::create_dir_all(parent)?;
     }
     let wrapped = wrap_json_value(value, path)?;
-    std::fs::write(path, serde_json::to_vec_pretty(&wrapped)?)?;
-    Ok(())
+    use std::io::Write;
+    let temporary = path.with_file_name(format!(
+        ".{}.{}.tmp",
+        path.file_name().unwrap_or_default().to_string_lossy(),
+        uuid::Uuid::new_v4()
+    ));
+    let result = (|| -> AppResult<()> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
+        file.write_all(&serde_json::to_vec_pretty(&wrapped)?)?;
+        file.sync_all()?;
+        drop(file);
+        super::migrate::atomic_replace(&temporary, path)?;
+        super::migrate::sync_parent(path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
 }
 
 pub fn read_maybe_wrapped_json(path: &Path) -> AppResult<serde_json::Value> {

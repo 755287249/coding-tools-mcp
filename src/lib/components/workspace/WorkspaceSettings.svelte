@@ -43,11 +43,7 @@
   <section class="tx-card p-5">
     <p class="tx-section-label">{$t("Project folders")}</p>
     <div class="mt-3">
-      <WorkspaceFolderManager
-        {profile}
-        onChanged={onProfileChanged}
-        {onFoldersChanged}
-      />
+      <p class="break-all">{profile.path}</p><p class="mt-2 text-xs text-[var(--color-text-muted)]">{$t('connection.fixedDirectoryHelp')}</p>
     </div>
   </section>
 
@@ -57,6 +53,7 @@
       <SandboxSettings
         config={sandboxConfig(profile.runtime)}
         locked={sandboxLocked}
+        projectIsolation
         {hasWslFolder}
         onSave={onSaveSandbox}
       />

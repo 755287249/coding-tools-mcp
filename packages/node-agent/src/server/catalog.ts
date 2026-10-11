@@ -1,3 +1,4 @@
+import {projectToolAllowed} from '../projectIsolation.js';
 import { createHash } from 'node:crypto';
 import type { ServerResponse } from 'node:http';
 import {
@@ -28,6 +29,10 @@ export function currentToolCatalog(context: ToolContext): ToolCatalogSnapshot {
       revision: toolsetRevisionForProfile(profile)
     };
     toolCatalogCache.set(profile, base);
+  }
+  if(context.projectIsolation){
+    const tools=base.tools.filter(tool=>projectToolAllowed(tool.name));
+    return {profile,tools,names:tools.map(tool=>tool.name),revision:createHash('sha256').update(JSON.stringify(tools)).digest('hex').slice(0,16)};
   }
   const extensionTools = context.extensions.toolDefinitions();
   if (!extensionTools.length) return base;

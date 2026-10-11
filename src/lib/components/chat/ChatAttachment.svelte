@@ -1,4 +1,6 @@
 <script lang="ts">
+  import {saveFile} from "$lib/save-file";
+  import {copyText} from "$lib/browser-tools";
   import { untrack, onDestroy } from 'svelte';
   import Download from '@lucide/svelte/icons/download';
   import ImageIcon from '@lucide/svelte/icons/image';
@@ -19,7 +21,7 @@
   let busy = $state(false);
   let localOnly = $state(false);
   let pathCopied = $state(false);
-  async function copyPath() { try { await navigator.clipboard.writeText(file.path); pathCopied = true; } catch { error = $t('chat.42'); } }
+  async function copyPath() { try { await copyText(file.path); pathCopied = true; } catch { error = $t('chat.42'); } }
   onDestroy(()=>{alive=false;if(preview)URL.revokeObjectURL(preview)});
   let thumbnail = $state<HTMLButtonElement>();
   $effect(() => {
@@ -43,9 +45,7 @@
         if (bytes.length > MAX_PREVIEW_BYTES) throw new Error($t('chat.65'));
         code = new TextDecoder('utf-8', {fatal:true}).decode(bytes);
       } else {
-        const url = URL.createObjectURL(new Blob([bytes as BlobPart], {type:'application/octet-stream'}));
-        const a = document.createElement('a'); a.href = url; a.download = file.name; a.click();
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        await saveFile(new Blob([bytes as BlobPart],{type:file.mime||'application/octet-stream'}),file.name);
       }
     } catch(e) { error = String(e); } finally { busy = false; }
   }

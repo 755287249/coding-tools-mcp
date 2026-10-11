@@ -205,6 +205,18 @@ test('OAuthRuntime refresh_token renews access without the one-time password', a
   assert.equal(other.exchangeToken(refreshForm(refresh), {}, base).status, 400, 'rotated token secret revokes refresh tokens');
 });
 
+test('server grant identity differs per authorization and survives refresh and restart',async()=>{
+ const base='https://grant.example',runtime=new OAuthRuntime(oauthConfig());
+ const issue=async()=>{const authorized=await runtime.authorizeSubmitOneTime(authorizationForm(),base);return runtime.exchangeToken(tokenForm(new URL(authorized.location).searchParams.get('code')),{},base).body};
+ const a=await issue(),b=await issue();const headers=token=>({authorization:`Bearer ${token}`});
+ const grant=runtime.accessGrantId(headers(a.access_token),base);assert.ok(grant);
+ assert.notEqual(grant,runtime.accessGrantId(headers(b.access_token),base));
+ assert.equal(runtime.accessGrantId(headers(a.refresh_token),base),undefined);
+ assert.equal(runtime.accessGrantId(headers(a.access_token),'https://foreign.example'),undefined);
+ const renewed=runtime.exchangeToken(new URLSearchParams({grant_type:'refresh_token',refresh_token:a.refresh_token,client_id:'chatgpt'}),{},base).body;
+ assert.equal(new OAuthRuntime(oauthConfig()).accessGrantId(headers(renewed.access_token),base),grant);
+});
+
 test('OAuthRuntime applies configurable access-token TTL with a ten-year cap', async () => {
   const base = 'https://public.example/builtin/clients/oauth-test';
   const runtime = new OAuthRuntime(oauthConfig({ tokenTtlSeconds: 60 * 60 }));

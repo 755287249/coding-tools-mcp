@@ -120,9 +120,12 @@ fn list_resources(state: &SharedState) -> Result<Value, Value> {
         .map_err(|message| crate::workspace_features::skill_rpc_error("resources/list", message))?;
     let evolution = crate::knowledge::list_tool_evolution_resources(state)?;
     let resources = crate::knowledge::merge_resource_lists(skills, evolution);
-    Ok(crate::knowledge::merge_resource_lists(resources, json!({
-        "resources": [crate::tools::chat::local_chat_skill_resource()]
-    })))
+    Ok(crate::knowledge::merge_resource_lists(
+        resources,
+        json!({
+            "resources": [crate::tools::chat::local_chat_skill_resource()]
+        }),
+    ))
 }
 
 fn read_resource(
@@ -147,6 +150,13 @@ fn read_resource(
 async fn list_tools_dynamic(state: &SharedState) -> Value {
     let runtime = state.runtime_config();
     let mut tools = list_tools_for_profile(&runtime.tool_profile);
+    if runtime.project_isolation {
+        tools.retain(|tool| {
+            tool["name"]
+                .as_str()
+                .is_some_and(crate::tools::project_scope::allowed)
+        });
+    }
     let external = crate::workspace_features::list_external_tools(&state.profile_id).await;
     for tool in &external {
         tools.push(tool.definition.clone());
@@ -166,25 +176,42 @@ const SERVER_INSTRUCTIONS: &str = "Start with list_workspace_folders to verify a
 const CHAT_INSTRUCTIONS: &str = "With supplied chat_id/workspace_folder_id, call chat_open, save attachment_id and follow the complete skill.text (coding-tools://skills/local-chat). Loop: chat_wait -> work -> chat_reply -> chat_wait. Use one independent chat_wait(timeout_ms:25000), shorter within host limits. Require persisted=true; progress replies continue work, final replies resume waiting. Idle is not an exit. chat_close only when the user explicitly ends the chat.";
 const HISTORY_INSTRUCTIONS: &str = "Outside local chat use conversation_bootstrap before project work. Preserve session_key/current_path; after each task use history_session_checkpoint with unchanged session_key/expected_path and require ok=true plus matching path before claiming saved.";
 const EXEC_INSTRUCTIONS: &str = "Read/search before guarded edits and exec_command; use wait_command for retained sessions and exec_many(mode=auto) for independent commands. Check actual command outcomes, not just tool ok.";
-const PLAN_INSTRUCTIONS: &str = "Keep multi-step set_todos/update_plan and report_progress current.";
-const UPLOAD_INSTRUCTIONS: &str = "Save deliverables in the target workspace, then chat_upload and chat_reply attachment_ids.";
+const PLAN_INSTRUCTIONS: &str =
+    "Keep multi-step set_todos/update_plan and report_progress current.";
+const UPLOAD_INSTRUCTIONS: &str =
+    "Save deliverables in the target workspace, then chat_upload and chat_reply attachment_ids.";
 
 fn server_instructions(tool_profile: &str) -> String {
     let names = crate::tools::registry::exposed_tool_names(tool_profile);
     let mut parts = vec![SERVER_INSTRUCTIONS];
-    if ["chat_open", "chat_wait", "chat_reply", "chat_close"].iter().all(|name| names.contains(name)) {
+    if ["chat_open", "chat_wait", "chat_reply", "chat_close"]
+        .iter()
+        .all(|name| names.contains(name))
+    {
         parts.push(CHAT_INSTRUCTIONS);
     }
-    if ["conversation_bootstrap", "history_session_checkpoint"].iter().all(|name| names.contains(name)) {
+    if ["conversation_bootstrap", "history_session_checkpoint"]
+        .iter()
+        .all(|name| names.contains(name))
+    {
         parts.push(HISTORY_INSTRUCTIONS);
     }
-    if ["exec_command", "wait_command", "exec_many"].iter().all(|name| names.contains(name)) {
+    if ["exec_command", "wait_command", "exec_many"]
+        .iter()
+        .all(|name| names.contains(name))
+    {
         parts.push(EXEC_INSTRUCTIONS);
     }
-    if ["set_todos", "update_plan", "report_progress"].iter().all(|name| names.contains(name)) {
+    if ["set_todos", "update_plan", "report_progress"]
+        .iter()
+        .all(|name| names.contains(name))
+    {
         parts.push(PLAN_INSTRUCTIONS);
     }
-    if ["chat_upload", "chat_reply"].iter().all(|name| names.contains(name)) {
+    if ["chat_upload", "chat_reply"]
+        .iter()
+        .all(|name| names.contains(name))
+    {
         parts.push(UPLOAD_INSTRUCTIONS);
     }
     parts.join(" ")
@@ -642,7 +669,12 @@ fn handle_tools_call(state: &SharedState, params: &Value) -> Result<Value, Value
             )
             .map_err(|message| workspace_routing_error(state, host_session_key, message))?;
             task_context = Some(routed.context.clone());
-            let mut operation = crate::tools::chat::operations::begin(routed.context.workspace.root(), host_session_key, canonical_name, &args);
+            let mut operation = crate::tools::chat::operations::begin(
+                routed.context.workspace.root(),
+                host_session_key,
+                canonical_name,
+                &args,
+            );
             let mut structured = if let Some(retry) = permission_mrtr_retry(params)? {
                 if let Some(pending_name) = routed
                     .context
@@ -665,8 +697,17 @@ fn handle_tools_call(state: &SharedState, params: &Value) -> Result<Value, Value
             } else {
                 call_tool(routed.context.as_ref(), canonical_name, &args)
             };
-            crate::tools::chat::operations::bind(routed.context.workspace.root(), host_session_key, canonical_name, &args, &structured);
-            if let Some(warning) = operation.as_mut().and_then(|op| op.finish(&structured, false)) {
+            crate::tools::chat::operations::bind(
+                routed.context.workspace.root(),
+                host_session_key,
+                canonical_name,
+                &args,
+                &structured,
+            );
+            if let Some(warning) = operation
+                .as_mut()
+                .and_then(|op| op.finish(&structured, false))
+            {
                 structured["chat_activity_warning"] = json!(warning);
             }
             let structured = enrich_alternate_workspace_recovery(
@@ -1504,30 +1545,71 @@ mod tests {
     fn initialize_instructions_define_the_history_persistence_workflow() {
         let initialized = initialize_result(Some("2025-06-18"), "core");
         let instructions = initialized["instructions"].as_str().expect("instructions");
-        for required in ["list_workspace_folders", "conversation_bootstrap", "chat_open",
-            "chat_wait -> work -> chat_reply -> chat_wait", "attachment_id", "persisted",
-            "workspace_folder_id", "exec_many(mode=auto)", "set_todos/update_plan",
-            "report_progress", "prompts/get or resources/read", "history_session_checkpoint",
-            "session_key/expected_path", "ok=true", "matching path", "chat_close"] {
+        for required in [
+            "list_workspace_folders",
+            "conversation_bootstrap",
+            "chat_open",
+            "chat_wait -> work -> chat_reply -> chat_wait",
+            "attachment_id",
+            "persisted",
+            "workspace_folder_id",
+            "exec_many(mode=auto)",
+            "set_todos/update_plan",
+            "report_progress",
+            "prompts/get or resources/read",
+            "history_session_checkpoint",
+            "session_key/expected_path",
+            "ok=true",
+            "matching path",
+            "chat_close",
+        ] {
             assert!(instructions.contains(required), "missing {required}");
         }
         assert!(!instructions.contains("ChatGPT"));
         assert!(instructions.len() < 1900);
-        assert_eq!(discover_result("core")["instructions"], initialized["instructions"]);
+        assert_eq!(
+            discover_result("core")["instructions"],
+            initialized["instructions"]
+        );
     }
 
     #[test]
     fn startup_guidance_follows_current_tool_profile() {
-        for profile in ["read-only", "core", "trusted-core", "guarded-core", "advanced", "compat-readonly-all"] {
+        for profile in [
+            "read-only",
+            "core",
+            "trusted-core",
+            "guarded-core",
+            "advanced",
+            "compat-readonly-all",
+        ] {
             let initialized = initialize_result(Some("2025-03-26"), profile);
             let instructions = initialized["instructions"].as_str().unwrap();
             let names = crate::tools::registry::exposed_tool_names(profile);
-            for name in ["chat_open", "chat_wait", "chat_reply", "chat_close", "chat_upload",
-                "conversation_bootstrap", "history_session_checkpoint", "exec_command", "exec_many",
-                "set_todos", "update_plan", "report_progress"] {
-                assert_eq!(instructions.contains(name), names.contains(&name), "{profile}: {name}");
+            for name in [
+                "chat_open",
+                "chat_wait",
+                "chat_reply",
+                "chat_close",
+                "chat_upload",
+                "conversation_bootstrap",
+                "history_session_checkpoint",
+                "exec_command",
+                "exec_many",
+                "set_todos",
+                "update_plan",
+                "report_progress",
+            ] {
+                assert_eq!(
+                    instructions.contains(name),
+                    names.contains(&name),
+                    "{profile}: {name}"
+                );
             }
-            assert_eq!(discover_result(profile)["instructions"], initialized["instructions"]);
+            assert_eq!(
+                discover_result(profile)["instructions"],
+                initialized["instructions"]
+            );
             assert!(instructions.len() < 1900);
             assert!(instructions.contains("permissions still apply"));
         }
@@ -1538,24 +1620,50 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let state = new_state(
             vec![crate::workspace::WorkspaceFolder {
-                id: "folder-a".into(), name: "Folder A".into(),
-                path: workspace.path().display().to_string(), execution: Default::default(),
+                id: "folder-a".into(),
+                name: "Folder A".into(),
+                path: workspace.path().display().to_string(),
+                execution: Default::default(),
             }],
-            "folder-a".into(), format!("builtin-chat-{}", uuid::Uuid::new_v4()),
-            crate::workspace::AuthConfig::default(), crate::tools::policy::PolicySettings::default(),
-            "trusted-core".into(), "trusted".into(), crate::workspace::SandboxConfig::default(),
+            "folder-a".into(),
+            format!("builtin-chat-{}", uuid::Uuid::new_v4()),
+            crate::workspace::AuthConfig::default(),
+            crate::tools::policy::PolicySettings::default(),
+            "trusted-core".into(),
+            "trusted".into(),
+            crate::workspace::SandboxConfig::default(),
             crate::tools::ExecutionLimits::default(),
-        ).expect("state");
-        let listed = handle_request(&state, &json!({"jsonrpc":"2.0","id":1,"method":"resources/list"}));
+        )
+        .expect("state");
+        let listed = handle_request(
+            &state,
+            &json!({"jsonrpc":"2.0","id":1,"method":"resources/list"}),
+        );
         let uri = crate::tools::chat::LOCAL_CHAT_SKILL_URI;
-        let resource = listed["result"]["resources"].as_array().expect("resources")
-            .iter().find(|resource| resource["uri"] == uri).expect("builtin skill");
+        let resource = listed["result"]["resources"]
+            .as_array()
+            .expect("resources")
+            .iter()
+            .find(|resource| resource["uri"] == uri)
+            .expect("builtin skill");
         assert!(resource.get("text").is_none());
-        let read = handle_request(&state, &json!({"jsonrpc":"2.0","id":2,"method":"resources/read","params":{"uri":uri}}));
-        let session = crate::tools::chat::ui(workspace.path(), &json!({"action":"create"})).expect("chat");
-        let opened = crate::tools::chat::tool(workspace.path(), "chat_open", &json!({"chat_id":session["session"]["id"]})).expect("open");
+        let read = handle_request(
+            &state,
+            &json!({"jsonrpc":"2.0","id":2,"method":"resources/read","params":{"uri":uri}}),
+        );
+        let session =
+            crate::tools::chat::ui(workspace.path(), &json!({"action":"create"})).expect("chat");
+        let opened = crate::tools::chat::tool(
+            workspace.path(),
+            "chat_open",
+            &json!({"chat_id":session["session"]["id"]}),
+        )
+        .expect("open");
         assert_eq!(opened["skill"], read["result"]["contents"][0]);
-        assert_eq!(opened["skill"]["text"], include_str!("../../../skills/local-chat/SKILL.md").replace("\r\n", "\n"));
+        assert_eq!(
+            opened["skill"]["text"],
+            include_str!("../../../skills/local-chat/SKILL.md").replace("\r\n", "\n")
+        );
     }
 
     #[tokio::test]
@@ -3255,25 +3363,71 @@ mod tests {
 
 #[cfg(test)]
 mod chat_operation_dispatch_tests {
- use super::*;
- use super::{handle_request,handle_request_async};
- use crate::tools::chat;
- use std::fs;
- use crate::tools::ToolContext;
- use std::sync::Arc;
- #[tokio::test]
- async fn real_async_and_sync_mcp_dispatch_preserve_operation_evidence(){
-  let root=tempfile::tempdir().unwrap();let harness=tempfile::tempdir().unwrap();
-  let ctx=Arc::new(ToolContext::for_test(root.path().into(),harness.path().into()).unwrap());
-  let cid=chat::ui(root.path(),&json!({"action":"create"})).unwrap()["session"]["id"].clone();
-  let request=|name:&str,args:Value|json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":args,"_meta":{"openai/session":"rust-operations-test"}}});
-  let opened=handle_request_async(ctx.clone(),request("chat_open",json!({"chat_id":cid,"agent_name":"Builder"}))).await;
-  assert_eq!(opened["result"]["structuredContent"]["ok"],true,"{opened}");let aid=opened["result"]["structuredContent"]["attachment_id"].clone();
-  chat::ui(root.path(),&json!({"action":"send","chat_id":cid,"message_id":"u","text":"read"})).unwrap();
-  let waited=handle_request_async(ctx.clone(),request("chat_wait",json!({"chat_id":cid,"attachment_id":aid,"timeout_ms":0}))).await;assert_eq!(waited["result"]["structuredContent"]["message"]["id"],"u","{waited}");
-  fs::write(root.path().join("sample.txt"),"private-file-body").unwrap();
-  let result=handle_request_async(ctx.clone(),request("read_file",json!({"path":"sample.txt"}))).await;assert_eq!(result["result"]["structuredContent"]["ok"],true,"{result}");
-  let failed=handle_request(&ctx,&request("read_file",json!({"path":"missing.txt"})));assert_eq!(failed["result"]["structuredContent"]["ok"],false,"{failed}");
-  let local=chat::ui(root.path(),&json!({"action":"read","chat_id":cid})).unwrap();let events=local["session"]["operations"].as_array().unwrap();assert_eq!(events.len(),2);assert_eq!(events[0]["paths"],json!(["sample.txt"]));assert_eq!(events[0]["agent_name"],"Builder");assert_eq!(events[1]["status"],"failed");assert!(!serde_json::to_string(events).unwrap().contains("private-file-body"));
- }
+    use super::*;
+    use super::{handle_request, handle_request_async};
+    use crate::tools::chat;
+    use crate::tools::ToolContext;
+    use std::fs;
+    use std::sync::Arc;
+    #[tokio::test]
+    async fn real_async_and_sync_mcp_dispatch_preserve_operation_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        let harness = tempfile::tempdir().unwrap();
+        let ctx =
+            Arc::new(ToolContext::for_test(root.path().into(), harness.path().into()).unwrap());
+        let cid =
+            chat::ui(root.path(), &json!({"action":"create"})).unwrap()["session"]["id"].clone();
+        let request = |name: &str, args: Value| json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":args,"_meta":{"openai/session":"rust-operations-test"}}});
+        let opened = handle_request_async(
+            ctx.clone(),
+            request("chat_open", json!({"chat_id":cid,"agent_name":"Builder"})),
+        )
+        .await;
+        assert_eq!(
+            opened["result"]["structuredContent"]["ok"], true,
+            "{opened}"
+        );
+        let aid = opened["result"]["structuredContent"]["attachment_id"].clone();
+        chat::ui(
+            root.path(),
+            &json!({"action":"send","chat_id":cid,"message_id":"u","text":"read"}),
+        )
+        .unwrap();
+        let waited = handle_request_async(
+            ctx.clone(),
+            request(
+                "chat_wait",
+                json!({"chat_id":cid,"attachment_id":aid,"timeout_ms":0}),
+            ),
+        )
+        .await;
+        assert_eq!(
+            waited["result"]["structuredContent"]["message"]["id"], "u",
+            "{waited}"
+        );
+        fs::write(root.path().join("sample.txt"), "private-file-body").unwrap();
+        let result = handle_request_async(
+            ctx.clone(),
+            request("read_file", json!({"path":"sample.txt"})),
+        )
+        .await;
+        assert_eq!(
+            result["result"]["structuredContent"]["ok"], true,
+            "{result}"
+        );
+        let failed = handle_request(&ctx, &request("read_file", json!({"path":"missing.txt"})));
+        assert_eq!(
+            failed["result"]["structuredContent"]["ok"], false,
+            "{failed}"
+        );
+        let local = chat::ui(root.path(), &json!({"action":"read","chat_id":cid})).unwrap();
+        let events = local["session"]["operations"].as_array().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["paths"], json!(["sample.txt"]));
+        assert_eq!(events[0]["agent_name"], "Builder");
+        assert_eq!(events[1]["status"], "failed");
+        assert!(!serde_json::to_string(events)
+            .unwrap()
+            .contains("private-file-body"));
+    }
 }

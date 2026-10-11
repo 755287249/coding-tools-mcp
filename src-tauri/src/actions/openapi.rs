@@ -31,14 +31,16 @@ pub fn build_openapi(tools: &[Value], public_base_url: &str, auth_type: &str) ->
             .get("description")
             .and_then(Value::as_str)
             .unwrap_or("Call coding tool");
-        let routing_hint = if name == "list_workspace_folders" {
+        let routing_hint = if tool["inputSchema"]["properties"]["attachment_id"].is_object() {
+            " Global connection: call chat_open with the supplied chat_id and workspace_folder_id. Every subsequent project operation requires these IDs and the returned attachment_id. Follow the complete skill.text. Projects cannot be switched. "
+        } else if name == "list_workspace_folders" {
             " Call this first to discover allowed tool-hub folders."
         } else if workspace_folder_id_optional(name) {
             " Pass workspace_folder_id from list_workspace_folders, unless this control call can be routed from its session_id, output_ref, or resume_id. There is no default folder."
         } else {
             " Pass workspace_folder_id from list_workspace_folders. The request is rejected when no folder is selected; there is no default folder."
         };
-        let description: String = format!("{description_raw}{routing_hint}")
+        let description: String = format!("{routing_hint}{description_raw}")
             .chars()
             .take(900)
             .collect();

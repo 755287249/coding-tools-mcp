@@ -1,5 +1,11 @@
-import { writable } from 'svelte/store';
-import { localChat } from '$lib/api/chat';
+import {get,writable} from 'svelte/store';
+import {getBackend} from '$lib/backend';
+import {workspaces} from '$lib/stores/app';
+import {workspaceFolders} from '$lib/types';
+import type {ChatAction} from '$lib/api/chat';
+import {startVisiblePolling} from './polling';
+import {onChatCacheReset} from './cache-lifecycle.js';
+import {workspaceBlocked,workspaceEpoch} from '$lib/stores/workspace-lifecycle';
 export interface ScheduledChat {
   id:string; workspaceId:string; folderId:string; chatId:string; title:string; text:string;
   due:number; status:'pending'|'sending'|'sent'|'error'|'paused'; error?:string;
@@ -7,40 +13,59 @@ export interface ScheduledChat {
 const KEY='ctmcp-chat-schedules-v1';
 export const scheduledChats=writable<ScheduledChat[]>([]);
 export const scheduleError=writable('');
-function read():ScheduledChat[] {
-  const value=JSON.parse(localStorage.getItem(KEY)??'[]');
-  if(!Array.isArray(value)||value.some(t=>!t||!['id','workspaceId','folderId','chatId','title','text'].every(k=>typeof t[k]==='string')||!Number.isFinite(t.due)||!['pending','sending','sent','error','paused'].includes(t.status)))throw new Error('Invalid scheduled-task storage');
-  return value;
+let identity=0;
+onChatCacheReset(()=>{identity++;scheduledChats.set([]);scheduleError.set('')});
+async function request(workspaceId:string,folderId:string,args:Record<string,unknown>) {
+  const epoch=identity,workspaceVersion=workspaceEpoch(workspaceId);
+  if(workspaceBlocked(workspaceId))throw Error('Project unavailable');
+  const result=await getBackend().chat.request(workspaceId,folderId,args as unknown as ChatAction) as unknown as {tasks:Omit<ScheduledChat,'workspaceId'|'folderId'>[]};
+  if(epoch!==identity||workspaceVersion!==workspaceEpoch(workspaceId)||workspaceBlocked(workspaceId))throw Error('Schedule session changed; refresh before editing');
+  if(!Array.isArray(result.tasks))throw Error('Invalid schedule response');
+  const tasks=result.tasks.map(task=>({...task,workspaceId,folderId}));
+  scheduledChats.update(current=>[...current.filter(t=>t.workspaceId!==workspaceId||t.folderId!==folderId),...tasks]);
+  return tasks;
 }
-function write(tasks:ScheduledChat[]) {localStorage.setItem(KEY,JSON.stringify(tasks));scheduledChats.set(tasks);scheduleError.set('');}
-export async function changeSchedule(change:(tasks:ScheduledChat[])=>ScheduledChat[]) {
-  if(!navigator.locks)throw new Error('This browser does not support safe scheduled-task locking.');
-  await navigator.locks.request(KEY,()=>write(change(read())));
+export async function createSchedule(task:ScheduledChat) {await request(task.workspaceId,task.folderId,{...task,action:'schedule_create'})}
+export async function updateSchedule(task:ScheduledChat,status:ScheduledChat['status']|'deleted') {
+  await request(task.workspaceId,task.folderId,{action:'schedule_update',id:task.id,status,expected_status:task.status});
 }
+function legacyTasks():ScheduledChat[] {
+  let raw:string|null;try{raw=localStorage.getItem(KEY)}catch{return []}
+  const tasks=JSON.parse(raw??'[]');
+  if(!Array.isArray(tasks)||tasks.some(t=>!t||!['id','workspaceId','folderId','chatId','title','text'].every(k=>typeof t[k]==='string')||!Number.isFinite(t.due)||!['pending','sending','sent','error','paused'].includes(t.status)))throw Error('Invalid scheduled-task storage');
+  return tasks;
+}
+/** Only synchronization lives in the browser. Delivery is owned by the server. */
 export function startScheduleRunner() {
-  let stopped=false, running=false;
-  const refresh=()=>{try{scheduledChats.set(read())}catch(e){scheduleError.set(String(e))}};
-  async function run(){
-    if(stopped||running||!navigator.locks)return;running=true;
-    try{await navigator.locks.request(KEY,{ifAvailable:true},async lock=>{
-      if(!lock||stopped)return;
-      const tasks=read();
-      for(const task of tasks) {
-        if(stopped)break;
-        if(!((task.status==='pending'&&task.due<=Date.now())||task.status==='sending'))continue;
-        task.status='sending';write(tasks);
+  let stopped=false;
+  const stop=startVisiblePolling(async()=>{
+    const pollIdentity=identity;
+    try {
+      const targets=get(workspaces).flatMap(ws=>workspaceFolders(ws).map(folder=>({workspaceId:ws.id,folderId:folder.id})));
+      const warnings:string[]=[];
+      let legacy:ScheduledChat[]=[];
+      try{legacy=legacyTasks()}catch(error){warnings.push(String(error))}
+      for(const task of legacy) {
+        if(stopped||pollIdentity!==identity)return;
+        // Folder IDs survive the one-directory project migration.
+        const matches=targets.filter(t=>t.folderId===task.folderId);
+        const target=targets.find(t=>t.workspaceId===task.workspaceId&&t.folderId===task.folderId)??(matches.length===1?matches[0]:undefined);
+        if(!target)continue;
         try {
-          // The stable message ID and immutable payload also make recovery after a
-          // lost response safe. Competing windows share this Web Lock.
-          await localChat(task.workspaceId,task.folderId,{action:'send',chat_id:task.chatId,message_id:task.id,text:task.text});
-          task.status='sent';task.error=undefined;
-        }catch(e){task.status='error';task.error=String(e)}
-        write(tasks);
+          await request(target.workspaceId,target.folderId,{...task,action:'schedule_import'});
+          const latest=legacyTasks();
+          localStorage.setItem(KEY,JSON.stringify(latest.filter(t=>!(t.id===task.id&&t.workspaceId===task.workspaceId&&t.folderId===task.folderId))));
+        }catch(error){warnings.push(String(error))}
       }
-      scheduledChats.set(tasks);
-    })}catch(e){scheduleError.set(String(e))}finally{running=false}
-  }
-  refresh();void run();const timer=setInterval(()=>void run(),1000);
-  const storage=(event:StorageEvent)=>{if(event.key===KEY)refresh()};window.addEventListener('storage',storage);
-  return()=>{stopped=true;clearInterval(timer);window.removeEventListener('storage',storage)};
+      for(const target of targets) {
+        if(stopped||pollIdentity!==identity)return;
+        try{await request(target.workspaceId,target.folderId,{action:'schedule_list'})}catch(error){warnings.push(String(error))}
+      }
+      if(stopped||pollIdentity!==identity)return;
+      const active=new Set(targets.map(t=>JSON.stringify([t.workspaceId,t.folderId])));
+      scheduledChats.update(tasks=>tasks.filter(t=>active.has(JSON.stringify([t.workspaceId,t.folderId]))));
+      if(!stopped&&pollIdentity===identity)scheduleError.set([...new Set(warnings)].join('\n'));
+    }catch(error){if(!stopped&&pollIdentity===identity)scheduleError.set(String(error))}
+  },()=>3000);
+  return()=>{stopped=true;stop();scheduledChats.set([])};
 }

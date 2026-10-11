@@ -1,3 +1,4 @@
+import { GLOBAL_MCP_ID } from './projectIsolation.js';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { chmod, copyFile, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
@@ -326,7 +327,8 @@ export function normalizeConfig(
         3650 * 24 * 60 * 60
       )
     },
-    folders: environmentFolders !== undefined
+    globalConnection: input.globalConnection === true,
+    folders: input.globalConnection ? [] : environmentFolders !== undefined
       ? parseFolders(environmentFolders)
       : input.folders?.length
         ? normalizeWorkspaceFolderDocuments(input.folders)
@@ -376,7 +378,7 @@ function migrateConfigDocument(value: unknown, identity?: WorkspaceIdentity): Mi
 
   if (looksLikeCanonicalWorkspace(source)) {
     const extracted = extractPlaintextSecrets(source);
-    const missingFolders = !Array.isArray(source.folders) || source.folders.length === 0;
+    const missingFolders = source.id !== GLOBAL_MCP_ID && (!Array.isArray(source.folders) || source.folders.length === 0);
     const fallbackFolders = missingFolders ? defaultWorkspaceFolders() : undefined;
     const canonicalSource = fallbackFolders
       ? { ...source, folders: fallbackFolders, activeFolderId: fallbackFolders[0].id }
@@ -458,7 +460,7 @@ async function readLegacyTokenSecret(dataDir: string): Promise<{ filePath: strin
 }
 
 export function validateConfig(config: AgentConfig): void {
-  if (!config.folders.length) throw new Error('at least one workspace folder is required');
+  if (!config.globalConnection && !config.folders.length) throw new Error('at least one workspace folder is required');
   if (!config.host.trim()) throw new Error('host is required');
   const ids = new Set<string>();
   for (const folder of config.folders) {
@@ -522,7 +524,7 @@ export async function writeConfigDocument(
 
 export async function loadConfigBundle(
   file?: string,
-  options?: { identity?: WorkspaceIdentity }
+  options?: { identity?: WorkspaceIdentity; fixedRoot?: boolean }
 ): Promise<LoadedConfig> {
   const configPath = resolveConfigPath(file);
   const input = await readConfigInput(configPath);
@@ -531,7 +533,7 @@ export async function loadConfigBundle(
     migration.document.oauth = { ...migration.document.oauth, clientId: createOAuthClientId() };
     migration.changed = true;
   }
-  if (!migration.document.folders?.length) {
+  if (!migration.document.globalConnection && !migration.document.folders?.length) {
     migration.document.folders = parseFolders(process.env.CTMCP_WORKSPACES);
     migration.changed = true;
   }
@@ -561,7 +563,9 @@ export async function loadConfigBundle(
   );
   let config = normalizeConfig(migration.document, secretState.secrets);
   validateConfig(config);
-  const folderRecovery = await recoverWorkspaceFolders(config, migration.document);
+  const folderRecovery = options?.fixedRoot || config.globalConnection
+    ? { config, document: migration.document, removed: [], fallbackCreated: false }
+    : await recoverWorkspaceFolders(config, migration.document);
   config = folderRecovery.config;
   if (folderRecovery.removed.length) {
     migration.document = folderRecovery.document;

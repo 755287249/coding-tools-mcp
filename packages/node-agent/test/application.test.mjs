@@ -1,3 +1,4 @@
+import {GLOBAL_MCP_ID} from '../dist/projectIsolation.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, realpath, stat, writeFile } from 'node:fs/promises';
@@ -133,7 +134,7 @@ test('application initialization persists a Rust-style random OAuth client ID an
   assert.equal(second.workspaces[0].loaded.config.oauth.password, first.workspaces[0].loaded.config.oauth.password);
 });
 
-test('application startup removes missing workspace folders and persists the repaired config', async () => {
+test('application migration preserves missing fixed roots without changing their identity', async () => {
   const { base, root, dataDir, configPath } = await fixture('ctmcp-application-stale-folder');
   const validRoot = path.join(base, 'valid-root');
   const missingRoot = path.join(base, 'missing-root');
@@ -149,31 +150,23 @@ test('application startup removes missing workspace folders and persists the rep
   assert.deepEqual(application.workspaces[0].loaded.config.folders.map(folder => folder.id), ['valid']);
   assert.equal(application.workspaces[0].loaded.config.folders[0].path, await realpath(validRoot));
 
-  const saved = JSON.parse(await readFile(configPath, 'utf8'));
-  assert.deepEqual(saved.folders.map(folder => folder.id), ['valid']);
-  assert.equal(saved.folders[0].path, await realpath(validRoot));
-  assert.equal(saved.folders.some(folder => folder.path === missingRoot), false);
+  assert.equal(application.workspaces[1].loaded.config.folders[0].id, 'missing');
+  assert.equal(application.workspaces[1].loaded.config.folders[0].path, missingRoot);
+  const reloaded = await loadApplication(configPath);
+  assert.equal(reloaded.workspaces[1].loaded.config.folders[0].path, missingRoot);
 });
 
-test('application startup creates and persists a safe fallback when every workspace folder is missing', async () => {
+test('unavailable fixed roots remain unavailable and never receive a fallback directory', async () => {
   const { base, dataDir, configPath } = await fixture('ctmcp-application-all-stale-folders');
   const missingRoot = path.join(base, 'missing-root');
   await writeFile(configPath, `${JSON.stringify(configDocument(missingRoot, dataDir, 43126), null, 2)}\n`);
 
   const application = await loadApplication(configPath);
-  const fallbackRoot = path.join(dataDir, 'workspace');
-  const fallbackCanonical = await realpath(fallbackRoot);
-  const metadata = await stat(fallbackRoot);
-  assert.equal(metadata.isDirectory(), true);
-  assert.equal(application.workspaces[0].loaded.config.folders.length, 1);
-  assert.equal(application.workspaces[0].loaded.config.folders[0].id, 'default');
-  assert.equal(application.workspaces[0].loaded.config.folders[0].path, fallbackCanonical);
-
-  const saved = JSON.parse(await readFile(configPath, 'utf8'));
-  assert.equal(saved.folders.length, 1);
-  assert.equal(saved.folders[0].id, 'default');
-  assert.equal(saved.folders[0].path, fallbackCanonical);
-  assert.equal(saved.folders.some(folder => folder.path === missingRoot), false);
+  assert.equal(application.connection.loaded.config.folders.length, 0);
+  assert.equal(application.workspaces[0].loaded.config.folders[0].path, missingRoot);
+  await assert.rejects(stat(path.join(dataDir,'workspace')), {code:'ENOENT'});
+  const reloaded = await loadApplication(configPath);
+  assert.equal(reloaded.workspaces[0].loaded.config.folders[0].path, missingRoot);
 });
 
 test('workspace registry keeps settings, secrets, ports and multiple folders independent', async () => {
@@ -201,10 +194,11 @@ test('workspace registry keeps settings, secrets, ports and multiple folders ind
   }, null, 2)}\n`);
 
   const application = await loadApplication(primary.configPath);
-  assert.deepEqual(application.workspaces.map(workspace => workspace.id), ['primary', 'secondary']);
-  assert.deepEqual(application.workspaces.map(workspace => workspace.loaded.config.port), [43131, 43132]);
+  assert.deepEqual(application.workspaces.slice(0,2).map(workspace => workspace.id), ['primary', 'secondary']);
+  assert.equal(application.workspaces.length,3);
+  assert.deepEqual(application.workspaces.map(workspace => workspace.loaded.config.port), [43131, 43132, 43132]);
   assert.equal(application.workspaces[0].loaded.config.folders.length, 1);
-  assert.equal(application.workspaces[1].loaded.config.folders.length, 2);
+  assert.equal(application.workspaces[1].loaded.config.folders.length, 1);
   assert.equal(application.workspaces[1].loaded.config.permissionMode, 'guarded');
 
   const store = new ApplicationConfigStore(application);
@@ -223,10 +217,8 @@ test('workspace registry keeps settings, secrets, ports and multiple folders ind
     ...secondarySnapshot.saved.folders,
     { id: 'assets', name: 'Assets', path: primary.root }
   ];
-  await store.saveWorkspace('secondary', updatePayload(secondarySnapshot, {
-    name: 'Secondary Renamed',
-    folders: renamedFolders
-  }));
+  await assert.rejects(store.saveWorkspace('secondary', updatePayload(secondarySnapshot, {folders: renamedFolders})), /fixed directory/);
+  await store.saveWorkspace('secondary', updatePayload(secondarySnapshot, {name:'Secondary Renamed'}));
 
   const after = store.snapshot();
   const primaryAfter = after.workspaces.find(workspace => workspace.id === 'primary');
@@ -234,12 +226,12 @@ test('workspace registry keeps settings, secrets, ports and multiple folders ind
   assert.equal(primaryAfter.name, 'Primary Workspace');
   assert.equal(primaryAfter.saved.folders.length, 1);
   assert.equal(secondaryAfter.name, 'Secondary Renamed');
-  assert.equal(secondaryAfter.saved.folders.length, 3);
+  assert.equal(secondaryAfter.saved.folders.length, 1);
 
   const savedRegistry = JSON.parse(await readFile(registryPath, 'utf8'));
   assert.equal(savedRegistry.workspaces[1].name, 'Secondary Renamed');
-  const reloadedSecondary = await loadConfigBundle(secondary.configPath);
-  assert.equal(reloadedSecondary.config.folders.length, 3);
+  const reloadedSecondary = await loadConfigBundle(application.workspaces.find(p=>p.id==='secondary').loaded.configPath);
+  assert.equal(reloadedSecondary.config.folders.length, 1);
   assert.equal(reloadedSecondary.config.oauth.password, rotated.value);
 });
 
@@ -300,7 +292,7 @@ test('workspace management API scopes settings, dashboards and authorization pas
   const headers = { 'x-ctmcp-admin-token': token };
 
   const snapshot = await fetch(`${base}/admin/api/config`, { headers }).then(response => response.json());
-  assert.equal(snapshot.primaryWorkspaceId, 'primary');
+  assert.equal(snapshot.primaryWorkspaceId, GLOBAL_MCP_ID);
   assert.deepEqual(snapshot.workspaces.map(workspace => workspace.id), ['primary', 'secondary']);
 
   const status = await fetch(`${base}/admin/api/status`, { headers }).then(response => response.json());
@@ -340,7 +332,7 @@ test('workspace management API scopes settings, dashboards and authorization pas
   assert.equal(secondaryTunnelReconfigurations.length, 1);
   assert.equal(secondaryTunnelReconfigurations[0].tunnel.enrollmentUrl, enrollmentUrl);
   assert.equal(secondaryRuntime.context.config.tunnel.enrollmentUrl, enrollmentUrl);
-  const persistedSecondary = await loadConfigBundle(secondary.configPath);
+  const persistedSecondary = await loadConfigBundle(application.workspaces.find(p=>p.id==='secondary').loaded.configPath);
   assert.equal(persistedSecondary.config.tunnel.enrollmentUrl, enrollmentUrl);
   assert.doesNotMatch(await readFile(secondary.configPath, 'utf8'), /enroll\/once/);
 
@@ -394,20 +386,15 @@ test('workspace management API scopes settings, dashboards and authorization pas
     }))
   });
   const folderResult = await folderResponse.json();
-  assert.equal(folderResponse.status, 200, JSON.stringify(folderResult));
-  assert.ok(folderResult.appliedImmediately.includes('folders'));
-  assert.equal(folderResult.hotApplyDeferredReason, null);
-  assert.equal(secondaryRuntime.context.config.folders.length, 2);
-  const canonicalExtraFolder = await import('node:fs/promises').then(({ realpath }) => realpath(extraFolder));
-  assert.equal(secondaryRuntime.context.config.folders[1].path, canonicalExtraFolder);
-
+  assert.equal(folderResponse.status, 400, JSON.stringify(folderResult));
+  assert.match(folderResult.error.message, /fixed directory/);
+  assert.equal(secondaryRuntime.context.config.folders.length, 1);
   const foldersSnapshot = await fetch(`${base}/admin/api/config`, { headers }).then(response => response.json());
-  const foldersWorkspace = foldersSnapshot.workspaces.find(workspace => workspace.id === 'secondary');
-  assert.equal(foldersWorkspace.saved.folders.length, 2);
-  assert.equal(foldersWorkspace.effective.folders.length, 2);
+  assert.equal(foldersSnapshot.workspaces.find(workspace => workspace.id === 'secondary').saved.folders.length, 1);
+  await secondaryRuntime.close();
 });
 
-test('workspace registry rejects duplicate runtime ports before servers start', async () => {
+test('global migration rejects duplicate folder identities before routing can be ambiguous', async () => {
   const primary = await fixture('ctmcp-application-conflict-primary');
   const secondary = await fixture('ctmcp-application-conflict-secondary');
   await writeFile(primary.configPath, `${JSON.stringify(configDocument(primary.root, primary.dataDir, 43141), null, 2)}\n`);
@@ -420,13 +407,13 @@ test('workspace registry rejects duplicate runtime ports before servers start', 
     ]
   }, null, 2)}\n`);
 
-  await assert.rejects(loadApplication(primary.configPath), /Workspace ports conflict/);
+  await assert.rejects(loadApplication(primary.configPath), /Project or folder identity conflict/);
 });
 
 test('workspace pack export strips secrets and import allocates a local port and dataDir', async () => {
   const source = await fixture('ctmcp-pack-source');
   const dest = await fixture('ctmcp-pack-dest');
-  await writeFile(source.configPath, `${JSON.stringify(configDocument(source.root, source.dataDir, 43201), null, 2)}\n`);
+  await writeFile(source.configPath, `${JSON.stringify(configDocument(source.root, source.dataDir, 43201, {folders:[{id:'source-root',name:'Source',path:source.root}]}), null, 2)}\n`);
   await writeFile(dest.configPath, `${JSON.stringify(configDocument(dest.root, dest.dataDir, 43202), null, 2)}\n`);
   const sourceApp = await loadApplication(source.configPath);
   const sourceStore = new ApplicationConfigStore(sourceApp);
@@ -468,6 +455,7 @@ test('shared drop workspace.json opens without replacing the Node data dir', asy
   process.env.CTMCP_SHARED_WORKSPACES_ROOT = dropRoot;
   const source = await fixture('ctmcp-drop-source');
   await writeFile(source.configPath, `${JSON.stringify(configDocument(source.root, source.dataDir, 43302, {
+    folders:[{id:'drop-root',name:'Drop',path:source.root}],
     securityPolicy: { restrictToolCatalog: true }
   }), null, 2)}\n`);
   const sourceApp = await loadApplication(source.configPath);

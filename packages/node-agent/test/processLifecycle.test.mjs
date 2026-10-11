@@ -363,6 +363,14 @@ test('kill_session terminates a durable managed job after Agent restart', async 
     yield_time_ms: 50
   }, meta1);
   sessionId = started.session_id;
+  // Wait for the child to reach the point this assertion exercises. Under a
+  // loaded build host, admission may return before Node prints its first line.
+  let ready = started;
+  const readyDeadline = Date.now() + 15_000;
+  while (!String(ready.stdout).includes('kill-start') && Date.now() < readyDeadline) {
+    ready = await callTool(ctx1, 'wait_command', {session_id:sessionId,timeout_ms:1000}, meta1);
+  }
+  assert.match(ready.stdout, /kill-start/);
   await disposeProcessSessions(ctx1);
 
   ctx2 = await createToolContext(config(root, dataDir));

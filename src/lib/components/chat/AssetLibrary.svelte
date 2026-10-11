@@ -1,4 +1,5 @@
 <script lang="ts">
+  import {copyText} from "$lib/browser-tools";
   import { setContext } from 'svelte';
   import { IMAGE_GALLERY, uniqueImages } from '$lib/chat/image-gallery';
   import { assetPreview } from '$lib/chat/asset-preview';
@@ -42,7 +43,7 @@
     }catch(e){if(!cancelled)error=String(e)}finally{if(!cancelled)loading=false}})();
     return()=>{cancelled=true};
   });
-  async function copy(path:string){try{await navigator.clipboard.writeText(path)}catch(e){error=String(e)}}
+  async function copy(path:string){try{await copyText(path)}catch(e){error=String(e)}}
 </script>
 <div class="asset-library">
   <input class="tx-input" bind:this={searchInput} bind:value={query} aria-label={$t('shell.findAssets')} placeholder={$t('shell.findAssets')}/>

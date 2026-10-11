@@ -74,7 +74,18 @@ export interface TelemetryQueryOptions {
   sortBy?: string;
 }
 
+export interface ConnectionHealth {
+  state: 'online' | 'offline' | 'error' | 'connecting';
+  observedAt: number;
+  service: string;
+  entry: string;
+  detail: string;
+  endpoint: string;
+}
+
 export interface WorkspaceBackend {
+  getConnection(): Promise<WorkspaceProfile>;
+  getConnectionHealth(): Promise<ConnectionHealth>;
   list(): Promise<WorkspaceProfile[]>;
   create(path: string, name?: string): Promise<WorkspaceProfile>;
   listWslDistributions(): Promise<string[]>;

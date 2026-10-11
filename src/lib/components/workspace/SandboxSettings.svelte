@@ -14,9 +14,10 @@
     locked: boolean;
     onSave: (config: SandboxConfig) => void | Promise<void>;
     hasWslFolder?: boolean;
+    projectIsolation?:boolean;
   }
 
-  let { config, locked, onSave, hasWslFolder = false }: Props = $props();
+  let { config, locked, onSave, hasWslFolder = false, projectIsolation=false }: Props = $props();
   let enabled = $state(false);
   let backend = $state("appcontainer");
   let readOnlyPaths = $state("");
@@ -38,7 +39,7 @@
   );
 
   $effect(() => {
-    enabled = config.enabled;
+    enabled = projectIsolation || config.enabled;
     backend = config.backend;
     readOnlyPaths = pathsForAccess(config.external_paths ?? [], "read_only");
     writablePaths = pathsForAccess(config.external_paths ?? [], "modify");
@@ -90,7 +91,7 @@
     saving = true;
     error = "";
     try {
-      await onSave({ enabled, backend, external_paths: pendingExternalPaths, options });
+      await onSave({ enabled:projectIsolation||enabled, backend, external_paths:projectIsolation?[]:pendingExternalPaths, options });
     } catch (cause) {
       error = String(cause);
     } finally {
@@ -111,11 +112,11 @@
   </div>
 
   <label class="flex items-start gap-3 rounded-lg border border-[var(--color-border)] p-3 text-sm">
-    <input class="mt-0.5 h-4 w-4" type="checkbox" bind:checked={enabled} disabled={locked} />
+    <input class="mt-0.5 h-4 w-4" type="checkbox" bind:checked={enabled} disabled={locked||projectIsolation} />
     <span class="grid gap-1">
       <span class="font-medium text-[var(--color-text)]">{$t("Enable command sandbox")}</span>
       <span class="text-xs leading-5 text-[var(--color-text-muted)]">
-        {$t("Sandbox changes normally apply to new commands immediately. Turning the sandbox off automatically starts or restarts the MCP service so the unsandboxed runtime is active.")}
+        {#if projectIsolation}{$t('connection.sandboxHelp')}{:else}{$t("Sandbox changes normally apply to new commands immediately. Turning the sandbox off automatically starts or restarts the MCP service so the unsandboxed runtime is active.")}{/if}
       </span>
     </span>
   </label>
@@ -133,7 +134,7 @@
     </select>
   </label>
 
-  <div class="grid gap-3">
+  {#if !projectIsolation}<div class="grid gap-3">
     <div>
       <p class="text-sm font-medium text-[var(--color-text)]">{$t("External filesystem access")}</p>
       <p class="mt-1 text-xs leading-5 text-[var(--color-text-muted)]">
@@ -149,6 +150,8 @@
       <textarea class="tx-input min-h-24" bind:value={writablePaths} disabled={locked} rows="3"></textarea>
     </label>
   </div>
+
+  {/if}
 
   {#if selected}
     <div class="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-soft)] p-3 text-xs leading-5 text-[var(--color-text-muted)]">

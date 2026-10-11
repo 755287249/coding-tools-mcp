@@ -279,6 +279,7 @@ export function createNodeBackend(deps: NodeBackendDeps = {}): FrontendBackend {
   }
 
   async function savedConfig(id: string): Promise<NodeSafeConfig> {
+    if (id === "00000000000000000000000000000001") { const connection = await request<NodeWorkspaceSnapshot>("/admin/api/connection"); return connection.saved ?? connection.effective; }
     const cached = extras.get(id);
     if (cached) return cached;
     const config = await loadConfig();
@@ -296,7 +297,7 @@ export function createNodeBackend(deps: NodeBackendDeps = {}): FrontendBackend {
       body: JSON.stringify(payload),
     });
     const config = await loadConfig();
-    const workspace = config.workspaces.find((item) => item.id === id);
+    const workspace = id === "00000000000000000000000000000001" ? await request<NodeWorkspaceSnapshot>("/admin/api/connection") : config.workspaces.find((item) => item.id === id);
     if (!workspace) throw new Error(`Workspace ${id} was not found.`);
     return mapNodeWorkspace(workspace);
   }
@@ -310,6 +311,8 @@ export function createNodeBackend(deps: NodeBackendDeps = {}): FrontendBackend {
     native,
 
     workspaces: {
+      async getConnection() { return mapNodeWorkspace(await request("/admin/api/connection")); },
+      getConnectionHealth: () => request("/admin/api/connection/health"),
       async list() {
         const config = await loadConfig();
         return config.workspaces.map(mapNodeWorkspace);
@@ -327,7 +330,7 @@ export function createNodeBackend(deps: NodeBackendDeps = {}): FrontendBackend {
       listWslDistributions: notSupported("wslFolders"),
       async listSandboxBackends() {
         const config = snapshot ?? (await loadConfig());
-        return config.workspaces[0]?.effective.sandboxBackends ?? [];
+        return config.workspaces[0]?.effective.sandboxBackends ?? (await request<NodeWorkspaceSnapshot>("/admin/api/connection")).effective.sandboxBackends ?? [];
       },
       async update(profile) {
         const saved = await savedConfig(profile.id);
@@ -365,15 +368,15 @@ export function createNodeBackend(deps: NodeBackendDeps = {}): FrontendBackend {
           body: JSON.stringify({ path: folderPath }),
         });
       },
-      canDelete(id) { return !!snapshot && id !== snapshot.primaryWorkspaceId && snapshot.workspaces.length > 1; },
+      canDelete(id) { return !!snapshot && id !== snapshot.primaryWorkspaceId && snapshot.workspaces.some(workspace => workspace.id === id); },
       async delete(id) {
         await request(`/admin/api/workspaces/${encodeURIComponent(id)}`, { method: "DELETE" });
       },
       startRuntime: notSupported("runtimeSupervisor"),
       stopRuntime: notSupported("runtimeSupervisor"),
       async getRuntimeStatus(id) {
-        const saved = await savedConfig(id);
-        return runtimeStatusFromConfig(saved);
+        const connection = await request<NodeWorkspaceSnapshot>("/admin/api/connection");
+        return runtimeStatusFromConfig(connection.effective);
       },
       startActionsRuntime: notSupported("actions"),
       stopActionsRuntime: notSupported("actions"),

@@ -16,6 +16,18 @@ use crate::workspace::resources::{
 use crate::workspace::{compare_wsl_paths, wsl_unc_path, WorkspaceFolder, WorkspaceProfile};
 use serde_json::Value;
 
+#[tauri::command]
+pub async fn get_mcp_connection_health(
+    state: State<'_, AppState>,
+) -> AppResult<crate::application::connection::ConnectionHealth> {
+    crate::application::connection::health(&state).await
+}
+
+#[tauri::command(async)]
+pub fn get_mcp_connection(state: State<'_, AppState>) -> AppResult<WorkspaceProfile> {
+    state.with_workspaces(|store| store.global_connection())
+}
+
 #[tauri::command(async)]
 pub fn list_workspaces(state: State<'_, AppState>) -> AppResult<Vec<WorkspaceProfile>> {
     state.with_workspaces(|store| Ok(store.list().to_vec()))
@@ -69,7 +81,7 @@ fn create_workspace_inner(
         let mut profile = WorkspaceProfile::new(path, name);
         // Create should not fail just because default ports are already claimed.
         // Pick free ports now; start/update still enforce conflict checks.
-        assign_free_workspace_ports(store.list(), &mut profile)?;
+        assign_free_workspace_ports(&store.resource_profiles(), &mut profile)?;
         bootstrap_workspace(store, &profile.id)?;
         store.add(profile.clone())?;
         Ok(profile)
@@ -191,17 +203,21 @@ pub async fn update_workspace(
             .ok_or_else(|| AppError::Message(format!("workspace not found: {}", profile.id)))
     })?;
     state.with_workspaces(|store| {
-        validate_workspace_resources_update(store.list(), &current, &profile)
+        validate_workspace_resources_update(&store.resource_profiles(), &current, &profile)
     })?;
     if crate::tunnel::public_mcp_security_error(&profile).is_some() {
         crate::tunnel::stop_for_runtime(&current, crate::tunnel::TunnelServiceKind::Mcp).await?;
     }
-    crate::tools::hub::preflight_live_hub(&profile).map_err(AppError::Message)?;
+    if profile.id != crate::data::GLOBAL_MCP_ID {
+        crate::tools::hub::preflight_live_hub(&profile).map_err(AppError::Message)?;
+    }
     let updated = state.with_workspaces(|store| {
         store.update(profile.clone())?;
         Ok(profile.clone())
     })?;
-    crate::tools::hub::sync_live_hub_after_preflight(&updated).map_err(AppError::Message)?;
+    if updated.id != crate::data::GLOBAL_MCP_ID {
+        crate::tools::hub::sync_live_hub_after_preflight(&updated).map_err(AppError::Message)?;
+    }
     Ok(())
 }
 
@@ -343,6 +359,11 @@ pub fn open_external_url(url: String) -> AppResult<()> {
 #[tauri::command]
 pub async fn delete_workspace(state: State<'_, AppState>, id: String) -> AppResult<()> {
     use crate::runtime::{await_listener_shutdown, ServiceKind};
+    if id == crate::data::GLOBAL_MCP_ID {
+        return Err(AppError::Message(
+            "The global connection cannot be deleted as a project".into(),
+        ));
+    }
     let profile = state.with_workspaces(|store| {
         store
             .get(&id)
@@ -356,6 +377,7 @@ pub async fn delete_workspace(state: State<'_, AppState>, id: String) -> AppResu
             runtime.begin_stop(&id, ServiceKind::Actions),
         ))
     })?;
+    crate::mcp::stop_project(Some(&id)).await;
     // Shutdown futures own their handles. Never wait while holding AppState.runtime.
     tokio::join!(
         await_listener_shutdown(mcp, profile.runtime.local_port),
@@ -382,6 +404,7 @@ pub async fn delete_workspace(state: State<'_, AppState>, id: String) -> AppResu
         Ok(())
     }.await;
     if result.is_err() {
+        crate::mcp::unblock_project(&id);
         state.with_runtime(|runtime| {
             runtime.cancel_delete(&id);
             Ok(())

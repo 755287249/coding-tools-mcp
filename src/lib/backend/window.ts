@@ -2,7 +2,7 @@
 import { desktopWindowApi } from '$lib/backend/host';
 import { isDesktopWindow } from '$lib/stores/glass';
 export async function newAppWindow() {
-  if (!isDesktopWindow()) {
+  if (!isDesktopWindow() || !desktopWindowApi) {
     if (!window.open(window.location.href, '_blank', 'noopener')) return;
     return;
   }
@@ -18,7 +18,7 @@ export async function closeAppWindow() {
   else window.close();
 }
 export async function quitApp() {
-  if (isDesktopWindow()) { await desktopWindowApi.invoke('quit_app'); }
+  if (isDesktopWindow() && desktopWindowApi) { await desktopWindowApi.invoke('quit_app'); }
   else window.close();
 }
 export async function toggleFullscreen() {
@@ -28,6 +28,6 @@ export async function toggleFullscreen() {
 }
 
 export function getCurrentWindow() {
-  if (!isDesktopWindow()) throw new Error('Desktop window is unavailable');
+  if (!isDesktopWindow() || !desktopWindowApi) throw new Error('Desktop window is unavailable');
   return desktopWindowApi.getCurrentWindow();
 }

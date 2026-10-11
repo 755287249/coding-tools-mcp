@@ -64,13 +64,13 @@ test('manual OAuth includes an explicit callback while fixed-token config bypass
 test('desktop and Node expose the same startup and chat guidance', () => {
   const read = path => readFileSync(new URL('../' + path, import.meta.url), 'utf8');
   const constants = (path, pattern) => Object.fromEntries([...read(path).matchAll(pattern)].map(m => [m[1], JSON.parse(m[2])]));
-  const rust = constants('src-tauri/src/mcp/server.rs', /const (\w+_INSTRUCTIONS): &str = ("[^\n]+");/g);
+  const rust = constants('src-tauri/src/mcp/server.rs', /const (\w+_INSTRUCTIONS): &str =\s*("[^\n]+");/g);
   const node = constants('packages/node-agent/src/server/mcp/dispatcher.ts', /const (\w+_INSTRUCTIONS) = ("[^\n]+");/g);
   assert.equal(Object.keys(rust).length, 6);
   assert.deepEqual(node, rust);
   assert.ok(Object.values(rust).join(' ').length < 1900);
   assert.doesNotMatch(Object.values(rust).join(' '), /ChatGPT/);
-  const rustChat = constants('src-tauri/src/tools/chat.rs', /const (CHAT_\w+_INSTRUCTION): &str = ("[^\n]+");/g);
+  const rustChat = constants('src-tauri/src/tools/chat.rs', /const (CHAT_\w+_INSTRUCTION): &str =\s*("[^\n]+");/g);
   const nodeChat = constants('packages/node-agent/src/chat/store.ts', /const (CHAT_\w+_INSTRUCTION) = ("[^\n]+");/g);
   assert.equal(Object.keys(rustChat).length, 6);
   assert.deepEqual(nodeChat, rustChat);

@@ -40,6 +40,19 @@
     { "id": "PA-025-MCP-HTTP-VALIDATION", "title": "MCP HTTP connection and envelope validation differential", "category": "mcp_http_validation", "mode": "node_test", "required": true, "item_ids": ["NP-025"], "test_files": ["packages/node-agent/test/mcpHttpValidation.test.mjs"] },
     { "id": "PA-026-MCP-STREAMING", "title": "Streamable HTTP heartbeat differential", "category": "mcp_streaming", "mode": "node_test", "required": true, "item_ids": ["NP-026"], "test_files": ["packages/node-agent/test/mcpStreaming.test.mjs"] },
     { "id": "PA-027-MCP-HTTP-SEMANTICS", "title": "MCP HTTP method and client-response differential", "category": "mcp_http_semantics", "mode": "node_test", "required": true, "item_ids": ["NP-027"], "test_files": ["packages/node-agent/test/mcpHttpSemantics.test.mjs"] },
-    { "id": "PA-028-MCP-GUARD-COVERAGE", "title": "MCP transport guard coverage", "category": "verification", "mode": "evidence", "required": true, "item_ids": ["NP-028"], "test_files": ["packages/node-agent/test/behavioralParity.test.mjs", "tests/node-agent-parity.test.mjs"] }
+    { "id": "PA-028-MCP-GUARD-COVERAGE", "title": "MCP transport guard coverage", "category": "verification", "mode": "evidence", "required": true, "item_ids": ["NP-028"], "test_files": ["packages/node-agent/test/behavioralParity.test.mjs", "tests/node-agent-parity.test.mjs"] },
+    {
+      "id": "PA-029-GLOBAL-PROJECTS",
+      "title": "Global project capability isolation",
+      "category": "folder_isolation",
+      "mode": "node_test",
+      "required": true,
+      "item_ids": [
+        "NP-029"
+      ],
+      "test_files": [
+        "packages/node-agent/test/projectGateway.test.mjs"
+      ]
+    }
   ]
 }

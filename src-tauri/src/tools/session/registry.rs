@@ -20,6 +20,20 @@ impl Default for SessionStore {
 }
 
 impl SessionStore {
+    pub fn close_admission(&self) {
+        self.active_slots.close();
+    }
+    pub fn is_closed(&self) -> bool {
+        self.active_slots.is_closed()
+    }
+    pub async fn shutdown(&self) {
+        self.close_admission();
+        for session in self.list(false, usize::MAX) {
+            session.mark_termination_reason("project_stopped");
+            session.kill_and_wait().await;
+        }
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -50,6 +64,13 @@ impl SessionStore {
         registry
             .sessions
             .insert(arc.session_id.clone(), arc.clone());
+        if self.is_closed() {
+            let stopped = arc.clone();
+            tokio::spawn(async move {
+                stopped.mark_termination_reason("project_stopped");
+                stopped.kill_and_wait().await;
+            });
+        }
         arc
     }
 

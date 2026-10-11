@@ -1,9 +1,9 @@
 mod activity;
+mod chat;
 mod frp_profiles;
 mod health;
 mod history;
-mod chat;
-pub use chat::local_chat;
+pub use chat::{local_chat, start_schedule_worker};
 mod logs;
 mod runtime;
 mod sandbox;
@@ -41,9 +41,9 @@ pub use telemetry::read_workspace_telemetry;
 pub use tunnel::{get_frp_snippet, restart_tunnel, start_tunnel, stop_tunnel, test_tunnel};
 pub use workspace::{
     add_workspace_folder, add_wsl_workspace_folder, create_workspace, delete_workspace,
-    export_shared_workspace, export_workspace_pack, import_workspace_pack, list_workspaces,
-    list_wsl_distributions, open_external_url, open_shared_workspace, open_workspace_directory,
-    remove_workspace_folder, update_workspace,
+    export_shared_workspace, export_workspace_pack, get_mcp_connection, get_mcp_connection_health,
+    import_workspace_pack, list_workspaces, list_wsl_distributions, open_external_url,
+    open_shared_workspace, open_workspace_directory, remove_workspace_folder, update_workspace,
 };
 pub use workspace_features::{
     get_workspace_extensions, get_workspace_skills, set_workspace_extension_active,

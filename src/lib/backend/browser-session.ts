@@ -1,7 +1,10 @@
 import { clearChatCaches } from '../chat/cache-lifecycle.js';
 import { writable } from 'svelte/store';
 const key = 'ctmcp-browser-session';
-function saved(): string { try { return sessionStorage.getItem(key) ?? ''; } catch { return ''; } }
+function saved(): string {
+  try { const temporary=sessionStorage.getItem(key);if(temporary)return temporary; } catch {}
+  try { return localStorage.getItem(key)??''; } catch { return ''; }
+}
 let token = typeof window === 'undefined' ? '' : saved();
 let epoch = 0;
 export const browserAuthenticated = writable(!!token);
@@ -9,6 +12,7 @@ export function forgetBrowserSession(): void {
   epoch++;
   clearChatCaches();
   token = ''; try { sessionStorage.removeItem(key); } catch { /* In-memory fallback. */ }
+  try { localStorage.removeItem(key); } catch { /* Storage may be unavailable. */ }
   browserAuthenticated.set(false);
 }
 class BrowserResponseError extends Error {
@@ -26,19 +30,20 @@ async function responseData(response: Response): Promise<Record<string, unknown>
 }
 /** Explicit read allowlist. Unknown commands and every mutation are sent exactly once. */
 function retryableRead(command: string, args: Record<string, unknown>): boolean {
-  if (['list_workspaces','list_frp_profiles','list_software','get_proxy','get_last_workspace_id','get_runtime_status','get_actions_runtime_status'].includes(command)) return true;
+  if (['list_workspaces','get_mcp_connection','get_mcp_connection_health','list_frp_profiles','list_software','get_proxy','get_last_workspace_id','get_runtime_status','get_actions_runtime_status','browse_host_directory'].includes(command)) return true;
   if (command !== 'local_chat' || !args.args || typeof args.args !== 'object') return false;
   return ['list','read','discussion_list','discussion_read'].includes(String((args.args as Record<string, unknown>).action));
 }
-export async function browserLogin(password: string): Promise<void> {
+export async function browserLogin(password: string, remember = true): Promise<void> {
   const requestEpoch = ++epoch;
-  const response = await fetch('/browser/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password }), cache: 'no-store' });
+  const response = await fetch('/browser/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password, remember }), cache: 'no-store' });
   const data = await responseData(response);
   if (requestEpoch !== epoch) throw new Error('Browser session changed; retry the request');
   if (typeof data.token !== 'string' || !data.token.trim()) throw new Error('Invalid browser response');
   clearChatCaches();
   token = data.token;
   try { sessionStorage.setItem(key, token); } catch { /* In-memory fallback. */ }
+  try { if(remember)localStorage.setItem(key,token);else localStorage.removeItem(key); } catch { /* In-memory fallback. */ }
   browserAuthenticated.set(true);
 }
 export async function browserLogout(): Promise<void> {

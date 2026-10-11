@@ -5,7 +5,7 @@
   import { testTunnel as invokeTunnelTest } from "$lib/api/tunnel";
   import SecretTokenField from "$lib/components/SecretTokenField.svelte";
   import CloudflareRouteGuide from "$lib/components/CloudflareRouteGuide.svelte";
-  import { workspaces } from "$lib/stores/app";
+  import { workspaces, mcpConnection } from "$lib/stores/app";
   import { actionsConfig } from "$lib/types";
   import { showToast } from "$lib/stores/toast";
   import { t } from "$lib/i18n";
@@ -88,7 +88,7 @@
   const showBuiltin = $derived(draft.type === "builtin");
   const showCloudflare = $derived(draft.type === "cloudflare");
   const showCloudflareToken = $derived(showCloudflare && draft.cloudflare_mode === "named");
-  const workspaceProfile = $derived($workspaces.find((item) => item.id === workspaceId) ?? null);
+  const workspaceProfile = $derived($mcpConnection?.id===workspaceId?$mcpConnection:$workspaces.find((item) => item.id === workspaceId) ?? null);
   /** Local listener the named tunnel's dashboard route must point at. */
   const routeTarget = $derived.by(() => {
     if (!workspaceProfile) return null;

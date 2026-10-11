@@ -35,9 +35,9 @@ pub fn validate_workspace_resources(
     let existing_claims: Vec<_> = profiles
         .iter()
         .filter(|profile| profile.id != candidate.id)
-        .flat_map(service_claims)
+        .flat_map(|profile| active_service_claims(profile, profiles))
         .collect();
-    let candidate_claims = service_claims(candidate);
+    let candidate_claims = active_service_claims(candidate, profiles);
 
     validate_candidate_ports(&existing_claims, &candidate_claims)?;
     validate_candidate_subdomains(&existing_claims, &candidate_claims)
@@ -54,7 +54,7 @@ pub fn assign_free_workspace_ports(
     let reserved: std::collections::HashSet<u16> = profiles
         .iter()
         .filter(|profile| profile.id != candidate.id)
-        .flat_map(service_claims)
+        .flat_map(|profile| active_service_claims(profile, profiles))
         .map(|claim| claim.local_port)
         .collect();
 
@@ -91,9 +91,9 @@ pub fn validate_workspace_resources_update(
     let existing_claims: Vec<_> = profiles
         .iter()
         .filter(|profile| profile.id != candidate.id)
-        .flat_map(service_claims)
+        .flat_map(|profile| active_service_claims(profile, profiles))
         .collect();
-    let candidate_claims = service_claims(candidate);
+    let candidate_claims = active_service_claims(candidate, profiles);
 
     validate_changed_candidate_ports(&existing_claims, &candidate_claims, current, candidate)?;
     validate_changed_candidate_subdomains(&existing_claims, &candidate_claims, current, candidate)
@@ -108,11 +108,17 @@ pub fn validate_service_start(
         .iter()
         .find(|profile| profile.id == workspace_id)
         .ok_or_else(|| AppError::Message(format!("workspace not found: {workspace_id}")))?;
+    if has_global_connection(profiles) && !service_enabled(target, service) {
+        return Err(AppError::Message(
+            "Transports use the global connection; project listeners cannot be started separately"
+                .into(),
+        ));
+    }
     validate_service_auth_exposure(target, service)?;
     let target_claim = claim_for(target, service);
 
     for profile in profiles {
-        for claim in service_claims(profile) {
+        for claim in active_service_claims(profile, profiles) {
             if claim.profile.id == workspace_id && claim.service == service {
                 continue;
             }
@@ -268,6 +274,23 @@ fn validate_changed_candidate_subdomains(
     Ok(())
 }
 
+fn has_global_connection(profiles: &[WorkspaceProfile]) -> bool {
+    profiles.iter().any(|p| p.id == crate::data::GLOBAL_MCP_ID)
+}
+fn service_enabled(profile: &WorkspaceProfile, service: WorkspaceService) -> bool {
+    let _ = service;
+    profile.id == crate::data::GLOBAL_MCP_ID
+}
+fn active_service_claims<'a>(
+    profile: &'a WorkspaceProfile,
+    profiles: &[WorkspaceProfile],
+) -> Vec<ServiceClaim<'a>> {
+    service_claims(profile)
+        .into_iter()
+        .filter(|claim| !has_global_connection(profiles) || service_enabled(profile, claim.service))
+        .collect()
+}
+
 fn service_claims(profile: &WorkspaceProfile) -> [ServiceClaim<'_>; 2] {
     [
         claim_for(profile, WorkspaceService::Mcp),
@@ -352,6 +375,25 @@ mod tests {
         profile.actions.tunnel_type = "frp".into();
         profile.actions.frp_subdomain = format!("{name}-actions");
         profile
+    }
+
+    #[test]
+    fn only_global_transports_claim_ports_and_start() {
+        let project = profile("project", 28766, 8787);
+        let mut connection = project.clone();
+        connection.id = crate::data::GLOBAL_MCP_ID.into();
+        let profiles = vec![project.clone(), connection.clone()];
+        for service in [WorkspaceService::Mcp, WorkspaceService::Actions] {
+            assert!(validate_service_start(&profiles, &connection.id, service).is_ok());
+            assert!(validate_service_start(&profiles, &project.id, service).is_err());
+        }
+        connection.actions.local_port = connection.runtime.local_port;
+        assert!(validate_service_start(
+            &[project, connection.clone()],
+            &connection.id,
+            WorkspaceService::Mcp
+        )
+        .is_err());
     }
 
     #[test]

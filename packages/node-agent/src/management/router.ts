@@ -1,3 +1,4 @@
+import { connectionHealth } from './connectionHealth.js';
 import { handleChatRoute } from '../chat/management.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { handleManagementUiRequest, isManagementUiPath } from '../managementUi.js';
@@ -36,6 +37,10 @@ export async function handleManagementRequest(
       }
     });
     return true;
+  }
+  if (pathname === '/admin/api/connection/health' && req.method === 'GET') { sendJson(res,200,await connectionHealth(options));return true; }
+  if (pathname === '/admin/api/connection' && req.method === 'GET' && options.workspaceStore?.connectionSnapshot) {
+    sendJson(res,200,options.workspaceStore.connectionSnapshot());return true;
   }
   if (pathname === '/admin/api/status' && req.method === 'GET') {
     sendJson(res, 200, statusPayload(options));

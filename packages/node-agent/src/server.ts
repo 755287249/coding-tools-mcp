@@ -1,3 +1,8 @@
+import { mkdir } from 'node:fs/promises';
+import { GLOBAL_MCP_ID } from './projectIsolation.js';
+import { ProjectGateway, projectCatalog } from './server/projectGateway.js';
+import {enforceProjectConfiguration} from './projectIsolation.js';
+import {runSchedules} from './chat/store.js';
 import {handleSeedRoute} from './server/routes/seeds.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
@@ -28,7 +33,7 @@ import { handleOAuthRoute } from './server/routes/oauth.js';
 import { markPairing } from './chat/pairing.js';
 import { handleSystemRoute } from './server/routes/system.js';
 
-export async function createToolContext(config: AgentConfig): Promise<ToolContext> {
+export async function createToolContext(config: AgentConfig,options:{projectIsolation?:boolean}={}): Promise<ToolContext> {
   config.policy ??= defaultPolicy();
   config.toolProfile ??= 'advanced';
   config.activeToolProfile ??= resolveToolProfile(config.toolProfile, config.permissionMode);
@@ -41,7 +46,15 @@ export async function createToolContext(config: AgentConfig): Promise<ToolContex
   config.extensions.mcp ??= { active: true, enabled: [] };
   config.extensions.hooks.active ??= true;
   config.extensions.mcp.active ??= true;
-  const folders = await canonicalizeWorkspaceFolders(config.folders);
+  if(options.projectIsolation) {config=structuredClone(config);enforceProjectConfiguration(config);}
+  let configuredFolders = config.folders;
+  if (config.globalConnection) {
+    const control = path.join(config.dataDir, 'connection-control');
+    await mkdir(control, {recursive:true,mode:0o700});
+    configuredFolders = [{id:'connection-control',name:'MCP transport',path:control}];
+    config.extensions = {hooks:{active:false,enabled:[]},mcp:{active:false,enabled:[]}};
+  }
+  const folders = await canonicalizeWorkspaceFolders(configuredFolders);
   config = { ...config, folders };
   const state = new StateStore(config.dataDir);
   await state.load();
@@ -50,6 +63,7 @@ export async function createToolContext(config: AgentConfig): Promise<ToolContex
   if (!folderRuntimes.size) throw new Error('at least one workspace folder is required');
   await syncToolEvolutionRuntimes([...folderRuntimes.values()], usageStore, 'tool_evolution_startup');
   const extensions = new ExtensionRegistry({
+    projectIsolation:options.projectIsolation,
     folders: config.folders,
     hooksActive: config.extensions.hooks.active,
     mcpActive: config.extensions.mcp.active,
@@ -85,6 +99,7 @@ export async function createToolContext(config: AgentConfig): Promise<ToolContex
       ? { enabled: true, state: 'stopped', publicUrl: config.tunnel.publicUrl, workers: 1, connectedWorkers: 0, completedRequests: 0 }
       : { enabled: false, state: 'disabled', workers: 0, connectedWorkers: 0, completedRequests: 0 }
   };
+  Object.defineProperty(context,"projectIsolation",{value:options.projectIsolation===true,writable:false,enumerable:true});
   await restoreProcessSessions(context);
   return context;
 }
@@ -97,6 +112,7 @@ export interface AgentRuntime {
 }
 
 export interface AgentRuntimeOptions {
+  projectIsolation?: boolean;
   configStore?: ConfigStore;
   mcpHeartbeatIntervalMs?: number;
   requestRestart?: () => void;
@@ -107,7 +123,8 @@ export interface AgentRuntimeOptions {
 }
 
 export async function createAgentRuntime(config: AgentConfig, options: AgentRuntimeOptions = {}): Promise<AgentRuntime> {
-  const context = await createToolContext(config);
+  const context = await createToolContext(config, {projectIsolation:options.projectIsolation});
+  const projectGateway = config.globalConnection ? new ProjectGateway(() => [...(options.runtimeRegistry?.entries() ?? [])].filter(([id]) => id !== GLOBAL_MCP_ID).map(([,record])=>record.context)) : undefined;
   context.resolveSecret = options.secretResolver;
   const oauth = new OAuthRuntime(config.oauth, Date.now, options.persistOAuthPassword);
   const startedAt = Date.now();
@@ -134,12 +151,14 @@ export async function createAgentRuntime(config: AgentConfig, options: AgentRunt
       if (pathname === '/mcp/pairing') {
         if (req.method !== 'POST') {res.setHeader('Allow','POST');sendJson(res,405,{error:'method_not_allowed'});return;}
         const ticket=req.headers['x-chat-pairing'];
-        const accepted=typeof ticket==='string'&&markPairing(ticket,context.config.folders.map(f=>f.path));
+        const accepted=typeof ticket==='string'&&markPairing(ticket,(projectGateway?.folders() ?? context.config.folders).map(f=>f.path));
         sendJson(res,accepted?202:404,accepted?{status:'preparing',authenticated:false}:{error:'pairing_unavailable'});return;
       }
-      if(await handleSeedRoute(req,res,pathname,context))return;
+      const seedFolder = pathname.match(/^\/mcp\/(?:seeds|seed-library)\/([A-Za-z0-9_-]{1,80})(?:\/|$)/)?.[1];
+      const seedContext = projectGateway && seedFolder ? await projectGateway.contextFor(seedFolder) : context;
+      if(await handleSeedRoute(req,res,pathname,seedContext))return;
       await context.extensions.refresh();
-      const catalog = currentToolCatalog(context);
+      const catalog = projectGateway ? projectCatalog(context) : currentToolCatalog(context);
       setRuntimeRevisionHeaders(res, catalog, startedAt);
 
       if (options.configStore && await handleManagementRequest(req, res, url.pathname, {
@@ -160,6 +179,7 @@ export async function createAgentRuntime(config: AgentConfig, options: AgentRunt
         catalog,
         config,
         context,
+        projectGateway,
         heartbeatIntervalMs: options.mcpHeartbeatIntervalMs,
         oauth,
         pathname,
@@ -173,9 +193,19 @@ export async function createAgentRuntime(config: AgentConfig, options: AgentRunt
       res.destroy();
     }
   });
+  const scheduleTimer = setInterval(() => {
+    for (const folder of config.globalConnection ? [] : context.config.folders) {
+      try { runSchedules(folder.path); }
+      catch (error) { console.error('Scheduled chat delivery:', error instanceof Error ? error.message : String(error)); }
+    }
+  }, 1000);
+  scheduleTimer.unref();
   let cleanupPromise: Promise<void> | undefined;
   const cleanup = (): Promise<void> => {
     if (cleanupPromise) return cleanupPromise;
+    context.runtimeClosed = true;
+    projectGateway?.stop();
+    clearInterval(scheduleTimer);
     cleanupPromise = (async () => {
       if (options.runtimeRegistry?.get(workspaceId)?.context === context) {
         options.runtimeRegistry.delete(workspaceId);
@@ -241,6 +271,8 @@ export async function createAgentRuntime(config: AgentConfig, options: AgentRunt
   let closePromise: Promise<void> | undefined;
   const close = (): Promise<void> => {
     if (closePromise) return closePromise;
+    context.runtimeClosed = true;
+    projectGateway?.stop();
     closePromise = (async () => {
       if (server.listening) {
         await new Promise<void>((resolve, reject) => {

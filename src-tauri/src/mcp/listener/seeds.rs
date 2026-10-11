@@ -76,6 +76,7 @@ pub(super) async fn get(
         return (StatusCode::METHOD_NOT_ALLOWED, [("allow", "POST")]).into_response();
     }
     let result = (|| -> Result<Value, String> {
+        let state = super::gateway::project_state(&state, &folder_id)?;
         if !crate::tools::registry::exposed_tool_names(&state.mcp.runtime_config().tool_profile)
             .contains(&"chat_open")
         {
@@ -114,6 +115,7 @@ pub(super) async fn provision(
     Json(body): Json<Value>,
 ) -> Response {
     let result = (|| -> Result<Value, String> {
+        let state = super::gateway::project_state(&state, &folder_id)?;
         if !crate::tools::registry::exposed_tool_names(&state.mcp.runtime_config().tool_profile)
             .contains(&"chat_open")
         {
@@ -176,6 +178,7 @@ async fn execute(
     headers: &HeaderMap,
     body: Value,
 ) -> Result<Option<Value>, String> {
+    let state = super::gateway::project_state(&state, folder_id)?;
     if body["jsonrpc"] != "2.0" || !body["method"].is_string() {
         return Err("Invalid JSON-RPC request".into());
     }
@@ -513,6 +516,7 @@ mod tests {
             .unwrap(),
         );
         let state = ListenerState {
+            gateway_epoch: super::gateway::current_epoch(),
             mcp,
             auth: crate::workspace::AuthConfig {
                 auth_type: "bearer".into(),

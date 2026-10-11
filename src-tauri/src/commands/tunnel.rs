@@ -26,7 +26,7 @@ fn validate_tunnel_start_resources(
         TunnelServiceKind::Mcp => WorkspaceService::Mcp,
         TunnelServiceKind::Actions => WorkspaceService::Actions,
     };
-    state.with_workspaces(|store| validate_service_start(store.list(), id, service))
+    state.with_workspaces(|store| validate_service_start(&store.resource_profiles(), id, service))
 }
 
 fn persist_public_url(

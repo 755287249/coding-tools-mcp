@@ -1,4 +1,5 @@
 <script lang="ts">
+  import {copyText} from "$lib/browser-tools";
   import { confirmFolderRemoval } from "$lib/workspace/confirm-folder-removal";
   import { onMount, untrack } from "svelte";
   import { page } from "$app/stores";
@@ -16,13 +17,13 @@
   import ActivityEdgeTab from "$lib/components/activity/ActivityEdgeTab.svelte";
   import { pickDirectory } from "$lib/api/native";
   import { getWorkspaceSecret, setWorkspaceSecret } from "$lib/api/secrets";
-  import { addWorkspaceFolder, listWorkspaces, removeWorkspaceFolder, updateWorkspace } from "$lib/api/workspaces";
+  import { getMcpConnection, GLOBAL_MCP_ID, addWorkspaceFolder, listWorkspaces, removeWorkspaceFolder, updateWorkspace } from "$lib/api/workspaces";
   import { getBackend, loadMcpAuthSecrets } from "$lib/backend";
   import { cloudflareTokenTunnelId, normalizeCloudflareToken } from "$lib/connect/cloudflare-token";
   import CloudflareRouteGuide from "$lib/components/CloudflareRouteGuide.svelte";
   import { buildConnectionPrompt, isTemporaryEndpoint } from "$lib/connect/prompt";
   import { locale, t } from "$lib/i18n";
-  import { workspaces } from "$lib/stores/app";
+  import { workspaces, mcpConnection } from "$lib/stores/app";
   import {
     clearError,
     isReachablePublic,
@@ -51,7 +52,7 @@
 
   const capabilities = getBackend().capabilities;
   const canControl = capabilities.runtimeSupervisor;
-  const canPickFolder = capabilities.nativeDirectoryPicker && capabilities.workspaceLifecycle;
+  const canPickFolder = false;
   // The page re-creates this view per workspace ({#key profile.id}).
   const id = untrack(() => initialProfile.id);
 
@@ -66,7 +67,7 @@
   let copiedTimer: ReturnType<typeof setTimeout> | undefined;
 
   // Always render the freshest profile from the shared store.
-  const profile = $derived($workspaces.find((item) => item.id === id) ?? initialProfile);
+  const profile = $derived(id===GLOBAL_MCP_ID ? $mcpConnection??initialProfile : $workspaces.find((item) => item.id === id) ?? initialProfile);
   const session = $derived(sessionOf($sessions, id));
   const status = $derived(session.status);
   const working = $derived(session.working);
@@ -240,7 +241,7 @@
 
   async function writeClipboard(value: string) {
     try {
-      await navigator.clipboard.writeText(value);
+      await copyText(value);
     } catch {
       const area = document.createElement("textarea");
       area.value = value;

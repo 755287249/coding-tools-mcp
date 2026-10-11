@@ -204,11 +204,15 @@ pub(crate) async fn call_tool_async_with_canary_sample_key(
     args: Value,
     canary_sample_key: Option<String>,
 ) -> Value {
+    if let Some(error) = super::project_scope::denied(&ctx, &name) {
+        return error;
+    }
     let activity_root = ctx.workspace.root().to_path_buf();
     let activity_key = canary_sample_key.clone();
     let activity_name = name.clone();
     let activity_args = args.clone();
-    let mut activity = super::chat::operations::begin(&activity_root, activity_key.as_deref(), &name, &args);
+    let mut activity =
+        super::chat::operations::begin(&activity_root, activity_key.as_deref(), &name, &args);
     let policy = ctx.runtime_config().policy.security_policy;
     let redaction = OutputRedactionContext::new_with_policy(&name, &args, &policy);
     let lock_groups = mutation_lock_groups(ctx.as_ref(), &name, &args);
@@ -241,7 +245,13 @@ pub(crate) async fn call_tool_async_with_canary_sample_key(
     }
     drop(mutation_guards);
     let mut output = redaction.redact(output);
-    super::chat::operations::bind(&activity_root, activity_key.as_deref(), &activity_name, &activity_args, &output);
+    super::chat::operations::bind(
+        &activity_root,
+        activity_key.as_deref(),
+        &activity_name,
+        &activity_args,
+        &output,
+    );
     if let Some(warning) = activity.as_mut().and_then(|a| a.finish(&output, false)) {
         output["chat_activity_warning"] = json!(warning);
     }
@@ -266,14 +276,24 @@ async fn call_tool_async_inner(
     args: Value,
     execution: ToolCallExecutionContext,
 ) -> Value {
-    if matches!(name.as_str(), "chat_open" | "chat_wait" | "chat_reply" | "chat_close" | "chat_upload" | "chat_discuss") {
+    if matches!(
+        name.as_str(),
+        "chat_open" | "chat_wait" | "chat_reply" | "chat_close" | "chat_upload" | "chat_discuss"
+    ) {
         let runtime = ctx.runtime_config();
-        if let Err(error) = validate_tool_arguments_for_workspace(&name, &args, &runtime.policy, Some(&ctx.workspace)) {
+        if let Err(error) = validate_tool_arguments_for_workspace(
+            &name,
+            &args,
+            &runtime.policy,
+            Some(&ctx.workspace),
+        ) {
             return policy_tool_err(ctx.as_ref(), &name, &args, error);
         }
         let result = if name == "chat_wait" {
             super::chat::wait(ctx.workspace.root(), &args).await
-        } else { super::chat::tool(ctx.workspace.root(), &name, &args) };
+        } else {
+            super::chat::tool(ctx.workspace.root(), &name, &args)
+        };
         return result.unwrap_or_else(|error| error.to_error_value());
     }
     if name == "exec_many" {
@@ -738,6 +758,9 @@ fn call_tool_inner(
     permission_override: bool,
     execution: &ToolCallExecutionContext,
 ) -> Value {
+    if let Some(error) = super::project_scope::denied(ctx, name) {
+        return error;
+    }
     let effective_args = apply_default_cwd(ctx, name, args);
     let runtime = ctx.runtime_config();
     let mut override_policy;

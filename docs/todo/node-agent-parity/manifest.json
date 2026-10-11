@@ -5,9 +5,9 @@
     "audited_at": "2026-10-11",
     "repository_head": "f7ab8735dd61d1cc8fb5eeba7da8a980add2af90",
     "head_policy": "ancestor",
-    "desktop_client_version": "0.1.141",
+    "desktop_client_version": "0.1.142",
     "node_agent_version": "0.29.35",
-    "client_compatibility_version": "0.1.141"
+    "client_compatibility_version": "0.1.142"
   },
   "status_values": ["todo", "in_progress", "blocked", "done", "excluded"],
   "priority_values": ["P0", "P1", "P2"],
@@ -374,6 +374,37 @@
       "node_sources": ["scripts/check-node-agent-parity.mjs", "scripts/run-node-agent-parity-assertions.mjs", "tests/node-agent-parity.test.mjs", "docs/todo/node-agent-parity/assertions.json", "packages/node-agent/scripts/sync-rust-catalog.mjs", "packages/node-agent/src/rustCatalog.generated.ts", "packages/node-agent/test/behavioralParity.test.mjs"],
       "assertion_ids": ["PA-028-MCP-GUARD-COVERAGE", "PA-RUST-SHARED-CONSTANTS"],
       "acceptance_tests": ["MCP protocol versions exported from Rust", "heartbeat interval and channel capacity exported from Rust", "transport validation category required by parity checker", "streaming category required by parity checker", "HTTP semantics category required by parity checker", "planned assertions promoted to required executable assertions", "validator regression fixtures for planned and completed states"]
+    },
+    {
+      "id": "NP-029",
+      "title": "Global connection and fixed project capability isolation",
+      "priority": "P0",
+      "area": "security",
+      "status": "done",
+      "file": "TODO-029-global-project-gateway.md",
+      "depends_on": [
+        "NP-017",
+        "NP-018"
+      ],
+      "rust_sources": [
+        "src-tauri/src/mcp/listener/gateway.rs",
+        "src-tauri/src/tools/project_scope.rs",
+        "src-tauri/src/data/connection.rs"
+      ],
+      "node_sources": [
+        "packages/node-agent/src/server/projectGateway.ts",
+        "packages/node-agent/src/application.ts",
+        "packages/node-agent/src/projectIsolation.ts",
+        "packages/node-agent/test/projectGateway.test.mjs"
+      ],
+      "assertion_ids": [
+        "PA-029-GLOBAL-PROJECTS"
+      ],
+      "acceptance_tests": [
+        "global transport with independent fixed project roots and per-project policy",
+        "chat capability required for project access; spoofed session IDs and cross-project selectors rejected",
+        "global configuration works before any project exists; OS sandbox required for command execution"
+      ]
     }
   ],
   "intentional_divergences": [

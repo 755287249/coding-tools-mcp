@@ -29,11 +29,18 @@ final class ProfileStore {
         JSONObject json = new JSONObject(SecretBox.decrypt(key(false), saved));
         return ConnectionProfile.create(json.getString("url"), json.getString("password"), json.getBoolean("allowHttp"));
     }
-    void save(ConnectionProfile profile, boolean remember) throws Exception {
+    synchronized String session(ConnectionProfile profile) throws Exception {
+        String saved=prefs.getString("sealed",null);if(saved==null)return "";
+        JSONObject json=new JSONObject(SecretBox.decrypt(key(false),saved));
+        ConnectionProfile previous=ConnectionProfile.create(json.getString("url"),json.getString("password"),json.getBoolean("allowHttp"));
+        return previous.origin.equals(profile.origin) && previous.password.equals(profile.password) ? json.optString("session", "") : "";
+    }
+    synchronized void save(ConnectionProfile profile, boolean remember, String token) throws Exception {
         JSONObject json = new JSONObject().put("url", profile.url).put("password", remember ? profile.password : "")
-                .put("allowHttp", profile.allowHttp);
+                .put("allowHttp", profile.allowHttp).put("session", remember ? token : "");
         if (!prefs.edit().putString("sealed", SecretBox.encrypt(key(true), json.toString())).commit())
             throw new IllegalStateException("Cannot save connection");
     }
-    boolean clear() { return prefs.edit().clear().commit(); }
+    synchronized void forgetCredentials(ConnectionProfile profile) throws Exception { save(profile, false, ""); }
+    synchronized boolean clear() { return prefs.edit().clear().commit(); }
 }

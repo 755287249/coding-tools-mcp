@@ -14,7 +14,7 @@ const tunnelSetupPath = path.join(
   "QuickTunnelSetup.svelte",
 );
 
-test("quick setup is an independent five-step route reachable from the app shell", async () => {
+test("quick setup is an independent four-step global route reachable from the app shell", async () => {
   const [wizard, layout, shell] = await Promise.all([
     readFile(wizardPath, "utf8"),
     readFile(path.join(root, "src", "routes", "+layout.svelte"), "utf8"),
@@ -23,13 +23,13 @@ test("quick setup is an independent five-step route reachable from the app shell
 
   assert.match(
     wizard,
-    /type WizardStep = "provider" \| "workspace" \| "service" \| "connect" \| "complete"/,
+    /type WizardStep = "provider" \| "service" \| "connect" \| "complete"/,
   );
   assert.match(wizard, /let step = \$state<WizardStep>\("provider"\)/);
-  assert.match(layout, /workspaceMatch/);
+  assert.match(layout, /setupPrompt/);
   assert.match(layout, /onQuickSetup=\{capabilities\.guidedSetup \? openQuickSetup : undefined\}/);
   assert.match(shell, /\$t\("Quick setup"\)/);
-  assert.match(shell, /\$t\('New workspace \(separate MCP\)'\)/, "the original add-workspace entry remains available");
+  assert.match(shell, /\$t\('connection\.newProject'\)/, "the original add-workspace entry remains available");
 });
 
 test("the first step keeps all providers for desktop and gates unsupported Node providers", async () => {
@@ -63,10 +63,12 @@ test("provider setup reuses managed software and global FRP profile contracts", 
 test("quick setup saves source-specific settings and uses the host-supported start path", async () => {
   const wizard = await readFile(wizardPath, "utf8");
 
-  assert.match(wizard, /pickDirectory\(\{ multiple: true \}\)/);
-  assert.match(wizard, /createWorkspace\(primaryFolder, workspaceName\.trim\(\) \|\| undefined\)/);
-  assert.match(wizard, /for \(const folderPath of additionalFolders\)/);
-  assert.match(wizard, /addWorkspaceFolder\(created\.id, folderPath\)/);
+
+
+
+
+  assert.doesNotMatch(wizard, /createWorkspace\(|pickDirectory\(|addWorkspaceFolder\(/);
+  assert.match(wizard, /getMcpConnection\(\)/);
   assert.match(wizard, /setWorkspaceSecret\(workspaceId, key, value\)/);
   assert.match(wizard, /"builtin_tunnel_enrollment_url"/);
   assert.match(wizard, /"cloudflare_token" : "actions_cloudflare_token"/);
@@ -79,14 +81,10 @@ test("quick setup saves source-specific settings and uses the host-supported sta
   assert.match(wizard, /<GptQuickCopy/);
 });
 
-test("Node quick setup reuses the selected existing workspace instead of invoking a native picker", async () => {
+test("quick setup loads the global connection independently of projects", async () => {
   const wizard = await readFile(wizardPath, "utf8");
-
-  assert.match(wizard, /const isNodeHost = capabilities\.host === "node"/);
-  assert.match(wizard, /async function loadExistingWorkspace\(\)/);
-  assert.match(wizard, /\$page\.url\.searchParams\.get\("workspace"\)/);
-  assert.match(wizard, /items\.find\(\(item\) => item\.id === requestedId\) \?\? \(isNodeHost \? items\[0\] \?\? null : null\)/);
-  assert.match(wizard, /\{:else if isNodeHost\}[\s\S]*Continue with this workspace/);
+  assert.match(wizard, /profile=await getMcpConnection\(\)/);
+  assert.doesNotMatch(wizard, /items\.find|Continue with this workspace|createWorkspace\(/);
 });
 
 test("MCP completion explains advanced OAuth, empty client secret, then connection", async () => {

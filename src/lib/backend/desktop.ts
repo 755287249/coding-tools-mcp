@@ -21,13 +21,14 @@ export function installDesktopBackend(): void {
       },
     });
   if (remote) {
+    backend.directories.browse = (path, workspaceId) => browserInvoke('browse_host_directory', {path, workspaceId});
     backend.native.openExternal = async url => {
       const target = new URL(url);
       if (!["https:", "http:"].includes(target.protocol)) throw new Error("HTTP(S) links only");
       window.open(target.href, "_blank", "noopener,noreferrer");
     };
   }
-  setBackend(remote ? { ...backend, capabilities: { ...backend.capabilities, nativeDirectoryPicker: false, openNativePath: false, workspaceLifecycle: false } } : backend);
+  setBackend(remote ? { ...backend, capabilities: { ...backend.capabilities, nativeDirectoryPicker: false, openNativePath: false, workspaceLifecycle: true } } : backend);
 }
 
 /** Native APIs are exported only by the desktop host adapter. */

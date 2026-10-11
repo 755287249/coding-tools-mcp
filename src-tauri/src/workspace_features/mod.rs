@@ -160,6 +160,7 @@ pub struct FeatureConfig {
 }
 
 pub struct RuntimeFeatures {
+    isolated: std::sync::atomic::AtomicBool,
     pub folders: Vec<WorkspaceFolder>,
     config: RwLock<FeatureConfig>,
     pub(crate) connections: AsyncMutex<HashMap<String, external_mcp::ExternalMcpConnection>>,
@@ -180,10 +181,16 @@ fn lock_runtimes() -> std::sync::MutexGuard<'static, HashMap<String, Arc<Runtime
 
 impl RuntimeFeatures {
     pub(crate) fn config(&self) -> FeatureConfig {
-        self.config
+        let mut config = self
+            .config
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+            .clone();
+        if self.isolated.load(std::sync::atomic::Ordering::Acquire) {
+            config.extensions.hooks.active = false;
+            config.extensions.mcp.active = false;
+        }
+        config
     }
 
     fn update_config(&self, config: FeatureConfig) {
@@ -209,12 +216,21 @@ pub fn register_runtime(workspace_id: &str, folders: Vec<WorkspaceFolder>) {
     lock_runtimes().insert(
         workspace_id.to_string(),
         Arc::new(RuntimeFeatures {
+            isolated: std::sync::atomic::AtomicBool::new(false),
             folders,
             config: RwLock::new(config),
             connections: AsyncMutex::new(HashMap::new()),
             sessions: AsyncMutex::new(HashMap::new()),
         }),
     );
+}
+
+pub fn require_project_isolation(workspace_id: &str) {
+    if let Some(runtime) = runtime(workspace_id) {
+        runtime
+            .isolated
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
 }
 
 pub fn unregister_runtime(workspace_id: &str) {

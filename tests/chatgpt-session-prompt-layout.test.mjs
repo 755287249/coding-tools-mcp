@@ -68,7 +68,8 @@ test("工作區設定分頁集中名稱、資料夾與會話恢復入口", async
 
   assert.match(pageSource, /loadSettingsPanel\(\)/);
   assert.match(settingsSource, /<WorkspaceMetaForm/);
-  assert.match(settingsSource, /<WorkspaceFolderManager/);
+  assert.match(settingsSource, /profile\.path/);
+  assert.doesNotMatch(settingsSource, /<WorkspaceFolderManager/);
   assert.match(settingsSource, /<ChatGptSessionPrompt \/>/);
 });
 
@@ -84,7 +85,7 @@ test("MCP 與 Actions 配置拆為獨立服務面板", async () => {
   const [mcpSource, actionsSource] = await Promise.all([read(mcpPanelPath), read(actionsPanelPath)]);
 
   for (const source of [mcpSource, actionsSource]) {
-    for (const value of ["service", "tunnel", "auth", "policy", "logs", "health"]) {
+    for (const value of ["service", "tunnel", "auth", "logs", "health"]) {
       assert.match(source, new RegExp(`\\{ value: "${value}", label:`));
     }
     assert.match(source, /role="tabpanel"/);

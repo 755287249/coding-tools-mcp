@@ -57,6 +57,13 @@ impl DataStore {
         let path = data_file_path()?;
         let existed_before = path.exists();
         let mut data = load_or_migrate()?;
+        if data.connection_migration_pending {
+            persist_connection_mirrors(&data)?;
+            data.connection_migration_pending = false;
+            data.connection_project_origins.clear();
+            data.connection_feature_snapshots.clear();
+            save(&data)?;
+        }
         let imported = import_legacy_profiles_if_empty(&mut data)?;
         let normalized = data.profiles.iter_mut().fold(false, |changed, profile| {
             let folders_changed = profile.normalize_folders();
@@ -137,12 +144,106 @@ impl DataStore {
         self.save()
     }
 
+    pub fn ensure_global_connection(&mut self) -> AppResult<WorkspaceProfile> {
+        let _guard = lock_data_file()?;
+        let mut candidate = self.data.clone();
+        if super::connection::migrate(&mut candidate).map_err(AppError::Message)? {
+            // An existing Node global mirror owns the shared transport configuration.
+            if shared_live_store_enabled() && shared_workspace_file(super::GLOBAL_MCP_ID).is_file()
+            {
+                let path = shared_workspace_file(super::GLOBAL_MCP_ID);
+                let canonical = read_shared_canonical(&path)?;
+                if !canonical.folders.is_empty() {
+                    return Err(AppError::Message(
+                        "Global connection must not expose project folders".into(),
+                    ));
+                }
+                candidate.mcp_connection = Some(desktop_profile_from_canonical(&canonical));
+                candidate
+                    .connection_project_origins
+                    .insert(super::GLOBAL_MCP_ID.into(), super::GLOBAL_MCP_ID.into());
+                let secrets_path = shared_secrets_file_next_to(&path);
+                if secrets_path.is_file() {
+                    candidate.workspace_secrets.insert(
+                        super::GLOBAL_MCP_ID.into(),
+                        shared_secret_values(&read_maybe_wrapped_json(&secrets_path)?),
+                    );
+                }
+            }
+            // Commit a migration journal before updating independently atomic shared mirrors.
+            let secrets = candidate
+                .workspace_secrets
+                .entry(super::GLOBAL_MCP_ID.into())
+                .or_default();
+            for key in [
+                "oauth_password",
+                "oauth_token_secret",
+                "bearer_token",
+                "actions_api_key",
+                "actions_oauth_client_secret",
+                "actions_oauth_password",
+                "actions_oauth_token_secret",
+            ] {
+                if secrets.get(key).is_none_or(|v| v.trim().is_empty()) {
+                    secrets.insert(key.into(), random_secret());
+                }
+            }
+            if shared_live_store_enabled() {
+                for source in candidate.connection_project_origins.values() {
+                    let path = shared_workspace_file(source);
+                    if !candidate.connection_feature_snapshots.contains_key(source)
+                        && path.is_file()
+                    {
+                        candidate.connection_feature_snapshots.insert(
+                            source.clone(),
+                            serialize_canonical_workspace(&read_shared_canonical(&path)?)
+                                .map_err(AppError::Message)?,
+                        );
+                    }
+                }
+            }
+            candidate.connection_migration_pending = true;
+            save(&candidate)?;
+            self.data = candidate;
+            persist_connection_mirrors(&self.data)?;
+            self.data.connection_migration_pending = false;
+            self.data.connection_project_origins.clear();
+            self.data.connection_feature_snapshots.clear();
+            self.persist_unlocked()?;
+        }
+        self.data
+            .mcp_connection
+            .clone()
+            .ok_or_else(|| AppError::Message("Global MCP unavailable".into()))
+    }
+
+    /// Transport claims plus project Actions claims; the connection is not a project.
+    pub fn resource_profiles(&self) -> Vec<WorkspaceProfile> {
+        self.data
+            .profiles
+            .iter()
+            .chain(self.data.mcp_connection.iter())
+            .cloned()
+            .collect()
+    }
+
+    pub fn global_connection(&self) -> AppResult<WorkspaceProfile> {
+        self.data
+            .mcp_connection
+            .clone()
+            .ok_or_else(|| AppError::Message("Global MCP unavailable".into()))
+    }
+
     pub fn list(&self) -> &[WorkspaceProfile] {
         &self.data.profiles
     }
 
     pub fn get(&self, id: &str) -> Option<&WorkspaceProfile> {
-        self.data.profiles.iter().find(|profile| profile.id == id)
+        self.data
+            .mcp_connection
+            .as_ref()
+            .filter(|profile| profile.id == id)
+            .or_else(|| self.data.profiles.iter().find(|profile| profile.id == id))
     }
 
     pub fn feature_document(&self, id: &str) -> AppResult<CanonicalWorkspace> {
@@ -183,6 +284,13 @@ impl DataStore {
     /// Return enabled MCP workspaces in profile order. Stale ids are ignored,
     /// which also makes upgrades/recovery tolerant of partially removed data.
     pub fn mcp_auto_start_workspace_ids(&self) -> Vec<String> {
+        if let Some(connection) = &self.data.mcp_connection {
+            return if self.mcp_runtime_enabled(&connection.id) {
+                vec![connection.id.clone()]
+            } else {
+                vec![]
+            };
+        }
         self.data
             .profiles
             .iter()
@@ -199,6 +307,13 @@ impl DataStore {
     }
 
     pub fn actions_auto_start_workspace_ids(&self) -> Vec<String> {
+        if let Some(connection) = &self.data.mcp_connection {
+            return if self.actions_runtime_enabled(&connection.id) {
+                vec![connection.id.clone()]
+            } else {
+                vec![]
+            };
+        }
         self.data
             .profiles
             .iter()
@@ -208,6 +323,9 @@ impl DataStore {
     }
 
     pub fn set_mcp_runtime_enabled(&mut self, id: &str, enabled: bool) -> AppResult<()> {
+        if self.data.mcp_connection.is_some() && id != super::GLOBAL_MCP_ID {
+            return Err(AppError::Message("MCP uses the global connection".into()));
+        }
         if self.get(id).is_none() {
             return Err(AppError::Message(format!("workspace not found: {id}")));
         }
@@ -228,6 +346,11 @@ impl DataStore {
     }
 
     pub fn set_actions_runtime_enabled(&mut self, id: &str, enabled: bool) -> AppResult<()> {
+        if self.data.mcp_connection.is_some() && id != super::GLOBAL_MCP_ID {
+            return Err(AppError::Message(
+                "Actions uses the global connection".into(),
+            ));
+        }
         if self.get(id).is_none() {
             return Err(AppError::Message(format!("workspace not found: {id}")));
         }
@@ -254,20 +377,38 @@ impl DataStore {
         mcp_ids: &[String],
         actions_ids: &[String],
     ) -> AppResult<()> {
-        self.data.mcp_enabled_workspace_ids = self
-            .data
-            .profiles
-            .iter()
-            .filter(|profile| mcp_ids.iter().any(|id| id == &profile.id))
-            .map(|profile| profile.id.clone())
-            .collect();
-        self.data.actions_enabled_workspace_ids = self
-            .data
-            .profiles
-            .iter()
-            .filter(|profile| actions_ids.iter().any(|id| id == &profile.id))
-            .map(|profile| profile.id.clone())
-            .collect();
+        self.data.mcp_enabled_workspace_ids = if self.data.mcp_connection.is_some() {
+            if mcp_ids.iter().any(|id| {
+                id == super::GLOBAL_MCP_ID || self.data.profiles.iter().any(|p| &p.id == id)
+            }) {
+                vec![super::GLOBAL_MCP_ID.into()]
+            } else {
+                vec![]
+            }
+        } else {
+            self.data
+                .profiles
+                .iter()
+                .filter(|p| mcp_ids.contains(&p.id))
+                .map(|p| p.id.clone())
+                .collect()
+        };
+        self.data.actions_enabled_workspace_ids = if self.data.mcp_connection.is_some() {
+            if actions_ids.iter().any(|id| {
+                id == super::GLOBAL_MCP_ID || self.data.profiles.iter().any(|p| &p.id == id)
+            }) {
+                vec![super::GLOBAL_MCP_ID.into()]
+            } else {
+                vec![]
+            }
+        } else {
+            self.data
+                .profiles
+                .iter()
+                .filter(|p| actions_ids.contains(&p.id))
+                .map(|p| p.id.clone())
+                .collect()
+        };
         self.save()
     }
 
@@ -289,6 +430,10 @@ impl DataStore {
 
     pub fn add(&mut self, mut profile: WorkspaceProfile) -> AppResult<()> {
         profile.normalize_folders();
+        validate_new_project(&self.data, &profile)?;
+        if self.data.mcp_connection.is_some() {
+            super::connection::enforce_project_isolation(&mut profile);
+        }
         profile.normalize_bind_addresses();
         profile.normalize_sandbox();
         profile
@@ -302,6 +447,33 @@ impl DataStore {
     }
 
     pub fn update(&mut self, mut profile: WorkspaceProfile) -> AppResult<()> {
+        if profile.id == super::GLOBAL_MCP_ID {
+            if self.data.mcp_connection.is_none() {
+                return Err(AppError::Message("Global MCP unavailable".into()));
+            }
+            profile.path.clear();
+            profile.folders.clear();
+            profile.active_folder_id.clear();
+            profile.normalize_bind_addresses();
+            profile
+                .validate_bind_addresses()
+                .map_err(AppError::Message)?;
+            persist_shared_profile(&profile)?;
+            let before = self.data.mcp_connection.replace(profile);
+            if let Err(error) = self.save() {
+                self.data.mcp_connection = before;
+                return Err(error);
+            }
+            return Ok(());
+        }
+        if self.data.mcp_connection.is_some() {
+            let current = self
+                .get(&profile.id)
+                .ok_or_else(|| AppError::Message("Project not found".into()))?;
+            super::connection::validate_project_update(current, &profile)
+                .map_err(AppError::Message)?;
+            super::connection::enforce_project_isolation(&mut profile);
+        }
         profile.normalize_folders();
         profile.normalize_bind_addresses();
         profile.normalize_sandbox();
@@ -326,6 +498,11 @@ impl DataStore {
     }
 
     pub fn remove(&mut self, id: &str) -> AppResult<Option<WorkspaceProfile>> {
+        if id == super::GLOBAL_MCP_ID {
+            return Err(AppError::Message(
+                "The global connection cannot be removed as a project".into(),
+            ));
+        }
         let Some(index) = self.data.profiles.iter().position(|item| item.id == id) else {
             return Ok(None);
         };
@@ -462,7 +639,12 @@ impl DataStore {
     }
 
     /// Keep live settings unchanged if durable secret persistence fails.
-    pub fn set_app_secret_preserving_on_error(&mut self, scope: &str, item_id: &str, value: &str) -> AppResult<()> {
+    pub fn set_app_secret_preserving_on_error(
+        &mut self,
+        scope: &str,
+        item_id: &str,
+        value: &str,
+    ) -> AppResult<()> {
         let before = self.data.clone();
         if let Err(error) = self.set_app_secret(scope, item_id, value) {
             self.data = before;
@@ -843,6 +1025,61 @@ fn write_shared_secret_values(
     let path = shared_secrets_file_next_to(&shared_workspace_file(id));
     write_shared_secret_values_at(&path, secrets)
 }
+fn persist_connection_mirrors(data: &AppData) -> AppResult<()> {
+    if !shared_live_store_enabled() {
+        return Ok(());
+    }
+    persist_connection_mirrors_at(data, &shared_workspaces_root())
+}
+fn persist_connection_mirrors_at(data: &AppData, root: &Path) -> AppResult<()> {
+    // Load donor feature settings before replacing any of the original mirrors.
+    let mut donors = std::collections::HashMap::new();
+    for source in data.connection_project_origins.values() {
+        let path = shared_workspace_file_in(root, source);
+        if donors.contains_key(source) {
+            continue;
+        }
+        if let Some(snapshot) = data.connection_feature_snapshots.get(source) {
+            donors.insert(
+                source.clone(),
+                parse_canonical_workspace(snapshot).map_err(AppError::Message)?,
+            );
+        } else if path.is_file() {
+            donors.insert(source.clone(), read_shared_canonical(&path)?);
+        }
+    }
+    for profile in data.profiles.iter().chain(data.mcp_connection.iter()) {
+        let target = shared_workspace_file_in(root, &profile.id);
+        let donor = data
+            .connection_project_origins
+            .get(&profile.id)
+            .and_then(|source| donors.get(source));
+        let mut document = merge_desktop_profile_on_canonical(donor, profile);
+        if profile.id != super::GLOBAL_MCP_ID
+            && data
+                .connection_project_origins
+                .get(&profile.id)
+                .is_some_and(|source| source != &profile.id)
+        {
+            if let Some(node) = document.host.node.as_object_mut() {
+                node.remove("dataDir");
+                node.remove("tunnelStateFile");
+            }
+        }
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        write_wrapped_json(
+            &target,
+            &serialize_canonical_workspace(&document).map_err(AppError::Message)?,
+        )?;
+        if let Some(secrets) = data.workspace_secrets.get(&profile.id) {
+            write_shared_secret_values_at(&shared_secrets_file_next_to(&target), secrets)?;
+        }
+    }
+    Ok(())
+}
+
 fn persist_shared_profile(profile: &WorkspaceProfile) -> AppResult<()> {
     if !shared_live_store_enabled() {
         return Ok(());
@@ -873,11 +1110,42 @@ fn sync_shared_live_store(data: &mut AppData) -> AppResult<bool> {
 
 fn sync_shared_live_store_at(data: &mut AppData, root: &Path) -> AppResult<bool> {
     let mut changed = false;
+    if let Some(connection) = data.mcp_connection.clone() {
+        let path = shared_workspace_file_in(root, super::GLOBAL_MCP_ID);
+        if path.is_file() {
+            let canonical = read_shared_canonical(&path)?;
+            if !canonical.folders.is_empty() {
+                return Err(AppError::Message(
+                    "Global connection must not expose project folders".into(),
+                ));
+            }
+            let profile = desktop_profile_from_canonical(&canonical);
+            if serde_json::to_value(&connection).ok() != serde_json::to_value(&profile).ok() {
+                data.mcp_connection = Some(profile);
+                changed = true;
+            }
+        } else {
+            persist_shared_profile_at(&path, &connection)?;
+        }
+        let secrets_path = shared_secrets_file_next_to(&path);
+        if secrets_path.is_file() {
+            let secrets = shared_secret_values(&read_maybe_wrapped_json(&secrets_path)?);
+            if data.workspace_secrets.get(super::GLOBAL_MCP_ID) != Some(&secrets) {
+                data.workspace_secrets
+                    .insert(super::GLOBAL_MCP_ID.into(), secrets);
+                changed = true;
+            }
+        } else if let Some(secrets) = data.workspace_secrets.get(super::GLOBAL_MCP_ID) {
+            write_shared_secret_values_at(&secrets_path, secrets)?;
+        }
+    }
     for index in 0..data.profiles.len() {
         let current_id = data.profiles[index].id.clone();
-        if let Some(target_id) =
+        if let Some(target_id) = if data.mcp_connection.is_none() {
             find_node_counterpart_shared_workspace_id_at(root, &data.profiles[index], &current_id)?
-        {
+        } else {
+            None
+        } {
             changed |= migrate_profile_to_node_counterpart_at(data, index, root, &target_id)?;
         }
 
@@ -886,6 +1154,10 @@ fn sync_shared_live_store_at(data: &mut AppData, root: &Path) -> AppResult<bool>
         if workspace_path.is_file() {
             let canonical = read_shared_canonical(&workspace_path)?;
             let shared_profile = desktop_profile_from_canonical(&canonical);
+            if data.mcp_connection.is_some() {
+                super::connection::validate_project_update(&data.profiles[index], &shared_profile)
+                    .map_err(AppError::Message)?;
+            }
             if serde_json::to_value(&data.profiles[index]).ok()
                 != serde_json::to_value(&shared_profile).ok()
             {
@@ -981,10 +1253,23 @@ pub fn import_workspace_pack_into_data(
     pack: serde_json::Value,
 ) -> AppResult<WorkspaceProfile> {
     let mut profile = profile_from_workspace_pack(&pack)?;
-    if profile.id.trim().is_empty() || data.profiles.iter().any(|item| item.id == profile.id) {
+    if profile.id.trim().is_empty()
+        || profile.id == super::GLOBAL_MCP_ID
+        || data.profiles.iter().any(|item| item.id == profile.id)
+    {
         profile.id = uuid::Uuid::new_v4().to_string().replace('-', "");
     }
-    assign_free_workspace_ports(&data.profiles, &mut profile)?;
+    validate_new_project(data, &profile)?;
+    if data.mcp_connection.is_some() {
+        super::connection::enforce_project_isolation(&mut profile);
+    }
+    let resources = data
+        .profiles
+        .iter()
+        .chain(data.mcp_connection.iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    assign_free_workspace_ports(&resources, &mut profile)?;
     let secrets = data
         .workspace_secrets
         .entry(profile.id.clone())
@@ -1010,6 +1295,31 @@ pub fn import_workspace_pack_into_data(
     Ok(profile)
 }
 
+fn validate_new_project(data: &AppData, profile: &WorkspaceProfile) -> AppResult<()> {
+    if data.mcp_connection.is_none() {
+        return Ok(());
+    }
+    if profile.id == super::GLOBAL_MCP_ID || data.profiles.iter().any(|p| p.id == profile.id) {
+        return Err(AppError::Message("Project ID already exists".into()));
+    }
+    if profile.folders.len() != 1 {
+        return Err(AppError::Message(
+            "A project must have one fixed directory".into(),
+        ));
+    }
+    if data
+        .profiles
+        .iter()
+        .flat_map(|p| &p.folders)
+        .any(|f| f.id == profile.folders[0].id)
+    {
+        return Err(AppError::Message(
+            "Project directory ID already exists".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn lock_data_file() -> AppResult<std::sync::MutexGuard<'static, ()>> {
     DATA_FILE_LOCK
         .lock()
@@ -1031,6 +1341,44 @@ fn shared_value_for_key(key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migration_journal_repairs_interrupted_mirror_and_keeps_project_features() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut data = AppData::default();
+        let mut profile = WorkspaceProfile::new("/project/a".into(), Some("Account A".into()));
+        profile.folders.push(crate::workspace::WorkspaceFolder::new(
+            "/project/b".into(),
+            Some("Account B".into()),
+        ));
+        let mut donor = canonical_from_desktop_profile(&profile);
+        donor.skills.active = false;
+        donor.host.node =
+            serde_json::json!({"dataDir":"/old/shared-data","management":{"enabled":false}});
+        data.profiles.push(profile.clone());
+        super::super::connection::migrate(&mut data).unwrap();
+        data.connection_feature_snapshots.insert(
+            profile.id.clone(),
+            serialize_canonical_workspace(&donor).unwrap(),
+        );
+        let old = shared_workspace_file_in(dir.path(), &profile.id);
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(&old, b"interrupted").unwrap();
+        persist_connection_mirrors_at(&data, dir.path()).unwrap();
+        for project in &data.profiles {
+            let saved =
+                read_shared_canonical(&shared_workspace_file_in(dir.path(), &project.id)).unwrap();
+            assert_eq!(saved.folders.len(), 1);
+            assert!(!saved.skills.active);
+            assert_eq!(
+                saved.host.node["management"]["enabled"],
+                serde_json::json!(false)
+            );
+            if project.id != profile.id {
+                assert!(saved.host.node.get("dataDir").is_none());
+            }
+        }
+    }
 
     #[test]
     fn workspace_secret_roundtrip() {

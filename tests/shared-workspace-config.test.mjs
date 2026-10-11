@@ -130,3 +130,14 @@ test("desktop profile roundtrip restores host-only fields", async () => {
   assert.equal(restored.actions.oauth_client_id, "actions-desktop");
   assert.equal(restored.actions.local_port, 18791);
 });
+
+test('global connection round-trips zero folders while project documents require a root', async () => {
+  const {parseCanonicalWorkspace,migrateNodeV1Document,migrateDesktopProfile,canonicalToWorkspaceProfile} = await loadWorkspaceDocument();
+  const id='00000000000000000000000000000001';
+  const canonical=migrateNodeV1Document({folders:[],oauth:{clientId:'global-client'}},{id,name:'MCP'});
+  assert.deepEqual(canonical.folders,[]);
+  const desktop=canonicalToWorkspaceProfile(canonical);
+  assert.deepEqual(migrateDesktopProfile(desktop).folders,[]);
+  assert.throws(()=>parseCanonicalWorkspace({...canonical,id:'project'}),/at least one folder/);
+  assert.throws(()=>parseCanonicalWorkspace({...canonical,folders:[{id:'p',name:'p',path:'/project'}]}),/must not contain project folders/);
+});

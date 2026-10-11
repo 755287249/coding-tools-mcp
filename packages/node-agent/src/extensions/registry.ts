@@ -30,6 +30,7 @@ function activeHookSessionKey(sessionId: string, folderId: string): string {
 export interface ExtensionRegistryOptions extends Omit<ExtensionDiscoveryOptions, 'folders'> {
   folders: readonly WorkspaceFolder[];
   hooksActive?: boolean;
+  projectIsolation?:boolean;
   mcpActive?: boolean;
   enabledHooks?: readonly string[];
   enabledMcpServers?: readonly string[];
@@ -51,8 +52,8 @@ export class ExtensionRegistry {
 
   constructor(private readonly options: ExtensionRegistryOptions) {
     this.folders = options.folders.map(folder => ({ ...folder }));
-    this.hooksActive = options.hooksActive ?? true;
-    this.mcpActive = options.mcpActive ?? true;
+    this.hooksActive = !options.projectIsolation && (options.hooksActive ?? true);
+    this.mcpActive = !options.projectIsolation && (options.mcpActive ?? true);
     this.enabledHooks = new Set(options.enabledHooks ?? []);
     this.enabledMcpServers = new Set(options.enabledMcpServers ?? []);
   }
@@ -68,8 +69,8 @@ export class ExtensionRegistry {
     hooks: { active: boolean; enabled: readonly string[] };
     mcp: { active: boolean; enabled: readonly string[] };
   }): Promise<void> {
-    this.hooksActive = config.hooks.active;
-    this.mcpActive = config.mcp.active;
+    this.hooksActive = !this.options.projectIsolation && config.hooks.active;
+    this.mcpActive = !this.options.projectIsolation && config.mcp.active;
     this.enabledHooks = new Set(config.hooks.enabled);
     this.enabledMcpServers = new Set(config.mcp.enabled);
     this.lastRefreshAt = 0;
@@ -77,6 +78,7 @@ export class ExtensionRegistry {
   }
 
   async setActive(kind: ExtensionKind, active: boolean): Promise<void> {
+    active=active&&!this.options.projectIsolation;
     if (kind === 'hook') this.hooksActive = active;
     else this.mcpActive = active;
     this.lastRefreshAt = 0;

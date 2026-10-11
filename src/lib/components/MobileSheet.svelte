@@ -6,7 +6,7 @@
   import { mobileViewport } from '$lib/chat/mobile-viewport';
   import { t } from '$lib/i18n';
   import X from '@lucide/svelte/icons/x';
-  let { title, edge='bottom', open=true, onClose, children }:{open?:boolean;title:string;edge?:'bottom'|'left';onClose:()=>void;children:Snippet}=$props();
+  let { headerContent, title, edge='bottom', open=true, onClose, children }:{headerContent?:Snippet;open?:boolean;title:string;edge?:'bottom'|'left';onClose:()=>void;children:Snippet}=$props();
   let dialog:HTMLDialogElement;
   const reducedMotion = new MediaQuery('(prefers-reduced-motion: reduce)');
   let mounted=$state(false);
@@ -20,8 +20,8 @@
   })});
 </script>
 <svelte:window onresize={()=>{if(innerWidth>700)onClose()}}/>
-<dialog use:mobileViewport in:fly|global={{x:edge==='left'?-40:0,y:edge==='bottom'?24:0,duration:reducedMotion.current?0:220,easing:cubicOut}} out:fly|global={{x:edge==='left'?-24:0,y:edge==='bottom'?16:0,duration:reducedMotion.current?0:150,easing:cubicIn}} class="mobile-sheet" class:drawer={edge==='left'} bind:this={dialog} aria-label={title} onclose={()=>{if(!dialog.open)onClose()}} oncancel={event=>{event.preventDefault();onClose()}} onclick={event=>{if(event.target===dialog){const r=dialog.getBoundingClientRect();if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom)onClose()}}}>
-  <header><strong>{title}</strong><button type="button" aria-label={$t('Close')} onclick={onClose}><X size={20}/></button></header>
+<dialog use:mobileViewport in:fly|global={{x:edge==='left'?-40:0,y:edge==='bottom'?24:0,duration:reducedMotion.current?0:220,easing:cubicOut}} out:fly|global={{x:edge==='left'?-24:0,y:edge==='bottom'?16:0,duration:reducedMotion.current?0:150,easing:cubicIn}} class="mobile-sheet" class:drawer={edge==='left'} bind:this={dialog} aria-label={title} onclose={()=>{if(dialog&&!dialog.open)onClose()}} oncancel={event=>{event.preventDefault();onClose()}} onclick={event=>{if(event.target===dialog){const r=dialog.getBoundingClientRect();if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom)onClose()}}}>
+  <header>{#if headerContent}{@render headerContent()}{:else}<strong>{title}</strong>{/if}<button type="button" aria-label={$t('Close')} onclick={onClose}><X size={20}/></button></header>
   {@render children()}
 </dialog>
 <style>

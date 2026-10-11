@@ -1,4 +1,5 @@
 <script lang="ts">
+  import {copyText} from "$lib/browser-tools";
   import { t } from "$lib/i18n";
   interface Props {
     value: string;
@@ -10,7 +11,7 @@
   let copied = $state(false);
 
   async function copy() {
-    await navigator.clipboard.writeText(value);
+    await copyText(value);
     copied = true;
     onCopy?.();
     setTimeout(() => {

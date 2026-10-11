@@ -20,3 +20,25 @@ pub fn local_chat(
     })?;
     crate::tools::chat::ui(&root, &args).map_err(|e| AppError::Message(e.message()))
 }
+
+/// Runs independently of browser windows and AI transport availability.
+pub fn start_schedule_worker(app: tauri::AppHandle) {
+    use tauri::Manager;
+    std::thread::spawn(move || loop {
+        let roots = app.state::<AppState>().with_workspaces(|store| {
+            Ok(store
+                .list()
+                .iter()
+                .flat_map(|p| p.folders.iter().map(|f| std::path::PathBuf::from(&f.path)))
+                .collect::<std::collections::HashSet<_>>())
+        });
+        if let Ok(roots) = roots {
+            for root in roots {
+                if let Err(error) = crate::tools::chat::schedules::tick(&root) {
+                    eprintln!("Scheduled chat delivery: {}", error.message());
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    });
+}

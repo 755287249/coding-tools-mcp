@@ -32,6 +32,13 @@ pub fn spawn_listener(
     oauth_token_secret: Option<String>,
     runtime: RuntimeConfig,
 ) -> Result<(ShutdownSender, crate::task_runtime::JoinHandle<()>), String> {
+    let (folders, bootstrap_folder_id) = if workspace_id == crate::data::GLOBAL_MCP_ID {
+        let folder = crate::data::control_folder()?;
+        let id = folder.id.clone();
+        (vec![folder], id)
+    } else {
+        (folders, bootstrap_folder_id)
+    };
     let policy = PolicySettings::from_runtime(&runtime);
     let redact_telemetry = policy.security_policy.redact_telemetry;
     let mcp = new_state(
@@ -96,6 +103,7 @@ pub fn spawn_listener(
         None
     };
     let state = ListenerState {
+        gateway_epoch: super::gateway::current_epoch(),
         mcp,
         auth,
         workspace_id,

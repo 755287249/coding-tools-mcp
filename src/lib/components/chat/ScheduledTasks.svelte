@@ -1,7 +1,7 @@
 <script lang="ts">
   import { randomId } from "$lib/browser-tools";
   import { localChat, type ChatSession } from '$lib/api/chat';
-  import { scheduledChats, scheduleError, changeSchedule, type ScheduledChat } from '$lib/chat/schedules';
+  import { scheduledChats, scheduleError, createSchedule, updateSchedule, type ScheduledChat } from '$lib/chat/schedules';
   import { t } from '$lib/i18n';
   let {workspaceId,folderId}:{workspaceId:string;folderId:string}=$props();
   let chats=$state<ChatSession[]>([]), chatId=$state(''), text=$state(''), due=$state(''), error=$state(''), saving=$state(false);
@@ -15,9 +15,9 @@
     if(saving||!chat||!text.trim()||!Number.isFinite(when)||when<=Date.now()){error=$t('shell.scheduleInvalid');return}
     saving=true;error='';
     const task:ScheduledChat={id:randomId(),workspaceId,folderId,chatId,title:chat.title,text:text.trim(),due:when,status:'pending'};
-    try{await changeSchedule(tasks=>[...tasks,task]);text='';due=''}catch(e){error=String(e)}finally{saving=false}
+    try{await createSchedule(task);text='';due=''}catch(e){error=String(e)}finally{saving=false}
   }
-  async function update(id:string,status?:ScheduledChat['status']) {try{await changeSchedule(tasks=>status?tasks.map(task=>task.id===id?{...task,status}:task):tasks.filter(task=>task.id!==id))}catch(e){error=String(e)}}
+  async function update(id:string,status?:ScheduledChat['status']) {try{const task=tasks.find(t=>t.id===id);if(task)await updateSchedule(task,status??'deleted')}catch(e){error=String(e)}}
 </script>
 <div class="schedule-page"><p class="notice">{$t('shell.scheduleNotice')}</p>
 {#if error||$scheduleError}<p role="alert">{error||$scheduleError}</p>{/if}

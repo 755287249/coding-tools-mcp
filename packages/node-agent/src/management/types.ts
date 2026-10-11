@@ -7,6 +7,7 @@ export type { RuntimeHotApplyTarget, TunnelRuntimeController } from './runtimeCo
 
 export interface WorkspaceManagementStore {
   readonly primaryWorkspaceId: string;
+  connectionSnapshot?(): JsonObject;
   snapshot(): JsonObject;
   addWorkspace(folderPath: string, name?: string): Promise<JsonObject>;
   deleteWorkspace(id: string): Promise<JsonObject>;

@@ -6,14 +6,14 @@
   import { distributionCall, localDesktop } from '$lib/api/distribution';
   import { onMount } from 'svelte';
   import {APP_VERSION} from '$lib/app-version';
-  import {appUpdate,appDownload,checkAppUpdate,updateRepository} from '$lib/stores/app-updates';
+  import {appUpdate,appDownload,appInstallOutcome,loadInstallOutcome,checkAppUpdate,updateRepository} from '$lib/stores/app-updates';
   import {downloadBusy,downloadPercent,formatDownloadBytes} from '$lib/update-download';
   let repo=$state('755287249/coding-tools-mcp'),release=$derived($appUpdate.release),installing=$state(false),error=$state(''),ready=$derived($appDownload.phase==='ready'),checkedRepo=$derived($appUpdate.checkedRepo);
   const transferring=$derived(downloadBusy($appDownload));
   const busy=$derived(installing||transferring);
   const percent=$derived(downloadPercent($appDownload));
   const phaseLabel=$derived($t($appDownload.phase==='connecting'?'updates.connecting':$appDownload.phase==='verifying'?'updates.verifying':'updates.downloading'));
-  onMount(()=>{repo=updateRepository()});
+  onMount(()=>{repo=updateRepository();void loadInstallOutcome()});
   async function check(){error='';await checkAppUpdate(repo)}
   async function download(){if(!release?.sha256||busy||$appUpdate.busy)return;error='';await appDownload.start({repo:checkedRepo,version:release.version,sha256:release.sha256})}
   async function install(){if(!release?.sha256||busy||!ready)return;installing=true;error='';try{if(!await confirmAction($t('updates.restartConfirm')))return;await distributionCall('install_app_update',{expectedVersion:release.version,expectedSha256:release.sha256})}catch(e){error=String(e);appDownload.reset()}finally{installing=false}}
@@ -26,6 +26,7 @@
     <p>{$t('updates.description')}</p>
   </header>
   <div class="page-body update-page"><div class="tx-card">
+    {#if $appInstallOutcome}<section class="install-outcome" role="status"><strong>{$t($appInstallOutcome.runningExpectedVersion?'updates.installedOutcome':$appInstallOutcome.status==='rolled_back'?'updates.rolledBackOutcome':'updates.failedOutcome')} {$appInstallOutcome.version}</strong><p>{new Date($appInstallOutcome.finishedAt).toLocaleString()}</p>{#if !$appInstallOutcome.runningExpectedVersion}<details><summary>{$t('updates.errorDetails')}</summary><pre>{$appInstallOutcome.message}</pre></details>{/if}</section>{/if}
     <div class="buttons">
       <button type="button" onclick={check} disabled={busy||$appUpdate.busy||getBackend().capabilities.host==='node'}>{$appUpdate.busy?$t('updates.checking'):$t('updates.check')}</button>
     </div>
@@ -63,7 +64,7 @@
     <p>{$t('updates.integrity')}</p>
   </div></div>
 </section>
-<style>
+<style>.install-outcome{padding:14px;margin-bottom:16px;border:1px solid var(--color-border);border-radius:10px}.install-outcome p{font-size:11px;color:var(--color-text-muted)}
 .download-progress{display:grid;gap:8px}.download-progress progress{width:100%;height:10px;accent-color:var(--color-accent,#6b8afd)}.download-counts{display:flex;justify-content:space-between;font-variant-numeric:tabular-nums}
 .update-page{max-width:900px}.tx-card{padding:24px;display:grid;gap:18px}.buttons{display:flex;gap:10px;flex-wrap:wrap}button{border:1px solid var(--color-border);border-radius:7px;padding:10px;cursor:pointer}button:disabled{opacity:.5}p{font-size:13px;line-height:1.7;color:var(--color-text-muted)}pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:40dvh;overflow:auto;font:13px/1.7 inherit}.release-notes{display:grid;gap:8px}.release-notes h4{font-size:13px;font-weight:600}.up-to-date{color:var(--color-text)}[role=alert] p,[role=alert] details{color:#e77}summary{cursor:pointer;font-size:12px}
 </style>

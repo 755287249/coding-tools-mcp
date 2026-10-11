@@ -1,3 +1,4 @@
+import {enforceProjectConfiguration} from '../projectIsolation.js';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import {
@@ -297,6 +298,7 @@ async function applyRuntimeConfiguration(
   desired: AgentConfig
 ): Promise<RuntimeConfigurationApplyResult> {
   const context = runtime.context;
+  if(context.projectIsolation){desired=structuredClone(desired);enforceProjectConfiguration(desired);enforceProjectConfiguration(current);enforceProjectConfiguration(context.config);}
   const result: RuntimeConfigurationApplyResult = { applied: [], deferredReasons: [] };
   if (!sameRuntimeValue(context.config.policy, desired.policy)) {
     current.policy = structuredClone(desired.policy);
@@ -935,12 +937,13 @@ export class ConfigStore {
       delete nextSecrets.tunnelEnrollmentUrl;
     }
 
-    const folders = await canonicalizeWorkspaceFolders(
+    const folders = this.current.globalConnection ? [] : await canonicalizeWorkspaceFolders(
       parseFolders(input.folders ?? this.current.folders)
     );
 
     const document: AgentConfigDocument = {
       schema_version: CURRENT_CONFIG_SCHEMA_VERSION,
+      globalConnection: this.current.globalConnection,
       host: stringValue(input.host, 'host', this.current.host, 255),
       port: integerValue(input.port, 'port', this.current.port, 1, 65_535),
       dataDir: path.resolve(stringValue(input.dataDir, 'dataDir', this.current.dataDir, 4096)),
@@ -1084,7 +1087,7 @@ export class ConfigStore {
     const appliedImmediately: string[] = [];
     const hotApplyDeferredReasons: string[] = [];
     if (runtime) {
-      const folderApply = await applyWorkspaceFolderConfiguration(runtime.context, desired.folders);
+      const folderApply = this.current.globalConnection ? {applied:false,changed:false,deferredReason:undefined} : await applyWorkspaceFolderConfiguration(runtime.context, desired.folders);
       if (folderApply.applied) {
         this.current.folders = desired.folders.map(folder => ({ ...folder }));
         appliedImmediately.push('folders');

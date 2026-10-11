@@ -57,4 +57,24 @@ public class ShellContractTest {
             assertTrue(script.contains("location.origin!==")); assertFalse(script.contains(secret)); assertTrue(script.contains("ctmcp-browser-session"));
         }
     }
+    @Test public void cachedSessionIsReusedAndOnlyUnauthorizedStatusTriggersLogin() throws Exception {
+        try (MockWebServer server=new MockWebServer()) {
+            server.start(); String origin=server.url("/").toString().replaceAll("/$", "");
+            ConnectionProfile profile=ConnectionProfile.create(origin,"synthetic",true);
+            String cached="0123456789abcdef0123456789abcdef",fresh="abcdef0123456789abcdef0123456789";
+            server.enqueue(new MockResponse().setBody("{\"value\":[]}"));
+            assertEquals(cached,NativeLogin.resume(profile,cached,true));
+            var request=server.takeRequest(3,TimeUnit.SECONDS);assertNotNull(request);
+            assertEquals("/browser/invoke",request.getPath());assertEquals("Bearer "+cached,request.getHeader("Authorization"));
+            assertFalse(request.getBody().readUtf8().contains(profile.password));
+            server.enqueue(new MockResponse().setResponseCode(401));
+            server.enqueue(new MockResponse().setBody("{\"token\":\""+fresh+"\"}"));
+            assertEquals(fresh,NativeLogin.resume(profile,cached,true));
+            server.takeRequest(3,TimeUnit.SECONDS);var login=server.takeRequest(3,TimeUnit.SECONDS);assertNotNull(login);
+            assertEquals("/browser/login",login.getPath());assertTrue(new JSONObject(login.getBody().readUtf8()).getBoolean("remember"));
+            server.enqueue(new MockResponse().setResponseCode(503));
+            assertThrows(java.io.IOException.class,()->NativeLogin.resume(profile,cached,true));
+            assertEquals(4,server.getRequestCount());
+        }
+    }
 }

@@ -16,9 +16,9 @@
     complete: CircleCheck, completed: CircleCheck, failed: CircleX,
     closed: Square, interrupted: Pause,
   };
-  let { state, label }: {state: keyof typeof icons; label: string} = $props();
+  let { state, label, animate=true }: {animate?:boolean;state: keyof typeof icons; label: string} = $props();
   const Icon = $derived(icons[state]);
-  const spinning = $derived(state === 'processing' || state === 'supplementing' || state === 'running');
+  const spinning = $derived(animate && (state === 'processing' || state === 'supplementing' || state === 'running'));
 </script>
 <span class="status-icon" class:spinning class:attention={state === 'awaiting_user'} class:failed={state === 'failed'} class:done={state === 'complete' || state === 'completed' || state === 'replied' || state === 'read' || state === 'answered'} role="img" aria-label={label} title={label}>
   <Icon size={14} aria-hidden="true"/>

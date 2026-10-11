@@ -1,4 +1,6 @@
 <script lang="ts">
+  import {getMcpConnection,getRuntimeStatus} from "$lib/api/workspaces";
+  import {saveFile} from "$lib/save-file";
   import PresenceDot from './PresenceDot.svelte';
   import SeedStart from './SeedStart.svelte';
   import SeedLoading from './SeedLoading.svelte';
@@ -17,7 +19,6 @@
   import { autoGrow, messageBytes } from '$lib/chat/autogrow';
   import ChatMembers from './ChatMembers.svelte';
   import ChatTaskPanel from './ChatTaskPanel.svelte';
-  import { getRuntimeStatus } from '$lib/api/workspaces';
   import { taskPlanMarkdown } from '$lib/chat/task-state';
   import DraftAttachment from './DraftAttachment.svelte';
   import { IMAGE_GALLERY, conversationImages, attachmentImages } from '$lib/chat/image-gallery';
@@ -46,11 +47,11 @@
   import X from '@lucide/svelte/icons/x';
   import ComposerTools from './ComposerTools.svelte';
   import { readChatFile } from '$lib/chat/attachment-transfer';
-  import ChatToolActivity from './ChatToolActivity.svelte';
   import { chatDrafts, chatDraftKey, conversationAccent } from '$lib/chat/drafts';
   import { chatSessionReader, sessionCacheKey } from '$lib/chat/session-cache';
   import { chatReadingPositions, type ChatReadingPosition } from '$lib/chat/view-cache';
-  import { groupChatMessages } from '$lib/chat/tool-activity';
+  import { groupReplyTurns } from '$lib/chat/reply-groups';
+  import ReplyGroup from './ReplyGroup.svelte';
   import MessageText from './MessageText.svelte';
   import QuestionCard from './QuestionCard.svelte';
   import { questionsMarkdown } from '$lib/chat/questions';
@@ -69,7 +70,7 @@
   import { buildChatPrompt, pairingPrelude } from '$lib/connect/chat-prompt';
   import { pendingChatState, chatReplyState, chatUserState, USER_MESSAGE_STATUS_KEYS } from '$lib/chat/status';
   import type { AuthConfig, WorkspaceFolder } from '$lib/types';
-  let { onPlugins, tasksOpen=false, tasksExpanded=false, onCloseTasks=()=>{}, onToggleTasksExpanded=()=>{}, workspaceId, folders, activeFolderId = '', endpoint = '', auth, externalNavigation = false, requestedChatId = '', requestedFolderId = '', startNew = false, connectRequested = false, workspacePicker, headerActions, onNavigate }: { onPlugins?:(folderId:string)=>void;tasksOpen?:boolean;tasksExpanded?:boolean;onCloseTasks?:()=>void;onToggleTasksExpanded?:()=>void; workspaceId: string; workspacePicker?: Snippet; folders: WorkspaceFolder[]; activeFolderId?: string; endpoint?: string; auth: AuthConfig; externalNavigation?: boolean; requestedChatId?: string; requestedFolderId?: string; startNew?: boolean; connectRequested?: boolean; headerActions?: Snippet; onNavigate?: (folderId: string, chatId: string) => void } = $props();
+  let { onPlugins, tasksOpen=false, tasksExpanded=false, onCloseTasks=()=>{}, onToggleTasksExpanded=()=>{}, workspaceId, connectionId, folders, activeFolderId = '', endpoint = '', auth, externalNavigation = false, requestedChatId = '', requestedFolderId = '', startNew = false, connectRequested = false, workspacePicker, headerActions, onNavigate }: { onPlugins?:(folderId:string)=>void;tasksOpen?:boolean;tasksExpanded?:boolean;onCloseTasks?:()=>void;onToggleTasksExpanded?:()=>void; workspaceId: string; connectionId?:string; workspacePicker?: Snippet; folders: WorkspaceFolder[]; activeFolderId?: string; endpoint?: string; auth: AuthConfig; externalNavigation?: boolean; requestedChatId?: string; requestedFolderId?: string; startNew?: boolean; connectRequested?: boolean; headerActions?: Snippet; onNavigate?: (folderId: string, chatId: string) => void } = $props();
   const mobileHeader=getContext<MobileHeaderContext|undefined>(MOBILE_CHAT_HEADER);
   const mobileHeaderOwner=Symbol('chat-header');
   let newMode=$state<'work'|'group'>('work');
@@ -272,15 +273,18 @@
     const request = ++promptSequence, ws = workspaceId, folder = folderId, chat = selected, scope = currentScope;
     connectionLoading = true; connectionPrompt = '';
     try {
-      const loaded = endpoint ? await loadMcpAuthSecrets(getBackend(), ws, auth) : null;
+      const transport=await getMcpConnection();
+      const transportStatus=await getRuntimeStatus(transport.id);
+      const connectionEndpoint=transportStatus.publicEndpoint||transportStatus.localEndpoint;
+      const loaded=connectionEndpoint?await loadMcpAuthSecrets(getBackend(),transport.id,transport.auth):null;
       if (request !== promptSequence || scope !== currentScope || !guide) return;
-      const connection = loaded ? buildConnectionPrompt({ workspaceName: selectedFolder?.name ?? '', endpoint, authType: auth.type, clientId: loaded.oauth_client_id || auth.oauth_client_id, password: loaded.oauth_password ?? '', bearerToken: loaded.bearer_token ?? '', folders: folders.map(f => f.path) }, $locale, true) : '';
+      const connection = loaded ? buildConnectionPrompt({ workspaceName: selectedFolder?.name ?? '', endpoint:connectionEndpoint, authType: transport.auth.type, clientId: loaded.oauth_client_id || transport.auth.oauth_client_id, password: loaded.oauth_password ?? '', bearerToken: loaded.bearer_token ?? '', folders: folders.map(f => f.path) }, $locale, true) : '';
       connectionPrompt = buildChatPrompt(chat, folder, connection);
       await prepareConnection(request);
       if(request!==promptSequence || scope!==currentScope || !guide || connectionComplete)return;
       const prepared=await localChat(ws,folder,{action:'prepare_pairing',chat_id:chat,message_id:pairingAttempt});
       if(request!==promptSequence || scope!==currentScope || !guide)return;
-      if(prepared.pairing){pairingExpires=prepared.pairing.expires_at;const prelude=pairingPrelude(endpoint,prepared.pairing.ticket);if(prelude)connectionPrompt=prelude+'\n\n'+connectionPrompt;}
+      if(prepared.pairing){pairingExpires=prepared.pairing.expires_at;const prelude=pairingPrelude(connectionEndpoint,prepared.pairing.ticket);if(prelude)connectionPrompt=prelude+'\n\n'+connectionPrompt;}
     } catch { if (request === promptSequence) connectionError = $t('chat.prepareFailed'); }
     finally { if (request === promptSequence) connectionLoading = false; }
   }
@@ -331,7 +335,7 @@
     const timer = setTimeout(() => tongueRevealed = false, 1000);
     return () => clearTimeout(timer);
   });
-  const feedItems = $derived(groupChatMessages(messages, detail?.closed ?? false));
+  const feedItems = $derived(groupReplyTurns(messages,detail?.agent_name??'AI'));
   const historyPageSize = 60;
   let historyAnchor = $state('');
   const historyStart = $derived(historyAnchor ? Math.max(0, feedItems.findIndex(item => item.id === historyAnchor)) : Math.max(0, feedItems.length - historyPageSize));
@@ -346,7 +350,11 @@
     if (scope === currentScope && feed) { feed.scrollTop = top + feed.scrollHeight - height; lastScrollTop = feed.scrollTop; }
   }
   const pendingState = $derived(pendingChatState(detail));
-  const statusLabel = $derived(pendingState === 'awaiting_user' ? $t('chat.73') : pendingState === 'processing' ? $t('chat.70') : pendingState === 'interrupted' ? $t('chat.71') : detail?.status === 'waiting' ? $t('chat.19') : detail?.status === 'connected' ? $t('chat.20') : detail?.status === 'closed' ? $t('chat.21') : $t('chat.22'));
+  const hasSupplement = $derived(messages.some(m=>m.role==='assistant'&&!m.tool_event&&chatReplyState(detail,m.id)==='supplementing'));
+  const footerState = $derived(pendingState==='processing'&&hasSupplement?'supplementing':pendingState);
+  const footerLabel = $derived(footerState==='supplementing'?$t('chat.72'):footerState==='awaiting_user'?$t('chat.73'):footerState==='processing'?$t('chat.70'):footerState==='interrupted'?$t('chat.71'):$t('chat.29'));
+
+  const statusLabel = $derived(pendingState === 'awaiting_user' ? $t('chat.73') : pendingState === 'processing' ? $t('chat.98') : pendingState === 'interrupted' ? $t('chat.71') : detail?.status === 'waiting' ? $t('chat.19') : detail?.status === 'connected' ? $t('chat.20') : detail?.status === 'closed' ? $t('chat.21') : $t('chat.22'));
   const unreadTotal = $derived(sessions.reduce((total, session) => total + unread(session), 0));
   function replyCount(session: ChatSession): number {
     return session.assistant_message_count ?? session.messages?.filter(m => m.role === 'assistant').length ?? 0;
@@ -401,7 +409,7 @@
   async function jumpToMessage(id: string) {
     if (!feed) return;
     const scope = currentScope;
-    const index = feedItems.findIndex(item => item.kind !== 'tools' && item.message.id === id);
+    const index = feedItems.findIndex(item => item.kind === 'message' && item.message.id === id);
     following = false;
     if (index >= 0 && index < historyStart) { historyAnchor = feedItems[index].id; await tick(); }
     if (scope !== currentScope || !feed) return;
@@ -680,11 +688,10 @@
     try { await copyText(connectionPrompt); copied = true; revealPrompt=false; }
     catch { connectionError = $t('chat.42'); }
   }
-  function download() {
+  async function download() {
     if (!detail) return;
     const text = `# ${detail.title}\n\nSession: ${detail.id}\n\n` + messages.map(m => { const receipt = chatUserState(detail, m.id); return `## ${m.role === 'user' ? $t('chat.26') : m.agent_name??detail?.agent_name??'AI'} · ${new Date(m.created_at).toLocaleString()}\n\n${m.tool_event ? `Tool (AI reported): ${m.tool_event.name} · ${m.tool_event.status}\n\n` : ''}${m.text}\n${questionsMarkdown(m)}${taskPlanMarkdown(m.task_plan)}${(m.agent_plans??[]).map(p=>'\nAgent: '+(detail?.members?.find(a=>a.id===p.agent_id)?.name??p.agent_id)+'\n'+taskPlanMarkdown(p.plan)).join('')}${m.recipient_ids?.length?'\nRecipients: '+m.recipient_ids.map(id=>detail?.members?.find(a=>a.id===id)?.name??id).join(', ')+'\n':''}${receipt ? `\n${$t('chat.84')}：${$t(receipt.read ? 'chat.79' : 'chat.80')} · ${$t(USER_MESSAGE_STATUS_KEYS[receipt.status])}\n` : ''}${m.role === 'assistant' ? `\nReply state: ${m.awaiting_user ? 'awaiting_user' : m.final === false ? 'supplementing' : 'complete'}\n` : ''}${m.tool_event?.input ? `\nInput:\n${m.tool_event.input}\n` : ''}${m.tool_event?.output ? `\nOutput:\n${m.tool_event.output}\n` : ''}${m.tool_event?.output_truncated ? '\nOutput truncated\n' : ''}${(m.attachments ?? []).map(f => `\nAttachment: ${f.name} (${f.size} bytes)\nPath: ${f.path}\nReference: @${f.label ?? f.name}\n`).join('')}`; }).join('\n');
-    const url = URL.createObjectURL(new Blob([text], {type:'text/markdown;charset=utf-8'}));
-    const a = document.createElement('a'); a.href=url; a.download=`chat-${detail.id}.md`; a.click(); setTimeout(() => URL.revokeObjectURL(url),1000);
+    try{await saveFile(new Blob([text],{type:'text/markdown;charset=utf-8'}),`chat-${detail.id}.md`)}catch(e){error=String(e)}
   }
   $effect(()=>{
     if(!externalNavigation||!mobileHeader)return;
@@ -746,7 +753,7 @@
         {:else if detail?.seed_auto&&needsAi}<SeedLoading/>
         {:else}<h2>{$t(!workspaceId||!folderId?'chat.selectFolder':mode==='group'?'chat.inviteTitle':needsAi?'chat.connectTitle':'seeds.connectedReady')}</h2>{/if}
       </div>
-      {:else}<div class="message-column" bind:this={column}>{#if historyStart}<button type="button" class="load-older" onclick={showOlder}>{$t('chat.loadOlder')}</button>{/if}{#each visibleFeedItems as item (item.id)}{#if item.kind === 'tools'}<article class="assistant grouped-tools"><div class="message-meta">{item.messages[0]?.agent_name ?? 'AI'} · {$t("chat.54")}</div><div class="message-body"><ChatToolActivity messages={item.messages} settled={item.settled} {workspaceId} {folderId} chatId={selected}/></div></article>{:else}{@const m = item.message}<article data-user-message={m.role === 'user' ? m.id : undefined} tabindex="-1" class:user={m.role === 'user'} class:assistant={m.role === 'assistant'}><div class="message-meta">{m.role === 'user' ? $t('chat.26') : m.agent_name ?? detail?.agent_name ?? (m.final === false ? $t('chat.27') : 'AI')}<time>{new Date(m.created_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</time></div>{#if (m.attachments??[]).some(file=>file.mime.startsWith('image/'))}<div class="message-images"><div class="image-strip">{#each (m.attachments??[]).filter(file=>file.mime.startsWith('image/')) as file (workspaceId+":"+folderId+":"+selected+":"+file.id+":"+file.sha256)}<ChatAttachment {workspaceId} {folderId} chatId={selected} {file}/>{/each}</div></div>{/if}<div class="message-body" class:image-only={!m.text.trim()&&!(m.attachments??[]).some(file=>!file.mime.startsWith('image/'))}>{#if editingMessage===m.id}<MessageEditor text={m.text} hasAttachments={!!m.attachments?.length} onSend={(text:string,id:string)=>resendMessage(m,text,id)} onCancel={()=>editingMessage=''}/>{:else}<MessageText text={m.text} attachments={m.attachments ?? []} {workspaceId} {folderId} chatId={selected} collapsible={m.role==='user'}/>{/if}{#each (m.attachments??[]).filter(file=>!file.mime.startsWith('image/')) as file (workspaceId + ":" + folderId + ":" + selected + ":" + file.id)}<ChatAttachment {workspaceId} {folderId} chatId={selected} {file}/>{/each}{#if m.questions?.length}<QuestionCard message={m} disabled={busy||memberBusy||!!detail?.closed} onAnswer={(id,answers)=>memberAction({action:'answer_question',question_message_id:m.id,message_id:id,answers})}/>{/if}<ChatReplyState state={chatReplyState(detail, m.id)}/><ChatUserState state={chatUserState(detail, m.id)}/></div>{#if editingMessage!==m.id}<div class="message-actions"><button type="button" title={$t('chat.copyMessage')} aria-label={$t('chat.copyMessage')} onclick={()=>copyMessage(m)}>{#if copiedMessage===m.id}<Check size={15}/>{:else}<Copy size={15}/>{/if}</button>{#if m.role==='user'}<button type="button" title={$t('chat.editMessage')} aria-label={$t('chat.editMessage')} disabled={busy||!!detail?.closed} onclick={()=>editingMessage=m.id}><Pencil size={15}/></button>{:else}<button type="button" title={$t('chat.shareMessage')} aria-label={$t('chat.shareMessage')} onclick={()=>shareMessage=m}><Share2 size={15}/></button>{/if}</div>{/if}</article>{/if}{/each}{#if pendingState}<div class="pending" class:processing={pendingState === 'processing'} role="status" aria-live="polite"><ChatStatusIcon state={pendingState} label={pendingState === 'awaiting_user' ? $t('chat.73') : pendingState === 'processing' ? $t('chat.70') : pendingState === 'interrupted' ? $t('chat.71') : $t('chat.29')}/>{pendingState === 'awaiting_user' ? $t('chat.73') : pendingState === 'processing' ? $t('chat.70') : pendingState === 'interrupted' ? $t('chat.71') : $t('chat.29')}</div>{/if}</div>{/if}
+      {:else}<div class="message-column" bind:this={column}>{#if historyStart}<button type="button" class="load-older" onclick={showOlder}>{$t('chat.loadOlder')}</button>{/if}{#each visibleFeedItems as item (item.id)}{#if item.kind === 'reply'}<ReplyGroup group={item} {workspaceId} {folderId} chatId={selected} copied={copiedMessage} disabled={busy||memberBusy||!!detail?.closed} onCopy={copyMessage} onShare={m=>shareMessage=m} onAnswer={(m,id,answers)=>memberAction({action:'answer_question',question_message_id:m.id,message_id:id,answers})}/>{:else}{@const m = item.message}<article data-user-message={m.role === 'user' ? m.id : undefined} tabindex="-1" class:user={m.role === 'user'} class:assistant={m.role === 'assistant'}><div class="message-meta">{m.role === 'user' ? $t('chat.26') : m.agent_name ?? detail?.agent_name ?? (m.final === false ? $t('chat.27') : 'AI')}<time>{new Date(m.created_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</time></div>{#if (m.attachments??[]).some(file=>file.mime.startsWith('image/'))}<div class="message-images"><div class="image-strip">{#each (m.attachments??[]).filter(file=>file.mime.startsWith('image/')) as file (workspaceId+":"+folderId+":"+selected+":"+file.id+":"+file.sha256)}<ChatAttachment {workspaceId} {folderId} chatId={selected} {file}/>{/each}</div></div>{/if}<div class="message-body" class:image-only={!m.text.trim()&&!(m.attachments??[]).some(file=>!file.mime.startsWith('image/'))}>{#if editingMessage===m.id}<MessageEditor text={m.text} hasAttachments={!!m.attachments?.length} onSend={(text:string,id:string)=>resendMessage(m,text,id)} onCancel={()=>editingMessage=''}/>{:else}<MessageText text={m.text} attachments={m.attachments ?? []} {workspaceId} {folderId} chatId={selected} collapsible={m.role==='user'}/>{/if}{#each (m.attachments??[]).filter(file=>!file.mime.startsWith('image/')) as file (workspaceId + ":" + folderId + ":" + selected + ":" + file.id)}<ChatAttachment {workspaceId} {folderId} chatId={selected} {file}/>{/each}{#if m.questions?.length}<QuestionCard message={m} disabled={busy||memberBusy||!!detail?.closed} onAnswer={(id,answers)=>memberAction({action:'answer_question',question_message_id:m.id,message_id:id,answers})}/>{/if}<ChatReplyState state={chatReplyState(detail,m.id)==='supplementing'?null:chatReplyState(detail,m.id)}/><ChatUserState state={chatUserState(detail, m.id)} hideProcessing/></div>{#if editingMessage!==m.id}<div class="message-actions"><button type="button" title={$t('chat.copyMessage')} aria-label={$t('chat.copyMessage')} onclick={()=>copyMessage(m)}>{#if copiedMessage===m.id}<Check size={15}/>{:else}<Copy size={15}/>{/if}</button>{#if m.role==='user'}<button type="button" title={$t('chat.editMessage')} aria-label={$t('chat.editMessage')} disabled={busy||!!detail?.closed} onclick={()=>editingMessage=m.id}><Pencil size={15}/></button>{:else}<button type="button" title={$t('chat.shareMessage')} aria-label={$t('chat.shareMessage')} onclick={()=>shareMessage=m}><Share2 size={15}/></button>{/if}</div>{/if}</article>{/if}{/each}{#if footerState}<div class="pending" role="status" aria-live="polite"><ChatStatusIcon state={footerState} label={footerLabel}/>{footerLabel}</div>{/if}</div>{/if}
     </div>
     <ChatOutline {messages} activeId={activeMessage} onSelect={jumpToMessage}/>
     </div>
@@ -848,7 +855,6 @@
 .session-row{display:flex;align-items:center;gap:2px;min-width:0}.session-choice{flex:1;min-width:0}.session-choice :global(svg){flex-shrink:0}nav .rename-action{width:25px;flex:0 0 25px;justify-content:center;padding:6px 3px;margin:0}.session-rename{display:flex;gap:2px;align-items:center;min-width:0;width:100%;padding:5px 0}.session-rename input{min-width:0;width:100%;flex:1;border:1px solid var(--color-border);border-radius:5px;background:var(--card-bg);padding:7px 5px;font-size:12px;color:var(--color-text)}.session-rename input:focus-visible{outline:2px solid var(--primary);outline-offset:1px}@media(max-width:560px){.session-row{min-width:145px;max-width:300px;flex-shrink:0}.session-row:has(.session-rename){width:280px}nav:has(.session-rename){max-height:60px}nav .rename-action{min-width:25px}}
 .session-row{border:1px solid transparent;border-radius:8px;margin:3px 0;background:transparent}.session-row.selected{background:var(--surface-hover,var(--card-bg));border-color:var(--border-strong,var(--color-border))}.session-row.selected .session-choice{color:var(--color-text)}.session-choice.active{background:transparent;box-shadow:none}
 .session-row{position:relative}.unread-badge{position:absolute;top:-3px;right:0;min-width:15px;height:15px;padding:0 4px;border-radius:9px;background:#55749a;color:white;font:9px/15px system-ui;text-align:center;pointer-events:none;z-index:1}.unread-total{display:flex;align-items:center;gap:5px;color:var(--color-text)}.header-actions{flex-wrap:wrap;justify-content:flex-end;row-gap:6px}
-.grouped-tools{margin-bottom:16px}.grouped-tools .message-body{padding:9px 12px;background:transparent}
 .conversation{background:color-mix(in srgb,var(--conversation-accent) 8%,var(--card-bg))}.draft-warning{max-width:760px;margin:8px auto 0;font-size:10px;color:var(--color-text-muted)}
 .feed-frame{position:relative;display:flex;flex:1;min-height:0}.message-feed{padding-right:30px}.bottom-control{display:flex;justify-content:center;margin:-4px 0 8px}.jump-bottom{display:grid;place-items:center;width:28px;height:28px;border-radius:50%;border:1px solid var(--color-border);background:var(--card-bg);color:var(--color-text-muted)}.jump-bottom:hover{color:var(--color-text);border-color:var(--border-strong)}.composer-input{display:flex;align-items:flex-start;gap:10px}.attach-button{flex:none;display:grid;place-items:center;width:28px;height:32px;color:var(--color-text-secondary)}.composer-input textarea{min-width:0;flex:1}.composer-area{padding-top:6px}.message-feed{overflow-anchor:none}article:focus{outline:none}article:focus-visible{outline:1px solid var(--color-border);outline-offset:6px}
 @media(max-width:560px){.message-column{padding:15px 8px}.composer-hint{display:none}.chat-header{gap:6px}.session-sidebar{padding:8px}.composer-area{padding:6px 10px 10px}.header-actions{gap:8px}.message-feed{padding-right:24px}}

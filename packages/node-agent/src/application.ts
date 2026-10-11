@@ -1,4 +1,5 @@
-import { randomBytes, randomUUID } from 'node:crypto';
+import { GLOBAL_MCP_ID, enforceProjectConfiguration } from './projectIsolation.js';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { chmod, mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { seedStore } from './chat/store.js';
@@ -14,7 +15,7 @@ import {
   type LoadedConfig
 } from './config.js';
 import { ConfigStore, type RuntimeHotApplyTarget } from './management.js';
-import { generateAuthorizationPassword } from './secrets.js';
+import { ensureAgentSecrets, generateAuthorizationPassword } from './secrets.js';
 import type { AgentConfigDocument, JsonObject, WorkspaceRegistryDocument } from './types.js';
 import { unwrapJson } from './protect.js';
 import { canonicalToAgentConfigDocument, overlayAgentDocumentOnCanonical, parseWorkspacePack } from './workspaceDocument.js';
@@ -32,7 +33,7 @@ import {
 
 export { sharedSecretsFile, sharedWorkspaceFile, sharedWorkspacesRoot } from './sharedStore.js';
 
-async function activateSharedStore(loaded: LoadedConfig, id: string, name: string): Promise<LoadedConfig> {
+async function activateSharedStore(loaded: LoadedConfig, id: string, name: string, fixedRoot = false): Promise<LoadedConfig> {
   if (!sharedStoreAvailable()) return loaded;
   const sharedCanonical = await readSharedWorkspace(id);
   const sharedSecrets = await readSharedAgentSecrets(id);
@@ -43,7 +44,9 @@ async function activateSharedStore(loaded: LoadedConfig, id: string, name: strin
     else await writeSharedAgentSecrets(id, loaded.secrets);
     loaded.config = normalizeConfig(loaded.document, loaded.secrets);
     validateConfig(loaded.config);
-    const folderRecovery = await recoverWorkspaceFolders(loaded.config, loaded.document);
+    const folderRecovery = fixedRoot || loaded.config.globalConnection
+      ? {config:loaded.config,document:loaded.document,removed:[],fallbackCreated:false}
+      : await recoverWorkspaceFolders(loaded.config, loaded.document);
     loaded.config = folderRecovery.config;
     loaded.document = folderRecovery.document;
     if (folderRecovery.removed.length) {
@@ -79,6 +82,7 @@ export interface LoadedWorkspaceProfile {
 }
 
 export interface LoadedApplication {
+  connection?: LoadedWorkspaceProfile;
   registryPath: string;
   registry: WorkspaceRegistryDocument;
   workspaces: LoadedWorkspaceProfile[];
@@ -111,7 +115,7 @@ function validateRegistry(value: unknown, registryPath: string): WorkspaceRegist
   }
   const input = value as Record<string, unknown>;
   if (input.schema_version !== 1) throw new Error(`Workspace registry schema_version must be 1: ${registryPath}`);
-  if (!Array.isArray(input.workspaces) || input.workspaces.length < 1 || input.workspaces.length > 100) {
+  if (!Array.isArray(input.workspaces) || (!input.connection && input.workspaces.length < 1) || input.workspaces.length > 100) {
     throw new Error(`Workspace registry must contain 1 to 100 workspaces: ${registryPath}`);
   }
   const ids = new Set<string>();
@@ -134,7 +138,14 @@ function validateRegistry(value: unknown, registryPath: string): WorkspaceRegist
     configPaths.add(comparable);
     return { id, name, configPath };
   });
-  return { schema_version: 1, workspaces };
+  let connection: WorkspaceRegistryDocument['connection'];
+  if (input.connection) {
+    const raw = input.connection as Record<string, unknown>;
+    if (raw.id !== GLOBAL_MCP_ID || typeof raw.configPath !== 'string' || !raw.configPath) throw new Error('Invalid global connection registry entry');
+    connection = { id: GLOBAL_MCP_ID, name: 'MCP', configPath: path.resolve(base, raw.configPath) };
+    if (ids.has(GLOBAL_MCP_ID)) throw new Error('Reserved global connection ID conflicts with a project');
+  }
+  return { schema_version: 1, workspaces, ...(connection ? { connection } : {}), ...(input.migrationPending === true ? {migrationPending:true} : {}) };
 }
 
 async function writeRegistry(registryPath: string, registry: WorkspaceRegistryDocument): Promise<void> {
@@ -166,43 +177,105 @@ export async function loadApplication(configFile?: string): Promise<LoadedApplic
   const registryPath = registryPathFor(primaryConfigPath);
   let registry = await readRegistry(registryPath);
   let registryCreated = false;
+  if (registry?.connection) {
+    const load = async (entry: {id:string;name:string;configPath:string}) => {
+      const local = await loadConfigBundle(entry.configPath, { identity: entry, fixedRoot: true });
+      const loaded = registry!.migrationPending ? local : await activateSharedStore(local, entry.id, entry.name, true);
+      loaded.config.workspaceId = entry.id; loaded.config.workspaceName = entry.name;
+      if (entry.id !== GLOBAL_MCP_ID) {
+        if (loaded.config.folders.length !== 1) throw new Error('A project must have one fixed directory');
+        enforceProjectConfiguration(loaded.config);
+      }
+      return { id: entry.id, name: entry.name, loaded };
+    };
+    const connection = await load(registry.connection), workspaces = await Promise.all(registry.workspaces.map(load));
+    if (registry.migrationPending) {
+      for (const profile of [connection,...workspaces]) {
+        await writeSharedWorkspace(profile.id,profile.loaded.canonical);
+        await writeSharedAgentSecrets(profile.id,profile.loaded.secrets);
+      }
+      delete registry.migrationPending; await writeRegistry(registryPath,registry);
+    }
+    return {registryPath,registry,registryCreated,connection,workspaces};
+  }
+  const primaryExisted = await stat(primaryConfigPath).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; });
+  if (!registry && !primaryExisted && !process.env.CTMCP_WORKSPACES?.trim()) {
+    await writeConfigDocument(primaryConfigPath, {schema_version:1,globalConnection:true,folders:[],dataDir:path.dirname(primaryConfigPath)}, {identity:{id:GLOBAL_MCP_ID,name:'MCP'}});
+  }
   const primaryEntry = registry?.workspaces.find(entry => sameConfigPath(entry.configPath, primaryConfigPath));
   const primary = await loadConfigBundle(primaryConfigPath, {
+    fixedRoot: true,
     identity: primaryEntry ? { id: primaryEntry.id, name: primaryEntry.name } : undefined
   });
   if (!registry) {
     registry = {
       schema_version: 1,
-      workspaces: [{
+      workspaces: primary.config.globalConnection ? [] : [{
         id: primary.canonical.id || workspaceId(),
         name: primary.canonical.name || inferredWorkspaceName(primary),
         configPath: primaryConfigPath
       }]
     };
-    await writeRegistry(registryPath, registry);
     registryCreated = true;
   }
 
   const workspaces: LoadedWorkspaceProfile[] = [];
-  const ports = new Map<string, string>();
+
   for (const entry of registry.workspaces) {
     const legacyLoaded = sameConfigPath(entry.configPath, primaryConfigPath)
       ? primary
-      : await loadConfigBundle(entry.configPath, { identity: { id: entry.id, name: entry.name } });
+      : await loadConfigBundle(entry.configPath, { identity: { id: entry.id, name: entry.name }, fixedRoot: true });
     const counterpartId = await findCounterpartSharedWorkspaceId(legacyLoaded.canonical, entry.id, 'desktop');
     if (counterpartId && counterpartId !== entry.id) entry.id = counterpartId;
-    const loaded = await activateSharedStore(legacyLoaded, entry.id, entry.name);
+    const loaded = await activateSharedStore(legacyLoaded, entry.id, entry.name, true);
     if (loaded.canonical.name && loaded.canonical.name !== entry.name) entry.name = loaded.canonical.name;
     loaded.config.workspaceId = entry.id;
     loaded.config.workspaceName = entry.name;
-    const address = `${loaded.config.host}:${loaded.config.port}`.toLowerCase();
-    const conflict = ports.get(address);
-    if (conflict) throw new Error(`Workspace ports conflict: ${conflict} and ${entry.name} both use ${address}`);
-    ports.set(address, entry.name);
     workspaces.push({ id: entry.id, name: entry.name, loaded });
   }
-  if (sharedStoreAvailable()) await writeRegistry(registryPath, registry);
-  return { registryPath, registry, workspaces, registryCreated };
+  // Write every new config and encrypted secret store before the single registry
+  // commit. Legacy files remain intact so an interrupted migration can be retried.
+  const materialize = async (donor: LoadedWorkspaceProfile, id: string, name: string, folders: typeof donor.loaded.canonical.folders, global = false) => {
+    let canonical = structuredClone(donor.loaded.canonical);
+    canonical.id = id; canonical.name = name; canonical.folders = folders; canonical.activeFolderId = folders[0]?.id ?? '';
+    if (global) canonical = await readSharedWorkspace(GLOBAL_MCP_ID) ?? canonical;
+    const document = canonicalToAgentConfigDocument(canonical);
+    if (id !== donor.id && !global) {
+      document.dataDir = path.join(path.dirname(registryPath), 'projects', id);
+      if (document.tunnel) delete document.tunnel.stateFile;
+    }
+    const configPath = path.join(path.dirname(registryPath), 'global-model', id, 'agent.json');
+    const secrets = global ? await readSharedAgentSecrets(GLOBAL_MCP_ID) ?? donor.loaded.secrets : donor.loaded.secrets;
+    const config = normalizeConfig(document, secrets);
+    if (!global) enforceProjectConfiguration(config);
+    document.sandbox = config.sandbox; document.securityPolicy = config.securityPolicy; document.extensions = config.extensions;
+    await ensureAgentSecrets(config.dataDir, secrets);
+    await writeConfigDocument(configPath, document, { identity: {id,name}, canonical });
+    const loaded = await loadConfigBundle(configPath, { identity: {id,name}, fixedRoot: true });
+    loaded.config.workspaceId = id; loaded.config.workspaceName = name;
+    return {id,name,loaded};
+  };
+  const donor = workspaces[0] ?? {id: primary.canonical.id, name: primary.canonical.name, loaded: primary};
+  const connection = await materialize(donor, GLOBAL_MCP_ID, 'MCP', [], true);
+  const projects: LoadedWorkspaceProfile[] = [];
+  const ids = new Set<string>([GLOBAL_MCP_ID]); const folderIds = new Set<string>();
+  for (const workspace of primaryExisted || !registryCreated ? workspaces : []) {
+    for (const folder of workspace.loaded.canonical.folders) {
+      const primary = folder.id === (workspace.loaded.canonical.activeFolderId || workspace.loaded.canonical.folders[0]?.id);
+      const id = primary ? workspace.id : createHash('sha256').update(`project:${workspace.id}:${folder.id}`).digest('hex').slice(0,32);
+      if (ids.has(id) || folderIds.has(folder.id)) throw new Error('Project or folder identity conflict');
+      ids.add(id); folderIds.add(folder.id);
+      projects.push(await materialize(workspace,id,primary?workspace.name:folder.name,[folder]));
+    }
+  }
+  registry = {schema_version:1, migrationPending:true, connection:{id:connection.id,name:connection.name,configPath:connection.loaded.configPath}, workspaces:projects.map(p=>({id:p.id,name:p.name,configPath:p.loaded.configPath}))};
+  await writeRegistry(registryPath,registry);
+  for (const profile of [connection,...projects]) {
+    await writeSharedWorkspace(profile.id,profile.loaded.canonical);
+    await writeSharedAgentSecrets(profile.id,profile.loaded.secrets);
+  }
+  delete registry.migrationPending; await writeRegistry(registryPath,registry);
+  return {registryPath,registry,workspaces:projects,connection,registryCreated};
 }
 
 export class ApplicationConfigStore {
@@ -213,11 +286,11 @@ export class ApplicationConfigStore {
 
   private readonly deleting = new Set<string>();
 
-  constructor(application: LoadedApplication, private readonly beforeDelete?: (id: string) => Promise<void>) {
+  constructor(application: LoadedApplication, private readonly beforeDelete?: (id: string) => Promise<void>, private readonly afterAdd?: (profile: ManagedWorkspaceProfile) => Promise<void>) {
     this.registryPath = application.registryPath;
     this.registry = structuredClone(application.registry);
-    this.primaryWorkspaceId = application.workspaces[0]?.id ?? '';
-    for (const workspace of application.workspaces) {
+    this.primaryWorkspaceId = application.connection?.id ?? application.workspaces[0]?.id ?? '';
+    for (const workspace of [...(application.connection ? [application.connection] : []), ...application.workspaces]) {
       this.workspaces.set(workspace.id, {
         id: workspace.id,
         name: workspace.name,
@@ -232,6 +305,11 @@ export class ApplicationConfigStore {
       if (!workspace) throw new Error(`Workspace registry entry is not loaded: ${entry.id}`);
       return workspace;
     });
+  }
+
+  connectionSnapshot(): JsonObject {
+    const connection = this.workspace(this.primaryWorkspaceId);
+    return {id:connection.id,name:connection.name,...connection.store.snapshot()};
   }
 
   snapshot(): JsonObject {
@@ -267,8 +345,10 @@ export class ApplicationConfigStore {
       host: '127.0.0.1',
       port,
       dataDir: workspaceHome,
-      folders: [{ path: folder, name: workspaceName }],
+      folders: [{ id, path: folder, name: workspaceName }],
       management: { enabled: false },
+      sandbox: {enabled:true,externalPaths:[]},
+      extensions:{hooks:{active:false,enabled:[]},mcp:{active:false,enabled:[]}},
       oauth: { clientId: createOAuthClientId() },
       tunnel: { enabled: true }
     };
@@ -277,13 +357,24 @@ export class ApplicationConfigStore {
     const loaded = await activateSharedStore(legacyLoaded, id, workspaceName);
     this.workspaces.set(id, { id, name: workspaceName, store: new ConfigStore(loaded) });
     this.registry.workspaces.push({ id, name: workspaceName, configPath });
-    await writeRegistry(this.registryPath, this.registry);
+    try {
+      await writeRegistry(this.registryPath, this.registry);
+      await this.afterAdd?.(this.workspace(id));
+    } catch (error) {
+      // Revoke a partially started virtual runtime before removing its record.
+      await this.beforeDelete?.(id);
+      const next = {...this.registry, workspaces: this.registry.workspaces.filter(item => item.id !== id)};
+      await writeRegistry(this.registryPath, next);
+      this.registry = next;
+      this.workspaces.delete(id);
+      throw error;
+    }
     return {
       ...this.workspace(id).store.snapshot(),
       ok: true,
       id,
       name: workspaceName,
-      restartRequired: true
+      restartRequired: !this.afterAdd
     };
   }
 
@@ -340,6 +431,8 @@ export class ApplicationConfigStore {
 
   async importWorkspacePack(pack: unknown): Promise<JsonObject> {
     const { canonical } = parseWorkspacePack(pack);
+    if (this.registry.connection && (canonical.id === GLOBAL_MCP_ID || canonical.folders.length !== 1)) throw new Error('Import one fixed project directory at a time');
+    if (this.registry.connection && canonical.folders.some(folder => this.entries().some(project => project.store.current.folders.some(existing => existing.id === folder.id)))) throw new Error('Project directory ID already exists');
     for (const folder of canonical.folders) {
       const metadata = await stat(folder.path);
       if (!metadata.isDirectory()) {
@@ -374,12 +467,9 @@ export class ApplicationConfigStore {
       skills: canonical.skills,
       extensions: canonical.extensions,
       sandbox: {
-        enabled: canonical.sandbox.enabled,
+        enabled: true,
         backend: canonical.sandbox.backend,
-        externalPaths: canonical.sandbox.externalPaths.map(entry => ({
-          path: entry.path,
-          access: entry.access === 'modify' ? 'modify' as const : 'read_only' as const
-        })),
+        externalPaths: [],
         options: canonical.sandbox.options
       },
       oauth: { clientId: canonical.auth.oauthClientId || createOAuthClientId() },
@@ -397,19 +487,30 @@ export class ApplicationConfigStore {
     const loaded = await activateSharedStore(legacyLoaded, id, workspaceName);
     this.workspaces.set(id, { id, name: workspaceName, store: new ConfigStore(loaded) });
     this.registry.workspaces.push({ id, name: workspaceName, configPath });
-    await writeRegistry(this.registryPath, this.registry);
+    try {
+      await writeRegistry(this.registryPath, this.registry);
+      await this.afterAdd?.(this.workspace(id));
+    } catch (error) {
+      // Revoke a partially started virtual runtime before removing its record.
+      await this.beforeDelete?.(id);
+      const next = {...this.registry, workspaces: this.registry.workspaces.filter(item => item.id !== id)};
+      await writeRegistry(this.registryPath, next);
+      this.registry = next;
+      this.workspaces.delete(id);
+      throw error;
+    }
     return {
       ...this.workspace(id).store.snapshot(),
       ok: true,
       id,
       name: workspaceName,
-      restartRequired: true
+      restartRequired: !this.afterAdd
     };
   }
 
   async deleteWorkspace(id: string): Promise<JsonObject> {
     if (id === this.primaryWorkspaceId) throw new Error('The primary workspace cannot be deleted');
-    if (this.registry.workspaces.length <= 1) throw new Error('At least one workspace must remain');
+    if (!this.registry.connection && this.registry.workspaces.length <= 1) throw new Error('At least one workspace must remain');
     if (!this.workspaces.has(id)) throw new Error(`Workspace was not found: ${id}`);
     if (this.deleting.has(id)) throw new Error('Workspace deletion is already in progress');
     this.deleting.add(id);
@@ -439,6 +540,12 @@ export class ApplicationConfigStore {
       : {};
     const name = String(input.name ?? workspace.name).trim();
     if (!name || name.length > 128) throw new Error('workspace name must contain 1 to 128 characters');
+    if (this.registry.connection && id !== GLOBAL_MCP_ID) {
+      if (input.folders !== undefined && JSON.stringify(input.folders) !== JSON.stringify(workspace.store.current.folders)) throw new Error('A project has one fixed directory. Create a new project to use another directory.');
+      input.sandbox = {...workspace.store.current.sandbox,...(input.sandbox as object ?? {}),enabled:true,externalPaths:[]};
+      input.securityPolicy = {...workspace.store.current.securityPolicy,...(input.securityPolicy as object ?? {}),enforceWorkspaceBoundary:true,blockSymlinkEscape:true};
+    }
+    if (id === GLOBAL_MCP_ID) { input.folders = []; input.globalConnection = true; }
     const previousName = workspace.store.current.workspaceName;
     workspace.store.current.workspaceName = name;
     let result: JsonObject;
@@ -450,7 +557,7 @@ export class ApplicationConfigStore {
     }
     if (name !== workspace.name) {
       workspace.name = name;
-      const entry = this.registry.workspaces.find(item => item.id === id);
+      const entry = id === GLOBAL_MCP_ID ? this.registry.connection : this.registry.workspaces.find(item => item.id === id);
       if (!entry) throw new Error(`Workspace registry entry is missing: ${id}`);
       entry.name = name;
       await writeRegistry(this.registryPath, this.registry);

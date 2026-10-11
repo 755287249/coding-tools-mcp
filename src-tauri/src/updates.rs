@@ -340,6 +340,45 @@ fn verify_download(bytes: &[u8], digest: &str) -> Result<(), String> {
     }
     Ok(())
 }
+#[derive(Clone, Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallOutcome {
+    pub id: String,
+    pub status: String,
+    pub version: String,
+    pub message: String,
+    pub finished_at: u64,
+    #[serde(default)]
+    pub running_expected_version: bool,
+}
+fn parse_install_outcome(bytes: &[u8], version: &str) -> Result<InstallOutcome, String> {
+    if bytes.len() > 32768 {
+        return Err("Invalid update outcome size".into());
+    }
+    let mut result: InstallOutcome =
+        serde_json::from_slice(bytes).map_err(|_| "Invalid update outcome")?;
+    if !matches!(
+        result.status.as_str(),
+        "installed" | "failed" | "rolled_back"
+    ) {
+        return Err("Invalid update outcome status".into());
+    }
+    result.running_expected_version = result.status == "installed" && result.version == version;
+    Ok(result)
+}
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub fn get_app_update_outcome() -> Result<Option<InstallOutcome>, String> {
+    let path = crate::platform::platform()
+        .app_config_dir()
+        .map_err(|e| e.to_string())?
+        .join("updates/last-install.json");
+    match std::fs::read(path) {
+        Ok(bytes) => parse_install_outcome(&bytes, env!("CARGO_PKG_VERSION")).map(Some),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
 #[cfg(feature = "desktop")]
 #[tauri::command]
 pub fn install_app_update(
@@ -377,18 +416,26 @@ pub fn install_app_update(
             .replace("__TARGET__", &quote(&target))
             .replace("__SOURCE__", &quote(&item.path))
             .replace("__HASH__", &format!("'{}'", item.digest))
-            .replace("__PID__", &std::process::id().to_string());
+            .replace("__PID__", &std::process::id().to_string())
+            .replace(
+                "__RESULT__",
+                &quote(
+                    &item
+                        .path
+                        .parent()
+                        .ok_or("Invalid update staging path")?
+                        .join("last-install.json"),
+                ),
+            )
+            .replace(
+                "__VERSION__",
+                &format!("'{}'", item.version.replace('\'', "''")),
+            );
         std::fs::write(&script, body).map_err(|e| e.to_string())?;
-        // A visible console gives the user update progress and any rollback error.
-        std::process::Command::new("cmd.exe")
-            .args([
-                "/k",
-                "powershell.exe",
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-            ])
+        // The installer owns its visible console and exits on success or failure.
+        // Launch directly so cmd metacharacters in a user-selected path are inert.
+        std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
             .arg(&script)
             .creation_flags(0x00000010)
             .spawn()
@@ -548,5 +595,25 @@ mod tests {
         let r=parse_release("o/r",json!({"tag_name":"v999.2.3","assets":[{"name":"ctmcp-999.2.3-win64.exe","browser_download_url":"https://github.com/o/r/releases/download/v999.2.3/ctmcp-999.2.3-win64.exe","digest":"sha256:bad"}]})).unwrap();
         assert!(r.asset_url.is_some());
         assert!(r.sha256.is_none());
+    }
+}
+
+#[cfg(test)]
+mod install_outcome_tests {
+    use super::*;
+    #[test]
+    fn only_the_expected_running_version_confirms_installation() {
+        let bytes=br#"{"id":"fixture","status":"installed","version":"1.2.3","message":"done","finishedAt":1}"#;
+        assert!(
+            parse_install_outcome(bytes, "1.2.3")
+                .unwrap()
+                .running_expected_version
+        );
+        assert!(
+            !parse_install_outcome(bytes, "1.2.2")
+                .unwrap()
+                .running_expected_version
+        );
+        assert!(parse_install_outcome(b"invalid", "1.2.3").is_err());
     }
 }

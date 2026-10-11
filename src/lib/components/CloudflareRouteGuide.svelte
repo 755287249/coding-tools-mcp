@@ -1,4 +1,5 @@
 <script lang="ts">
+  import {copyText} from "$lib/browser-tools";
   import Check from "@lucide/svelte/icons/check";
   import ChevronDown from "@lucide/svelte/icons/chevron-down";
   import ClipboardList from "@lucide/svelte/icons/clipboard-list";
@@ -70,7 +71,7 @@
 
   async function writeClipboard(value: string) {
     try {
-      await navigator.clipboard.writeText(value);
+      await copyText(value);
     } catch {
       const area = document.createElement("textarea");
       area.value = value;

@@ -8,7 +8,7 @@ export function messagePreview(text:string):string {
 export function messageClipboardText(message:ChatMessage):string {
   return [message.text,...(message.attachments??[]).map(file=>`${file.label?'@'+file.label+' ':''}${file.name}\n${file.path}`)].filter(Boolean).join('\n\n');
 }
-export interface MessageTransfer { messageId:string; uploads:Map<string,string>; files:Map<string,ChatFile> }
+export interface MessageTransfer { messageId:string; uploads:Map<string,string>; files:Map<string,ChatFile>; replyUpload?:string; replyFile?:ChatFile }
 export function createMessageTransfer(id:()=>string):MessageTransfer {return {messageId:id(),uploads:new Map(),files:new Map()};}
 function remapText(text:string,files:ChatFile[],transferred:ChatFile[]):string {
   const replacements=new Map<string,string>();
@@ -20,7 +20,6 @@ function remapText(text:string,files:ChatFile[],transferred:ChatFile[]):string {
 }
 /** Chunked transfer avoids loading large attachments into browser memory. */
 export async function forwardMessage(message:ChatMessage,sourceChat:string,targetChat:string,source:Request,target:Request,state:MessageTransfer,id:()=>string):Promise<ChatResult> {
-  if(new TextEncoder().encode(message.text).length>32000)throw Error('Message exceeds 32000 bytes');
   const files=message.attachments??[], transferred:ChatFile[]=[];
   for(const file of files){
     let complete=state.files.get(file.id);
@@ -41,7 +40,28 @@ export async function forwardMessage(message:ChatMessage,sourceChat:string,targe
     }
     transferred.push(complete);
   }
-  const text=remapText(message.text,files,transferred);
-  if(new TextEncoder().encode(text.trim()).length>32000)throw Error('Message exceeds 32000 bytes');
+  let text=remapText(message.text,files,transferred);
+  const complete=new TextEncoder().encode(text);
+  if(complete.length>32000){
+    // A reply can contain many individually valid progress messages. Preserve it
+    // as one document instead of silently dropping progress or splitting sends.
+    state.replyUpload??=id();
+    if(!state.replyFile){
+      for(let offset=0;offset<complete.length;){
+        const chunk=complete.subarray(offset,offset+512*1024);
+        let binary='';for(let i=0;i<chunk.length;i+=8192)binary+=String.fromCharCode(...chunk.subarray(i,i+8192));
+        const result=await target({action:'upload_chunk',chat_id:targetChat,upload_id:state.replyUpload,name:'reply.md',offset,total_size:complete.length,data_base64:btoa(binary)});
+        offset+=chunk.length;
+        if(result.next_offset!==offset)throw Error('Invalid reply upload offset');
+        if(offset===complete.length){
+          if(!result.attachment||result.attachment.size!==complete.length)throw Error('Incomplete reply attachment');
+          state.replyFile=result.attachment;
+        }
+      }
+    }
+    const document=state.replyFile!;
+    transferred.push(document);
+    text=`@${document.label??document.name}\n\n${messagePreview(text)}`;
+  }
   return target({action:'send',chat_id:targetChat,message_id:state.messageId,text,attachment_ids:transferred.map(file=>file.id)});
 }

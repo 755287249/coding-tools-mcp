@@ -5,6 +5,14 @@ pub use super::registry_metadata::{
     ALLOWED_TOOLS, CORE_READ_ONLY_TOOLS, CORE_TOOLS, GUARDED_CORE_TOOLS, P0_TOOLS, READ_ONLY_TOOLS,
 };
 
+pub fn project_tool_names() -> Vec<&'static str> {
+    ALLOWED_TOOLS
+        .iter()
+        .copied()
+        .filter(|name| super::project_scope::allowed(name))
+        .collect()
+}
+
 pub fn is_allowed_tool(name: &str) -> bool {
     ALLOWED_TOOLS.contains(&name)
 }
@@ -229,7 +237,13 @@ mod tests {
         let unique: HashSet<_> = names.iter().copied().collect();
 
         assert_eq!(tools.len(), CORE_TOOLS.len());
-        for name in ["chat_open", "chat_wait", "chat_reply", "chat_upload", "chat_close"] {
+        for name in [
+            "chat_open",
+            "chat_wait",
+            "chat_reply",
+            "chat_upload",
+            "chat_close",
+        ] {
             assert!(names.contains(&name), "missing local chat tool: {name}");
         }
         assert_eq!(unique.len(), tools.len());
@@ -273,12 +287,24 @@ mod tests {
     fn guarded_core_adds_only_permission_requests() {
         let trusted = list_tools_for_profile("trusted-core");
         let guarded = list_tools_for_profile("guarded-core");
-        let trusted_names: HashSet<_> = trusted.iter().map(|tool| tool["name"].as_str().unwrap()).collect();
-        let guarded_names: HashSet<_> = guarded.iter().map(|tool| tool["name"].as_str().unwrap()).collect();
+        let trusted_names: HashSet<_> = trusted
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        let guarded_names: HashSet<_> = guarded
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
         assert_eq!(trusted_names.len(), trusted.len());
         assert_eq!(guarded_names.len(), guarded.len());
         assert!(trusted_names.is_subset(&guarded_names));
-        assert_eq!(guarded_names.difference(&trusted_names).copied().collect::<HashSet<_>>(), HashSet::from(["request_permissions"]));
+        assert_eq!(
+            guarded_names
+                .difference(&trusted_names)
+                .copied()
+                .collect::<HashSet<_>>(),
+            HashSet::from(["request_permissions"])
+        );
         assert!(guarded
             .iter()
             .any(|tool| tool["name"] == "request_permissions"));
