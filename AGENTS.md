@@ -1,3 +1,14 @@
+## Optional analysis integrations
+
+GitNexus and mcp-probe are optional aids, not prerequisites for normal repository work.
+When available, use their analysis and memory tools as described below.
+When unavailable, inspect the relevant source, callers, tests, and Git diff directly;
+report material impact and run the repository's applicable validation commands.
+Use this manual impact and change-scope review before edits and commits without
+asking the user to approve an exception for an unavailable analysis tool.
+Missing integrations must not block reads, edits, commits, pushes, or builds.
+This availability policy takes precedence over the generated integration blocks below.
+
 <!-- mcp-probe:context begin — auto-generated; re-run init_project_context updates this block only -->
 <!-- mcp-probe:context-version: 3.6.11 -->
 ## MCP (call first)

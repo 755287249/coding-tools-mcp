@@ -52,12 +52,152 @@ jobs:
       - run: pnpm run check
       - run: pnpm run node-agent:parity:check
       - run: pnpm run node-agent:verify-repo
-      - name: Verify Windows AppContainer provider and isolation
-        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib tools::sandbox::appcontainer::provider::tests -- --test-threads=1
-      - name: Verify GitHub CLI runtime without credentials
+      - name: Prepare scoped CI NUL device helper
+        shell: pwsh
         run: |
-          gh --version
-          cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib gh_uses_exact_identity_and_isolated_configuration -- --ignored --test-threads=1
+          @'
+          using System;
+          using System.ComponentModel;
+          using System.Runtime.InteropServices;
+          using System.Security.AccessControl;
+          using System.Security.Principal;
+          using System.Threading;
+          using Microsoft.Win32.SafeHandles;
+
+          public sealed class CtmcpCiNullDevice : IDisposable {
+              // Same private capability carried by the Desktop provider, not All App Packages.
+              const string Capability = "CodingToolsMcp.Sandbox.Runtime.ReadExecute.v1";
+              const int ReadWrite = 0x0012019f; // FILE_GENERIC_READ | FILE_GENERIC_WRITE
+              SafeFileHandle handle;
+              byte[] addedAce;
+              Mutex gate;
+              bool ownsGate;
+
+              [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+              static extern SafeFileHandle CreateFileW(string name, uint access, uint share,
+                  IntPtr security, uint creation, uint flags, IntPtr template);
+              [DllImport("advapi32.dll", SetLastError = true)]
+              static extern uint GetSecurityInfo(SafeFileHandle handle, int type, uint info,
+                  out IntPtr owner, out IntPtr group, out IntPtr dacl, out IntPtr sacl, out IntPtr descriptor);
+              [DllImport("advapi32.dll", SetLastError = true)]
+              static extern uint SetSecurityInfo(SafeFileHandle handle, int type, uint info,
+                  IntPtr owner, IntPtr group, byte[] dacl, IntPtr sacl);
+              [DllImport("advapi32.dll")]
+              static extern uint GetSecurityDescriptorLength(IntPtr descriptor);
+              [DllImport("kernelbase.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+              [return: MarshalAs(UnmanagedType.Bool)]
+              static extern bool DeriveCapabilitySidsFromName(string name, out IntPtr groups,
+                  out uint groupCount, out IntPtr capabilities, out uint capabilityCount);
+              [DllImport("kernel32.dll")]
+              static extern IntPtr LocalFree(IntPtr memory);
+
+              static void FreeSids(IntPtr array, uint count) {
+                  if (array == IntPtr.Zero) return;
+                  for (int i = 0; i < count; i++) LocalFree(Marshal.ReadIntPtr(array, i * IntPtr.Size));
+                  LocalFree(array);
+              }
+              static SecurityIdentifier RuntimeSid() {
+                  IntPtr groups = IntPtr.Zero, capabilities = IntPtr.Zero;
+                  uint groupCount = 0, capabilityCount = 0;
+                  try {
+                      if (!DeriveCapabilitySidsFromName(Capability, out groups, out groupCount,
+                          out capabilities, out capabilityCount))
+                          throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot derive runtime capability SID.");
+                      if (capabilityCount != 1 || capabilities == IntPtr.Zero)
+                          throw new InvalidOperationException("Expected one private runtime capability SID.");
+                      return new SecurityIdentifier(Marshal.ReadIntPtr(capabilities));
+                  } finally { FreeSids(groups, groupCount); FreeSids(capabilities, capabilityCount); }
+              }
+              RawAcl ReadAcl() {
+                  IntPtr owner, group, dacl, sacl, descriptor;
+                  uint error = GetSecurityInfo(handle, 1, 4, out owner, out group, out dacl, out sacl, out descriptor);
+                  if (error != 0) throw new Win32Exception((int)error, "Cannot read NUL device DACL.");
+                  try {
+                      byte[] bytes = new byte[checked((int)GetSecurityDescriptorLength(descriptor))];
+                      Marshal.Copy(descriptor, bytes, 0, bytes.Length);
+                      return new RawSecurityDescriptor(bytes, 0).DiscretionaryAcl;
+                  } finally { LocalFree(descriptor); }
+              }
+              void WriteAcl(RawAcl acl) {
+                  byte[] bytes = new byte[acl.BinaryLength];
+                  acl.GetBinaryForm(bytes, 0);
+                  uint error = SetSecurityInfo(handle, 1, 4, IntPtr.Zero, IntPtr.Zero, bytes, IntPtr.Zero);
+                  if (error != 0) throw new Win32Exception((int)error, "Cannot update NUL device DACL.");
+              }
+              static byte[] Bytes(GenericAce ace) {
+                  byte[] bytes = new byte[ace.BinaryLength]; ace.GetBinaryForm(bytes, 0); return bytes;
+              }
+              static bool Equal(byte[] left, byte[] right) {
+                  if (left.Length != right.Length) return false;
+                  for (int i = 0; i < left.Length; i++) if (left[i] != right[i]) return false;
+                  return true;
+              }
+              public CtmcpCiNullDevice() {
+                  if (Environment.GetEnvironmentVariable("GITHUB_ACTIONS") != "true" ||
+                      Environment.GetEnvironmentVariable("RUNNER_OS") != "Windows")
+                      throw new InvalidOperationException("This device preparation is restricted to the disposable Windows CI runner.");
+                  try {
+                      gate = new Mutex(false, @"Local\CtmcpCiNullDeviceLease");
+                      try { ownsGate = gate.WaitOne(TimeSpan.FromMinutes(2)); }
+                      catch (AbandonedMutexException) { ownsGate = true; }
+                      if (!ownsGate) throw new TimeoutException("NUL device lease is busy.");
+                      handle = CreateFileW(@"\\.\NUL", 0x00060000, 7, IntPtr.Zero, 3, 0, IntPtr.Zero);
+                      if (handle.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot configure CI NUL device.");
+                      RawAcl acl = ReadAcl();
+                      if (acl == null) return; // Existing unrestricted DACL needs no extra ACE.
+                      CommonAce ace = new CommonAce(AceFlags.None, AceQualifier.AccessAllowed,
+                          ReadWrite, RuntimeSid(), false, null);
+                      byte[] expected = Bytes(ace);
+                      for (int i = 0; i < acl.Count; i++) if (Equal(Bytes(acl[i]), expected)) return;
+                      int insertion = 0;
+                      while (insertion < acl.Count && (acl[insertion].AceFlags & AceFlags.Inherited) == 0) insertion++;
+                      acl.InsertAce(insertion, ace);
+                      WriteAcl(acl);
+                      addedAce = expected;
+                      Console.WriteLine("CI NUL grant installed for the private Desktop runtime capability.");
+                  } catch { Dispose(); throw; }
+              }
+              public void Dispose() {
+                  try {
+                      if (addedAce != null) {
+                          RawAcl acl = ReadAcl();
+                          bool found = false;
+                          if (acl != null) for (int i = 0; i < acl.Count; i++) {
+                              if (!Equal(Bytes(acl[i]), addedAce)) continue;
+                              acl.RemoveAce(i); WriteAcl(acl); found = true; break;
+                          }
+                          if (!found) throw new InvalidOperationException("CI NUL grant disappeared before cleanup.");
+                          addedAce = null;
+                          Console.WriteLine("CI NUL grant removed; other device ACEs preserved.");
+                      }
+                  } finally {
+                      if (handle != null) { handle.Dispose(); handle = null; }
+                      if (ownsGate) { gate.ReleaseMutex(); ownsGate = false; }
+                      if (gate != null) { gate.Dispose(); gate = null; }
+                  }
+              }
+          }
+          '@ | Set-Content -LiteralPath "$env:RUNNER_TEMP/ctmcp-ci-nul.cs" -Encoding utf8
+      - name: Verify Windows AppContainer provider and isolation
+        shell: pwsh
+        run: |
+          Add-Type -Path "$env:RUNNER_TEMP/ctmcp-ci-nul.cs"
+          $lease = [CtmcpCiNullDevice]::new()
+          try {
+            cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib tools::sandbox::appcontainer::provider::tests -- --test-threads=1
+            if ($LASTEXITCODE -ne 0) { throw 'Windows provider tests failed' }
+          } finally { $lease.Dispose() }
+      - name: Verify GitHub CLI runtime without credentials
+        shell: pwsh
+        run: |
+          Add-Type -Path "$env:RUNNER_TEMP/ctmcp-ci-nul.cs"
+          $lease = [CtmcpCiNullDevice]::new()
+          try {
+            gh --version
+            if ($LASTEXITCODE -ne 0) { throw 'GitHub CLI is unavailable' }
+            cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib gh_uses_exact_identity_and_isolated_configuration -- --ignored --test-threads=1
+            if ($LASTEXITCODE -ne 0) { throw 'GitHub CLI runtime test failed' }
+          } finally { $lease.Dispose() }
       - name: Verify desktop startup handoff
         shell: powershell
         run: |
