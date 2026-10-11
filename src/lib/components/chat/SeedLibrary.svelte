@@ -13,6 +13,7 @@
   const empty=():SeedInventory=>({enabled:false,seeds:[],retired_count:0});
   let inventory=$state<SeedInventory>(empty()),address=$state(''),token=$state('');
   let busy=$state(false),error=$state(''),notice=$state(''),history=$state(false),filter=$state(''),status=$state(''),search=$state(''),page=$state(0),sourceFilter=$state(''),keyword=$state('');
+  let pairingOpen=$state(true),showToken=$state(false);
   let scope=0;
   const accounts=$derived(inventory.accounts??[]),counts=$derived(inventory.counts??{});
   const pageCount=$derived(Math.max(1,Math.ceil((inventory.filtered_total??0)/50)));
@@ -20,6 +21,7 @@
     const saved=loadPairing(key),profile=$workspaces.find(w=>w.id===workspaceId);
     address=saved.address;token=saved.token;
     if(!address&&profile?.tunnel.public_url){try{address=pairingAddress(profile.tunnel.public_url.replace(/\/$/,'').replace(/\/mcp$/,'')+'/mcp',folderId);}catch{}}
+    pairingOpen=true;showToken=false;
     inventory=empty();error='';notice='';history=false;filter='';status='';search='';page=0;sourceFilter='';keyword='';
   });});
   $effect(()=>{const ws=workspaceId,folder=folderId,query={action:'seed_list',limit:50,offset:page*50,account:filter,status,search,source:sourceFilter,keyword,include_archived:history};const generation=++scope;
@@ -51,12 +53,12 @@
   <div class="toolbar"><label><input type="checkbox" checked={inventory.enabled} disabled={busy} onchange={e=>action({action:'seed_settings',enabled:e.currentTarget.checked})}/>{$t('seeds.auto')}</label><button disabled={busy} onclick={()=>action({action:'seed_cleanup'})}>{$t('seeds.cleanup')}</button><span class="muted">{$t('seeds.retiredTotal')}: {inventory.retired_count}</span></div>
   {#if error}<p role="alert">{error}</p>{/if}
   {#if notice}<p class="notice" role="status">{notice}</p>{/if}
-  <details class="pairing" open={!inventory.pairing_enabled}>
+  <details class="pairing" bind:open={pairingOpen}>
     <summary>{$t('seeds.browserPair')} <span class:connected={inventory.pairing_enabled}>{$t(inventory.pairing_enabled?'seeds.pairEnabled':'seeds.pairDisabled')}</span></summary>
     <p class="notice">{$t('seeds.pairHelp')}</p>
     <form onsubmit={e=>{e.preventDefault();void connect();}}>
       <label>{$t('seeds.pairAddress')}<div class="input-row"><input bind:value={address} type="url" required placeholder="https://example.com/mcp"/><button type="button" onclick={()=>copy(address)}>{$t('seeds.copy')}</button></div></label>
-      <label>{$t('seeds.pairToken')}<div class="input-row"><input bind:value={token} type="password" autocomplete="off" maxlength="64" required/><button type="button" onclick={()=>copy(token)}>{$t('seeds.copy')}</button><button type="button" disabled={busy} onclick={()=>{token=newPairingToken();notice=$t('seeds.tokenUnsaved');}}>{$t('seeds.generateToken')}</button></div></label>
+      <label>{$t('seeds.pairToken')}<div class="input-row"><input bind:value={token} type={showToken?'text':'password'} autocomplete="off" maxlength="64" required/><button type="button" aria-pressed={showToken} onclick={()=>showToken=!showToken}>{$t(showToken?'sharing.hidePassword':'sharing.showPassword')}</button><button type="button" onclick={()=>copy(token)}>{$t('seeds.copy')}</button><button type="button" disabled={busy} onclick={()=>{token=newPairingToken();notice=$t('seeds.tokenUnsaved');}}>{$t('seeds.generateToken')}</button></div></label>
       <div class="toolbar"><button class="primary" disabled={busy}>{$t('seeds.savePair')}</button><button type="button" disabled={busy||!inventory.pairing_enabled} onclick={()=>action({action:'seed_pairing',enabled:false})}>{$t('seeds.revokePair')}</button><a href={`https://github.com/755287249/coding-tools-mcp/releases/download/v${APP_VERSION}/coderabbit-seeds.user.js`} target="_blank" rel="noreferrer">{$t('seeds.install')}</a></div>
     </form>
   </details>

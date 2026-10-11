@@ -8,12 +8,13 @@ const token='c'.repeat(64),ticket='a'.repeat(64),connection={address:'https://mc
 async function fixture(options={}){
  const elements=new Map(),saved=new Map(),requests=[],bridges=[],timers=[],sessions=new Map(),local=new Map(),batches=new Map();let counter=0;
  sessions.set('user',JSON.stringify({state:{user:{id:'user-a',providerLogin:'alice',providerUserId:'123'},currentOrganization:{id:'org-a',organization_name:'team',provider_organization_id:'777',workspace_id:'ws-a',type:'github'}}}));sessions.set('accessToken','synthetic-login-token');local.set('clerkGitProvider','github');local.set('coding-agent-last-selected-repository','team/repo');
- const el=name=>{if(!elements.has(name))elements.set(name,{value:name==='#count'?'3':'',disabled:false,textContent:'',classList:{toggle(){},add(){}}});return elements.get(name);};
+ const el=name=>{if(!elements.has(name))elements.set(name,{value:name==='#count'?'3':'',disabled:false,textContent:'',type:name==='#token'?'password':'',setAttribute(k,v){this[k]=v;},classList:{toggle(){},add(){}}});return elements.get(name);};
  const page={sessionStorage:{getItem:k=>sessions.get(k)??null},localStorage:{getItem:k=>local.get(k)??null},location:{pathname:'/code/new'},document:{querySelector:()=>({getAttribute:()=>`Repository: ${options.repoLabel??'repo'}`}),querySelectorAll:()=>[{getAttribute:()=>`Branch: ${options.branch??'main'}`} ]},fetch:async(url,init)=>{requests.push({url,init});if(url.includes('getAllRepos'))return {ok:true,json:async()=>[{result:{data:{repos:[{id:'1412803600',name:'team/repo'}]}}}]};if(options.create)await options.create(requests);if(options.unknown)throw Error('network');return {ok:true,json:async()=>[{result:{data:{taskId:randomUUID()}}}]};}};
- const panel={style:{},attachShadow:()=>({set innerHTML(v){},querySelector:el}),isConnected:false};
+ const panel={style:{},attachShadow:()=>({set innerHTML(v){},querySelector:el,addEventListener(){}}),isConnected:false};
  if(options.restore)saved.set('ctmcp-seed-connection-v2',connection);
- const sandbox={unsafeWindow:page,window:{confirm:()=>true},document:{createElement:()=>panel,readyState:'complete',body:{append(){panel.isConnected=true;}}},URL,Headers,Request,AbortSignal,console,crypto:{randomUUID},setInterval:fn=>timers.push(fn),setTimeout:fn=>{options.delay?.({sessions,local});fn();},GM_getValue:(k,f)=>saved.get(k)??f,GM_setValue:(k,v)=>saved.set(k,v),GM_registerMenuCommand(){},GM_xmlhttpRequest:args=>{
+ const sandbox={unsafeWindow:page,window:{confirm:()=>true},document:{createElement:()=>panel,readyState:'complete',querySelectorAll:()=>[],documentElement:{},body:{append(){panel.isConnected=true;panel.parentNode=this;}}},MutationObserver:class{observe(){}},URL,Headers,Request,AbortSignal,console,crypto:{randomUUID},setInterval:fn=>timers.push(fn),setTimeout:fn=>{options.delay?.({sessions,local});fn();},GM_getValue:(k,f)=>saved.get(k)??f,GM_setValue:(k,v)=>saved.set(k,v),GM_registerMenuCommand(){},GM_xmlhttpRequest:args=>{
    const body=JSON.parse(args.data);bridges.push({args,body});
+   if(body.action==='status'&&options.status){options.status(args);return;}
    if(body.method==='seed/created'){if(options.registerFailure){options.registerFailure=false;args.ontimeout();return;}args.onload({status:200,responseText:JSON.stringify({result:{ok:true}})});return;}
    let result={workspace_folder_id:'folder',ok:true,total:0,capacity:10000};
    if(body.action==='batch'){
@@ -66,4 +67,22 @@ test('browser snapshots a model prefix across batches, persists it, and includes
  assert.equal(creations(f).length,11);assert.ok(f.bridges.filter(b=>b.body.action==='batch').every(b=>b.body.prefix==='GPT-6-astra'));
  assert.ok(creations(f).every(r=>JSON.parse(r.init.body)['0'].title.startsWith('GPT-6-astra MCP Seed ')));
  assert.equal(f.saved.get('ctmcp-seed-connection-v2').prefix,'GPT-6-astra');
+});
+
+test('binding immediately reports pending, deduplicates clicks, and restores controls after failure',async()=>{
+ const f=await fixture();let pending;f.options.status=args=>pending=args;
+ const first=f.el('#bind').onclick();await f.el('#bind').onclick();
+ assert.equal(f.bridges.filter(b=>b.body.action==='status').length,2);
+ assert.equal(f.el('#bind').disabled,true);assert.match(f.el('#bind').textContent,/连接中/);
+ assert.equal(f.el('#stop').disabled,true);assert.match(f.el('#connection-status').textContent,/正在验证/);
+ pending.onerror();await first;
+ assert.equal(f.el('#bind').disabled,false);assert.match(f.el('#connection-status').textContent,/连接失败/);
+ assert.match(f.el('.log').textContent,/油猴/);
+ await f.el('#start').onclick();assert.equal(creations(f).length,0);
+});
+test('successful pairing keeps connection details open and token can be shown then hidden without changing it',async()=>{
+ const f=await fixture();f.el('#connection').open=true;await f.el('#bind').onclick();
+ assert.equal(f.el('#connection').open,true);
+ f.el('#show-token').onclick();assert.equal(f.el('#token').type,'text');assert.equal(f.el('#token').value,token);assert.equal(f.el('#show-token')['aria-pressed'],'true');
+ f.el('#show-token').onclick();assert.equal(f.el('#token').type,'password');assert.equal(f.el('#token').value,token);
 });
