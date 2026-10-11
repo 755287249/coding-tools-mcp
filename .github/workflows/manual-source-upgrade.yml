@@ -27,6 +27,13 @@ jobs:
         with:
           node-version: "24"
           cache: pnpm
+      - name: Use canonical Windows temporary paths
+        shell: pwsh
+        run: |
+          $temporaryRoot = node -p "require('node:fs').realpathSync.native(process.env.RUNNER_TEMP)"
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve runner temporary directory' }
+          "TEMP=$temporaryRoot" >> $env:GITHUB_ENV
+          "TMP=$temporaryRoot" >> $env:GITHUB_ENV
       - name: Provide pnpm.cmd for Windows child processes
         shell: pwsh
         run: |
