@@ -31,6 +31,7 @@ use crate::tools::process_child::ProcessChild;
 use crate::tools::process_spec::ProcessLaunchSpec;
 use crate::tools::workspace::{WorkspaceError, WorkspaceResult};
 
+mod git_drive_alias;
 mod provider;
 
 pub(super) use provider::prepare;

@@ -24,6 +24,9 @@ export function runCapturedStdoutWithProgress(program, args, {
       windowsHide,
       stdio: ['ignore', 'pipe', 'pipe']
     });
+    // A pipe chunk can end inside a multibyte character. Decode per stream.
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
     let stdout = '';
     let stderrTail = '';
     let settled = false;

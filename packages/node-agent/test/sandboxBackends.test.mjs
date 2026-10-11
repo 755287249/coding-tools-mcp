@@ -425,3 +425,41 @@ test('AppContainer fallback cleanup restores the exact protected DACL after help
   assert.equal(await readFile(gitDir, 'utf8'), gitPointer, 'fallback cleanup must preserve the .git pointer file content');
   assert.deepEqual(await readdir(leaseRoot), []);
 });
+
+test('AppContainer Git drive aliases are exclusive, scoped and released', { skip: process.platform !== 'win32' }, async t => {
+  const { workspace, data } = await directories(t);
+  const nested = path.join(workspace, 'nested');
+  await mkdir(nested);
+  const prepared = await prepareAppContainer({ enabled: true, backend: 'appcontainer', externalPaths: [], options: {} }, workspace, data);
+  const script = path.join(data, 'alias-test.ps1');
+  await writeFile(script, String.raw`
+param($Helper, $Workspace, $Nested, $Outside)
+$ErrorActionPreference = 'Stop'
+$assembly = [Reflection.Assembly]::LoadFile($Helper)
+$type = $assembly.GetType('Program').GetNestedType('GitDriveAlias', [Reflection.BindingFlags]::NonPublic)
+$create = $type.GetMethod('Create')
+$first = $null; $second = $null
+try {
+  $first = $create.Invoke($null, @($Workspace))
+  $second = $create.Invoke($null, @($Workspace))
+  $one = $first.Cwd($Workspace); $two = $second.Cwd($Workspace)
+  if ($one -eq $two) { throw 'Aliases collided' }
+  if (!(Test-Path -LiteralPath $first.Cwd($Nested))) { throw 'Nested cwd missing' }
+  $denied = $false
+  try { $null = $first.Cwd($Outside) } catch { $denied = $true }
+  if (!$denied) { throw 'Outside cwd was accepted' }
+  $first.Dispose(); $first = $null
+  if (Test-Path -LiteralPath $one) { throw 'First mapping survived dispose' }
+  if (!(Test-Path -LiteralPath $two)) { throw 'Second mapping was removed by first owner' }
+  $second.Dispose(); $second = $null
+  if (Test-Path -LiteralPath $two) { throw 'Second mapping survived dispose' }
+  Write-Output 'git-alias-lifecycle-ok'
+} finally {
+  if ($first) { $first.Dispose() }
+  if ($second) { $second.Dispose() }
+}
+`);
+  const result = spawnSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', script, prepared.helper, workspace, nested, data], { windowsHide: true, timeout: 30_000, encoding: 'utf8' });
+  assert.equal(result.status, 0, `stderr: ${result.stderr}`);
+  assert.match(result.stdout, /git-alias-lifecycle-ok/);
+});

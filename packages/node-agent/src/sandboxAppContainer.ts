@@ -1318,6 +1318,82 @@ public static class Program {
         }
     }
 
+    // Temporary Object Manager links are owned by handles, so cancellation or
+    // host termination cannot leave a persistent DefineDosDevice mapping.
+    private sealed class GitDriveAlias : IDisposable {
+        [StructLayout(LayoutKind.Sequential)]
+        private struct UnicodeString { public ushort Length, MaximumLength; public IntPtr Buffer; }
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ObjectAttributes {
+            public uint Length; public IntPtr RootDirectory, ObjectName; public uint Attributes;
+            public IntPtr SecurityDescriptor, SecurityQualityOfService;
+        }
+        [DllImport("ntdll.dll")]
+        private static extern int NtCreateSymbolicLinkObject(out IntPtr handle, uint access, ref ObjectAttributes attributes, ref UnicodeString target);
+        [DllImport("ntdll.dll")]
+        private static extern uint RtlNtStatusToDosError(int status);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern uint GetLogicalDrives();
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr CreateFileW(string path, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern uint GetFinalPathNameByHandleW(IntPtr handle, StringBuilder path, uint length, uint flags);
+        private IntPtr handle;
+        private string root, drive;
+        private static string Canonical(string path) {
+            IntPtr file = CreateFileW(path, 0, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero);
+            if (file == new IntPtr(-1)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+            try {
+                StringBuilder result = new StringBuilder(32768);
+                uint length = GetFinalPathNameByHandleW(file, result, (uint)result.Capacity, 0);
+                if (length == 0 || length >= result.Capacity) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+                return result.ToString().TrimEnd('\\');
+            } finally { CloseHandle(file); }
+        }
+        public static GitDriveAlias Create(string workspace) {
+            string root = Canonical(workspace);
+            string dos = root.StartsWith(@"\\?\", StringComparison.Ordinal) ? root.Substring(4) : root;
+            if (dos.Length < 2 || dos[1] != ':' || !Char.IsLetter(dos[0])) throw new InvalidOperationException("Git DOS alias requires a local drive workspace.");
+            string targetText = @"\??\" + dos;
+            IntPtr targetBuffer = Marshal.StringToHGlobalUni(targetText);
+            try {
+                UnicodeString target = new UnicodeString { Length = checked((ushort)(targetText.Length * 2)), MaximumLength = checked((ushort)(targetText.Length * 2)), Buffer = targetBuffer };
+                uint used = GetLogicalDrives();
+                if (used == 0) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+                for (char letter = 'Z'; letter >= 'D'; letter--) {
+                    if ((used & (1u << (letter - 'A'))) != 0) continue;
+                    string nameText = @"\??\" + letter + ":";
+                    IntPtr nameBuffer = Marshal.StringToHGlobalUni(nameText);
+                    IntPtr namePointer = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(UnicodeString)));
+                    try {
+                        UnicodeString name = new UnicodeString { Length = checked((ushort)(nameText.Length * 2)), MaximumLength = checked((ushort)(nameText.Length * 2)), Buffer = nameBuffer };
+                        Marshal.StructureToPtr(name, namePointer, false);
+                        ObjectAttributes attributes = new ObjectAttributes { Length = (uint)Marshal.SizeOf(typeof(ObjectAttributes)), ObjectName = namePointer, Attributes = 0x40 };
+                        IntPtr link;
+                        int status = NtCreateSymbolicLinkObject(out link, 1, ref attributes, ref target);
+                        if (status == unchecked((int)0xc0000035)) continue; // Never replace an existing name.
+                        if (status < 0) throw new System.ComponentModel.Win32Exception((int)RtlNtStatusToDosError(status));
+                        GitDriveAlias alias = new GitDriveAlias { handle = link, root = root, drive = letter + @":\" };
+                        try {
+                            if (!String.Equals(Canonical(alias.drive), root, StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Git DOS alias resolved to an unexpected workspace.");
+                            return alias;
+                        } catch { alias.Dispose(); throw; }
+                    } finally { Marshal.FreeHGlobal(namePointer); Marshal.FreeHGlobal(nameBuffer); }
+                }
+                throw new InvalidOperationException("No free DOS drive letter for sandboxed Git.");
+            } finally { Marshal.FreeHGlobal(targetBuffer); }
+        }
+        public string Cwd(string path) {
+            string physical = Canonical(path);
+            if (String.Equals(physical, root, StringComparison.OrdinalIgnoreCase)) return drive;
+            if (!physical.StartsWith(root + @"\", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Git cwd is outside its workspace.");
+            return Path.Combine(drive, physical.Substring(root.Length + 1));
+        }
+        public void Dispose() {
+            if (handle != IntPtr.Zero) { CloseHandle(handle); handle = IntPtr.Zero; }
+        }
+    }
+
     private static int Launch(Options options, IntPtr appContainerSid, string program) {
         SecurityAttributes attributes = new SecurityAttributes { Length = Marshal.SizeOf(typeof(SecurityAttributes)), InheritHandle = 1 };
         IntPtr childInput, parentInput, parentOutput, childOutput, parentError, childError;
@@ -1332,6 +1408,7 @@ public static class Program {
         IntPtr capabilityBlock = IntPtr.Zero;
         ProcessInformation process = new ProcessInformation();
         IntPtr job = IntPtr.Zero;
+        GitDriveAlias gitAlias = null;
         try {
             IntPtr size = IntPtr.Zero;
             InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref size);
@@ -1358,7 +1435,12 @@ public static class Program {
             foreach (string argument in options.Arguments) commandLine.Append(' ').Append(Quote(argument));
             if (!String.IsNullOrEmpty(options.RawArg)) commandLine.Append(' ').Append(options.RawArg);
             uint flags = CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT;
-            if (!CreateProcess(program, commandLine, IntPtr.Zero, IntPtr.Zero, true, flags, environment, options.Cwd, ref startup, out process)) throw new InvalidOperationException("CreateProcessW failed: " + Marshal.GetLastWin32Error());
+            string launchCwd = options.Cwd;
+            if (String.Equals(Path.GetFileName(program), "git.exe", StringComparison.OrdinalIgnoreCase)) {
+                gitAlias = GitDriveAlias.Create(options.Workspace);
+                launchCwd = gitAlias.Cwd(options.Cwd);
+            }
+            if (!CreateProcess(program, commandLine, IntPtr.Zero, IntPtr.Zero, true, flags, environment, launchCwd, ref startup, out process)) throw new InvalidOperationException("CreateProcessW failed: " + Marshal.GetLastWin32Error());
             try {
                 VerifyAppContainerToken(process.Process, appContainerSid);
             } catch {
@@ -1396,6 +1478,7 @@ public static class Program {
             if (process.Process != IntPtr.Zero) CloseHandle(process.Process);
             if (process.Thread != IntPtr.Zero) CloseHandle(process.Thread);
             if (job != IntPtr.Zero) CloseHandle(job);
+            if (gitAlias != null) gitAlias.Dispose();
             if (attributeList != IntPtr.Zero) { DeleteProcThreadAttributeList(attributeList); Marshal.FreeHGlobal(attributeList); }
             if (capabilityBlock != IntPtr.Zero) Marshal.FreeHGlobal(capabilityBlock);
             if (environment != IntPtr.Zero) Marshal.FreeHGlobal(environment);

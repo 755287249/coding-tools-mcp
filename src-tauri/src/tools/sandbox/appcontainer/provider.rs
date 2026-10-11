@@ -814,7 +814,7 @@ impl PreparedSandbox for AppContainerPreparedSandbox {
 
     fn launch_prepared_process(
         &self,
-        plan: SandboxProcessPlan,
+        mut plan: SandboxProcessPlan,
     ) -> WorkspaceResult<crate::tools::process_child::ProcessChild> {
         if plan.backend_id != self.backend_id() {
             return Err(provider_error(
@@ -834,13 +834,33 @@ impl PreparedSandbox for AppContainerPreparedSandbox {
         if let Some(internet) = &self.lease.internet {
             capability_sids.push(internet.sid());
         }
+        // Keep logical admission and ACLs on physical paths. Only the selected
+        // Git process uses an alias so its GetLongPathName cwd fallback stays
+        // inside the workspace instead of enumerating private ancestors.
+        let git_alias = if matches!(
+            file_name_lowercase(&plan.process.program).as_str(),
+            "git" | "git.exe"
+        ) && trusted_windows_runtime(&plan.process.program)?.is_some()
+        {
+            let alias = super::git_drive_alias::GitDriveAlias::create(&self.workspace_root)
+                .map_err(|e| provider_error("SANDBOX_GIT_CWD_ALIAS_FAILED", e.to_string()))?;
+            let cwd = plan.process.cwd.as_deref().unwrap_or(&self.workspace_root);
+            plan.process.cwd = Some(
+                alias
+                    .cwd(cwd)
+                    .map_err(|e| provider_error("SANDBOX_GIT_CWD_ALIAS_FAILED", e.to_string()))?,
+            );
+            Some(alias)
+        } else {
+            None
+        };
         let child = super::launch_process(
             &plan.process,
             &plan.environment_overrides,
             self.lease.profile.clone(),
             &capability_sids,
         )?;
-        Ok(child.with_backend_lifetime(self.lease.clone()))
+        Ok(child.with_backend_lifetime((self.lease.clone(), git_alias)))
     }
 
     fn environment_overrides(&self) -> WorkspaceResult<BTreeMap<String, String>> {
