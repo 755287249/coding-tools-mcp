@@ -598,7 +598,7 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
         let title = text(args.get("title").unwrap_or(&json!("新对话")), 240)?;
         let mut s = json!({"version":1,"id":uuid::Uuid::new_v4().to_string(),"title":title,"created_at":now(),"updated_at":now(),"closed":false,"messages":[],"attachment_id":"","lease_until":0});
         if let Some(mode)=args.get("mode"){group::set_mode(&mut s,mode)?;}
-        if !group::grouped(&s)&&seeds::enabled(root)?{s["seed_auto"]=json!(true);}
+        if !group::grouped(&s)&&args["seed_manual"]!=true&&seeds::enabled(root)?{s["seed_auto"]=json!(true);s["seed_filter"]=seeds::parse_filter(&args["seed_filter"])?;}
         save(root, &s)?;
         return Ok(json!({"session":local_view(root,&s)?}));
     }

@@ -1,5 +1,9 @@
 <script lang="ts">
   import PresenceDot from './PresenceDot.svelte';
+  import SeedStart from './SeedStart.svelte';
+  import SeedLoading from './SeedLoading.svelte';
+  import type {SeedFilter} from '$lib/api/seeds';
+  let seedStartPending=$state(false);
   import { chatConnectionTone } from '$lib/chat/connection-tone';
   import { fileDrop } from '$lib/chat/file-drop';
   let dropActive=$state(false);
@@ -182,7 +186,7 @@
   let queueElement=$state<HTMLDivElement>(),queueExpanded=$state(false);
   let runtimeState=$state('');
   $effect(()=>{const ws=workspaceId;runtimeState='';if(!ws)return;let stopped=false;const stop=startVisiblePolling(async()=>{try{const value=await getRuntimeStatus(ws);if(!stopped)runtimeState=value.state;}catch{if(!stopped)runtimeState='';}},()=>4000);return()=>{stopped=true;stop()}});
-  const queueNotice=$derived(!workspaceId||!folderId?'':runtimeState&&runtimeState!=='running'?'chat.enableMcp':needsAi?(detail?.seed_auto?'seeds.waiting':'chat.connectAi'):'');
+  const queueNotice=$derived(!workspaceId||!folderId?'':runtimeState&&runtimeState!=='running'?'chat.enableMcp':needsAi?(detail?.seed_auto||seedStartPending?'seeds.loading':'chat.connectAi'):'');
   function collapseQueue(){queueElement?.querySelectorAll('details[open]').forEach(item=>(item as HTMLDetailsElement).open=false);queueExpanded=false;}
 
   async function toggleQueueMode() {
@@ -512,7 +516,7 @@
   $effect(() => {
     const ws = workspaceId, folder = folderId; const gen = ++generation;
     untrack(() => { persistDraft(); rememberReadingPosition(); }); readingScope = ''; pendingPosition = null; activeDraftKey = ''; draftStorageError = false;
-    readSequence++; loadingDetail = false; readError = '';
+    readSequence++; loadingDetail = false; readError = '';seedStartPending=false;
     seen = restoreSeen(ws, folder);
     sessions = []; selected = ''; detail = null; draft = ''; error = ''; retry = null; attachments = []; renameId = ''; renameTitle = '';
     untrack(() => { if (folder && requestedChatId) selectSession(ws, folder, requestedChatId); });
@@ -561,19 +565,20 @@
     } catch (e) { if (gen === generation) error = String(e); }
     finally { busy = false; }
   }
-  async function create(keepDraft = false) {
-    if (busy || !folderId) return; busy = true; error = ''; const gen = generation, previous = selected;
+  async function create(keepDraft = false,seedFilter?:SeedFilter|null):Promise<boolean> {
+    if (busy || !folderId || (!selected&&seedStartPending&&seedFilter===undefined)) return false; busy = true; error = ''; const gen = generation, previous = selected;
     try {
-      const result = await localChat(workspaceId, folderId, { action: 'create', title: '新对话',mode:newMode });
-      if (gen !== generation || selected !== previous) return;
+      const result = await localChat(workspaceId, folderId, { action: 'create', title: '新对话',mode:newMode,seed_filter:seedFilter??undefined,seed_manual:seedFilter===null });
+      if (gen !== generation || selected !== previous) return false;
       readSequence++;
       detail = result.session ?? null; selected = detail?.id ?? '';
       if (selected) { const unsent = draft; activateDraft(workspaceId, folderId, selected); if (keepDraft) { draft = unsent; persistDraft(); chatDrafts.save(chatDraftKey(workspaceId, folderId, 'new'), {text:'',attachments:[],retry:null}); } }
       guide = false;
       await refresh(workspaceId, folderId, gen);
       if (selected) onNavigate?.(folderId, selected);
-      if (!keepDraft && selected) { setTimeout(() => { if (gen === generation && selected === result.session?.id) void openConnection(); }, 0); }
-    } catch(e) { if (gen === generation) error = String(e); } finally { busy = false; }
+      if ((!keepDraft||seedFilter===null) && selected&&!detail?.seed_auto) { setTimeout(() => { if (gen === generation && selected === result.session?.id) void openConnection(); }, 0); }
+      seedStartPending=false;return !!selected;
+    } catch(e) { if (gen === generation) error = String(e);return false; } finally { busy = false; }
   }
   async function send() {
     if (messageBytes(draft) > 32000) { error = $t('chat.tooLong'); return; }
@@ -722,7 +727,7 @@
       <button class="mobile-chat-actions" aria-label={$t('mobile.chatActions')} aria-expanded={mobileActions} onclick={()=>mobileActions=!mobileActions}><Ellipsis size={20}/></button>
       <div class="header-actions">
         {#if unreadTotal}<button class="unread-total" onclick={showUnread} aria-label={`${$t('chat.90')}: ${unreadTotal}`}>{unreadTotal}</button>{/if}
-        <div class="connection-actions"><button disabled={busy || !selected || !(detail?.seed_auto || detail?.status === 'connected' || detail?.status === 'waiting')} onclick={requestDisconnect}>{$t('chat.disconnect')}</button><button class="connect-button" data-connection={chatConnectionTone(detail)} title={needsAi?$t('chat.connectHint'):undefined} disabled={busy || !folderId || detail?.closed || detail?.seed_auto} onclick={openConnection}>{$t(detail?.seed_auto?'shell.seeds':mode==='group'?'chat.inviteGroup':'chat.connectWork')}</button></div>
+        <div class="connection-actions"><button disabled={busy || !selected || !(detail?.seed_auto || detail?.status === 'connected' || detail?.status === 'waiting')} onclick={requestDisconnect}>{$t('chat.disconnect')}</button><button class="connect-button" data-connection={chatConnectionTone(detail)} title={needsAi?$t('chat.connectHint'):undefined} disabled={busy || !folderId || detail?.closed || detail?.seed_auto || seedStartPending} onclick={openConnection}>{$t(detail?.seed_auto?'shell.seeds':mode==='group'?'chat.inviteGroup':'chat.connectWork')}</button></div>
         {#if selected}<button title={$t('chat.36')} aria-label={$t('chat.36')} onclick={download}><Download size={16}/></button>{/if}
 
         {#if headerActions}{@render headerActions()}{/if}
@@ -730,11 +735,17 @@
     </header>
     {#if error}<div class="chat-error" role="alert">{error}<button onclick={() => error = ''} aria-label={$t("chat.38")}>×</button></div>{/if}
     {#if isNewConversation}<div class="mode-switch" aria-label={$t('chat.mode')}><button type="button" aria-pressed={mode==='group'} disabled={busy||memberBusy||detail?.closed||!workspaceId||!folderId} onclick={()=>changeMode('group')}>{$t('chat.group')}</button><button type="button" aria-pressed={mode==='work'} disabled={busy||memberBusy||detail?.closed} onclick={()=>changeMode('work')}>{$t('chat.work')}</button></div>{/if}
+    {#if detail?.seed_auto&&detail.seed_filter}<p class="seed-pool-note">{$t('seeds.poolForChat')}: {detail.seed_filter.source||$t('seeds.allSources')} · {detail.seed_filter.keyword||$t('seeds.allPrefixes')}</p>{/if}
     <div class="conversation-body">
     <div class="feed-frame">
     <div class="message-feed" bind:this={feed} onscroll={scheduleScroll} aria-busy={loadingDetail}>
       {#if selected && !detail}<div class="chat-loading" role="status">{loadingDetail ? $t("Loading…") : error}{#if loadingDetail}<div class="history-skeleton" aria-hidden="true"><span></span><span></span><span></span></div>{/if}</div>
-      {:else if !messages.length}<div class="empty-state"><h2>{$t(!workspaceId||!folderId?'chat.selectFolder':mode==='group'?'chat.inviteTitle':'chat.connectTitle')}</h2></div>
+      {:else if !messages.length}<div class="empty-state">
+        {#if workspaceId&&folderId&&mode==='work'&&!selected&&startNew}
+          <SeedStart {workspaceId} {folderId} onEnabled={value=>seedStartPending=value} onChoose={filter=>create(true,filter)}/>
+        {:else if detail?.seed_auto&&needsAi}<SeedLoading/>
+        {:else}<h2>{$t(!workspaceId||!folderId?'chat.selectFolder':mode==='group'?'chat.inviteTitle':needsAi?'chat.connectTitle':'seeds.connectedReady')}</h2>{/if}
+      </div>
       {:else}<div class="message-column" bind:this={column}>{#if historyStart}<button type="button" class="load-older" onclick={showOlder}>{$t('chat.loadOlder')}</button>{/if}{#each visibleFeedItems as item (item.id)}{#if item.kind === 'tools'}<article class="assistant grouped-tools"><div class="message-meta">{item.messages[0]?.agent_name ?? 'AI'} · {$t("chat.54")}</div><div class="message-body"><ChatToolActivity messages={item.messages} settled={item.settled} {workspaceId} {folderId} chatId={selected}/></div></article>{:else}{@const m = item.message}<article data-user-message={m.role === 'user' ? m.id : undefined} tabindex="-1" class:user={m.role === 'user'} class:assistant={m.role === 'assistant'}><div class="message-meta">{m.role === 'user' ? $t('chat.26') : m.agent_name ?? detail?.agent_name ?? (m.final === false ? $t('chat.27') : 'AI')}<time>{new Date(m.created_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</time></div>{#if (m.attachments??[]).some(file=>file.mime.startsWith('image/'))}<div class="message-images"><div class="image-strip">{#each (m.attachments??[]).filter(file=>file.mime.startsWith('image/')) as file (workspaceId+":"+folderId+":"+selected+":"+file.id+":"+file.sha256)}<ChatAttachment {workspaceId} {folderId} chatId={selected} {file}/>{/each}</div></div>{/if}<div class="message-body" class:image-only={!m.text.trim()&&!(m.attachments??[]).some(file=>!file.mime.startsWith('image/'))}>{#if editingMessage===m.id}<MessageEditor text={m.text} hasAttachments={!!m.attachments?.length} onSend={(text:string,id:string)=>resendMessage(m,text,id)} onCancel={()=>editingMessage=''}/>{:else}<MessageText text={m.text} attachments={m.attachments ?? []} {workspaceId} {folderId} chatId={selected} collapsible={m.role==='user'}/>{/if}{#each (m.attachments??[]).filter(file=>!file.mime.startsWith('image/')) as file (workspaceId + ":" + folderId + ":" + selected + ":" + file.id)}<ChatAttachment {workspaceId} {folderId} chatId={selected} {file}/>{/each}{#if m.questions?.length}<QuestionCard message={m} disabled={busy||memberBusy||!!detail?.closed} onAnswer={(id,answers)=>memberAction({action:'answer_question',question_message_id:m.id,message_id:id,answers})}/>{/if}<ChatReplyState state={chatReplyState(detail, m.id)}/><ChatUserState state={chatUserState(detail, m.id)}/></div>{#if editingMessage!==m.id}<div class="message-actions"><button type="button" title={$t('chat.copyMessage')} aria-label={$t('chat.copyMessage')} onclick={()=>copyMessage(m)}>{#if copiedMessage===m.id}<Check size={15}/>{:else}<Copy size={15}/>{/if}</button>{#if m.role==='user'}<button type="button" title={$t('chat.editMessage')} aria-label={$t('chat.editMessage')} disabled={busy||!!detail?.closed} onclick={()=>editingMessage=m.id}><Pencil size={15}/></button>{:else}<button type="button" title={$t('chat.shareMessage')} aria-label={$t('chat.shareMessage')} onclick={()=>shareMessage=m}><Share2 size={15}/></button>{/if}</div>{/if}</article>{/if}{/each}{#if pendingState}<div class="pending" class:processing={pendingState === 'processing'} role="status" aria-live="polite"><ChatStatusIcon state={pendingState} label={pendingState === 'awaiting_user' ? $t('chat.73') : pendingState === 'processing' ? $t('chat.70') : pendingState === 'interrupted' ? $t('chat.71') : $t('chat.29')}/>{pendingState === 'awaiting_user' ? $t('chat.73') : pendingState === 'processing' ? $t('chat.70') : pendingState === 'interrupted' ? $t('chat.71') : $t('chat.29')}</div>{/if}</div>{/if}
     </div>
     <ChatOutline {messages} activeId={activeMessage} onSelect={jumpToMessage}/>
@@ -818,6 +829,7 @@
 {/snippet}
 
 <style>
+.seed-pool-note{margin:8px auto;font-size:12px;color:var(--color-text-muted);max-width:90%;overflow-wrap:anywhere}
 .outbox{position:relative}.outbox.expanded{min-height:65px}.collapse-queue{position:absolute;left:0;bottom:0;width:29px;height:26px;border:1px solid var(--color-border);border-radius:7px;background:var(--surface-2);color:var(--color-text);z-index:1;cursor:pointer}.queue-notice{max-width:760px;margin:0 auto 8px;color:var(--color-text-muted);font-size:12px}
 
 .mention-section-title{padding:7px 9px 4px;font-size:11px;font-weight:600;color:var(--color-text-muted)}.mention-empty{padding:7px 9px;font-size:12px;color:var(--color-text-muted)}.mention-choices .mention-more{border-top:1px solid var(--color-border);justify-content:space-between;margin-top:4px;color:var(--color-text-muted)}

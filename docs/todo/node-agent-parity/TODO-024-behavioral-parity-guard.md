@@ -76,3 +76,8 @@ are covered by root plugin fixtures. No Node parity exception is introduced.
 in both runtimes. Seed unit/HTTP suites cover scoped pairing and 600-record
 fixtures; browser fixtures cover direct pairing, context switches, retry and
 unknown outcomes. No additional parity exception is introduced.
+
+0.1.134 adds equivalent source/prefix fields, manual folder enrollment, immutable
+per-chat source/keyword filters, filtered initial/replacement assignment and
+per-pool scan caches. Legacy records default to coderabbit with no prefix; old
+unfiltered conversations remain compatible. No parity exception is introduced.

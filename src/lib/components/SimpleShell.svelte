@@ -92,7 +92,7 @@
   async function newChat(connect=false){
     if(!group){await onAddWorkspace?.();return}if(creating)return;
     creating=true;error='';const target=group;
-    try{let id:string|undefined;if(connect){const result=await localChat(target.workspace.id,target.folder.id,{action:'create',title:$t('chat.1')});if(!result.session)throw new Error($t('chat.117'));id=result.session.id}
+    try{let id:string|undefined;if(connect){const result=await localChat(target.workspace.id,target.folder.id,{action:'create',title:$t('chat.1'),seed_manual:true});if(!result.session)throw new Error($t('chat.117'));id=result.session.id}
       await goto(appUrl(chatLocation(target.workspace.id,target.folder.id,id)+(connect?'&connect=1':'')),{noScroll:true});
     }catch(e){error=String(e)}finally{creating=false}
   }

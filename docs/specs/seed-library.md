@@ -97,3 +97,26 @@ on the next scan. Assigned seeds inspect only their own conversation. Heartbeats
 persist at most once per minute during idle waits; process recovery probes and
 internal long-wait polling run at five-second intervals. No live 500-host
 concurrency guarantee follows from synthetic registry performance measurements.
+
+## Classified pools and manual enrollment (0.1.134)
+
+Seeds add backward-compatible source (default `coderabbit`), prefix (default
+empty), and manual (default false). `seed_manual` creates one folder-scoped
+capability without a host repo or branch; these records do not participate in
+CodeRabbit repo binding. Existing nonmanual bindings remain enforced. `seed_label`
+changes classification; inventory adds source/keyword filters and grouped counts.
+Browser provisioning fixes source to `coderabbit`, accepts a prefix, preserves it
+in retry validation and task titles, and snapshots it for the whole creation round.
+
+New work conversations persist `seed_filter: {source, keyword}` when auto assignment
+is enabled. Source matches exactly; keyword is a case-insensitive substring of
+the prefix. Initial assignment and replacement apply the same conditions, with
+no fallback to a mismatched source/model. Per-pool scan caches prevent a poll from
+another source or prefix from suppressing an eligible assignment. Existing chats
+without a filter remain unrestricted. Explicit `seed_manual: true` creates a
+traditional direct-connection chat without automatic seed allocation.
+
+The new-chat page creates automatically for a single available classification;
+multiple classifications first offer a source/keyword picker. A non-modal pulse
+shows while waiting and an online empty chat shows readiness. The filter remains
+visible in the chat. Manual enrollment prompts remain in page memory only.

@@ -10,6 +10,7 @@ export interface SeedStore {
   locked<T>(run:()=>T):T;
 }
 export interface Seed {
+  source?:string; prefix?:string; manual?:boolean;
   provision_key?:string; metadata?:Record<string,string>;
   id:string; account:string; repo_id:string; branch:string; created_at:number;
   enrollment_hash:string; access_hash:string; enrollment_until:number; redeemed_at:number;
@@ -23,11 +24,20 @@ export const SEED_LIBRARY_LIMIT=10000;
 const REGISTRY_BYTES=32*1024*1024;
 const exchanges=new Map<string,{token:string;expires:number}>();
 const scans=new Map<string,number>();
-export function seedInvalidate(store:SeedStore):void {scans.delete(store.path(FILE));}
+export function seedInvalidate(store:SeedStore):void {const base=store.path(FILE)+'\0';for(const key of scans.keys())if(key.startsWith(base))scans.delete(key);}
 export const SEED_SUSPECT_MS=600_000, SEED_REPLACE_MS=720_000;
 const hash=(s:string)=>createHash('sha256').update(s).digest('hex');
 const uid=(s:unknown):string=>{if(typeof s!=='string'||! /^[a-zA-Z0-9_-]{1,80}$/.test(s))throw Error('Invalid seed ID');return s;};
 const label=(s:unknown,max=200):string=>{if(typeof s!=='string'||!s.trim()||Buffer.byteLength(s)>max)throw Error('Invalid seed field');return s.trim();};
+export interface SeedFilter {source:string;keyword:string}
+function optionalLabel(value:unknown,max=200):string {if(value===undefined||value===null||value==='')return '';const result=label(value,max);if(/[\r\n\0]/.test(result))throw Error('Invalid seed label');return result;}
+export function parseSeedFilter(value:unknown):SeedFilter {
+  if(value===undefined||value===null)return {source:'',keyword:''};
+  if(!value||typeof value!=='object'||Array.isArray(value))throw Error('Invalid seed filter');
+  const filter=value as Record<string,unknown>;return {source:optionalLabel(filter.source).toLowerCase(),keyword:optionalLabel(filter.keyword)};
+}
+const sourceOf=(s:Seed)=>s.source||'coderabbit';
+function matches(s:Seed,filter:SeedFilter):boolean {return (!filter.source||sourceOf(s)===filter.source)&&(!filter.keyword||(s.prefix??'').toLowerCase().includes(filter.keyword.toLowerCase()));}
 export function readSeeds(store:SeedStore):Library {
   let body:Buffer;try{body=readFileSync(store.path(FILE));}catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')return {version:1,enabled:false,seeds:[]};throw e;}
   if(body.length>REGISTRY_BYTES)throw Error('Seed registry exceeds limit');
@@ -49,16 +59,19 @@ function eligibleChat(chat:ChatSession):boolean {
 }
 function publicSeed(s:Seed,now:number){
   const state=s.retired_at?'retired':s.inflight.length||s.operations.length?'working':!s.redeemed_at?'preparing':now-s.last_seen>SEED_SUSPECT_MS?'offline':s.chat_id?'assigned':s.ready?'ready':'preparing';
-  return {id:s.id,account:s.account,repo_id:s.repo_id,branch:s.branch,metadata:s.metadata??{},created_at:s.created_at,last_seen:s.last_seen,status:state,reason:s.reason,archived:s.archived,retired_at:s.retired_at,host_task_id:s.host_task_id,chat_id:s.chat_id,generation:s.generation,unresolved_operations:s.inflight.length+s.operations.length};
+  return {id:s.id,source:sourceOf(s),prefix:s.prefix??'',manual:s.manual===true,account:s.account,repo_id:s.repo_id,branch:s.branch,metadata:s.metadata??{},created_at:s.created_at,last_seen:s.last_seen,status:state,reason:s.reason,archived:s.archived,retired_at:s.retired_at,host_task_id:s.host_task_id,chat_id:s.chat_id,generation:s.generation,unresolved_operations:s.inflight.length+s.operations.length};
 }
 function inventory(data:Library,args:Record<string,unknown>,now:number){
+  const groups=new Map<string,{source:string;prefix:string;total:number;ready:number}>();
+  for(const seed of data.seeds.filter(s=>!s.retired_at)){const source=sourceOf(seed),prefix=seed.prefix??'',key=JSON.stringify([source,prefix]),g=groups.get(key)??{source,prefix,total:0,ready:0};g.total++;if(publicSeed(seed,now).status==='ready')g.ready++;groups.set(key,g);}
+  const selection=parseSeedFilter({source:args.source,keyword:args.keyword});
   const all=data.seeds.map(s=>publicSeed(s,now)),counts:Record<string,number>={},accounts=[...new Set(all.map(s=>s.account))].sort();
   for(const s of all)counts[s.status]=(counts[s.status]??0)+1;
   const search=typeof args.search==='string'?args.search.trim().toLowerCase():'';
-  const filtered=all.filter(s=>(args.include_archived!==false||!s.archived)&&(!args.account||s.account===args.account)&&(!args.status||s.status===args.status)&&(!search||[s.id,s.account,s.repo_id,s.branch,s.host_task_id,...Object.values(s.metadata)].some(v=>v.toLowerCase().includes(search))));
+  const filtered=all.filter(s=>matches(s as unknown as Seed,selection)&&(args.include_archived!==false||!s.archived)&&(!args.account||s.account===args.account)&&(!args.status||s.status===args.status)&&(!search||[s.id,s.account,s.source,s.prefix,s.repo_id,s.branch,s.host_task_id,...Object.values(s.metadata)].some(v=>v.toLowerCase().includes(search))));
   const limit=Number.isInteger(args.limit)?Math.max(1,Math.min(200,Number(args.limit))):all.length;
   const offset=Number.isInteger(args.offset)?Math.max(0,Number(args.offset)):0;
-  return {enabled:data.enabled,seeds:filtered.slice(offset,offset+limit),retired_count:counts.retired??0,total:all.length,filtered_total:filtered.length,offset,limit,counts,accounts,pairing_enabled:!!data.pairing_hash,capacity:SEED_LIBRARY_LIMIT};
+  return {groups:[...groups.values()],sources:[...new Set(all.map(s=>s.source))].sort(),enabled:data.enabled,seeds:filtered.slice(offset,offset+limit),retired_count:counts.retired??0,total:all.length,filtered_total:filtered.length,offset,limit,counts,accounts,pairing_enabled:!!data.pairing_hash,capacity:SEED_LIBRARY_LIMIT};
 }
 // Called by chatUi while it already owns the folder lock.
 export function seedUi(store:SeedStore,args:Record<string,unknown>):Record<string,unknown> {
@@ -69,10 +82,11 @@ export function seedUi(store:SeedStore,args:Record<string,unknown>):Record<strin
     saveSeeds(store,data);
   }
   else if(args.action==='seed_settings') {if(typeof args.enabled!=='boolean')throw Error('enabled must be boolean');data.enabled=args.enabled;saveSeeds(store,data);}
-  else if(args.action==='seed_batch') {
-    const count=Number(args.count);if(!Number.isInteger(count)||count<1||count>50||data.seeds.length+count>SEED_LIBRARY_LIMIT)throw Error('Batch must contain 1–50 seeds (library limit 10000)');
-    const account=label(args.account),repo_id=label(args.repo_id),branch=label(args.branch),batch=[];
-    const mismatched=data.seeds.filter(s=>s.repo_id!==repo_id||s.branch!==branch);
+  else if(args.action==='seed_batch'||args.action==='seed_manual') {
+    const manual=args.action==='seed_manual',source=optionalLabel(args.source)|| (manual?'custom':'coderabbit'),prefix=optionalLabel(args.prefix);
+    const count=manual?1:Number(args.count);if(!Number.isInteger(count)||count<1||count>50||data.seeds.length+count>SEED_LIBRARY_LIMIT)throw Error('Batch must contain 1–50 seeds (library limit 10000)');
+    const account=label(args.account),repo_id=manual?'':label(args.repo_id),branch=manual?'':label(args.branch),batch=[];
+    const mismatched=data.seeds.filter(s=>!manual&&!s.manual&&(s.repo_id!==repo_id||s.branch!==branch));
     if(mismatched.length){
       if(mismatched.some(s=>s.redeemed_at||s.host_task_id||s.chat_id||s.inflight.length||s.operations.length))throw Error('Connected seeds bind this folder to another repository or branch; use a separate project folder');
       const pending=mismatched.filter(s=>!s.retired_at);
@@ -83,10 +97,13 @@ export function seedUi(store:SeedStore,args:Record<string,unknown>):Record<strin
       const id=randomUUID(),provision_key=String(args._provision_key??'');
       const ticket=provision_key?hash(String(args._provision_token)+'\0'+provision_key+'\0'+id):randomBytes(32).toString('hex');
       const metadata:Record<string,string>={};for(const key of ['account_id','provider_user_id','repo_name','organization_id','workspace_id'])if((args.metadata as Record<string,unknown>|undefined)?.[key])metadata[key]=label((args.metadata as Record<string,unknown>)[key]);
-      const seed:Seed={id,provision_key,metadata,account,repo_id,branch,created_at:now,enrollment_hash:hash(ticket),access_hash:'',enrollment_until:now+3600_000,redeemed_at:0,access_until:0,last_seen:0,ready:false,retired_at:0,reason:'',archived:false,host_task_id:'',chat_id:'',attachment_id:'',generation:0,inflight:[],operations:[]};
-      data.seeds.push(seed);batch.push({seed_id:seed.id,ticket,repo_id,branch,account,expires_at:seed.enrollment_until});
+      const seed:Seed={id,source:source.toLowerCase(),prefix,manual,provision_key,metadata,account,repo_id,branch,created_at:now,enrollment_hash:hash(ticket),access_hash:'',enrollment_until:now+3600_000,redeemed_at:0,access_until:0,last_seen:0,ready:false,retired_at:0,reason:'',archived:false,host_task_id:'',chat_id:'',attachment_id:'',generation:0,inflight:[],operations:[]};
+      data.seeds.push(seed);batch.push({seed_id:seed.id,ticket,source:seed.source,prefix,manual,repo_id,branch,account,expires_at:seed.enrollment_until});
     }
     saveSeeds(store,data);return {batch};
+  } else if(args.action==='seed_label') {
+    const seed=data.seeds.find(s=>s.id===uid(args.seed_id));if(!seed)throw Error('Seed not found');
+    seed.source=optionalLabel(args.source).toLowerCase()||sourceOf(seed);seed.prefix=optionalLabel(args.prefix);saveSeeds(store,data);seedInvalidate(store);
   } else if(args.action==='seed_retire') {
     const seed=data.seeds.find(s=>s.id===uid(args.seed_id));if(!seed)throw Error('Seed not found');
     if(seed.inflight.length||seed.operations.length)throw Error('Seed has unresolved operations; finish or inspect them before retirement');
@@ -110,10 +127,10 @@ export function seedProvision(store:SeedStore,token:string,args:Record<string,un
     if(args.action!=='batch')throw Error('Pairing only supports status and batch');
     const request=uid(args.request_id),key=hash(token+'\0'+request),existing=data.seeds.filter(s=>s.provision_key===key);
     if(existing.length){
-      if(existing.length!==args.count||existing.some(s=>s.account!==args.account||s.repo_id!==args.repo_id||s.branch!==args.branch||s.retired_at||s.enrollment_until<=Date.now()))throw Error('Provision request changed or expired; use a new request ID');
-      return {batch:existing.map(s=>({seed_id:s.id,ticket:hash(token+'\0'+key+'\0'+s.id),repo_id:s.repo_id,branch:s.branch,account:s.account,expires_at:s.enrollment_until}))};
+      if(existing.length!==args.count||existing.some(s=>s.account!==args.account||s.repo_id!==args.repo_id||s.branch!==args.branch||(s.prefix??'')!==optionalLabel(args.prefix)||s.retired_at||s.enrollment_until<=Date.now()))throw Error('Provision request changed or expired; use a new request ID');
+      return {batch:existing.map(s=>({seed_id:s.id,ticket:hash(token+'\0'+key+'\0'+s.id),source:sourceOf(s),prefix:s.prefix??'',manual:s.manual===true,repo_id:s.repo_id,branch:s.branch,account:s.account,expires_at:s.enrollment_until}))};
     }
-    return seedUi(store,{action:'seed_batch',account:args.account,repo_id:args.repo_id,branch:args.branch,count:args.count,metadata:args.metadata,replace_unconnected:args.replace_unconnected===true,_provision_key:key,_provision_token:token});
+    return seedUi(store,{action:'seed_batch',source:'coderabbit',prefix:args.prefix,account:args.account,repo_id:args.repo_id,branch:args.branch,count:args.count,metadata:args.metadata,replace_unconnected:args.replace_unconnected===true,_provision_key:key,_provision_token:token});
   });
 }
 export function seedInitialize(store:SeedStore,seedId:string,ticket:string,now=Date.now()):string {
@@ -144,7 +161,7 @@ export function seedPoll(store:SeedStore,id:string,token:string,now=Date.now()):
   return store.locked(()=>{
     const data=readSeeds(store),s=authorized(data,id,token,now),wasReady=s.ready;
     let dirty=!s.ready;if(now-s.last_seen>=60000){s.last_seen=now;dirty=true;}s.ready=true;
-    const key=store.path(FILE),lastScan=scans.get(key);
+    const key=store.path(FILE)+'\0'+JSON.stringify([sourceOf(s),(s.prefix??'').toLowerCase()]),lastScan=scans.get(key);
     if(!s.chat_id&&wasReady&&lastScan!==undefined&&now>=lastScan&&now-lastScan<1000){
       if(dirty)saveSeeds(store,data);
       return {status:'idle',instruction:'Make one new independent seed_wait(timeout_ms:25000). Idle is normal. Respect host execution limits.'};
@@ -156,7 +173,7 @@ export function seedPoll(store:SeedStore,id:string,token:string,now=Date.now()):
     if(s.chat_id){const chat=chats.find(c=>c.id===s.chat_id);if(!chat||chat.closed||!chat.seed_auto||chat.seed_owner!==s.id||chat.attachment_id!==s.attachment_id){retirement(s,'conversation_detached',now);saveSeeds(store,data);return {status:'retired'};}}
     if(data.enabled&&!s.chat_id){
       for(const chat of chats.sort((a,b)=>a.created_at-b.created_at)){
-        if(!eligibleChat(chat))continue;
+        if(!eligibleChat(chat)||!matches(s,parseSeedFilter(chat.seed_filter)))continue;
         const old=chat.seed_owner?byId.get(chat.seed_owner):undefined;
         if(old){
           if(old.inflight.length||old.operations.length)continue;

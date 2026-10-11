@@ -138,3 +138,39 @@ test('paired HTTP endpoint is exact, folder scoped, no-store and cannot authenti
  assert.equal(tunnelPathAllowed(f.config,new URL(endpoint).pathname),true);assert.equal(tunnelPathAllowed(f.config,new URL(endpoint).pathname+'/extra'),false);
  assert.equal((await fetch(endpoint)).status,405);
 });
+
+test('source and prefix route initial and replacement owners; another warm pool cannot suppress matching scans',t=>{
+ const {root,store,batch,tokens}=fixture(t,3);
+ for(let i=0;i<3;i++)chatUi(root,{action:'seed_label',seed_id:batch[i].seed_id,source:'coderabbit',prefix:i===1?'GPT-6-sol':'GPT-6-astra'});
+ for(let i=0;i<3;i++)assert.equal(seedPoll(store,batch[i].seed_id,tokens[i]).status,'idle');
+ const chat=chatUi(root,{action:'create',seed_filter:{source:'coderabbit',keyword:'ASTRA'}}).session;
+ assert.deepEqual(chat.seed_filter,{source:'coderabbit',keyword:'ASTRA'});
+ assert.equal(seedPoll(store,batch[1].seed_id,tokens[1]).status,'idle');
+ const first=seedPoll(store,batch[0].seed_id,tokens[0]);assert.equal(first.chat_id,chat.id);
+ const future=Date.now()+SEED_REPLACE_MS+5;
+ assert.equal(seedPoll(store,batch[1].seed_id,tokens[1],future).status,'idle');
+ const second=seedPoll(store,batch[2].seed_id,tokens[2],future);assert.equal(second.chat_id,chat.id);assert.equal(second.generation,2);
+ assert.deepEqual(chatUi(root,{action:'read',chat_id:chat.id}).session.seed_filter,chat.seed_filter);
+ assert.throws(()=>seedBegin(store,batch[0].seed_id,tokens[0],'read_file',{},'old'),/retired/);
+ const unavailable=chatUi(root,{action:'create',seed_filter:{source:'arena',keyword:'grok'}}).session;
+ assert.equal(seedPoll(store,batch[1].seed_id,tokens[1]).status,'idle');assert.equal(chatUi(root,{action:'read',chat_id:unavailable.id}).session.seed_owner,undefined);
+ assert.equal(chatUi(root,{action:'create',seed_manual:true}).session.seed_auto,undefined);
+});
+test('manual enrollment has no host repo requirement and classifies independently without weakening browser repo binding',t=>{
+ const {root,store}=fixture(t,1);
+ const manual=chatUi(root,{action:'seed_manual',source:'Arena',prefix:'Opus',account:'personal'}).batch[0];assert.equal(manual.repo_id,'');assert.equal(manual.branch,'');assert.equal(manual.source,'arena');
+ const access=seedInitialize(store,manual.seed_id,manual.ticket);
+ const chat=chatUi(root,{action:'create',seed_filter:{source:'arena',keyword:'opus'}}).session;
+ assert.equal(seedPoll(store,manual.seed_id,access).chat_id,chat.id);
+ assert.doesNotThrow(()=>chatUi(root,{action:'seed_batch',count:1,account:'test',repo_id:'repo-id',branch:'main'}));
+ assert.throws(()=>chatUi(root,{action:'seed_batch',count:1,account:'test',repo_id:'other',branch:'main',replace_unconnected:true}),/Connected/);
+ const list=chatUi(root,{action:'seed_list',source:'arena',keyword:'OPUS'});assert.equal(list.seeds.length,1);assert.equal(list.groups.find(g=>g.source==='arena').prefix,'Opus');
+ assert.ok(!JSON.stringify(list).includes(manual.ticket));
+});
+test('paired prefix is stable across retries and existing seeds can be classified',t=>{
+ const {root,store,batch}=fixture(t,1),token='e'.repeat(64);chatUi(root,{action:'seed_pairing',token});
+ const args={action:'batch',request_id:'classified',count:1,account:'test',repo_id:'repo-id',branch:'main',prefix:'GPT-6-astra'};
+ const first=seedProvision(store,token,args);assert.deepEqual(seedProvision(store,token,args),first);assert.equal(first.batch[0].prefix,'GPT-6-astra');assert.equal(first.batch[0].source,'coderabbit');
+ assert.throws(()=>seedProvision(store,token,{...args,prefix:'grok'}),/changed/);
+ chatUi(root,{action:'seed_label',seed_id:batch[0].seed_id,source:'coderabbit',prefix:'astra-old'});assert.equal(chatUi(root,{action:'seed_list',keyword:'astra'}).seeds.length,2);
+});

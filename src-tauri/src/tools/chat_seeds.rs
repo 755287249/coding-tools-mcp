@@ -3,7 +3,8 @@ use super::*;
 use serde::{Deserialize, Serialize};
 static EXCHANGES: OnceLock<Mutex<std::collections::HashMap<String, (String, u64)>>> =
     OnceLock::new();
-static SCANS: OnceLock<Mutex<std::collections::HashMap<PathBuf, u64>>> = OnceLock::new();
+static SCANS: OnceLock<Mutex<std::collections::HashMap<(PathBuf, String, String), u64>>> =
+    OnceLock::new();
 const FILE: &str = "docs/chat-sessions/seed-library.seeds.json";
 pub const LIBRARY_LIMIT: usize = 10000;
 const REGISTRY_BYTES: usize = 32 * 1024 * 1024;
@@ -11,6 +12,12 @@ pub const SUSPECT_MS: u64 = 600_000;
 pub const REPLACE_MS: u64 = 720_000;
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Seed {
+    #[serde(default = "default_source")]
+    pub source: String,
+    #[serde(default)]
+    pub prefix: String,
+    #[serde(default)]
+    pub manual: bool,
     #[serde(default)]
     pub provision_key: String,
     #[serde(default)]
@@ -44,6 +51,36 @@ struct Library {
     version: u8,
     enabled: bool,
     seeds: Vec<Seed>,
+}
+fn default_source() -> String {
+    "coderabbit".into()
+}
+fn optional_label(value: &Value) -> Result<String> {
+    if value.is_null() || value == "" {
+        return Ok(String::new());
+    }
+    let value = text(value, 200)?;
+    if value.contains(['\r', '\n', '\0']) {
+        return Err(err("Invalid seed label"));
+    }
+    Ok(value)
+}
+pub fn parse_filter(value: &Value) -> Result<Value> {
+    if value.is_null() {
+        return Ok(json!({"source":"","keyword":""}));
+    }
+    if !value.is_object() {
+        return Err(err("Invalid seed filter"));
+    }
+    Ok(
+        json!({"source":optional_label(&value["source"])?.to_lowercase(),"keyword":optional_label(&value["keyword"])?}),
+    )
+}
+fn matches(seed: &Seed, filter: &Value) -> bool {
+    let source = filter["source"].as_str().unwrap_or("");
+    let keyword = filter["keyword"].as_str().unwrap_or("");
+    (source.is_empty() || seed.source == source)
+        && (keyword.is_empty() || seed.prefix.to_lowercase().contains(&keyword.to_lowercase()))
 }
 fn read(root: &Path) -> Result<Library> {
     let target = safe(root, FILE)?;
@@ -80,7 +117,7 @@ fn write(root: &Path, data: &Library) -> Result<()> {
 }
 pub fn invalidate(root: &Path) {
     if let Ok(mut scans) = SCANS.get_or_init(Default::default).lock() {
-        scans.remove(root);
+        scans.retain(|(folder, _, _), _| folder != root);
     }
 }
 pub fn enabled(root: &Path) -> Result<bool> {
@@ -128,9 +165,24 @@ fn public(s: &Seed, time: u64) -> Value {
     } else {
         "preparing"
     };
-    json!({"id":s.id,"account":s.account,"repo_id":s.repo_id,"branch":s.branch,"metadata":s.metadata,"created_at":s.created_at,"last_seen":s.last_seen,"status":status,"reason":s.reason,"archived":s.archived,"retired_at":s.retired_at,"host_task_id":s.host_task_id,"chat_id":s.chat_id,"generation":s.generation,"unresolved_operations":s.inflight.len()+s.operations.len()})
+    json!({"id":s.id,"source":s.source,"prefix":s.prefix,"manual":s.manual,"account":s.account,"repo_id":s.repo_id,"branch":s.branch,"metadata":s.metadata,"created_at":s.created_at,"last_seen":s.last_seen,"status":status,"reason":s.reason,"archived":s.archived,"retired_at":s.retired_at,"host_task_id":s.host_task_id,"chat_id":s.chat_id,"generation":s.generation,"unresolved_operations":s.inflight.len()+s.operations.len()})
 }
 fn inventory(data: &Library, args: &Value, time: u64) -> Value {
+    let mut grouped = std::collections::BTreeMap::<(String, String), (usize, usize)>::new();
+    for seed in data.seeds.iter().filter(|s| s.retired_at == 0) {
+        let count = grouped
+            .entry((seed.source.clone(), seed.prefix.clone()))
+            .or_default();
+        count.0 += 1;
+        if public(seed, time)["status"] == "ready" {
+            count.1 += 1;
+        }
+    }
+    let groups:Vec<_>=grouped.into_iter().map(|((source,prefix),(total,ready))|json!({"source":source,"prefix":prefix,"total":total,"ready":ready})).collect();
+    let sources: std::collections::BTreeSet<_> =
+        data.seeds.iter().map(|s| s.source.clone()).collect();
+    let source = args["source"].as_str().unwrap_or("").trim().to_lowercase();
+    let keyword = args["keyword"].as_str().unwrap_or("").trim().to_lowercase();
     let all: Vec<_> = data.seeds.iter().map(|s| public(s, time)).collect();
     let mut counts = std::collections::BTreeMap::<String, usize>::new();
     let mut accounts = std::collections::BTreeSet::new();
@@ -145,6 +197,13 @@ fn inventory(data: &Library, args: &Value, time: u64) -> Value {
         .iter()
         .filter(|s| {
             (args["include_archived"] != false || s["archived"] != true)
+                && (source.is_empty() || s["source"] == source)
+                && (keyword.is_empty()
+                    || s["prefix"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_lowercase()
+                        .contains(&keyword))
                 && args["account"]
                     .as_str()
                     .filter(|v| !v.is_empty())
@@ -154,9 +213,17 @@ fn inventory(data: &Library, args: &Value, time: u64) -> Value {
                     .filter(|v| !v.is_empty())
                     .is_none_or(|v| s["status"] == v)
                 && (search.is_empty()
-                    || ["id", "account", "repo_id", "branch", "host_task_id"]
-                        .iter()
-                        .any(|k| s[k].as_str().unwrap_or("").to_lowercase().contains(&search))
+                    || [
+                        "id",
+                        "account",
+                        "source",
+                        "prefix",
+                        "repo_id",
+                        "branch",
+                        "host_task_id",
+                    ]
+                    .iter()
+                    .any(|k| s[k].as_str().unwrap_or("").to_lowercase().contains(&search))
                     || s["metadata"].as_object().is_some_and(|m| {
                         m.values()
                             .any(|v| v.as_str().unwrap_or("").to_lowercase().contains(&search))
@@ -168,7 +235,7 @@ fn inventory(data: &Library, args: &Value, time: u64) -> Value {
         .as_u64()
         .map(|v| v.clamp(1, 200) as usize)
         .unwrap_or(all.len());
-    json!({"enabled":data.enabled,"seeds":filtered.iter().skip(offset).take(limit).collect::<Vec<_>>(),"retired_count":counts.get("retired").copied().unwrap_or(0),"total":all.len(),"filtered_total":filtered.len(),"offset":offset,"limit":limit,"counts":counts,"accounts":accounts,"pairing_enabled":!data.pairing_hash.is_empty(),"capacity":LIBRARY_LIMIT})
+    json!({"groups":groups,"sources":sources,"enabled":data.enabled,"seeds":filtered.iter().skip(offset).take(limit).collect::<Vec<_>>(),"retired_count":counts.get("retired").copied().unwrap_or(0),"total":all.len(),"filtered_total":filtered.len(),"offset":offset,"limit":limit,"counts":counts,"accounts":accounts,"pairing_enabled":!data.pairing_hash.is_empty(),"capacity":LIBRARY_LIMIT})
 }
 /// Caller owns the chat lock; no nested locking.
 pub fn ui(root: &Path, args: &Value) -> Result<Value> {
@@ -197,8 +264,25 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
                 .ok_or_else(|| err("enabled must be boolean"))?;
             write(root, &data)?;
         }
-        "seed_batch" => {
-            let count = args["count"]
+        "seed_batch" | "seed_manual" => {
+            let manual = args["action"] == "seed_manual";
+            let source = optional_label(&args["source"])?;
+            let source = if source.is_empty() {
+                if manual {
+                    "custom".into()
+                } else {
+                    default_source()
+                }
+            } else {
+                source.to_lowercase()
+            };
+            let prefix = optional_label(&args["prefix"])?;
+            let count_value = if manual {
+                json!(1)
+            } else {
+                args["count"].clone()
+            };
+            let count = count_value
                 .as_u64()
                 .filter(|c| *c >= 1 && *c <= 50)
                 .ok_or_else(|| err("Batch must contain 1–50 seeds"))?;
@@ -206,13 +290,21 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
                 return Err(err("Seed library limit 10000"));
             }
             let account = text(&args["account"], 200)?;
-            let repo_id = text(&args["repo_id"], 200)?;
-            let branch = text(&args["branch"], 200)?;
+            let repo_id = if manual {
+                String::new()
+            } else {
+                text(&args["repo_id"], 200)?
+            };
+            let branch = if manual {
+                String::new()
+            } else {
+                text(&args["branch"], 200)?
+            };
             let mut batch = vec![];
             let mismatched: Vec<_> = data
                 .seeds
                 .iter()
-                .filter(|s| s.repo_id != repo_id || s.branch != branch)
+                .filter(|s| !manual && !s.manual && (s.repo_id != repo_id || s.branch != branch))
                 .collect();
             if mismatched.iter().any(|s| {
                 s.redeemed_at > 0
@@ -229,7 +321,11 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
                 ));
             }
             for s in &mut data.seeds {
-                if (s.repo_id != repo_id || s.branch != branch) && s.retired_at == 0 {
+                if !manual
+                    && !s.manual
+                    && (s.repo_id != repo_id || s.branch != branch)
+                    && s.retired_at == 0
+                {
                     retire(s, "configuration_corrected", time);
                     s.archived = true;
                 }
@@ -267,6 +363,9 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
                     }
                 }
                 let s = Seed {
+                    source: source.clone(),
+                    prefix: prefix.clone(),
+                    manual,
                     id: sid,
                     provision_key,
                     metadata,
@@ -291,11 +390,26 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
                     inflight: vec![],
                     operations: vec![],
                 };
-                batch.push(json!({"seed_id":s.id,"ticket":ticket,"repo_id":repo_id,"branch":branch,"account":account,"expires_at":s.enrollment_until}));
+                batch.push(json!({"seed_id":s.id,"ticket":ticket,"source":source,"prefix":prefix,"manual":manual,"repo_id":repo_id,"branch":branch,"account":account,"expires_at":s.enrollment_until}));
                 data.seeds.push(s);
             }
             write(root, &data)?;
             return Ok(json!({"batch":batch}));
+        }
+        "seed_label" => {
+            let sid = id(&args["seed_id"])?;
+            let seed = data
+                .seeds
+                .iter_mut()
+                .find(|s| s.id == sid)
+                .ok_or_else(|| err("Seed not found"))?;
+            let source = optional_label(&args["source"])?;
+            if !source.is_empty() {
+                seed.source = source.to_lowercase();
+            }
+            seed.prefix = optional_label(&args["prefix"])?;
+            write(root, &data)?;
+            invalidate(root);
         }
         "seed_retire" => {
             let sid = id(&args["seed_id"])?;
@@ -375,6 +489,7 @@ pub fn provision(root: &Path, token: &str, args: &Value) -> Result<Value> {
                 args["account"] != s.account
                     || args["repo_id"] != s.repo_id
                     || args["branch"] != s.branch
+                    || args["prefix"].as_str().unwrap_or("").trim() != s.prefix
                     || s.retired_at > 0
                     || s.enrollment_until <= now()
             })
@@ -384,12 +499,12 @@ pub fn provision(root: &Path, token: &str, args: &Value) -> Result<Value> {
             ));
         }
         return Ok(
-            json!({"batch":existing.iter().map(|s|json!({"seed_id":s.id,"ticket":digest(format!("{token}\0{key}\0{}",s.id).as_bytes()),"repo_id":s.repo_id,"branch":s.branch,"account":s.account,"expires_at":s.enrollment_until})).collect::<Vec<_>>()}),
+            json!({"batch":existing.iter().map(|s|json!({"seed_id":s.id,"ticket":digest(format!("{token}\0{key}\0{}",s.id).as_bytes()),"source":s.source,"prefix":s.prefix,"manual":s.manual,"repo_id":s.repo_id,"branch":s.branch,"account":s.account,"expires_at":s.enrollment_until})).collect::<Vec<_>>()}),
         );
     }
     ui(
         root,
-        &json!({"action":"seed_batch","account":args["account"],"repo_id":args["repo_id"],"branch":args["branch"],"count":args["count"],"metadata":args["metadata"],"replace_unconnected":args["replace_unconnected"]==true,"_provision_key":key,"_provision_token":token}),
+        &json!({"action":"seed_batch","source":"coderabbit","prefix":args["prefix"],"account":args["account"],"repo_id":args["repo_id"],"branch":args["branch"],"count":args["count"],"metadata":args["metadata"],"replace_unconnected":args["replace_unconnected"]==true,"_provision_key":key,"_provision_token":token}),
     )
 }
 pub fn initialize(root: &Path, sid: &str, ticket: &str) -> Result<String> {
@@ -492,13 +607,18 @@ fn poll_at(root: &Path, sid: &str, token: &str, time: u64) -> Result<Value> {
     }
     data.seeds[index].ready = true;
     if data.seeds[index].chat_id.is_empty() {
+        let scan_key = (
+            root.to_path_buf(),
+            data.seeds[index].source.clone(),
+            data.seeds[index].prefix.to_lowercase(),
+        );
         let mut scans = SCANS
             .get_or_init(Default::default)
             .lock()
             .map_err(|_| err("Seed scan lock unavailable"))?;
         if was_ready
             && scans
-                .get(root)
+                .get(&scan_key)
                 .is_some_and(|last| time >= *last && time - *last < 1000)
         {
             if dirty {
@@ -511,7 +631,7 @@ fn poll_at(root: &Path, sid: &str, token: &str, time: u64) -> Result<Value> {
         if scans.len() > 1024 {
             scans.retain(|_, last| time.saturating_sub(*last) < 60000);
         }
-        scans.insert(root.to_path_buf(), time);
+        scans.insert(scan_key, time);
     }
     let mut chats = vec![];
     let own_chat = data.seeds[index].chat_id.clone();
@@ -584,7 +704,9 @@ fn poll_at(root: &Path, sid: &str, token: &str, time: u64) -> Result<Value> {
     if data.enabled && data.seeds[index].chat_id.is_empty() {
         chats.sort_by_key(|chat| chat["created_at"].as_u64().unwrap_or(0));
         for mut chat in chats {
-            if !eligible(&chat) {
+            if !eligible(&chat)
+                || !matches(&data.seeds[index], &parse_filter(&chat["seed_filter"])?)
+            {
                 continue;
             }
             let old = chat["seed_owner"]
@@ -624,7 +746,7 @@ fn poll_at(root: &Path, sid: &str, token: &str, time: u64) -> Result<Value> {
             s.generation = generation;
             dirty = true;
             if let Ok(mut scans) = SCANS.get_or_init(Default::default).lock() {
-                scans.remove(root);
+                scans.retain(|(folder, _, _), _| folder != root);
             }
             break;
         }
@@ -757,6 +879,128 @@ mod tests {
             })
             .collect();
         (root, batch, tokens)
+    }
+    #[test]
+    fn classified_pools_keep_initial_and_replacement_routing() {
+        let (root, batch, tokens) = fixture();
+        for i in 0..3 {
+            ui(root.path(),&json!({"action":"seed_label","seed_id":batch[i]["seed_id"],"source":"coderabbit","prefix":if i==1{"GPT-6-sol"}else{"GPT-6-astra"}})).unwrap();
+            assert_eq!(
+                poll(
+                    root.path(),
+                    batch[i]["seed_id"].as_str().unwrap(),
+                    &tokens[i]
+                )
+                .unwrap()["status"],
+                "idle"
+            );
+        }
+        let chat = super::super::ui(
+            root.path(),
+            &json!({"action":"create","seed_filter":{"source":"coderabbit","keyword":"ASTRA"}}),
+        )
+        .unwrap()["session"]
+            .clone();
+        assert_eq!(
+            poll(
+                root.path(),
+                batch[1]["seed_id"].as_str().unwrap(),
+                &tokens[1]
+            )
+            .unwrap()["status"],
+            "idle"
+        );
+        assert_eq!(
+            poll(
+                root.path(),
+                batch[0]["seed_id"].as_str().unwrap(),
+                &tokens[0]
+            )
+            .unwrap()["chat_id"],
+            chat["id"]
+        );
+        let future = now() + REPLACE_MS + 5;
+        assert_eq!(
+            poll_at(
+                root.path(),
+                batch[1]["seed_id"].as_str().unwrap(),
+                &tokens[1],
+                future
+            )
+            .unwrap()["status"],
+            "idle"
+        );
+        let replacement = poll_at(
+            root.path(),
+            batch[2]["seed_id"].as_str().unwrap(),
+            &tokens[2],
+            future,
+        )
+        .unwrap();
+        assert_eq!(replacement["chat_id"], chat["id"]);
+        assert_eq!(replacement["generation"], 2);
+        assert_eq!(
+            super::super::ui(root.path(), &json!({"action":"read","chat_id":chat["id"]})).unwrap()
+                ["session"]["seed_filter"],
+            chat["seed_filter"]
+        );
+        assert!(
+            super::super::ui(root.path(), &json!({"action":"create","seed_manual":true})).unwrap()
+                ["session"]["seed_auto"]
+                .is_null()
+        );
+    }
+    #[test]
+    fn manual_enrollment_is_independent_of_browser_repository_and_prefix_retry_is_stable() {
+        let (root, _, _) = fixture();
+        let manual = ui(
+            root.path(),
+            &json!({"action":"seed_manual","account":"personal","source":"Arena","prefix":"Opus"}),
+        )
+        .unwrap()["batch"][0]
+            .clone();
+        assert_eq!(manual["repo_id"], "");
+        assert_eq!(manual["source"], "arena");
+        let token = initialize(
+            root.path(),
+            manual["seed_id"].as_str().unwrap(),
+            manual["ticket"].as_str().unwrap(),
+        )
+        .unwrap();
+        let chat = super::super::ui(
+            root.path(),
+            &json!({"action":"create","seed_filter":{"source":"arena","keyword":"opus"}}),
+        )
+        .unwrap()["session"]
+            .clone();
+        assert_eq!(
+            poll(root.path(), manual["seed_id"].as_str().unwrap(), &token).unwrap()["chat_id"],
+            chat["id"]
+        );
+        let library = ui(
+            root.path(),
+            &json!({"action":"seed_list","source":"arena","keyword":"OPUS"}),
+        )
+        .unwrap();
+        assert_eq!(library["seeds"].as_array().unwrap().len(), 1);
+        assert!(!library
+            .to_string()
+            .contains(manual["ticket"].as_str().unwrap()));
+        let paired = "f".repeat(64);
+        ui(
+            root.path(),
+            &json!({"action":"seed_pairing","token":paired}),
+        )
+        .unwrap();
+        let args = json!({"action":"batch","request_id":"classified","count":1,"account":"test","repo_id":"exact","branch":"main","prefix":"GPT-6-astra"});
+        let first = provision(root.path(), &paired, &args).unwrap();
+        assert_eq!(provision(root.path(), &paired, &args).unwrap(), first);
+        let mut other = args;
+        other["prefix"] = json!("grok");
+        assert!(provision(root.path(), &paired, &other).is_err());
+        other["repo_id"] = json!("wrong");
+        other["request_id"] = json!("other");
+        assert!(provision(root.path(), &paired, &other).is_err());
     }
     #[test]
     fn pairing_rotation_retry_and_large_inventory() {

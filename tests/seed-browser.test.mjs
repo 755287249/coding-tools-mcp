@@ -17,7 +17,7 @@ async function fixture(options={}){
    if(body.method==='seed/created'){if(options.registerFailure){options.registerFailure=false;args.ontimeout();return;}args.onload({status:200,responseText:JSON.stringify({result:{ok:true}})});return;}
    let result={workspace_folder_id:'folder',ok:true,total:0,capacity:10000};
    if(body.action==='batch'){
-    if(!batches.has(body.request_id))batches.set(body.request_id,Array.from({length:body.count},()=>({seed_id:'seed-'+(++counter),ticket,repo_id:body.repo_id,branch:body.branch,account:body.account,expires_at:Date.now()+3600000})));
+    if(!batches.has(body.request_id))batches.set(body.request_id,Array.from({length:body.count},()=>({seed_id:'seed-'+(++counter),ticket,prefix:body.prefix??'',source:'coderabbit',repo_id:body.repo_id,branch:body.branch,account:body.account,expires_at:Date.now()+3600000})));
     result.batch=batches.get(body.request_id);
     if(options.batchFailure){options.batchFailure=false;args.ontimeout();return;}
    }
@@ -59,4 +59,11 @@ test('failed host registration resumes registration without creating a second ta
  await f.el('#bind').onclick();assert.match(f.el('.log').textContent,/结束本轮/);
  // Existing connection remains valid when changing it was rejected.
  await f.el('#start').onclick();assert.equal(creations(f).length,1);assert.equal(f.bridges.filter(b=>b.body.method==='seed/created').length,2);assert.match(f.el('.log').textContent,/已创建并登记/);
+});
+
+test('browser snapshots a model prefix across batches, persists it, and includes it in host task titles',async()=>{
+ const f=await fixture();f.el('#prefix').value='GPT-6-astra';f.el('#count').value='11';await f.el('#start').onclick();
+ assert.equal(creations(f).length,11);assert.ok(f.bridges.filter(b=>b.body.action==='batch').every(b=>b.body.prefix==='GPT-6-astra'));
+ assert.ok(creations(f).every(r=>JSON.parse(r.init.body)['0'].title.startsWith('GPT-6-astra MCP Seed ')));
+ assert.equal(f.saved.get('ctmcp-seed-connection-v2').prefix,'GPT-6-astra');
 });
