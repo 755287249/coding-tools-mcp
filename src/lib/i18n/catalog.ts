@@ -1,4 +1,9 @@
 export const MESSAGES = {
+  "seeds.saved": ["Configuration is saved automatically for this project. The batch stays available when switching pages; copy it before restarting the app.", "設定會依專案自動儲存。切換頁面後仍可複製批次；重新啟動前請先複製。", "配置按项目自动保存。切换页面后仍可复制批次；重启客户端前请先复制。", "設定はプロジェクトごとに保存されます。画面を切り替えてもバッチは残ります。再起動前にコピーしてください。"],
+  "seeds.saveUnavailable": ["Storage is unavailable. Configuration and batch are retained only while this app stays open.", "無法持久儲存，目前設定與批次只保留到關閉應用程式。", "暂时无法持久保存，当前配置与批次仅保留到关闭应用。", "保存できません。設定とバッチはアプリを閉じるまで保持されます。"],
+  "seeds.correctConfirm": ["Correct this project's repository/branch and retire the old unconnected batches? Their tickets will stop working. Generate and copy the new batch afterward.", "修正此專案的倉庫／分支並退役尚未接入的舊批次？舊票據將失效，請複製新批次。", "修正此项目的仓库／分支并退役尚未接入的旧批次？旧票据将失效，请复制新生成的批次。", "リポジトリ／ブランチを修正し、未接続の旧バッチを無効にしますか？新しいバッチをコピーしてください。"],
+  "seeds.bound": ["This project has connected or submitted seeds for another repository/branch. Use a separate project folder.", "此專案已有其他倉庫／分支的已接入或已建立任務種子，請使用另一個專案目錄。", "此项目已有其他仓库／分支的已接入或已创建任务的种子，请使用另一个项目目录。", "別のリポジトリ／ブランチに接続済みです。別のプロジェクトを使用してください。"],
+  "seeds.reason.configuration_corrected": ["Retired after correcting configuration", "修正設定後退役", "修正配置后退役", "設定修正により無効化"],
   "shell.seeds": ["Seed library", "種子庫", "种子库", "シードライブラリ"],
   "seeds.ready": ["Ready", "可分配", "可分配", "待機中"],
   "seeds.assigned": ["Assigned", "已分配", "已分配", "割当済み"],

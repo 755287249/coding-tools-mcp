@@ -53,7 +53,13 @@ export function seedUi(store:SeedStore,args:Record<string,unknown>):Record<strin
   else if(args.action==='seed_batch') {
     const count=Number(args.count);if(!Number.isInteger(count)||count<1||count>50||data.seeds.length+count>1000)throw Error('Batch must contain 1–50 seeds (library limit 1000)');
     const account=label(args.account),repo_id=label(args.repo_id),branch=label(args.branch),batch=[];
-    if(data.seeds.some(s=>s.repo_id!==repo_id||s.branch!==branch))throw Error('This folder is bound to another repository or branch; use a separate project folder');
+    const mismatched=data.seeds.filter(s=>s.repo_id!==repo_id||s.branch!==branch);
+    if(mismatched.length){
+      if(mismatched.some(s=>s.redeemed_at||s.host_task_id||s.chat_id||s.inflight.length||s.operations.length))throw Error('Connected seeds bind this folder to another repository or branch; use a separate project folder');
+      const pending=mismatched.filter(s=>!s.retired_at);
+      if(pending.length&&args.replace_unconnected!==true)throw Error('Confirm replacing unconnected batches to correct the repository or branch');
+      for(const s of pending){retirement(s,'configuration_corrected',now);s.archived=true;}
+    }
     for(let i=0;i<count;i++){
       const ticket=randomUUID().replaceAll('-','')+randomUUID().replaceAll('-','');
       const seed:Seed={id:randomUUID(),account,repo_id,branch,created_at:now,enrollment_hash:hash(ticket),access_hash:'',enrollment_until:now+3600_000,redeemed_at:0,access_until:0,last_seen:0,ready:false,retired_at:0,reason:'',archived:false,host_task_id:'',chat_id:'',attachment_id:'',generation:0,inflight:[],operations:[]};

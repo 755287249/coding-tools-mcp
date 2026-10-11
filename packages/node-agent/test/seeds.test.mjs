@@ -4,7 +4,7 @@ import {mkdtempSync,rmSync,readFileSync,writeFileSync,symlinkSync} from 'node:fs
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {chatUi,chatTool,seedStore} from '../dist/chat/store.js';
-import {seedInitialize,seedAuthenticate,seedPoll,seedBegin,seedFinish,SEED_REPLACE_MS} from '../dist/chat/seeds.js';
+import {seedInitialize,seedCreated,seedAuthenticate,seedPoll,seedBegin,seedFinish,SEED_REPLACE_MS} from '../dist/chat/seeds.js';
 import {createMcpFixture} from './mcpTestHelpers.mjs';
 import {tunnelPathAllowed} from '../dist/tunnel.js';
 function fixture(t,count=3){const root=mkdtempSync(path.join(tmpdir(),'seeds-'));t.after(()=>rmSync(root,{recursive:true,force:true}));chatUi(root,{action:'seed_settings',enabled:true});const batch=chatUi(root,{action:'seed_batch',count,account:'test',repo_id:'repo-id',branch:'main'}).batch;const store=seedStore(root),tokens=batch.map(s=>seedInitialize(store,s.seed_id,s.ticket));return {root,batch,store,tokens};}
@@ -81,4 +81,26 @@ test('concurrent HTTP seed waits allocate one owner and reject a duplicate waite
  const waiting=wait(idle,1000);await new Promise(resolve=>setTimeout(resolve,100));
  assert.match((await wait(idle)).error.message,/already active/);
  assert.equal((await waiting).result.structuredContent.status,'idle');
+});
+
+// Configuration corrections only revoke unused enrollment tickets, never a live project binding.
+test('correcting unconnected batches requires confirmation, retires old tickets and retains history',t=>{
+ const root=mkdtempSync(path.join(tmpdir(),'seed-correction-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
+ const args={action:'seed_batch',count:1,account:'a',repo_id:'1232',branch:'main'};
+ const first=chatUi(root,args).batch[0],store=seedStore(root);
+ assert.throws(()=>chatUi(root,{...args,repo_id:'1412803600'}),/Confirm/);
+ const next=chatUi(root,{...args,repo_id:'1412803600',replace_unconnected:true}).batch[0];
+ assert.throws(()=>seedInitialize(store,first.seed_id,first.ticket),/invalid/);
+ assert.equal(chatUi(root,{action:'seed_list'}).retired_count,1);
+ assert.doesNotThrow(()=>chatUi(root,{...args,repo_id:'1412803600'}));
+ seedInitialize(store,next.seed_id,next.ticket);
+ chatUi(root,{action:'seed_retire',seed_id:next.seed_id});
+ assert.throws(()=>chatUi(root,{...args,repo_id:'other',replace_unconnected:true}),/Connected/);
+});
+test('a recorded host task prevents configuration correction even before initialization',t=>{
+ const root=mkdtempSync(path.join(tmpdir(),'seed-submitted-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
+ const args={action:'seed_batch',count:1,account:'a',repo_id:'repo',branch:'main'};
+ const first=chatUi(root,args).batch[0];seedCreated(seedStore(root),first.seed_id,first.ticket,'task-id');
+ assert.throws(()=>chatUi(root,{...args,branch:'different',replace_unconnected:true}),/Connected/);
+ assert.equal(chatUi(root,{action:'seed_list'}).retired_count,0);
 });

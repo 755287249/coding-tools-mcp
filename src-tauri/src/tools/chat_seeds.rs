@@ -138,12 +138,30 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
             let repo_id = text(&args["repo_id"], 200)?;
             let branch = text(&args["branch"], 200)?;
             let mut batch = vec![];
-            if data
+            let mismatched: Vec<_> = data
                 .seeds
                 .iter()
-                .any(|s| s.repo_id != repo_id || s.branch != branch)
-            {
-                return Err(err("This folder is bound to another repository or branch; use a separate project folder"));
+                .filter(|s| s.repo_id != repo_id || s.branch != branch)
+                .collect();
+            if mismatched.iter().any(|s| {
+                s.redeemed_at > 0
+                    || !s.host_task_id.is_empty()
+                    || !s.chat_id.is_empty()
+                    || !s.inflight.is_empty()
+                    || !s.operations.is_empty()
+            }) {
+                return Err(err("Connected seeds bind this folder to another repository or branch; use a separate project folder"));
+            }
+            if mismatched.iter().any(|s| s.retired_at == 0) && args["replace_unconnected"] != true {
+                return Err(err(
+                    "Confirm replacing unconnected batches to correct the repository or branch",
+                ));
+            }
+            for s in &mut data.seeds {
+                if (s.repo_id != repo_id || s.branch != branch) && s.retired_at == 0 {
+                    retire(s, "configuration_corrected", time);
+                    s.archived = true;
+                }
             }
             for _ in 0..count {
                 let ticket = format!(
@@ -540,6 +558,63 @@ mod tests {
             })
             .collect();
         (root, batch, tokens)
+    }
+    #[test]
+    fn correction_only_retires_unconnected_batches() {
+        let root = tempfile::tempdir().unwrap();
+        let original =
+            json!({"action":"seed_batch","count":1,"account":"a","repo_id":"1232","branch":"main"});
+        let first = super::super::ui(root.path(), &original).unwrap()["batch"][0].clone();
+        let mut corrected = original.clone();
+        corrected["repo_id"] = json!("1412803600");
+        assert!(super::super::ui(root.path(), &corrected).is_err());
+        corrected["replace_unconnected"] = json!(true);
+        let next = super::super::ui(root.path(), &corrected).unwrap()["batch"][0].clone();
+        assert!(initialize(
+            root.path(),
+            first["seed_id"].as_str().unwrap(),
+            first["ticket"].as_str().unwrap()
+        )
+        .is_err());
+        assert_eq!(
+            super::super::ui(root.path(), &json!({"action":"seed_list"})).unwrap()["retired_count"],
+            1
+        );
+        assert!(super::super::ui(root.path(), &corrected).is_ok());
+        initialize(
+            root.path(),
+            next["seed_id"].as_str().unwrap(),
+            next["ticket"].as_str().unwrap(),
+        )
+        .unwrap();
+        ui(
+            root.path(),
+            &json!({"action":"seed_retire","seed_id":next["seed_id"]}),
+        )
+        .unwrap();
+        corrected["branch"] = json!("other");
+        assert!(super::super::ui(root.path(), &corrected).is_err());
+    }
+    #[test]
+    fn submitted_host_task_blocks_correction() {
+        let root = tempfile::tempdir().unwrap();
+        let mut args =
+            json!({"action":"seed_batch","count":1,"account":"a","repo_id":"repo","branch":"main"});
+        let first = super::super::ui(root.path(), &args).unwrap()["batch"][0].clone();
+        created(
+            root.path(),
+            first["seed_id"].as_str().unwrap(),
+            first["ticket"].as_str().unwrap(),
+            "task-id",
+        )
+        .unwrap();
+        args["replace_unconnected"] = json!(true);
+        args["branch"] = json!("other");
+        assert!(super::super::ui(root.path(), &args).is_err());
+        assert_eq!(
+            super::super::ui(root.path(), &json!({"action":"seed_list"})).unwrap()["retired_count"],
+            0
+        );
     }
     #[test]
     fn seed_exchange_is_scoped_and_no_secrets_are_stored() {

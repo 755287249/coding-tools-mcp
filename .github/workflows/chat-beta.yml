@@ -83,7 +83,7 @@ jobs:
       - name: Verify browser seed plugin
         run: |
           node plugins/coderabbit-seeds/build.mjs --check
-          node --test tests/seed-plugin.test.mjs
+          node --test tests/seed-plugin.test.mjs tests/seed-context.test.mjs tests/seed-browser.test.mjs tests/seed-drafts.test.mjs
       - name: Build production portable ZIP
         run: pnpm run desktop:portable
       - name: Verify ZIP and write checksum

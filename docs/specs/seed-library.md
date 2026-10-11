@@ -23,8 +23,11 @@ lifetime; replacement retains the local conversation and all durable history.
   recovery. No arbitrary JSON/Markdown edits by the AI are part of the protocol.
 - Allocation leaves the chat offline until the assigned seed acknowledges with
   `chat_open`; project calls before acknowledgement are rejected.
-- A folder is bound to one exact host repository ID and branch in v1, including
-  retired history. Use a separate folder for a different repository/branch.
+- A folder is bound to one exact host repository ID and branch once any seed
+  redeems its ticket or records a host task (including retired history). Before
+  that point, an explicit `replace_unconnected: true` batch request can correct
+  the binding by retiring unmatched pending seeds atomically. Old tickets stop
+  working; history remains. Connected bindings require a separate folder.
 - New work-mode conversations opt into auto assignment when the library is
   enabled. Explicit detach disables auto assignment; close/archive/group mode
   and waiting for a user decision prevent automatic takeover.
