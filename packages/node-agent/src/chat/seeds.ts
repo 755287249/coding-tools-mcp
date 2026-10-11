@@ -29,15 +29,15 @@ export const SEED_SUSPECT_MS=600_000, SEED_REPLACE_MS=720_000;
 const hash=(s:string)=>createHash('sha256').update(s).digest('hex');
 const uid=(s:unknown):string=>{if(typeof s!=='string'||! /^[a-zA-Z0-9_-]{1,80}$/.test(s))throw Error('Invalid seed ID');return s;};
 const label=(s:unknown,max=200):string=>{if(typeof s!=='string'||!s.trim()||Buffer.byteLength(s)>max)throw Error('Invalid seed field');return s.trim();};
-export interface SeedFilter {source:string;keyword:string}
+export interface SeedFilter {source:string;keyword:string;prefix?:string;account?:string}
 function optionalLabel(value:unknown,max=200):string {if(value===undefined||value===null||value==='')return '';const result=label(value,max);if(/[\r\n\0]/.test(result))throw Error('Invalid seed label');return result;}
 export function parseSeedFilter(value:unknown):SeedFilter {
   if(value===undefined||value===null)return {source:'',keyword:''};
   if(!value||typeof value!=='object'||Array.isArray(value))throw Error('Invalid seed filter');
-  const filter=value as Record<string,unknown>;return {source:optionalLabel(filter.source).toLowerCase(),keyword:optionalLabel(filter.keyword)};
+  const filter=value as Record<string,unknown>;return {source:optionalLabel(filter.source).toLowerCase(),keyword:optionalLabel(filter.keyword),...(filter.prefix!==undefined&&filter.prefix!==null?{prefix:optionalLabel(filter.prefix)}:{}),...(filter.account!==undefined&&filter.account!==null?{account:optionalLabel(filter.account)}:{})};
 }
 const sourceOf=(s:Seed)=>s.source||'coderabbit';
-function matches(s:Seed,filter:SeedFilter):boolean {return (!filter.source||sourceOf(s)===filter.source)&&(!filter.keyword||(s.prefix??'').toLowerCase().includes(filter.keyword.toLowerCase()));}
+function matches(s:Seed,filter:SeedFilter):boolean {return (!filter.source||sourceOf(s)===filter.source)&&(!filter.keyword||(s.prefix??'').toLowerCase().includes(filter.keyword.toLowerCase()))&&(filter.prefix===undefined||(s.prefix??'')===filter.prefix)&&(!filter.account||s.account===filter.account);}
 export function readSeeds(store:SeedStore):Library {
   let body:Buffer;try{body=readFileSync(store.path(FILE));}catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')return {version:1,enabled:false,seeds:[]};throw e;}
   if(body.length>REGISTRY_BYTES)throw Error('Seed registry exceeds limit');
@@ -64,6 +64,8 @@ function publicSeed(s:Seed,now:number){
 function inventory(data:Library,args:Record<string,unknown>,now:number){
   const groups=new Map<string,{source:string;prefix:string;total:number;ready:number}>();
   for(const seed of data.seeds.filter(s=>!s.retired_at)){const source=sourceOf(seed),prefix=seed.prefix??'',key=JSON.stringify([source,prefix]),g=groups.get(key)??{source,prefix,total:0,ready:0};g.total++;if(publicSeed(seed,now).status==='ready')g.ready++;groups.set(key,g);}
+  const readyGroups=new Map<string,{source:string;prefix:string;account:string;ready:number}>();
+  for(const seed of data.seeds){if(publicSeed(seed,now).status!=='ready')continue;const source=sourceOf(seed),prefix=seed.prefix??'',account=seed.account,key=JSON.stringify([source,prefix,account]),group=readyGroups.get(key)??{source,prefix,account,ready:0};group.ready++;readyGroups.set(key,group);}
   const selection=parseSeedFilter({source:args.source,keyword:args.keyword});
   const all=data.seeds.map(s=>publicSeed(s,now)),counts:Record<string,number>={},accounts=[...new Set(all.map(s=>s.account))].sort();
   for(const s of all)counts[s.status]=(counts[s.status]??0)+1;
@@ -74,7 +76,7 @@ function inventory(data:Library,args:Record<string,unknown>,now:number){
   const account_summaries=accounts.flatMap(account=>{const group=summaries.get(account);return group?[group]:[];});
   const limit=Number.isInteger(args.limit)?Math.max(1,Math.min(200,Number(args.limit))):all.length;
   const offset=Number.isInteger(args.offset)?Math.max(0,Number(args.offset)):0;
-  return {account_summaries,groups:[...groups.values()],sources:[...new Set(all.map(s=>s.source))].sort(),enabled:data.enabled,seeds:filtered.slice(offset,offset+limit),retired_count:counts.retired??0,total:all.length,filtered_total:filtered.length,offset,limit,counts,accounts,pairing_enabled:!!data.pairing_hash,capacity:SEED_LIBRARY_LIMIT};
+  return {ready_groups:[...readyGroups.values()],account_summaries,groups:[...groups.values()],sources:[...new Set(all.map(s=>s.source))].sort(),enabled:data.enabled,seeds:filtered.slice(offset,offset+limit),retired_count:counts.retired??0,total:all.length,filtered_total:filtered.length,offset,limit,counts,accounts,pairing_enabled:!!data.pairing_hash,capacity:SEED_LIBRARY_LIMIT};
 }
 // Called by chatUi while it already owns the folder lock.
 export function seedUi(store:SeedStore,args:Record<string,unknown>):Record<string,unknown> {
@@ -159,7 +161,7 @@ export function seedPoll(store:SeedStore,id:string,token:string,now=Date.now()):
   return store.locked(()=>{
     const data=readSeeds(store),s=authorized(data,id,token,now),wasReady=s.ready;
     let dirty=!s.ready;if(now-s.last_seen>=60000){s.last_seen=now;dirty=true;}s.ready=true;
-    const key=store.path(FILE)+'\0'+JSON.stringify([sourceOf(s),(s.prefix??'').toLowerCase()]),lastScan=scans.get(key);
+    const key=store.path(FILE)+'\0'+JSON.stringify([sourceOf(s),s.prefix??'',s.account]),lastScan=scans.get(key);
     if(!s.chat_id&&wasReady&&lastScan!==undefined&&now>=lastScan&&now-lastScan<1000){
       if(dirty)saveSeeds(store,data);
       return {status:'idle',instruction:'Make one new independent seed_wait(timeout_ms:25000). Idle is normal. Respect host execution limits.'};

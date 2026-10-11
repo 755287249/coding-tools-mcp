@@ -186,7 +186,7 @@
   let queueElement=$state<HTMLDivElement>(),queueExpanded=$state(false);
   let runtimeState=$state('');
   $effect(()=>{const ws=workspaceId;runtimeState='';if(!ws)return;let stopped=false;const stop=startVisiblePolling(async()=>{try{const value=await getRuntimeStatus(ws);if(!stopped)runtimeState=value.state;}catch{if(!stopped)runtimeState='';}},()=>4000);return()=>{stopped=true;stop()}});
-  const queueNotice=$derived(!workspaceId||!folderId?'':runtimeState&&runtimeState!=='running'?'chat.enableMcp':needsAi?(detail?.seed_auto||seedStartPending?'seeds.loading':'chat.connectAi'):'');
+  const queueNotice=$derived(!workspaceId||!folderId?'':runtimeState&&runtimeState!=='running'?'chat.enableMcp':needsAi?(seedStartPending?'':detail?.seed_auto?'seeds.loading':'chat.connectAi'):'');
   function collapseQueue(){queueElement?.querySelectorAll('details[open]').forEach(item=>(item as HTMLDetailsElement).open=false);queueExpanded=false;}
 
   async function toggleQueueMode() {
@@ -735,7 +735,7 @@
     </header>
     {#if error}<div class="chat-error" role="alert">{error}<button onclick={() => error = ''} aria-label={$t("chat.38")}>×</button></div>{/if}
     {#if isNewConversation}<div class="mode-switch" aria-label={$t('chat.mode')}><button type="button" aria-pressed={mode==='group'} disabled={busy||memberBusy||detail?.closed||!workspaceId||!folderId} onclick={()=>changeMode('group')}>{$t('chat.group')}</button><button type="button" aria-pressed={mode==='work'} disabled={busy||memberBusy||detail?.closed} onclick={()=>changeMode('work')}>{$t('chat.work')}</button></div>{/if}
-    {#if detail?.seed_auto&&detail.seed_filter}<p class="seed-pool-note">{$t('seeds.poolForChat')}: {detail.seed_filter.source||$t('seeds.allSources')} · {detail.seed_filter.keyword||$t('seeds.allPrefixes')}</p>{/if}
+    {#if detail?.seed_auto&&detail.seed_filter}<p class="seed-pool-note">{$t('seeds.poolForChat')}: {detail.seed_filter.source||$t('seeds.allSources')} · {detail.seed_filter.prefix!==undefined?(detail.seed_filter.prefix||$t('seeds.unlabelled')):detail.seed_filter.keyword||$t('seeds.allPrefixes')}{#if detail.seed_filter.account} · {detail.seed_filter.account}{/if}</p>{/if}
     <div class="conversation-body">
     <div class="feed-frame">
     <div class="message-feed" bind:this={feed} onscroll={scheduleScroll} aria-busy={loadingDetail}>

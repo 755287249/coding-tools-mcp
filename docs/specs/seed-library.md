@@ -112,13 +112,13 @@ in retry validation and task titles, and snapshots it for the whole creation rou
 New work conversations persist `seed_filter: {source, keyword}` when auto assignment
 is enabled. Source matches exactly; keyword is a case-insensitive substring of
 the prefix. Initial assignment and replacement apply the same conditions, with
-no fallback to a mismatched source/model. Per-pool scan caches prevent a poll from
-another source or prefix from suppressing an eligible assignment. Existing chats
+no fallback to a mismatched source/model. Per-pool scan caches distinguish source, exact prefix and account so another
+pool cannot suppress an eligible assignment. Existing chats
 without a filter remain unrestricted. Explicit `seed_manual: true` creates a
 traditional direct-connection chat without automatic seed allocation.
 
-The new-chat page creates automatically for a single available classification;
-multiple classifications first offer a source/keyword picker. A non-modal pulse
+The new-chat page offers ready-only prefix, account and source cards; the two
+largest pools and a More dialog keep the initial choice compact. A non-modal pulse
 shows while waiting and an online empty chat shows readiness. The filter remains
 visible in the chat. Manual enrollment prompts remain in page memory only.
 
@@ -130,3 +130,14 @@ are computed over the complete filtered inventory before detail pagination; sour
 prefix, account, status, text and archive filters apply consistently. Global overview
 counts remain unfiltered. Open an account only when individual seed management is
 needed; detail pages retain classification, links and retirement actions.
+
+## Compact pool chooser (0.1.138)
+
+New work conversations choose by exact prefix (default), account, or source. Only
+ready seeds contribute to available pools. Show the two largest pools and a More
+card; the modal contains remaining choices, category search and source filtering.
+Inventory exposes ready_groups keyed by source/prefix/account across all pages.
+New filter fields prefix (exact, including empty) and account are optional; old
+source/keyword filters preserve their substring semantics. Initial assignment and
+replacement enforce the same filter. Standby scan caches distinguish exact prefix
+and account so one account cannot suppress another eligible poll.

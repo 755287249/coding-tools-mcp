@@ -120,16 +120,16 @@ test('pairing capability rotates, isolates folders, retries exactly and never pe
  chatUi(root,{action:'seed_pairing',token:next});assert.throws(()=>seedProvision(store,token,{action:'status'}),/revoked/);assert.equal(seedProvision(store,next,{action:'status'}).ok,true);
  chatUi(root,{action:'seed_pairing',enabled:false});assert.throws(()=>seedProvision(store,next,{action:'status'}),/revoked/);
 });
-test('600 records paginate, filter and summarize; 500 warm standby polls share one scan and chat creation invalidates it',t=>{
+test('600 records paginate, filter and summarize; 500 warm standby polls share one scan per account and chat creation invalidates it',t=>{
  const {root,store,tokens}=fixture(t,1),file=path.join(root,'docs/chat-sessions/seed-library.seeds.json');
  const data=JSON.parse(readFileSync(file)),template=data.seeds[0],now=Date.now();data.seeds=Array.from({length:600},(_,i)=>({...template,id:'load-'+i,account:i%2?'odd':'even',ready:true,metadata:{repo_name:'owner/repo'},last_seen:now}));writeFileSync(file,JSON.stringify(data));
  let scans=0;const counted={...store,ids:()=>{scans++;return store.ids();}};
  // Each synthetic seed shares the fixture access hash solely for this load test.
  const start=performance.now();for(let i=0;i<500;i++)assert.equal(seedPoll(counted,'load-'+i,tokens[0],now).status,'idle');
- assert.equal(scans,1);t.diagnostic(`500 warm polls / 600 records: ${(performance.now()-start).toFixed(0)}ms, ${scans} full chat scan`);
+ assert.equal(scans,2);t.diagnostic(`500 warm polls / 600 records: ${(performance.now()-start).toFixed(0)}ms, ${scans} full chat scan`);
  const page=chatUi(root,{action:'seed_list',limit:50,offset:50,account:'odd',search:'OWNER/REPO',status:'ready'});assert.equal(page.total,600);assert.equal(page.filtered_total,300);assert.equal(page.seeds.length,50);assert.equal(page.seeds[0].id,'load-101');assert.equal(page.counts.ready,600);assert.equal(page.capacity,10000);
  assert.equal(chatUi(root,{action:'seed_list',limit:1000}).seeds.length,200);
- const chat=chatUi(root,{action:'create'}).session;assert.equal(seedPoll(counted,'load-0',tokens[0],now).chat_id,chat.id);assert.equal(scans,2);
+ const chat=chatUi(root,{action:'create'}).session;assert.equal(seedPoll(counted,'load-0',tokens[0],now).chat_id,chat.id);assert.equal(scans,3);
 });
 test('paired HTTP endpoint is exact, folder scoped, no-store and cannot authenticate ordinary MCP',async t=>{
  const f=await createMcpFixture(t),token='d'.repeat(64),endpoint=f.endpoint+'/seed-library/repo';chatUi(f.root,{action:'seed_pairing',token});
@@ -193,6 +193,7 @@ test('account cards summarize every filtered seed before detail pagination',t=>{
  assert.equal(page.seeds.length,1);assert.equal(page.filtered_total,60);
  assert.deepEqual(a,{account:'account-a',total:59,valid:30,counts:{ready:10,assigned:10,working:10,preparing:10,offline:10,retired:9}});
  assert.deepEqual(page.account_summaries,list({limit:1,offset:0}).account_summaries);
+ assert.equal(page.ready_groups.reduce((n,g)=>n+g.ready,0),11);assert.equal(page.ready_groups.find(g=>g.account==='account-a').ready,10);
  assert.equal(page.account_summaries.find(s=>s.account==='__proto__').valid,1);
  assert.equal(list({include_archived:true}).account_summaries.find(s=>s.account==='account-a').total,60);
  for(const filter of [{account:'account-a'},{source:'coderabbit',keyword:'ASTRA'},{search:'ACCOUNT-A'}]){
@@ -200,4 +201,23 @@ test('account cards summarize every filtered seed before detail pagination',t=>{
  }
  assert.deepEqual(list({account:'account-a',status:'offline'}).account_summaries,[{account:'account-a',total:10,valid:0,counts:{offline:10}}]);
  assert.deepEqual(list({keyword:'no-match'}).account_summaries,[]);
+});
+
+test('exact prefix and account selection fence initial and replacement owners and isolate scan caches',t=>{
+ const {root,store,batch,tokens}=fixture(t,6),file=path.join(root,'docs/chat-sessions/seed-library.seeds.json');
+ const data=JSON.parse(readFileSync(file));data.seeds.forEach((s,i)=>{s.account=i===0?'a':'b';s.prefix=['Astra','Astra','Astra','Astra-plus','astra',''][i];});writeFileSync(file,JSON.stringify(data));
+ const now=Date.now();for(let i=0;i<6;i++)assert.equal(seedPoll(store,batch[i].seed_id,tokens[i],now).status,'idle');
+ const ready=chatUi(root,{action:'seed_list',limit:1}).ready_groups;
+ assert.equal(ready.reduce((n,g)=>n+g.ready,0),6);assert.equal(ready.find(g=>g.account==='b'&&g.prefix==='Astra').ready,2);
+ const filter={source:'coderabbit',keyword:'',prefix:'Astra',account:'b'};
+ const chat=chatUi(root,{action:'create',seed_filter:filter}).session;assert.deepEqual(chat.seed_filter,filter);
+ for(const i of [0,3,4,5])assert.equal(seedPoll(store,batch[i].seed_id,tokens[i],now).status,'idle');
+ const assigned=seedPoll(store,batch[1].seed_id,tokens[1],now);assert.equal(assigned.chat_id,chat.id);
+ const after=chatUi(root,{action:'seed_list',limit:1}).ready_groups;assert.equal(after.find(g=>g.account==='b'&&g.prefix==='Astra').ready,1);
+ const future=now+SEED_REPLACE_MS+1;for(const i of [0,3,4])assert.equal(seedPoll(store,batch[i].seed_id,tokens[i],future).status,'idle');
+ const replacement=seedPoll(store,batch[2].seed_id,tokens[2],future);assert.equal(replacement.chat_id,chat.id);assert.equal(replacement.generation,2);
+ assert.deepEqual(chatUi(root,{action:'read',chat_id:chat.id}).session.seed_filter,filter);
+ const unlabeled=chatUi(root,{action:'create',seed_filter:{source:'',keyword:'',prefix:''}}).session;
+ assert.equal(seedPoll(store,batch[4].seed_id,tokens[4],future).status,'idle');assert.equal(seedPoll(store,batch[5].seed_id,tokens[5],future).chat_id,unlabeled.id);
+ for(const field of ['prefix','account'])assert.throws(()=>chatUi(root,{action:'create',seed_filter:{[field]:{bad:true}}}),/Invalid seed/);
 });
