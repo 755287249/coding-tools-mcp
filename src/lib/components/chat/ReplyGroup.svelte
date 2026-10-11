@@ -3,7 +3,6 @@
   import type {ChatMessage,QuestionAnswer} from '$lib/api/chat';
   import type {ReplyGroup} from '$lib/chat/reply-groups';
   import {combinedReply} from '$lib/chat/reply-groups';
-  import {groupChatMessages} from '$lib/chat/tool-activity';
   import MessageText from './MessageText.svelte';
   import ChatToolActivity from './ChatToolActivity.svelte';
   import ChatAttachment from './ChatAttachment.svelte';
@@ -15,7 +14,6 @@
   const last=$derived(group.messages.at(-1)!);
   const first=$derived(group.messages[0]);
   const complete=$derived(last.final===true&&!last.awaiting_user);
-  const blocks=$derived(groupChatMessages(group.messages,last.final===true));
   const combined=$derived(combinedReply(group,{tool:$t('chat.92'),input:$t('chat.76'),output:$t('chat.77'),truncated:$t('chat.78')}));
   const started=$derived(group.request?.received_at??first.created_at);
   const duration=$derived(Math.max(0,Math.floor((last.created_at-started)/1000)));
@@ -25,9 +23,9 @@
 <article class="assistant reply-group" data-reply-group={group.id}>
   <header class="reply-author"><strong>{group.name}</strong><time title={$t('reply.started')} datetime={new Date(first.created_at).toISOString()}>{time(first.created_at)}</time></header>
   <div class="reply-content">
-    {#each blocks as block (block.id)}
-      {#if block.kind==='tools'}<div class="reply-tools"><ChatToolActivity messages={block.messages} settled={block.settled} showTimes={false} {workspaceId} {folderId} {chatId}/></div>
-      {:else}{@const m=block.message}<section class="reply-segment">
+    {#each group.messages as m (m.id)}
+      {#if m.tool_event}<div class="reply-tools"><ChatToolActivity messages={[m]} settled={last.final===true} inline showTimes={false} {workspaceId} {folderId} {chatId}/></div>
+      {:else}<section class="reply-segment">
         {#if (m.attachments??[]).some(f=>f.mime.startsWith('image/'))}<div class="reply-images">{#each (m.attachments??[]).filter(f=>f.mime.startsWith('image/')) as file (file.id)}<ChatAttachment {workspaceId} {folderId} {chatId} {file}/>{/each}</div>{/if}
         <MessageText text={m.text} attachments={m.attachments??[]} {workspaceId} {folderId} {chatId}/>
         {#each (m.attachments??[]).filter(f=>!f.mime.startsWith('image/')) as file (file.id)}<ChatAttachment {workspaceId} {folderId} {chatId} {file}/>{/each}

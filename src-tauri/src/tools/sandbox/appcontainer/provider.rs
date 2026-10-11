@@ -33,7 +33,8 @@ use windows::Win32::Security::{
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, DELETE, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAGS_AND_ATTRIBUTES,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL, WRITE_DAC,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
+    OPEN_EXISTING, READ_CONTROL, SYNCHRONIZE, WRITE_DAC,
 };
 use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
 
@@ -46,6 +47,7 @@ use crate::tools::process_spec::ProcessLaunchSpec;
 
 static APPCONTAINER_ID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static APPCONTAINER_RUNTIME_GRANT_LOCK: Mutex<()> = Mutex::new(());
+static APPCONTAINER_ANCESTOR_GRANT_LOCK: Mutex<()> = Mutex::new(());
 #[cfg(test)]
 static APPCONTAINER_RUNTIME_HELPER_INVOCATIONS: AtomicU64 = AtomicU64::new(0);
 const APPCONTAINER_ACL_COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
@@ -724,6 +726,7 @@ fn prepare_with_state_root_external_paths_and_marker(
         Some(capability.sid()),
     )?);
     let package_sid = Arc::new(SharedSid::copy_from(profile.sid())?);
+    let ancestor_grants = prepare_workspace_ancestor_grants(workspace.root(), &package_sid)?;
 
     #[cfg(test)]
     if std::env::var_os("CTMCP_TEST_TRACE_WORKSPACE_ACL").is_some() {
@@ -756,6 +759,7 @@ fn prepare_with_state_root_external_paths_and_marker(
         metadata_capability,
         runtime_capability_sid,
         internet,
+        _ancestor_grants: ancestor_grants,
         _state_grant: state_grant,
         _external_grants: external_grants,
         runtime_grants: Mutex::new(BTreeSet::new()),
@@ -1867,6 +1871,60 @@ fn prepare_protected_asset_restrictions(
     Ok(())
 }
 
+struct WorkspaceAncestorGrants(Vec<TemporaryAclGrant>);
+
+impl Drop for WorkspaceAncestorGrants {
+    fn drop(&mut self) {
+        let _guard = APPCONTAINER_ANCESTOR_GRANT_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Ancestors are shared by concurrent provider leases. Serialize cleanup
+        // with installation so read/merge/write ACL updates cannot lose a SID.
+        self.0.clear();
+    }
+}
+
+// Windows path canonicalization (Node realpath and Git/MSYS getcwd) opens
+// ancestor directories for metadata. Workspace Modify does not cover ancestors.
+// Match Node Agent's GrantAncestorTraversal: this SID only, no directory listing,
+// file contents, writes, or inheritance. SYNCHRONIZE permits synchronous opens,
+// matching .NET's allow-rule behavior. The lease keeps grants until children exit.
+fn prepare_workspace_ancestor_grants(
+    workspace_root: &Path,
+    sid: &Arc<SharedSid>,
+) -> WorkspaceResult<WorkspaceAncestorGrants> {
+    let _guard = APPCONTAINER_ANCESTOR_GRANT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let root = workspace_root.canonicalize().map_err(|error| {
+        provider_error(
+            "SANDBOX_ANCESTOR_GRANT_FAILED",
+            format!("Failed to resolve workspace ancestors: {error}"),
+        )
+    })?;
+    let mut grants = Vec::new();
+    for ancestor in root.ancestors().skip(1) {
+        grants.push(
+            TemporaryAclGrant::apply(
+                ancestor.to_path_buf(),
+                sid,
+                AclGrantAccess::TraverseAttributes,
+                AclGrantInheritance::None,
+            )
+            .map_err(|error| {
+                provider_error(
+                    "SANDBOX_ANCESTOR_GRANT_FAILED",
+                    format!(
+                        "Cannot grant sandbox path traversal and attribute access on {}: {error}. The Windows account must be able to update this directory's ACL.",
+                        ancestor.display()
+                    ),
+                )
+            })?,
+        );
+    }
+    Ok(WorkspaceAncestorGrants(grants))
+}
+
 struct AppContainerLease {
     #[allow(dead_code)]
     profile: Arc<AppContainerProfile>,
@@ -1876,6 +1934,7 @@ struct AppContainerLease {
     metadata_capability: DerivedCapability,
     runtime_capability_sid: Arc<SharedSid>,
     internet: Option<DerivedCapability>,
+    _ancestor_grants: WorkspaceAncestorGrants,
     _state_grant: TemporaryAclGrant,
     _external_grants: Vec<TemporaryAclGrant>,
     runtime_grants: Mutex<BTreeSet<String>>,
@@ -1905,6 +1964,7 @@ fn selected_network(options: &BTreeMap<String, String>) -> WorkspaceResult<AppCo
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum AclGrantAccess {
+    TraverseAttributes,
     Read,
     ReadExecute,
     Modify,
@@ -1913,6 +1973,7 @@ enum AclGrantAccess {
 impl AclGrantAccess {
     fn permissions(self) -> u32 {
         match self {
+            Self::TraverseAttributes => (FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE).0,
             Self::Read => FILE_GENERIC_READ.0,
             Self::ReadExecute => (FILE_GENERIC_READ | FILE_GENERIC_EXECUTE).0,
             Self::Modify => {
@@ -1924,6 +1985,7 @@ impl AclGrantAccess {
 impl AclGrantAccess {
     fn helper_arg(self) -> &'static str {
         match self {
+            Self::TraverseAttributes => "traverse_attributes",
             Self::Read => "read",
             Self::ReadExecute => "read_execute",
             Self::Modify => "modify",
@@ -1932,6 +1994,7 @@ impl AclGrantAccess {
 
     fn from_helper_arg(value: &str) -> Option<Self> {
         match value {
+            "traverse_attributes" => Some(Self::TraverseAttributes),
             "read" => Some(Self::Read),
             "read_execute" => Some(Self::ReadExecute),
             "modify" => Some(Self::Modify),
@@ -3184,13 +3247,16 @@ fn trusted_windows_runtime(program: &Path) -> WorkspaceResult<Option<PathBuf>> {
         }
     }
 
-    if matches!(name.as_str(), "git" | "git.exe") {
-        if let Ok(git) = which::which("git.exe").or_else(|_| which::which("git")) {
-            if is_bare_program(program, "git.exe")
-                || is_bare_program(program, "git")
-                || same_existing_path(program, &git)
-            {
-                return Ok(Some(canonical_or_original(git)));
+    for tool in ["git", "gh"] {
+        let executable = format!("{tool}.exe");
+        if name == tool || name == executable {
+            if let Ok(selected) = which::which(&executable).or_else(|_| which::which(tool)) {
+                if is_bare_program(program, &executable)
+                    || is_bare_program(program, tool)
+                    || same_existing_path(program, &selected)
+                {
+                    return Ok(Some(canonical_or_original(selected)));
+                }
             }
         }
     }
@@ -4980,6 +5046,238 @@ mod tests {
         assert!(String::from_utf8_lossy(&output.stdout)
             .to_ascii_lowercase()
             .contains("git version"));
+    }
+
+
+    #[test]
+    fn ancestor_access_has_no_listing_write_or_inheritance() {
+        use windows::Win32::Storage::FileSystem::{
+            FILE_LIST_DIRECTORY, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA,
+        };
+        let access = AclGrantAccess::TraverseAttributes;
+        assert_eq!(
+            access.permissions(),
+            (FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE).0
+        );
+        assert_eq!(
+            access.permissions()
+                & (FILE_LIST_DIRECTORY | FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES).0,
+            0
+        );
+        assert_eq!(
+            AclGrantAccess::from_helper_arg(access.helper_arg()),
+            Some(access)
+        );
+        assert_eq!(AclGrantInheritance::None.flags(), NO_INHERITANCE);
+    }
+
+    #[test]
+    fn gh_runtime_requires_selected_executable_identity() {
+        let root = tempfile::tempdir().expect("fake runtime");
+        let fake = root.path().join("gh.exe");
+        fs::write(&fake, b"fixture").expect("fake gh");
+        assert!(trusted_windows_runtime(&fake)
+            .expect("fake gh lookup")
+            .is_none());
+        if let Ok(gh) = which::which("gh.exe").or_else(|_| which::which("gh")) {
+            let selected = trusted_windows_runtime(&gh)
+                .expect("gh lookup")
+                .expect("selected gh");
+            assert!(same_existing_path(&selected, &gh));
+        }
+    }
+
+    #[tokio::test]
+    async fn nested_workspace_realpath_preserves_parent_and_sibling_isolation() {
+        let root = tempfile::tempdir().expect("root");
+        let workspace = root.path().join("workspace");
+        let nested = workspace.join("nested");
+        fs::create_dir_all(&nested).expect("nested");
+        let outside_file = root.path().join("outside.txt");
+        fs::write(&outside_file, "private fixture").expect("outside fixture");
+        let model = Workspace::new(workspace.clone()).expect("workspace");
+        let state = tempfile::tempdir().expect("state");
+        let prepared =
+            prepare_with_state_root(&model, state.path().join("state")).expect("prepare provider");
+        let node = which::which("node.exe")
+            .or_else(|_| which::which("node"))
+            .expect("Node runtime");
+        let script = r#"
+const fs = require('fs');
+const assert = require('assert/strict');
+const path = require('path');
+const cwd = fs.realpathSync('.');
+assert.equal(path.basename(cwd), 'nested');
+const parent = process.argv[1];
+const outside = process.argv[2];
+const denied = fn => assert.throws(fn, e => e.code === 'EACCES' || e.code === 'EPERM');
+denied(() => fs.readdirSync(parent));
+denied(() => fs.readFileSync(outside));
+denied(() => fs.writeFileSync(outside, 'changed'));
+fs.writeFileSync('inside.txt', 'ok');
+console.log('ancestor-isolation-ok');
+"#;
+        run_runtime_case(
+            prepared.as_ref(),
+            &nested,
+            node,
+            vec![
+                "-e".into(),
+                script.into(),
+                root.path().to_string_lossy().into_owned(),
+                outside_file.to_string_lossy().into_owned(),
+            ],
+            Some("ancestor-isolation-ok"),
+        )
+        .await;
+        assert_eq!(
+            fs::read_to_string(&outside_file).expect("outside contents"),
+            "private fixture"
+        );
+        assert_eq!(
+            fs::read_to_string(nested.join("inside.txt")).expect("inside contents"),
+            "ok"
+        );
+    }
+
+    #[test]
+    fn workspace_ancestor_grants_are_removed_on_drop() {
+        let root = tempfile::tempdir().expect("root");
+        let workspace = root.path().join("workspace");
+        fs::create_dir(&workspace).expect("workspace");
+        let profile = AppContainerProfile::create(
+            &format!(
+                "CodingToolsMcp.Test.Ancestors.{}",
+                appcontainer_identity_suffix().expect("id")
+            ),
+            None,
+        )
+        .expect("profile");
+        let sid = Arc::new(SharedSid::copy_from(profile.sid()).expect("sid"));
+        let grants = prepare_workspace_ancestor_grants(&workspace, &sid).expect("ancestor grants");
+        let ace = allowed_ace_for_sid(root.path(), sid.sid())
+            .expect("ancestor ACE")
+            .expect("ancestor grant");
+        assert_eq!(ace.mask, AclGrantAccess::TraverseAttributes.permissions());
+        assert_eq!(u32::from(ace.flags), NO_INHERITANCE.0);
+        drop(grants);
+        assert!(allowed_ace_for_sid(root.path(), sid.sid())
+            .expect("removed ACE")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn git_status_reads_repository_from_nested_workspace() {
+        let root = tempfile::tempdir().expect("root");
+        let workspace = root.path().join("workspace");
+        let nested = workspace.join("nested");
+        fs::create_dir_all(&nested).expect("nested");
+        let git = which::which("git.exe")
+            .or_else(|_| which::which("git"))
+            .expect("Git runtime");
+        let initialized = Command::new(&git)
+            .args(["init", "--quiet"])
+            .current_dir(&workspace)
+            .output()
+            .expect("initialize fixture");
+        assert!(
+            initialized.status.success(),
+            "{}",
+            String::from_utf8_lossy(&initialized.stderr)
+        );
+        fs::write(nested.join("fixture.txt"), "fixture").expect("repository fixture");
+        let model = Workspace::new(workspace).expect("workspace");
+        let state = tempfile::tempdir().expect("state");
+        let prepared =
+            prepare_with_state_root(&model, state.path().join("state")).expect("prepare provider");
+        run_runtime_case(
+            prepared.as_ref(),
+            &nested,
+            git,
+            vec![
+                "--no-optional-locks".into(),
+                "status".into(),
+                "--porcelain".into(),
+                "--untracked-files=all".into(),
+            ],
+            Some("fixture.txt"),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires GitHub CLI installed on the Windows test host"]
+    async fn gh_uses_exact_identity_and_isolated_configuration() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let state = tempfile::tempdir().expect("state");
+        let model = Workspace::new(workspace.path().to_path_buf()).expect("workspace");
+        let prepared =
+            prepare_with_state_root(&model, state.path().join("state")).expect("prepare provider");
+        let environment = prepared
+            .environment_overrides()
+            .expect("private environment");
+        for key in ["HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA"] {
+            let value = environment.get(key).expect("private directory");
+            assert!(Path::new(value).starts_with(state.path()));
+        }
+        let gh = which::which("gh.exe")
+            .or_else(|_| which::which("gh"))
+            .expect("GitHub CLI runtime");
+        run_runtime_case(
+            prepared.as_ref(),
+            workspace.path(),
+            gh,
+            vec!["--version".into()],
+            Some("gh version"),
+        )
+        .await;
+    }
+
+
+    #[test]
+    fn concurrent_ancestor_leases_preserve_each_others_grants() {
+        let root = tempfile::tempdir().expect("root");
+        let workspace = root.path().join("workspace");
+        fs::create_dir(&workspace).expect("workspace");
+        let profile = |label: &str| {
+            AppContainerProfile::create(
+                &format!(
+                    "CodingToolsMcp.Test.{label}.{}",
+                    appcontainer_identity_suffix().expect("id")
+                ),
+                None,
+            )
+            .expect("profile")
+        };
+        let profile_a = profile("AncestorsA");
+        let profile_b = profile("AncestorsB");
+        let sid_a = Arc::new(SharedSid::copy_from(profile_a.sid()).expect("SID A"));
+        let sid_b = Arc::new(SharedSid::copy_from(profile_b.sid()).expect("SID B"));
+        let (grants_a, grants_b) = thread::scope(|scope| {
+            let a = scope.spawn(|| prepare_workspace_ancestor_grants(&workspace, &sid_a));
+            let b = scope.spawn(|| prepare_workspace_ancestor_grants(&workspace, &sid_b));
+            (
+                a.join().expect("thread A").expect("grants A"),
+                b.join().expect("thread B").expect("grants B"),
+            )
+        });
+        assert!(allowed_ace_for_sid(root.path(), sid_a.sid())
+            .expect("ACE A")
+            .is_some());
+        assert!(allowed_ace_for_sid(root.path(), sid_b.sid())
+            .expect("ACE B")
+            .is_some());
+        drop(grants_a);
+        assert!(allowed_ace_for_sid(root.path(), sid_a.sid())
+            .expect("removed A")
+            .is_none());
+        assert!(allowed_ace_for_sid(root.path(), sid_b.sid())
+            .expect("retained B")
+            .is_some());
+        drop(grants_b);
+        assert!(allowed_ace_for_sid(root.path(), sid_b.sid())
+            .expect("removed B")
+            .is_none());
     }
 
     async fn run_runtime_case(
