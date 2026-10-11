@@ -266,6 +266,7 @@ fn save(root: &Path, s: &Value) -> Result<()> {
     }
     let chat_id = id(&s["id"])?;
     atomic(root, chat_id, "json", &bytes)?;
+    seeds::invalidate(root);
     atomic(root, chat_id, "md", markdown(s).as_bytes())
 }
 struct DiskLock(PathBuf);

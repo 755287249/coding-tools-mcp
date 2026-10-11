@@ -1,5 +1,5 @@
 <script lang="ts">
-  import {seedRequest,seedBundle,type SeedInventory,type SeedTicket} from '$lib/api/seeds';
+  import {seedRequest,type SeedInventory,type SeedRow} from '$lib/api/seeds';
   import {copyText} from '$lib/browser-tools';
   import {t} from '$lib/i18n';
   import type {MessageKey} from '$lib/i18n/catalog';
@@ -7,80 +7,77 @@
   import {APP_VERSION} from '$lib/app-version';
   import {appUrl} from '$lib/app-path';
   import {untrack} from 'svelte';
-  import {seedDrafts,seedDraftKey} from '$lib/chat/seed-drafts';
+  import {pairingKey,pairingAddress,loadPairing,savePairing,newPairingToken} from '$lib/chat/seed-pairing';
   let {workspaceId,folderId}:{workspaceId:string;folderId:string}=$props();
-  let inventory=$state<SeedInventory>({enabled:false,seeds:[],retired_count:0});
-  let account=$state(''),repo=$state(''),branch=$state('main'),count=$state(3),endpoint=$state('');
-  let busy=$state(false),error=$state(''),bundle=$state(''),copied=$state(false),history=$state(false),filter=$state('');
-  let persisted=$state(true),draftKey=$state('');
-  const accounts=$derived([...new Set(inventory.seeds.map(s=>s.account))]);
-  const rows=$derived(inventory.seeds.filter(s=>(history||!s.archived)&&(!filter||s.account===filter)));
+  const empty=():SeedInventory=>({enabled:false,seeds:[],retired_count:0});
+  let inventory=$state<SeedInventory>(empty()),address=$state(''),token=$state('');
+  let busy=$state(false),error=$state(''),notice=$state(''),history=$state(false),filter=$state(''),status=$state(''),search=$state(''),page=$state(0);
   let scope=0;
-  $effect(()=>{const ws=workspaceId,folder=folderId;const generation=++scope;
-    untrack(()=>{
-      draftKey=seedDraftKey(ws,folder);const saved=seedDrafts.load(draftKey);
-      account=saved.account;repo=saved.repo;branch=saved.branch;count=saved.count;
-      const profile=$workspaces.find(w=>w.id===ws);
-      endpoint=saved.endpoint||(profile?.tunnel.public_url?profile.tunnel.public_url.replace(/\/$/,'').replace(/\/mcp$/,'')+'/mcp':'');
-      bundle=seedDrafts.batch(draftKey);copied=false;error='';filter='';inventory={enabled:false,seeds:[],retired_count:0};
-    });
+  const accounts=$derived(inventory.accounts??[]),counts=$derived(inventory.counts??{});
+  const pageCount=$derived(Math.max(1,Math.ceil((inventory.filtered_total??0)/50)));
+  $effect(()=>{const key=pairingKey(workspaceId,folderId);untrack(()=>{
+    const saved=loadPairing(key),profile=$workspaces.find(w=>w.id===workspaceId);
+    address=saved.address;token=saved.token;
+    if(!address&&profile?.tunnel.public_url){try{address=pairingAddress(profile.tunnel.public_url.replace(/\/$/,'').replace(/\/mcp$/,'')+'/mcp',folderId);}catch{}}
+    inventory=empty();error='';notice='';history=false;filter='';status='';search='';page=0;
+  });});
+  $effect(()=>{const ws=workspaceId,folder=folderId,query={action:'seed_list',limit:50,offset:page*50,account:filter,status,search,include_archived:history};const generation=++scope;
     let stopped=false,running=false;
-    const refresh=async()=>{if(running||stopped)return;running=true;try{const result=await seedRequest(ws,folder,{action:'seed_list'});if(!stopped&&scope===generation)inventory=result;}catch(e){if(!stopped&&scope===generation)error=String(e);}finally{running=false;}};
-    void refresh();const timer=setInterval(refresh,5000);return()=>{stopped=true;clearInterval(timer);};
+    const refresh=async()=>{if(running||stopped)return;running=true;try{const result=await seedRequest(ws,folder,query);if(!stopped&&scope===generation){inventory=result;const last=Math.max(0,Math.ceil((result.filtered_total??0)/50)-1);if(page>last)page=last;}}catch(e){if(!stopped&&scope===generation)error=String(e);}finally{running=false;}};
+    void refresh();const timer=setInterval(()=>{if(!document.hidden)void refresh();},5000);return()=>{stopped=true;clearInterval(timer);};
   });
-  async function action(args:Record<string,unknown>){if(busy)return;busy=true;error='';const generation=scope;try{const result=await seedRequest(workspaceId,folderId,args);if(generation===scope)inventory=result;}catch(e){if(generation===scope)error=String(e);}finally{busy=false;}}
-  function saveDraft(){if(draftKey===seedDraftKey(workspaceId,folderId))persisted=seedDrafts.save(draftKey,{account,repo,branch,count,endpoint});}
-  function clearBundle(){seedDrafts.setBatch(draftKey,'');bundle='';copied=false;}
-  async function prepare(){if(busy)return;busy=true;error='';copied=false;saveDraft();const generation=scope,ws=workspaceId,folder=folderId,key=draftKey,url=endpoint,request={account,repo_id:repo.trim(),branch:branch.trim(),count};try{
-    seedBundle(url,folder,[]);
-    const fresh=await seedRequest(ws,folder,{action:'seed_list'});
-    if(generation!==scope)return;
-    const mismatched=fresh.seeds.filter(s=>s.repo_id!==request.repo_id||s.branch!==request.branch);
-    if(mismatched.some(s=>s.last_seen||s.host_task_id||s.chat_id||s.unresolved_operations))throw Error($t('seeds.bound'));
-    const replace=mismatched.some(s=>!s.retired_at);
-    if(replace&&!window.confirm($t('seeds.correctConfirm')))return;
-    const result=await seedRequest<{batch:SeedTicket[]}>(ws,folder,{action:'seed_batch',...request,replace_unconnected:replace});
-    const text=seedBundle(url,folder,result.batch);seedDrafts.setBatch(key,text);
-    if(generation===scope){bundle=text;const next=await seedRequest(ws,folder,{action:'seed_list'});if(generation===scope)inventory=next;}
+  function query(){return {limit:50,offset:page*50,account:filter,status,search,include_archived:history};}
+  async function action(args:Record<string,unknown>){if(busy)return;busy=true;error='';const generation=scope;try{const result=await seedRequest(workspaceId,folderId,{...query(),...args});if(generation===scope)inventory=result;}catch(e){if(generation===scope)error=String(e);}finally{busy=false;}}
+  async function connect(){if(busy)return;busy=true;error='';notice='';const generation=scope,ws=workspaceId,folder=folderId;try{
+    const saved={address:pairingAddress(address,folder),token:token.trim()};
+    if(!/^[a-f0-9]{64}$/.test(saved.token))throw Error($t('seeds.tokenInvalid'));
+    const result=await seedRequest(ws,folder,{...query(),action:'seed_pairing',token:saved.token});
+    const stored=savePairing(pairingKey(ws,folder),saved);
+    if(generation===scope){address=saved.address;token=saved.token;inventory=result;notice=$t(stored?'seeds.pairSaved':'seeds.pairStorage');}
   }catch(e){if(generation===scope)error=String(e);}finally{busy=false;}}
-  async function copy(){try{await copyText(bundle);copied=true;}catch(e){error=String(e);}}
+  async function copy(value:string){try{await copyText(value);notice=$t('seeds.copied');}catch(e){error=String(e);}}
+  const date=(value:number)=>value?new Date(value).toLocaleString():$t('seeds.never');
+  function details(seed:SeedRow){return [seed.account,seed.metadata?.repo_name||seed.repo_id,seed.branch,`ID: ${seed.id}`,...Object.entries(seed.metadata??{}).filter(([,v])=>v).map(([k,v])=>`${k}: ${v}`),`${$t('seeds.created')}: ${date(seed.created_at)}`,`${$t('seeds.lastSeen')}: ${date(seed.last_seen)}`,`${$t('seeds.hostTask')}: ${seed.host_task_id||'—'}`,`${$t('seeds.conversation')}: ${seed.chat_id||'—'}`,`${$t('seeds.generation')}: ${seed.generation}`,`${$t('seeds.unresolved')}: ${seed.unresolved_operations}`,seed.reason?$t(`seeds.reason.${seed.reason}` as MessageKey):''].filter(Boolean).join('\n');}
 </script>
 <div class="seed-library">
   <div class="overview">
-    <div><span>{$t('seeds.ready')}</span><strong>{inventory.seeds.filter(s=>s.status==='ready').length}</strong></div>
-    <div><span>{$t('seeds.assigned')}</span><strong>{inventory.seeds.filter(s=>s.status==='assigned'||s.status==='working').length}</strong></div>
-    <div><span>{$t('seeds.offline')}</span><strong>{inventory.seeds.filter(s=>s.status==='offline').length}</strong></div>
-    <div><span>{$t('seeds.accounts')}</span><strong>{accounts.length}</strong></div>
-    <div><span>{$t('seeds.retiredTotal')}</span><strong>{inventory.retired_count}</strong></div>
+    <div><span>{$t('seeds.ready')}</span><strong>{counts.ready??0}</strong></div>
+    <div><span>{$t('seeds.assigned')}</span><strong>{(counts.assigned??0)+(counts.working??0)}</strong></div>
+    <div><span>{$t('seeds.preparing')}</span><strong>{counts.preparing??0}</strong></div>
+    <div><span>{$t('seeds.offline')}</span><strong>{counts.offline??0}</strong></div>
+    <div><span>{$t('seeds.total')}</span><strong>{inventory.total??0}<small> / {inventory.capacity??10000}</small></strong></div>
   </div>
-  <div class="toolbar"><label><input type="checkbox" checked={inventory.enabled} disabled={busy} onchange={e=>action({action:'seed_settings',enabled:e.currentTarget.checked})}/>{$t('seeds.auto')}</label><button disabled={busy} onclick={()=>action({action:'seed_cleanup'})}>{$t('seeds.cleanup')}</button></div>
-  <p class="notice">{$t('seeds.notice')}</p>
+  <div class="toolbar"><label><input type="checkbox" checked={inventory.enabled} disabled={busy} onchange={e=>action({action:'seed_settings',enabled:e.currentTarget.checked})}/>{$t('seeds.auto')}</label><button disabled={busy} onclick={()=>action({action:'seed_cleanup'})}>{$t('seeds.cleanup')}</button><span class="muted">{$t('seeds.retiredTotal')}: {inventory.retired_count}</span></div>
   {#if error}<p role="alert">{error}</p>{/if}
-  <details open><summary>{$t('seeds.add')}</summary>
-    <p class="notice">{$t(persisted?'seeds.saved':'seeds.saveUnavailable')}</p>
-    <form oninput={saveDraft} onsubmit={e=>{e.preventDefault();void prepare();}}>
-      <label>{$t('seeds.account')}<input bind:value={account} maxlength="200" required/></label>
-      <label>{$t('seeds.repo')}<input bind:value={repo} maxlength="200" required/></label>
-      <label>{$t('seeds.branch')}<input bind:value={branch} maxlength="200" required/></label>
-      <label>{$t('seeds.count')}<input type="number" bind:value={count} min="1" max="50" required/></label>
-      <label class="wide">{$t('seeds.endpoint')}<input type="url" bind:value={endpoint} placeholder="https://example.com/mcp" required/></label>
-      <div class="wide toolbar"><button class="primary" disabled={busy}>{$t('seeds.prepare')}</button><a href={`https://github.com/755287249/coding-tools-mcp/releases/download/v${APP_VERSION}/coderabbit-seeds.user.js`} target="_blank" rel="noreferrer">{$t('seeds.install')}</a></div>
+  {#if notice}<p class="notice" role="status">{notice}</p>{/if}
+  <details class="pairing" open={!inventory.pairing_enabled}>
+    <summary>{$t('seeds.browserPair')} <span class:connected={inventory.pairing_enabled}>{$t(inventory.pairing_enabled?'seeds.pairEnabled':'seeds.pairDisabled')}</span></summary>
+    <p class="notice">{$t('seeds.pairHelp')}</p>
+    <form onsubmit={e=>{e.preventDefault();void connect();}}>
+      <label>{$t('seeds.pairAddress')}<div class="input-row"><input bind:value={address} type="url" required placeholder="https://example.com/mcp"/><button type="button" onclick={()=>copy(address)}>{$t('seeds.copy')}</button></div></label>
+      <label>{$t('seeds.pairToken')}<div class="input-row"><input bind:value={token} type="password" autocomplete="off" maxlength="64" required/><button type="button" onclick={()=>copy(token)}>{$t('seeds.copy')}</button><button type="button" disabled={busy} onclick={()=>{token=newPairingToken();notice=$t('seeds.tokenUnsaved');}}>{$t('seeds.generateToken')}</button></div></label>
+      <div class="toolbar"><button class="primary" disabled={busy}>{$t('seeds.savePair')}</button><button type="button" disabled={busy||!inventory.pairing_enabled} onclick={()=>action({action:'seed_pairing',enabled:false})}>{$t('seeds.revokePair')}</button><a href={`https://github.com/755287249/coding-tools-mcp/releases/download/v${APP_VERSION}/coderabbit-seeds.user.js`} target="_blank" rel="noreferrer">{$t('seeds.install')}</a></div>
     </form>
-    {#if bundle}<section class="bundle"><p>{$t('seeds.bundleHint')}</p><textarea readonly value={bundle} rows="4" aria-label={$t('seeds.batch')}></textarea><div class="toolbar"><button onclick={copy}>{$t(copied?'seeds.copied':'seeds.copy')}</button><button onclick={clearBundle}>{$t('seeds.clear')}</button></div></section>{/if}
   </details>
-  <div class="toolbar filters"><select aria-label={$t('seeds.account')} bind:value={filter}><option value="">{$t('seeds.allAccounts')}</option>{#each accounts as a}<option value={a}>{a}</option>{/each}</select><label><input type="checkbox" bind:checked={history}/>{$t('seeds.history')}</label></div>
-  <div class="seed-list">{#each rows as seed(seed.id)}<article>
-    <div class="seed-title"><strong>{seed.account}</strong><span class:alive={seed.status==='ready'||seed.status==='assigned'}>{$t(`seeds.${seed.status}` as MessageKey)}</span></div>
-    <p class="identity">{seed.id.slice(0,8)} · {seed.repo_id} · {seed.branch}</p>
-    <p class="time">{$t('seeds.lastSeen')}: {seed.last_seen?new Date(seed.last_seen).toLocaleString():$t('seeds.never')}</p>
-    {#if seed.reason}<p class="notice">{$t(`seeds.reason.${seed.reason}` as MessageKey)}</p>{/if}
-    {#if seed.unresolved_operations}<p role="status">{$t('seeds.unresolved')} ({seed.unresolved_operations})</p>{/if}
-    <div class="toolbar">{#if seed.chat_id}<a href={appUrl(`/workspace/${encodeURIComponent(workspaceId)}?folder=${encodeURIComponent(folderId)}&chat=${encodeURIComponent(seed.chat_id)}`)}>{$t('seeds.conversation')}</a>{/if}
-      {#if seed.host_task_id}<a href={`https://app.coderabbit.ai/code/tasks/${encodeURIComponent(seed.host_task_id)}`} target="_blank" rel="noreferrer">{$t('seeds.hostTask')}</a>{/if}
-      {#if !seed.retired_at}<button disabled={busy||seed.unresolved_operations>0} onclick={()=>action({action:'seed_retire',seed_id:seed.id})}>{$t('seeds.retire')}</button>{/if}
-    </div>
-  </article>{:else}<div class="empty">{$t('seeds.empty')}</div>{/each}</div>
+  <div class="toolbar filters">
+    <input class="search" type="search" aria-label={$t('seeds.search')} placeholder={$t('seeds.search')} bind:value={search} oninput={()=>page=0}/>
+    <select aria-label={$t('seeds.account')} bind:value={filter} onchange={()=>page=0}><option value="">{$t('seeds.allAccounts')}</option>{#each accounts as a}<option value={a}>{a}</option>{/each}</select>
+    <select aria-label={$t('seeds.allStates')} bind:value={status} onchange={()=>page=0}><option value="">{$t('seeds.allStates')}</option>{#each ['ready','assigned','working','preparing','offline','retired'] as state}<option value={state}>{$t(`seeds.${state}` as MessageKey)}</option>{/each}</select>
+    <label><input type="checkbox" bind:checked={history} onchange={()=>page=0}/>{$t('seeds.history')}</label>
+  </div>
+  <div class="list-head muted"><span>{$t('seeds.hoverDetails')}</span><span>{inventory.filtered_total??0} {$t('seeds.items')}</span></div>
+  <div class="seed-list">{#each inventory.seeds as seed(seed.id)}
+    <details class="seed-row">
+      <summary title={details(seed)}><span class="dot" class:alive={seed.status==='ready'||seed.status==='assigned'||seed.status==='working'}></span><strong>{seed.account}</strong><span class="identity">{seed.metadata?.repo_name||seed.repo_id} · {seed.branch}</span><code>{seed.id.slice(0,8)}</code><span class="badge">{$t(`seeds.${seed.status}` as MessageKey)}</span></summary>
+      <div class="row-details"><pre>{details(seed)}</pre><div class="toolbar">
+        {#if seed.chat_id}<a href={appUrl(`/workspace/${encodeURIComponent(workspaceId)}?folder=${encodeURIComponent(folderId)}&chat=${encodeURIComponent(seed.chat_id)}`)}>{$t('seeds.conversation')}</a>{/if}
+        {#if seed.host_task_id}<a href={`https://app.coderabbit.ai/code/tasks/${encodeURIComponent(seed.host_task_id)}`} target="_blank" rel="noreferrer">{$t('seeds.hostTask')}</a>{/if}
+        {#if !seed.retired_at}<button disabled={busy||seed.unresolved_operations>0} onclick={()=>action({action:'seed_retire',seed_id:seed.id})}>{$t('seeds.retire')}</button>{/if}
+      </div></div>
+    </details>
+  {:else}<div class="empty">{$t('seeds.empty')}</div>{/each}</div>
+  <div class="toolbar pagination"><button disabled={page===0} onclick={()=>page--}>{$t('seeds.previous')}</button><span>{page+1} / {pageCount}</span><button disabled={page+1>=pageCount} onclick={()=>page++}>{$t('seeds.next')}</button></div>
 </div>
 <style>
-.seed-library{max-width:1000px;margin:auto}.overview{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:20px}.overview>div{border:1px solid var(--color-border);border-radius:12px;padding:16px;display:grid;gap:8px;background:var(--card-bg)}.overview span,.notice,.time,.identity{font-size:12px;color:var(--color-text-muted);line-height:1.7}.overview strong{font-size:28px}.toolbar{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.toolbar label{display:flex;align-items:center;gap:8px}.notice{margin:12px 0}details{border:1px solid var(--color-border);padding:16px;border-radius:12px;margin:18px 0}summary{cursor:pointer;font-weight:600}form{display:grid;grid-template-columns:repeat(2,1fr);gap:14px;margin-top:18px}form label{display:grid;gap:6px;font-size:12px}.wide{grid-column:1/-1}input:not([type=checkbox]),select,textarea{padding:10px;border:1px solid var(--color-border);border-radius:8px;background:var(--card-bg);min-width:0;width:100%}select{width:auto}button{padding:8px 14px;border:1px solid var(--color-border);border-radius:8px;cursor:pointer}button:disabled{opacity:.5;cursor:default}.primary{background:#2563eb;color:white}.bundle{margin-top:20px}.bundle p{font-size:12px;margin-bottom:10px}.bundle textarea{font-family:monospace;word-break:break-all;margin-bottom:10px}.filters{margin:20px 0}.seed-list{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}article{padding:18px;border:1px solid var(--color-border);border-radius:12px;background:var(--card-bg)}.seed-title{display:flex;justify-content:space-between;gap:12px}.seed-title span{font-size:11px;border-radius:20px;padding:3px 10px;background:var(--color-border)}.seed-title .alive{background:#16a34a20;color:#16a34a}article .toolbar{margin-top:12px;font-size:12px}.empty{padding:36px;color:var(--color-text-muted);grid-column:1/-1;text-align:center}[role=alert]{color:var(--danger);overflow-wrap:anywhere}[role=status]{font-size:12px;color:#d97706}a{color:#3b82f6;cursor:pointer}@media(max-width:700px){.overview{grid-template-columns:repeat(2,1fr)}.seed-list,form{grid-template-columns:1fr}.overview strong{font-size:23px}}
+.seed-library{max-width:1180px;margin:auto}.overview{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:20px}.overview>div{border:1px solid var(--color-border);border-radius:12px;padding:16px;display:grid;gap:8px;background:var(--card-bg)}.overview span,.muted,.notice,.identity{font-size:12px;color:var(--color-text-muted);line-height:1.7}.overview strong{font-size:27px}.overview small{font-size:12px;font-weight:400}.toolbar,.input-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.toolbar label{display:flex;align-items:center;gap:6px}.notice{margin:12px 0}.pairing{border:1px solid var(--color-border);padding:16px;border-radius:12px;margin:18px 0}.pairing summary{display:flex;justify-content:space-between}.pairing summary span{font-size:12px;color:var(--color-text-muted)}.pairing summary span.connected{color:#16a34a}summary{cursor:pointer}form{display:grid;gap:14px;margin-top:16px}form label{display:grid;gap:6px;font-size:12px}.input-row input{flex:1;min-width:160px}input:not([type=checkbox]),select{padding:9px 10px;border:1px solid var(--color-border);border-radius:8px;background:var(--card-bg);min-width:0}button{padding:8px 12px;border:1px solid var(--color-border);border-radius:8px;cursor:pointer;white-space:nowrap}button:disabled{opacity:.5;cursor:default}.primary{background:#2563eb;color:white}.filters{margin:18px 0}.search{flex:1;min-width:180px!important}.list-head{display:flex;justify-content:space-between;margin:8px 0}.seed-list{border:1px solid var(--color-border);border-radius:12px;overflow:hidden}.seed-row+ .seed-row{border-top:1px solid var(--color-border)}.seed-row summary{display:flex;align-items:center;gap:12px;padding:13px 16px;background:var(--card-bg)}.seed-row summary:hover{background:var(--color-border)}.seed-row strong{font-size:13px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.identity{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.dot{width:7px;height:7px;border-radius:50%;background:#94a3b8;flex-shrink:0}.dot.alive{background:#22c55e}.badge{font-size:11px;border-radius:12px;padding:3px 8px;background:var(--color-border);white-space:nowrap}code{font-size:11px;color:var(--color-text-muted)}.row-details{padding:0 16px 16px}.row-details pre{font:12px/1.8 system-ui;white-space:pre-wrap;overflow-wrap:anywhere;margin:12px 0;color:var(--color-text-muted)}.empty{padding:36px;color:var(--color-text-muted);text-align:center}.pagination{justify-content:center;margin:18px 0;font-size:12px}[role=alert]{color:var(--danger);overflow-wrap:anywhere}a{color:#3b82f6;cursor:pointer;font-size:12px}@media(max-width:700px){.overview{grid-template-columns:repeat(2,1fr)}.overview strong{font-size:23px}.seed-row summary{gap:7px;padding:12px 8px}.seed-row code{display:none}.seed-row strong{max-width:110px}.input-row button{padding:8px}.identity{font-size:11px}}
 </style>

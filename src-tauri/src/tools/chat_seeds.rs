@@ -3,11 +3,18 @@ use super::*;
 use serde::{Deserialize, Serialize};
 static EXCHANGES: OnceLock<Mutex<std::collections::HashMap<String, (String, u64)>>> =
     OnceLock::new();
+static SCANS: OnceLock<Mutex<std::collections::HashMap<PathBuf, u64>>> = OnceLock::new();
 const FILE: &str = "docs/chat-sessions/seed-library.seeds.json";
+pub const LIBRARY_LIMIT: usize = 10000;
+const REGISTRY_BYTES: usize = 32 * 1024 * 1024;
 pub const SUSPECT_MS: u64 = 600_000;
 pub const REPLACE_MS: u64 = 720_000;
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Seed {
+    #[serde(default)]
+    pub provision_key: String,
+    #[serde(default)]
+    pub metadata: std::collections::BTreeMap<String, String>,
     pub id: String,
     pub account: String,
     pub repo_id: String,
@@ -32,6 +39,8 @@ pub struct Seed {
 }
 #[derive(Serialize, Deserialize)]
 struct Library {
+    #[serde(default)]
+    pairing_hash: String,
     version: u8,
     enabled: bool,
     seeds: Vec<Seed>,
@@ -42,6 +51,7 @@ fn read(root: &Path) -> Result<Library> {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Ok(Library {
+                pairing_hash: String::new(),
                 version: 1,
                 enabled: false,
                 seeds: vec![],
@@ -49,11 +59,11 @@ fn read(root: &Path) -> Result<Library> {
         }
         Err(e) => return Err(io(e)),
     };
-    if bytes.len() > 2 * 1024 * 1024 {
+    if bytes.len() > REGISTRY_BYTES {
         return Err(err("Seed registry exceeds limit"));
     }
     let data: Library = serde_json::from_slice(&bytes).map_err(|_| err("Invalid seed registry"))?;
-    if data.version != 1 || data.seeds.len() > 1000 {
+    if data.version != 1 || data.seeds.len() > LIBRARY_LIMIT {
         return Err(err("Invalid seed registry"));
     }
     for s in &data.seeds {
@@ -63,10 +73,15 @@ fn read(root: &Path) -> Result<Library> {
 }
 fn write(root: &Path, data: &Library) -> Result<()> {
     let bytes = serde_json::to_vec(data).map_err(|_| err("Invalid seed registry"))?;
-    if bytes.len() > 2 * 1024 * 1024 {
+    if bytes.len() > REGISTRY_BYTES {
         return Err(err("Seed registry exceeds limit"));
     }
     atomic(root, "seed-library", "seeds.json", &bytes)
+}
+pub fn invalidate(root: &Path) {
+    if let Ok(mut scans) = SCANS.get_or_init(Default::default).lock() {
+        scans.remove(root);
+    }
 }
 pub fn enabled(root: &Path) -> Result<bool> {
     Ok(read(root)?.enabled)
@@ -113,13 +128,69 @@ fn public(s: &Seed, time: u64) -> Value {
     } else {
         "preparing"
     };
-    json!({"id":s.id,"account":s.account,"repo_id":s.repo_id,"branch":s.branch,"created_at":s.created_at,"last_seen":s.last_seen,"status":status,"reason":s.reason,"archived":s.archived,"retired_at":s.retired_at,"host_task_id":s.host_task_id,"chat_id":s.chat_id,"generation":s.generation,"unresolved_operations":s.inflight.len()+s.operations.len()})
+    json!({"id":s.id,"account":s.account,"repo_id":s.repo_id,"branch":s.branch,"metadata":s.metadata,"created_at":s.created_at,"last_seen":s.last_seen,"status":status,"reason":s.reason,"archived":s.archived,"retired_at":s.retired_at,"host_task_id":s.host_task_id,"chat_id":s.chat_id,"generation":s.generation,"unresolved_operations":s.inflight.len()+s.operations.len()})
+}
+fn inventory(data: &Library, args: &Value, time: u64) -> Value {
+    let all: Vec<_> = data.seeds.iter().map(|s| public(s, time)).collect();
+    let mut counts = std::collections::BTreeMap::<String, usize>::new();
+    let mut accounts = std::collections::BTreeSet::new();
+    for s in &all {
+        *counts
+            .entry(s["status"].as_str().unwrap_or("").into())
+            .or_default() += 1;
+        accounts.insert(s["account"].as_str().unwrap_or("").to_owned());
+    }
+    let search = args["search"].as_str().unwrap_or("").trim().to_lowercase();
+    let filtered: Vec<_> = all
+        .iter()
+        .filter(|s| {
+            (args["include_archived"] != false || s["archived"] != true)
+                && args["account"]
+                    .as_str()
+                    .filter(|v| !v.is_empty())
+                    .is_none_or(|v| s["account"] == v)
+                && args["status"]
+                    .as_str()
+                    .filter(|v| !v.is_empty())
+                    .is_none_or(|v| s["status"] == v)
+                && (search.is_empty()
+                    || ["id", "account", "repo_id", "branch", "host_task_id"]
+                        .iter()
+                        .any(|k| s[k].as_str().unwrap_or("").to_lowercase().contains(&search))
+                    || s["metadata"].as_object().is_some_and(|m| {
+                        m.values()
+                            .any(|v| v.as_str().unwrap_or("").to_lowercase().contains(&search))
+                    }))
+        })
+        .collect();
+    let offset = args["offset"].as_u64().unwrap_or(0) as usize;
+    let limit = args["limit"]
+        .as_u64()
+        .map(|v| v.clamp(1, 200) as usize)
+        .unwrap_or(all.len());
+    json!({"enabled":data.enabled,"seeds":filtered.iter().skip(offset).take(limit).collect::<Vec<_>>(),"retired_count":counts.get("retired").copied().unwrap_or(0),"total":all.len(),"filtered_total":filtered.len(),"offset":offset,"limit":limit,"counts":counts,"accounts":accounts,"pairing_enabled":!data.pairing_hash.is_empty(),"capacity":LIBRARY_LIMIT})
 }
 /// Caller owns the chat lock; no nested locking.
 pub fn ui(root: &Path, args: &Value) -> Result<Value> {
     let mut data = read(root)?;
     let time = now();
     match args["action"].as_str().unwrap_or("") {
+        "seed_pairing" => {
+            if args["enabled"] == false {
+                data.pairing_hash.clear();
+            } else {
+                let token = args["token"].as_str().unwrap_or("");
+                if token.len() != 64
+                    || !token
+                        .bytes()
+                        .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+                {
+                    return Err(err("Pairing token must contain 64 hexadecimal characters"));
+                }
+                data.pairing_hash = digest(token.as_bytes());
+            }
+            write(root, &data)?;
+        }
         "seed_settings" => {
             data.enabled = args["enabled"]
                 .as_bool()
@@ -131,8 +202,8 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
                 .as_u64()
                 .filter(|c| *c >= 1 && *c <= 50)
                 .ok_or_else(|| err("Batch must contain 1–50 seeds"))?;
-            if data.seeds.len() + count as usize > 1000 {
-                return Err(err("Seed library limit 1000"));
+            if data.seeds.len() + count as usize > LIBRARY_LIMIT {
+                return Err(err("Seed library limit 10000"));
             }
             let account = text(&args["account"], 200)?;
             let repo_id = text(&args["repo_id"], 200)?;
@@ -164,13 +235,41 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
                 }
             }
             for _ in 0..count {
-                let ticket = format!(
-                    "{}{}",
-                    uuid::Uuid::new_v4().simple(),
-                    uuid::Uuid::new_v4().simple()
-                );
+                let sid = uuid::Uuid::new_v4().to_string();
+                let provision_key = args["_provision_key"].as_str().unwrap_or("").to_owned();
+                let ticket = if !provision_key.is_empty() {
+                    digest(
+                        format!(
+                            "{}\0{}\0{}",
+                            args["_provision_token"].as_str().unwrap_or(""),
+                            provision_key,
+                            sid
+                        )
+                        .as_bytes(),
+                    )
+                } else {
+                    format!(
+                        "{}{}",
+                        uuid::Uuid::new_v4().simple(),
+                        uuid::Uuid::new_v4().simple()
+                    )
+                };
+                let mut metadata = std::collections::BTreeMap::new();
+                for key in [
+                    "account_id",
+                    "provider_user_id",
+                    "repo_name",
+                    "organization_id",
+                    "workspace_id",
+                ] {
+                    if let Some(value) = args["metadata"][key].as_str().filter(|v| !v.is_empty()) {
+                        metadata.insert(key.to_owned(), text(&json!(value), 200)?);
+                    }
+                }
                 let s = Seed {
-                    id: uuid::Uuid::new_v4().to_string(),
+                    id: sid,
+                    provision_key,
+                    metadata,
                     account: account.clone(),
                     repo_id: repo_id.clone(),
                     branch: branch.clone(),
@@ -243,8 +342,54 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
         "seed_list" => (),
         _ => return Err(err("Unknown seed action")),
     }
-    Ok(
-        json!({"enabled":data.enabled,"seeds":data.seeds.iter().map(|s|public(s,time)).collect::<Vec<_>>(),"retired_count":data.seeds.iter().filter(|s|s.retired_at>0).count()}),
+    Ok(inventory(&data, args, time))
+}
+/// Browser pairing is folder-scoped and only grants status/provisioning access.
+pub fn provision(root: &Path, token: &str, args: &Value) -> Result<Value> {
+    let _lock = lock(root)?;
+    let data = read(root)?;
+    if token.len() != 64
+        || data.pairing_hash.is_empty()
+        || digest(token.as_bytes()) != data.pairing_hash
+    {
+        return Err(err("Pairing token invalid or revoked"));
+    }
+    if args["action"] == "status" {
+        return Ok(
+            json!({"ok":true,"total":data.seeds.len(),"capacity":LIBRARY_LIMIT,"batch_limit":50}),
+        );
+    }
+    if args["action"] != "batch" {
+        return Err(err("Pairing only supports status and batch"));
+    }
+    let request = id(&args["request_id"])?;
+    let key = digest(format!("{token}\0{request}").as_bytes());
+    let existing: Vec<_> = data
+        .seeds
+        .iter()
+        .filter(|s| s.provision_key == key)
+        .collect();
+    if !existing.is_empty() {
+        if args["count"].as_u64() != Some(existing.len() as u64)
+            || existing.iter().any(|s| {
+                args["account"] != s.account
+                    || args["repo_id"] != s.repo_id
+                    || args["branch"] != s.branch
+                    || s.retired_at > 0
+                    || s.enrollment_until <= now()
+            })
+        {
+            return Err(err(
+                "Provision request changed or expired; use a new request ID",
+            ));
+        }
+        return Ok(
+            json!({"batch":existing.iter().map(|s|json!({"seed_id":s.id,"ticket":digest(format!("{token}\0{key}\0{}",s.id).as_bytes()),"repo_id":s.repo_id,"branch":s.branch,"account":s.account,"expires_at":s.enrollment_until})).collect::<Vec<_>>()}),
+        );
+    }
+    ui(
+        root,
+        &json!({"action":"seed_batch","account":args["account"],"repo_id":args["repo_id"],"branch":args["branch"],"count":args["count"],"metadata":args["metadata"],"replace_unconnected":args["replace_unconnected"]==true,"_provision_key":key,"_provision_token":token}),
     )
 }
 pub fn initialize(root: &Path, sid: &str, ticket: &str) -> Result<String> {
@@ -339,37 +484,87 @@ fn poll_at(root: &Path, sid: &str, token: &str, time: u64) -> Result<Value> {
     let _lock = lock(root)?;
     let mut data = read(root)?;
     let index = authorized(&data, sid, token, time)?;
-    let before = serde_json::to_string(&data).map_err(|_| err("Invalid seed registry"))?;
-    if time.saturating_sub(data.seeds[index].last_seen) >= 15000 {
+    let was_ready = data.seeds[index].ready;
+    let mut dirty = !was_ready;
+    if time.saturating_sub(data.seeds[index].last_seen) >= 60000 {
         data.seeds[index].last_seen = time;
+        dirty = true;
     }
     data.seeds[index].ready = true;
-    let mut chats = vec![];
-    for entry in fs::read_dir(safe(root, DIR)?).map_err(io)? {
-        let filename = entry.map_err(io)?.file_name().to_string_lossy().to_string();
-        if let Some(cid) = filename
-            .strip_suffix(".json")
-            .filter(|cid| id(&json!(cid)).is_ok())
+    if data.seeds[index].chat_id.is_empty() {
+        let mut scans = SCANS
+            .get_or_init(Default::default)
+            .lock()
+            .map_err(|_| err("Seed scan lock unavailable"))?;
+        if was_ready
+            && scans
+                .get(root)
+                .is_some_and(|last| time >= *last && time - *last < 1000)
         {
-            let chat = load(root, cid)?;
-            if let Some(owner) = chat["seed_owner"]
-                .as_str()
-                .filter(|_| {
-                    chat["seed_auto"] == true
-                        && !chat["attachment_id"].as_str().unwrap_or("").is_empty()
-                })
-                .and_then(|owner| {
-                    data.seeds
-                        .iter_mut()
-                        .find(|s| s.id == owner && s.retired_at == 0)
-                })
-            {
-                owner.chat_id = cid.into();
-                owner.attachment_id = chat["attachment_id"].as_str().unwrap_or("").into();
-                owner.generation = chat["seed_generation"].as_u64().unwrap_or(1);
+            if dirty {
+                write(root, &data)?;
             }
-            chats.push(chat);
+            return Ok(
+                json!({"status":"idle","instruction":"Make one new independent seed_wait(timeout_ms:25000). Idle is normal. Respect host execution limits."}),
+            );
         }
+        if scans.len() > 1024 {
+            scans.retain(|_, last| time.saturating_sub(*last) < 60000);
+        }
+        scans.insert(root.to_path_buf(), time);
+    }
+    let mut chats = vec![];
+    let own_chat = data.seeds[index].chat_id.clone();
+    let mut chat_ids = vec![];
+    if !own_chat.is_empty() {
+        if safe(root, &format!("{DIR}/{own_chat}.json"))?.exists() {
+            chat_ids.push(own_chat);
+        }
+    } else {
+        for entry in fs::read_dir(safe(root, DIR)?).map_err(io)? {
+            let filename = entry.map_err(io)?.file_name().to_string_lossy().to_string();
+            if let Some(cid) = filename
+                .strip_suffix(".json")
+                .filter(|cid| id(&json!(cid)).is_ok())
+            {
+                chat_ids.push(cid.to_owned());
+            }
+        }
+    }
+    let by_id: std::collections::HashMap<_, _> = data
+        .seeds
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.id.clone(), i))
+        .collect();
+    for cid in chat_ids {
+        let chat = load(root, &cid)?;
+        if let Some(owner) = chat["seed_owner"]
+            .as_str()
+            .filter(|_| {
+                chat["seed_auto"] == true
+                    && !chat["attachment_id"].as_str().unwrap_or("").is_empty()
+            })
+            .and_then(|owner| {
+                by_id
+                    .get(owner)
+                    .and_then(|index| data.seeds.get_mut(*index))
+                    .filter(|s| s.retired_at == 0)
+            })
+        {
+            let attachment = chat["attachment_id"].as_str().unwrap_or("");
+            let generation = chat["seed_generation"].as_u64().unwrap_or(1);
+            if owner.chat_id != cid
+                || owner.attachment_id != attachment
+                || owner.generation != generation
+            {
+                dirty = true;
+            }
+            owner.chat_id = cid;
+            owner.attachment_id = chat["attachment_id"].as_str().unwrap_or("").into();
+            owner.generation = chat["seed_generation"].as_u64().unwrap_or(1);
+        }
+        chats.push(chat);
     }
     if !data.seeds[index].chat_id.is_empty() {
         let seed = &data.seeds[index];
@@ -394,7 +589,7 @@ fn poll_at(root: &Path, sid: &str, token: &str, time: u64) -> Result<Value> {
             }
             let old = chat["seed_owner"]
                 .as_str()
-                .and_then(|owner| data.seeds.iter().position(|s| s.id == owner));
+                .and_then(|owner| by_id.get(owner).copied());
             if let Some(old) = old {
                 let seed = &data.seeds[old];
                 if !seed.inflight.is_empty() || !seed.operations.is_empty() {
@@ -427,10 +622,14 @@ fn poll_at(root: &Path, sid: &str, token: &str, time: u64) -> Result<Value> {
             s.chat_id = id(&chat["id"])?.into();
             s.attachment_id = attachment;
             s.generation = generation;
+            dirty = true;
+            if let Ok(mut scans) = SCANS.get_or_init(Default::default).lock() {
+                scans.remove(root);
+            }
             break;
         }
     }
-    if serde_json::to_string(&data).map_err(|_| err("Invalid seed registry"))? != before {
+    if dirty {
         write(root, &data)?;
     }
     let s = &data.seeds[index];
@@ -558,6 +757,71 @@ mod tests {
             })
             .collect();
         (root, batch, tokens)
+    }
+    #[test]
+    fn pairing_rotation_retry_and_large_inventory() {
+        let (root, _, tokens) = fixture();
+        let token = "b".repeat(64);
+        super::super::ui(root.path(), &json!({"action":"seed_pairing","token":token})).unwrap();
+        let args = json!({"action":"batch","request_id":"attempt","count":2,"account":"test","repo_id":"exact","branch":"main","metadata":{"repo_name":"owner/repo"}});
+        let first = provision(root.path(), &token, &args).unwrap();
+        assert_eq!(provision(root.path(), &token, &args).unwrap(), first);
+        let mut changed = args.clone();
+        changed["count"] = json!(3);
+        assert!(provision(root.path(), &token, &changed).is_err());
+        assert!(provision(root.path(), &token, &json!({"action":"read_file"})).is_err());
+        let other = tempfile::tempdir().unwrap();
+        assert!(provision(other.path(), &token, &json!({"action":"status"})).is_err());
+        let raw = fs::read_to_string(safe(root.path(), FILE).unwrap()).unwrap();
+        assert!(!raw.contains(&token));
+        assert!(!raw.contains(first["batch"][0]["ticket"].as_str().unwrap()));
+        super::super::ui(
+            root.path(),
+            &json!({"action":"seed_pairing","token":"c".repeat(64)}),
+        )
+        .unwrap();
+        assert!(provision(root.path(), &token, &json!({"action":"status"})).is_err());
+        super::super::ui(
+            root.path(),
+            &json!({"action":"seed_pairing","enabled":false}),
+        )
+        .unwrap();
+        assert!(provision(root.path(), &"c".repeat(64), &json!({"action":"status"})).is_err());
+        let mut data = read(root.path()).unwrap();
+        let template = data.seeds[0].clone();
+        let time = now();
+        data.seeds = (0..600)
+            .map(|i| {
+                let mut s = template.clone();
+                s.id = format!("load-{i}");
+                s.account = if i % 2 == 0 { "even" } else { "odd" }.into();
+                s.ready = true;
+                s.last_seen = time;
+                s
+            })
+            .collect();
+        write(root.path(), &data).unwrap();
+        let page = ui(
+            root.path(),
+            &json!({"action":"seed_list","limit":50,"offset":50,"account":"odd","status":"ready"}),
+        )
+        .unwrap();
+        assert_eq!(page["total"], 600);
+        assert_eq!(page["filtered_total"], 300);
+        assert_eq!(page["seeds"].as_array().unwrap().len(), 50);
+        assert_eq!(page["seeds"][0]["id"], "load-101");
+        assert_eq!(page["counts"]["ready"], 600);
+        for i in 0..500 {
+            assert_eq!(
+                poll_at(root.path(), &format!("load-{i}"), &tokens[0], time).unwrap()["status"],
+                "idle"
+            );
+        }
+        let chat = super::super::ui(root.path(), &json!({"action":"create"})).unwrap();
+        assert_eq!(
+            poll_at(root.path(), "load-0", &tokens[0], time).unwrap()["chat_id"],
+            chat["session"]["id"]
+        );
     }
     #[test]
     fn correction_only_retires_unconnected_batches() {

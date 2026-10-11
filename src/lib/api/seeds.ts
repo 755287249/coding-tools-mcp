@@ -1,7 +1,7 @@
 import {getBackend} from '$lib/backend';
 import type {ChatAction} from './chat';
-export interface SeedRow {id:string;account:string;repo_id:string;branch:string;created_at:number;last_seen:number;status:string;reason:string;archived:boolean;retired_at:number;host_task_id:string;chat_id:string;generation:number;unresolved_operations:number}
-export interface SeedInventory {enabled:boolean;seeds:SeedRow[];retired_count:number}
+export interface SeedRow {id:string;account:string;repo_id:string;branch:string;metadata?:Record<string,string>;created_at:number;last_seen:number;status:string;reason:string;archived:boolean;retired_at:number;host_task_id:string;chat_id:string;generation:number;unresolved_operations:number}
+export interface SeedInventory {enabled:boolean;seeds:SeedRow[];retired_count:number;total?:number;filtered_total?:number;counts?:Record<string,number>;accounts?:string[];pairing_enabled?:boolean;capacity?:number}
 export interface SeedTicket {seed_id:string;ticket:string;repo_id:string;branch:string;account:string;expires_at:number}
 export async function seedRequest<T=SeedInventory>(workspaceId:string,folderId:string,args:Record<string,unknown>):Promise<T>{
   return await getBackend().chat.request(workspaceId,folderId,args as ChatAction) as T;

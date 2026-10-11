@@ -5,6 +5,8 @@ use axum::extract::Path;
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 static WAITERS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+static PROBES: OnceLock<Mutex<std::collections::HashMap<std::path::PathBuf, Instant>>> =
+    OnceLock::new();
 const TOOLS: &[&str] = &[
     "chat_open",
     "chat_wait",
@@ -48,6 +50,46 @@ fn wait_tool() -> Value {
     json!({"name":"seed_wait","description":"Wait for a conversation assignment. One independent wait at a time; idle is normal. Then chat_open with returned chat_id/attachment_id.","inputSchema":{"type":"object","properties":{"timeout_ms":{"type":"integer","minimum":0,"maximum":25000}},"required":["timeout_ms"],"additionalProperties":false}})
 }
 struct WaitGuard(String);
+pub(super) async fn provision(
+    State(state): State<ListenerState>,
+    Path(folder_id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    let result = (|| -> Result<Value, String> {
+        if !crate::tools::registry::exposed_tool_names(&state.mcp.runtime_config().tool_profile)
+            .contains(&"chat_open")
+        {
+            return Err("Seed library unavailable".into());
+        }
+        if !body.is_object() || body.to_string().len() > 16384 {
+            return Err("Invalid pairing request".into());
+        }
+        let folders = crate::tools::hub::list_workspace_folders(&state.mcp, None);
+        let folder = folders["folders"]
+            .as_array()
+            .and_then(|v| v.iter().find(|f| f["id"] == folder_id))
+            .ok_or("Seed library unavailable")?;
+        let root =
+            std::path::PathBuf::from(folder["path"].as_str().ok_or("Seed library unavailable")?);
+        let token = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .unwrap_or("");
+        let mut result = seeds::provision(&root, token, &body).map_err(|e| e.message())?;
+        result["workspace_folder_id"] = json!(folder_id);
+        Ok(result)
+    })();
+    match result {
+        Ok(value) => json_no_store(value),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            json_no_store(json!({"error":error})),
+        )
+            .into_response(),
+    }
+}
 impl Drop for WaitGuard {
     fn drop(&mut self) {
         if let Ok(mut waiters) = WAITERS.get_or_init(Default::default).lock() {
@@ -166,7 +208,25 @@ async fn execute(
                     .as_u64()
                     .filter(|n| *n <= 25000)
                     .ok_or("timeout_ms must be 0–25000")?;
-                for (owner, session) in seeds::pending_processes(&root).map_err(|e| e.message())? {
+                let probe_due = {
+                    let mut times = PROBES
+                        .get_or_init(Default::default)
+                        .lock()
+                        .map_err(|_| "Seed probe lock unavailable")?;
+                    let due = times
+                        .get(&root)
+                        .is_none_or(|last| last.elapsed() >= Duration::from_secs(5));
+                    if due {
+                        times.insert(root.clone(), Instant::now());
+                    }
+                    due
+                };
+                let pending = if probe_due {
+                    seeds::pending_processes(&root).map_err(|e| e.message())?
+                } else {
+                    vec![]
+                };
+                for (owner, session) in pending {
                     let check=handle_request_async(state.mcp.clone(),json!({"jsonrpc":"2.0","id":"seed-recovery-probe","method":"tools/call","params":{"name":"wait_command","arguments":{"workspace_folder_id":folder_id,"session_id":session,"timeout_ms":0},"_meta":{"openai/session":format!("seed:{owner}")}}})).await;
                     let result = &check["result"]["structuredContent"];
                     if result["ok"] != false && result["process_still_running"] == false {
@@ -190,7 +250,11 @@ async fn execute(
                     if result["status"] != "idle" || tokio::time::Instant::now() >= deadline {
                         break wrapped(result);
                     }
-                    tokio::time::sleep(Duration::from_millis(1000)).await;
+                    tokio::time::sleep(
+                        Duration::from_secs(5)
+                            .min(deadline.saturating_duration_since(tokio::time::Instant::now())),
+                    )
+                    .await;
                 }
             } else {
                 if !TOOLS.contains(&name) {
@@ -291,6 +355,81 @@ mod tests {
         });
         let client = reqwest::Client::new();
         let base = format!("http://{address}/clients/seed/mcp");
+        let pairing = "d".repeat(64);
+        ui(json!({"action":"seed_pairing","token":pairing}));
+        let paired = format!("{base}/seed-library/legacy");
+        let state = client
+            .post(&paired)
+            .bearer_auth(&pairing)
+            .json(&json!({"action":"status"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(state.status(), reqwest::StatusCode::OK);
+        assert!(state.headers()["cache-control"]
+            .to_str()
+            .unwrap()
+            .contains("no-store"));
+        assert_eq!(
+            state.json::<Value>().await.unwrap()["workspace_folder_id"],
+            "legacy"
+        );
+        for action in ["read_file", "tools/call"] {
+            assert_eq!(
+                client
+                    .post(&paired)
+                    .bearer_auth(&pairing)
+                    .json(&json!({"action":action}))
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                reqwest::StatusCode::BAD_REQUEST
+            );
+        }
+        assert_eq!(
+            client
+                .post(&paired)
+                .bearer_auth("wrong")
+                .json(&json!({"action":"status"}))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            client
+                .post(&paired)
+                .bearer_auth(&pairing)
+                .header("content-type", "application/json")
+                .body("x".repeat(20000))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::PAYLOAD_TOO_LARGE
+        );
+        assert_eq!(
+            client
+                .post(&base)
+                .bearer_auth(&pairing)
+                .json(&json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::UNAUTHORIZED
+        );
+        assert!(!client
+            .post(format!("{paired}/extra"))
+            .bearer_auth(&pairing)
+            .json(&json!({"action":"status"}))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success());
         let endpoint = format!("{base}/seeds/legacy/{}", seed["seed_id"].as_str().unwrap());
         let rpc = |token: String, method: &str, params: Value, id: u64| {
             client

@@ -7,8 +7,8 @@ lifetime; replacement retains the local conversation and all durable history.
 ## Contract
 
 - Management uses authenticated local-chat `seed_*` actions. Batch credentials
-  are returned once to the UI, copied into the browser adapter and kept in memory.
-  Only hashes are persisted. The account label, exact repository ID and branch
+  are delivered directly to the paired browser and kept in memory.
+  Only hashes are persisted in the registry. The account label, exact repository ID and branch
   are mandatory; a missing repository never falls back to another repository.
 - `/mcp/seeds/{folder_id}/{seed_id}` is a separate, capability authenticated MCP
   endpoint. Enrollment expires after one hour. Initialization exchanges it for a
@@ -50,7 +50,7 @@ lifetime; replacement retains the local conversation and all durable history.
 Use the current browser account, exact repository and branch. Create sequentially
 with stable client request IDs and validate tRPC error envelopes and task IDs.
 Uncertain network results stop that batch for reconciliation; never automatically
-recreate an uncertain task. Store only nonsecret task receipts. Do not implement
+recreate an uncertain task. Store the explicitly saved pairing URL/token and nonsecret task receipts; never persist website access tokens or enrollment tickets. Do not implement
 account registration, eligibility activation or automatic billing/consent.
 
 ## Required verification
@@ -70,3 +70,30 @@ restart requires a new enrollment. The access token is independently random and
 cannot be derived from the enrollment ticket. Retained process markers are cleared
 only after the server observes a terminal process result in the original seed's
 execution context. Missing sessions and ambiguous in-flight markers fail closed.
+
+## Browser pairing and large libraries (0.1.133)
+
+`POST /mcp/seed-library/{folder_id}` accepts a folder-specific 64-hex bearer
+pairing capability. Management `seed_pairing` saves its hash or revokes it. The
+capability accepts only `status` and `batch`, never ordinary MCP or project tools.
+Requests are bounded to 16 KiB; responses are no-store. Batch request IDs are
+idempotent under the folder lock: identical retries return the same enrollment
+tickets; changed account/repository/branch/count or expired records fail closed.
+Token rotation invalidates provisioning retries made with the old token.
+
+The browser resolves account and organization from the page session, matches the
+selected repository label and saved full name, resolves its exact ID through the
+organization-scoped repository API, and reads the selected branch. Selection is
+revalidated after asynchronous boundaries. Quantities 1–10000 are chunked into
+10-record provisioning requests and sequential host task submissions. Failed host
+registration is retried separately from task creation.
+
+Both registries allow 10000 retained records and 32 MiB. Inventory supports
+limit (maximum 200), offset, account, status, search, include_archived, global
+counts and account choices. UI requests 50 rows and polls only when visible.
+Warm standby polling shares a one-second full-chat scan cache; authoritative chat
+saves invalidate it immediately in-process. Cross-process changes are observed
+on the next scan. Assigned seeds inspect only their own conversation. Heartbeats
+persist at most once per minute during idle waits; process recovery probes and
+internal long-wait polling run at five-second intervals. No live 500-host
+concurrency guarantee follows from synthetic registry performance measurements.

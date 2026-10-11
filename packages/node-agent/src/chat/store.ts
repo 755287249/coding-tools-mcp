@@ -1,4 +1,4 @@
-import {seedUi, readSeeds, type SeedStore} from './seeds.js';
+import {seedUi, readSeeds, seedInvalidate, type SeedStore} from './seeds.js';
 import {parseQuestions,validateQuestionContext,answerQuestions,activeQuestionId,questionsMarkdown,type ChatQuestion,type QuestionResponse} from './questions.js';
 import {packHistory, unpackHistory, agentContext, HISTORY_PAGE_BYTES} from './history.js';
 import {visibleSession} from './collaboration.js';
@@ -105,6 +105,7 @@ function save(root: string, s: ChatSession): void {
   const temporary = safe(root, `${DIR}/${s.id}.${randomUUID()}.tmp`);
   writeFileSync(temporary, body, { mode: 0o600, flag: 'wx' });
   try { renameSync(temporary, target); } finally { rmSync(temporary, { force: true }); }
+  seedInvalidate(seedStore(root));
   // JSON is authoritative. An export failure is surfaced; retries rebuild the projection.
   const md = safe(root, `${DIR}/${s.id}.md`);
   const mdTemp = safe(root, `${DIR}/${s.id}.${randomUUID()}.tmp`);

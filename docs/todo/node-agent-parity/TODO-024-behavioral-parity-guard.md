@@ -70,3 +70,9 @@ The dedicated capability gateways both restrict project/chat/process ownership a
 preserve ordinary MCP authentication. Focused verification lives in Rust seed
 unit/HTTP tests and Node `test/seeds.test.mjs`; shared UI and browser provisioning
 are covered by root plugin fixtures. No Node parity exception is introduced.
+
+0.1.133 keeps paired provisioning, token rotation/revocation, stable batch retries,
+10000-record limits, server pagination/filter summaries and polling optimizations
+in both runtimes. Seed unit/HTTP suites cover scoped pairing and 600-record
+fixtures; browser fixtures cover direct pairing, context switches, retry and
+unknown outcomes. No additional parity exception is introduced.

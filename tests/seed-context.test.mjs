@@ -5,7 +5,7 @@ const route='/trpc/codingAgent.listTasks';
 const h=(org,ws='')=>({'x-coderabbitai-organization':org,...(ws?{'x-coderabbitai-workspace':ws}:{}),authorization:'secret',cookie:'private'});
 test('app session reads only expected storage keys and keeps token rotation separate from account identity',()=>{
  const values=new Map([['user',JSON.stringify({state:{user:{id:'account'},currentOrganization:{id:'org'}}})],['accessToken','session-a']]);
- const page={sessionStorage:{getItem:k=>{assert.ok(['user','accessToken'].includes(k));return values.get(k);}},localStorage:{getItem:k=>{assert.equal(k,'clerkGitProvider');return null;}}};
+ const page={sessionStorage:{getItem:k=>{assert.ok(['user','accessToken'].includes(k));return values.get(k);}},localStorage:{getItem:k=>{assert.ok(['clerkGitProvider','clerkSsoWorkspaceId'].includes(k));return null;}}};
  const first=pageSession(page);assert.equal(first.account,'account');assert.equal(first.provider,'');assert.equal(first.access,'session-a');
  values.set('accessToken','session-b');assert.equal(pageSession(page).identity,first.identity);
  values.set('user',JSON.stringify({state:{user:{id:123}}}));assert.equal(pageSession(page),null);

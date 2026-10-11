@@ -7,7 +7,7 @@ import {readRequestBody} from '../http.js';
 import {currentToolCatalog} from '../catalog.js';
 import {dispatchMcpMethod} from '../mcp/dispatcher.js';
 import {seedStore} from '../../chat/store.js';
-import {seedInitialize,seedAuthenticate,seedCreated,seedPoll,seedBegin,seedFinish,seedPendingProcesses,seedProcessSettled} from '../../chat/seeds.js';
+import {seedProvision,seedInitialize,seedAuthenticate,seedCreated,seedPoll,seedBegin,seedFinish,seedPendingProcesses,seedProcessSettled} from '../../chat/seeds.js';
 import {localChatSkill} from '../../rustCatalog.generated.js';
 import {setTimeout as sleep} from 'node:timers/promises';
 
@@ -16,8 +16,23 @@ export const SEED_TOOLS=new Set(['chat_open','chat_wait','chat_reply','chat_uplo
 const waitTool={name:'seed_wait',description:'Wait for a conversation assignment. One independent wait at a time; idle is normal. Then chat_open with returned chat_id/attachment_id.',inputSchema:{type:'object',properties:{timeout_ms:{type:'integer',minimum:0,maximum:25000}},required:['timeout_ms'],additionalProperties:false}};
 const foldersTool={name:'list_workspace_folders',description:'Show the single project authorized for this seed.',inputSchema:{type:'object',properties:{},additionalProperties:false}};
 const waiting=new Set<string>();
+const probeTimes=new Map<string,number>();
 function wrapped(result:unknown){return {content:[{type:'text',text:JSON.stringify(result)}],structuredContent:result,isError:false};}
 export async function handleSeedRoute(req:IncomingMessage,res:ServerResponse,pathname:string,context:ToolContext):Promise<boolean>{
+  const pairing=pathname.match(/^\/mcp\/seed-library\/([A-Za-z0-9_-]{1,80})$/);
+  if(pairing){
+    res.setHeader('cache-control','no-store');
+    if(req.method!=='POST'){sendJson(res,405,{error:'POST required'});return true;}
+    const folder=context.config.folders.find(f=>f.id===pairing[1]);
+    if(!folder||!currentToolCatalog(context).names.includes('chat_open')){sendJson(res,404,{error:'Seed library unavailable'});return true;}
+    try{
+      const body=await readRequestBody(req,16384);
+      const args=JSON.parse(body.toString());if(!args||Array.isArray(args)||typeof args!=='object')throw Error('Invalid pairing request');
+      const result=seedProvision(seedStore(folder.path),String(req.headers.authorization??'').replace(/^Bearer /,''),args);
+      sendJson(res,200,{...result,workspace_folder_id:folder.id});
+    }catch(error){sendJson(res,400,{error:error instanceof Error?error.message:'Pairing request failed'});}
+    return true;
+  }
   const match=pathname.match(/^\/mcp\/seeds\/([A-Za-z0-9_-]{1,80})\/([A-Za-z0-9_-]{1,80})$/);if(!match)return false;
   res.setHeader('cache-control','no-store');
   if(req.method!=='POST'){sendJson(res,405,{error:'POST required'});return true;}
@@ -50,12 +65,14 @@ export async function handleSeedRoute(req:IncomingMessage,res:ServerResponse,pat
       if(name==='list_workspace_folders')result=wrapped({ok:true,folders:[{id:folder.id,name:folder.name,path:folder.path,selected:true}],selected_folder_id:folder.id});
       else if(name==='seed_wait'){
         const timeout=Number(args.timeout_ms);if(!Number.isInteger(timeout)||timeout<0||timeout>25000)throw Error('timeout_ms must be 0–25000');
-        for(const pending of seedPendingProcesses(store)){
+        const probeAt=Date.now(),probeDue=probeAt-(probeTimes.get(folder.path)??0)>=5000;
+        if(probeDue)probeTimes.set(folder.path,probeAt);
+        for(const pending of probeDue?seedPendingProcesses(store):[]){
           const check=await callTool(context,'wait_command',{workspace_folder_id:folder.id,session_id:pending.session_id,timeout_ms:0},{'openai/session':`seed:${pending.seed_id}`});
           if(check.ok!==false&&check.process_still_running===false)seedProcessSettled(store,pending.seed_id,pending.session_id);
         }
         const key=folder.path+':'+seedId;if(waiting.has(key))throw Error('A seed_wait is already active');waiting.add(key);
-        try{const deadline=Date.now()+timeout;let status;do{status=seedPoll(store,seedId,token);if(status.status!=='idle'||Date.now()>=deadline)break;await sleep(1000);}while(true);result=wrapped(status);}finally{waiting.delete(key);}
+        try{const deadline=Date.now()+timeout;let status;do{status=seedPoll(store,seedId,token);if(status.status!=='idle'||Date.now()>=deadline)break;await sleep(Math.min(5000,Math.max(0,deadline-Date.now())));}while(true);result=wrapped(status);}finally{waiting.delete(key);}
       }else{
         if(!SEED_TOOLS.has(name)||!catalog.names.includes(name))throw Error('Tool not available to seeds');
         if(args.workspace_folder_id!==undefined&&args.workspace_folder_id!==folder.id)throw Error('Seed workspace mismatch');

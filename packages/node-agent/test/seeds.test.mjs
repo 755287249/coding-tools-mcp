@@ -4,7 +4,7 @@ import {mkdtempSync,rmSync,readFileSync,writeFileSync,symlinkSync} from 'node:fs
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {chatUi,chatTool,seedStore} from '../dist/chat/store.js';
-import {seedInitialize,seedCreated,seedAuthenticate,seedPoll,seedBegin,seedFinish,SEED_REPLACE_MS} from '../dist/chat/seeds.js';
+import {seedProvision,seedInitialize,seedCreated,seedAuthenticate,seedPoll,seedBegin,seedFinish,SEED_REPLACE_MS} from '../dist/chat/seeds.js';
 import {createMcpFixture} from './mcpTestHelpers.mjs';
 import {tunnelPathAllowed} from '../dist/tunnel.js';
 function fixture(t,count=3){const root=mkdtempSync(path.join(tmpdir(),'seeds-'));t.after(()=>rmSync(root,{recursive:true,force:true}));chatUi(root,{action:'seed_settings',enabled:true});const batch=chatUi(root,{action:'seed_batch',count,account:'test',repo_id:'repo-id',branch:'main'}).batch;const store=seedStore(root),tokens=batch.map(s=>seedInitialize(store,s.seed_id,s.ticket));return {root,batch,store,tokens};}
@@ -103,4 +103,38 @@ test('a recorded host task prevents configuration correction even before initial
  const first=chatUi(root,args).batch[0];seedCreated(seedStore(root),first.seed_id,first.ticket,'task-id');
  assert.throws(()=>chatUi(root,{...args,branch:'different',replace_unconnected:true}),/Connected/);
  assert.equal(chatUi(root,{action:'seed_list'}).retired_count,0);
+});
+
+test('pairing capability rotates, isolates folders, retries exactly and never persists raw secrets',t=>{
+ const {root,store}=fixture(t,1),token='b'.repeat(64),next='c'.repeat(64);
+ chatUi(root,{action:'seed_pairing',token});
+ const args={action:'batch',request_id:'attempt-1',count:2,account:'test',repo_id:'repo-id',branch:'main',metadata:{repo_name:'owner/repo',organization_id:'org'}};
+ const first=seedProvision(store,token,args);assert.deepEqual(seedProvision(store,token,args),first);
+ assert.throws(()=>seedProvision(store,token,{...args,count:3}),/changed/);assert.throws(()=>seedProvision(store,token,{action:'read_file'}),/only/);
+ assert.throws(()=>seedProvision(store,next,{action:'status'}),/invalid/);
+ const other=fixture(t,1);assert.throws(()=>seedProvision(other.store,token,{action:'status'}),/invalid/);
+ for(const body of [readFileSync(path.join(root,'docs/chat-sessions/seed-library.seeds.json'),'utf8'),JSON.stringify(chatUi(root,{action:'seed_list'}))]){assert.ok(!body.includes(token));for(const s of first.batch)assert.ok(!body.includes(s.ticket));}
+ chatUi(root,{action:'seed_pairing',token:next});assert.throws(()=>seedProvision(store,token,{action:'status'}),/revoked/);assert.equal(seedProvision(store,next,{action:'status'}).ok,true);
+ chatUi(root,{action:'seed_pairing',enabled:false});assert.throws(()=>seedProvision(store,next,{action:'status'}),/revoked/);
+});
+test('600 records paginate, filter and summarize; 500 warm standby polls share one scan and chat creation invalidates it',t=>{
+ const {root,store,tokens}=fixture(t,1),file=path.join(root,'docs/chat-sessions/seed-library.seeds.json');
+ const data=JSON.parse(readFileSync(file)),template=data.seeds[0],now=Date.now();data.seeds=Array.from({length:600},(_,i)=>({...template,id:'load-'+i,account:i%2?'odd':'even',ready:true,metadata:{repo_name:'owner/repo'},last_seen:now}));writeFileSync(file,JSON.stringify(data));
+ let scans=0;const counted={...store,ids:()=>{scans++;return store.ids();}};
+ // Each synthetic seed shares the fixture access hash solely for this load test.
+ const start=performance.now();for(let i=0;i<500;i++)assert.equal(seedPoll(counted,'load-'+i,tokens[0],now).status,'idle');
+ assert.equal(scans,1);t.diagnostic(`500 warm polls / 600 records: ${(performance.now()-start).toFixed(0)}ms, ${scans} full chat scan`);
+ const page=chatUi(root,{action:'seed_list',limit:50,offset:50,account:'odd',search:'OWNER/REPO',status:'ready'});assert.equal(page.total,600);assert.equal(page.filtered_total,300);assert.equal(page.seeds.length,50);assert.equal(page.seeds[0].id,'load-101');assert.equal(page.counts.ready,600);assert.equal(page.capacity,10000);
+ assert.equal(chatUi(root,{action:'seed_list',limit:1000}).seeds.length,200);
+ const chat=chatUi(root,{action:'create'}).session;assert.equal(seedPoll(counted,'load-0',tokens[0],now).chat_id,chat.id);assert.equal(scans,2);
+});
+test('paired HTTP endpoint is exact, folder scoped, no-store and cannot authenticate ordinary MCP',async t=>{
+ const f=await createMcpFixture(t),token='d'.repeat(64),endpoint=f.endpoint+'/seed-library/repo';chatUi(f.root,{action:'seed_pairing',token});
+ const post=async(url,args,secret=token)=>fetch(url,{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+secret},body:JSON.stringify(args)});
+ const state=await post(endpoint,{action:'status'});assert.equal(state.status,200);assert.equal(state.headers.get('cache-control'),'no-store');assert.equal((await state.json()).workspace_folder_id,'repo');
+ assert.equal((await post(endpoint,{action:'status'},'e'.repeat(64))).status,400);assert.equal((await post(endpoint,{action:'read_file'})).status,400);
+ assert.equal((await post(f.endpoint+'/seed-library/other',{action:'status'})).status,404);
+ assert.equal((await post(f.endpoint,{jsonrpc:'2.0',id:1,method:'tools/list'})).status,401);
+ assert.equal(tunnelPathAllowed(f.config,new URL(endpoint).pathname),true);assert.equal(tunnelPathAllowed(f.config,new URL(endpoint).pathname+'/extra'),false);
+ assert.equal((await fetch(endpoint)).status,405);
 });
