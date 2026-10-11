@@ -61,3 +61,12 @@ A later MCP transport re-audit resolved `NP-016` as an intentional exclusion and
 The 0.29.3 follow-up inventory added `tests/node-agent-tool-contracts.test.mjs`: all 50 Rust catalog tools must have an explicit Node regression reference, and focused guards verify `exec_health_check`, `task_context.max_bytes`, and `project_state.clean` remain synchronized across Rust and Node.
 
 The subsequent schema-consumption pass extends the same guard to `finish_task.summary` and `change_summary.change_id`, including persisted completion reasons, immutable change snapshots, restart recovery, latest-change fallback, and cross-task mismatch validation.
+
+## Seed library v1
+
+Desktop `tools/chat_seeds.rs` and Node `chat/seeds.ts` use the same v1 registry,
+assignment generation, credential TTLs, inactivity grace and retirement records.
+The dedicated capability gateways both restrict project/chat/process ownership and
+preserve ordinary MCP authentication. Focused verification lives in Rust seed
+unit/HTTP tests and Node `test/seeds.test.mjs`; shared UI and browser provisioning
+are covered by root plugin fixtures. No Node parity exception is introduced.

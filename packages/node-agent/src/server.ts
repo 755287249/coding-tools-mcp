@@ -1,3 +1,4 @@
+import {handleSeedRoute} from './server/routes/seeds.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import path from 'node:path';
@@ -136,6 +137,7 @@ export async function createAgentRuntime(config: AgentConfig, options: AgentRunt
         const accepted=typeof ticket==='string'&&markPairing(ticket,context.config.folders.map(f=>f.path));
         sendJson(res,accepted?202:404,accepted?{status:'preparing',authenticated:false}:{error:'pairing_unavailable'});return;
       }
+      if(await handleSeedRoute(req,res,pathname,context))return;
       await context.extensions.refresh();
       const catalog = currentToolCatalog(context);
       setRuntimeRevisionHeaders(res, catalog, startedAt);

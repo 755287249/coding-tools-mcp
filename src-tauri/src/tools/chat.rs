@@ -1,4 +1,6 @@
 //! Local chat. JSON manifests and immutable pages are authoritative; Markdown is a projection.
+#[path = "chat_seeds.rs"]
+pub(crate) mod seeds;
 #[path = "chat_questions.rs"]
 mod questions;
 #[path = "chat_history.rs"]
@@ -565,6 +567,7 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
     // queue. Every mutation (including unknown/discussion actions) stays locked.
     let read_only = matches!(action, "list" | "read" | "read_attachment" | "read_attachment_chunk" | "read_artifact" | "reveal_path");
     let _lock = if read_only { None } else { Some(lock(root)?) };
+    if action.starts_with("seed_"){return seeds::ui(root,args);}
     if action.starts_with("discussion_"){return discussion::action(root,args,None);}
     if action == "list" {
         let mut sessions = Vec::new();
@@ -594,6 +597,7 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
         let title = text(args.get("title").unwrap_or(&json!("新对话")), 240)?;
         let mut s = json!({"version":1,"id":uuid::Uuid::new_v4().to_string(),"title":title,"created_at":now(),"updated_at":now(),"closed":false,"messages":[],"attachment_id":"","lease_until":0});
         if let Some(mode)=args.get("mode"){group::set_mode(&mut s,mode)?;}
+        if !group::grouped(&s)&&seeds::enabled(root)?{s["seed_auto"]=json!(true);}
         save(root, &s)?;
         return Ok(json!({"session":local_view(root,&s)?}));
     }
@@ -727,6 +731,7 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
             save(root, &s)?;
         }
         "detach" => {
+            s["seed_auto"] = json!(false);
             if let Some(members)=s["members"].as_array_mut(){for m in members{m["lease_until"]=json!(0);m["paused"]=json!(true);}}
             s["attachment_id"] = json!("");
             s["lease_until"] = json!(0);
@@ -824,6 +829,7 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
         return Ok(json!({"ok":true,"status":"closed","instruction":CHAT_CLOSED_INSTRUCTION}));
     }
     if name == "chat_open" {
+        if s["seed_auto"]==true&&s["seed_owner"].is_string()&&args["attachment_id"]!=s["attachment_id"]{return Err(err("Conversation reserved by seed library; use its assignment or disconnect in the UI"));}
         if group::grouped(&s){let member=group::open(&mut s,args)?;
             let prepared=s["pending_pairing"].clone();
             if let Some(attempt)=prepared.as_str().filter(|_|args["attachment_id"].as_str().unwrap_or("").is_empty()) {
@@ -848,6 +854,7 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
         if !resuming {
             s["attachment_id"] = json!(uuid::Uuid::new_v4().to_string());
         }
+        if s["seed_owner"].is_string(){s["seed_pending"]=json!(false);}
         let agent_name=s["agent_name"].as_str().unwrap_or("").to_string();assign_agent_title(root,&mut s,&agent_name)?;
         group::renew(&mut s,args)?;
         save(root, &s)?;

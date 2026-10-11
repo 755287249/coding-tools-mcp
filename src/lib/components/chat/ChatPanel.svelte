@@ -182,7 +182,7 @@
   let queueElement=$state<HTMLDivElement>(),queueExpanded=$state(false);
   let runtimeState=$state('');
   $effect(()=>{const ws=workspaceId;runtimeState='';if(!ws)return;let stopped=false;const stop=startVisiblePolling(async()=>{try{const value=await getRuntimeStatus(ws);if(!stopped)runtimeState=value.state;}catch{if(!stopped)runtimeState='';}},()=>4000);return()=>{stopped=true;stop()}});
-  const queueNotice=$derived(!workspaceId||!folderId?'':runtimeState&&runtimeState!=='running'?'chat.enableMcp':needsAi?'chat.connectAi':'');
+  const queueNotice=$derived(!workspaceId||!folderId?'':runtimeState&&runtimeState!=='running'?'chat.enableMcp':needsAi?(detail?.seed_auto?'seeds.waiting':'chat.connectAi'):'');
   function collapseQueue(){queueElement?.querySelectorAll('details[open]').forEach(item=>(item as HTMLDetailsElement).open=false);queueExpanded=false;}
 
   async function toggleQueueMode() {
@@ -260,7 +260,7 @@
   async function openConnection() {
     if (busy || !folderId) return;
     if (!selected) await create(true);
-    if (!selected || detail?.closed) return;
+    if (!selected || detail?.closed || detail?.seed_auto) return;
     onNavigate?.(folderId, selected);
     connectionMembers=(detail?.members??[]).map(m=>m.id);connectionScope = currentScope; connectionError = ''; connectionSending = false; copied = false; revealPrompt=false; pairingAttempt=randomId(); pairingExpires=0; guide = true;
     connectionRequest = detail?.messages?.find(m => m.kind === 'connection_request' && !detail?.messages?.some(r => r.role === 'assistant' && r.reply_to === m.id && r.final === true))?.id ?? '';
@@ -722,7 +722,7 @@
       <button class="mobile-chat-actions" aria-label={$t('mobile.chatActions')} aria-expanded={mobileActions} onclick={()=>mobileActions=!mobileActions}><Ellipsis size={20}/></button>
       <div class="header-actions">
         {#if unreadTotal}<button class="unread-total" onclick={showUnread} aria-label={`${$t('chat.90')}: ${unreadTotal}`}>{unreadTotal}</button>{/if}
-        <div class="connection-actions"><button disabled={busy || !selected || !(detail?.status === 'connected' || detail?.status === 'waiting')} onclick={requestDisconnect}>{$t('chat.disconnect')}</button><button class="connect-button" data-connection={chatConnectionTone(detail)} title={needsAi?$t('chat.connectHint'):undefined} disabled={busy || !folderId || detail?.closed} onclick={openConnection}>{$t(mode==='group'?'chat.inviteGroup':'chat.connectWork')}</button></div>
+        <div class="connection-actions"><button disabled={busy || !selected || !(detail?.seed_auto || detail?.status === 'connected' || detail?.status === 'waiting')} onclick={requestDisconnect}>{$t('chat.disconnect')}</button><button class="connect-button" data-connection={chatConnectionTone(detail)} title={needsAi?$t('chat.connectHint'):undefined} disabled={busy || !folderId || detail?.closed || detail?.seed_auto} onclick={openConnection}>{$t(detail?.seed_auto?'shell.seeds':mode==='group'?'chat.inviteGroup':'chat.connectWork')}</button></div>
         {#if selected}<button title={$t('chat.36')} aria-label={$t('chat.36')} onclick={download}><Download size={16}/></button>{/if}
 
         {#if headerActions}{@render headerActions()}{/if}

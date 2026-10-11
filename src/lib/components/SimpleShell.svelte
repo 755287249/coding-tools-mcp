@@ -37,6 +37,8 @@
   import ProjectNavigator from '$lib/components/chat/ProjectNavigator.svelte';
   import ConversationSearch from '$lib/components/chat/ConversationSearch.svelte';
   import AssetLibrary from '$lib/components/chat/AssetLibrary.svelte';
+  import Sprout from "@lucide/svelte/icons/sprout";
+  import SeedLibrary from "$lib/components/chat/SeedLibrary.svelte";
   import ScheduledTasks from '$lib/components/chat/ScheduledTasks.svelte';
   import WorkspaceFeatureControls from '$lib/components/workspace/WorkspaceFeatureControls.svelte';
   import LanguageSelect from '$lib/components/LanguageSelect.svelte';
@@ -73,7 +75,7 @@
   const group=$derived(groups.find(g=>g.workspace.id===$page.params.id&&g.folder.id===$page.url.searchParams.get('folder'))??groups.find(g=>g.workspace.id===$page.params.id)??groups[0]);
   const panel=$derived($page.url.searchParams.get('panel')??'');
   const customizing=$derived(panel==='plugins'||panel==='skills');
-  const entries=[{id:'assets',icon:Images},{id:'scheduled',icon:Clock},{id:'skills',icon:Library},{id:'plugins',icon:Blocks}];
+  const entries=[{id:'seeds',icon:Sprout},{id:'assets',icon:Images},{id:'scheduled',icon:Clock},{id:'skills',icon:Library},{id:'plugins',icon:Blocks}];
   onMount(()=>{const media=matchMedia('(max-width:700px)');const resize=()=>{mobileScreen=media.matches;if(!media.matches)mobileNav=false};resize();media.addEventListener('change',resize);try{pinned=localStorage.getItem('ctmcp-nav-pinned')!=='0';width=navigationWidth(localStorage.getItem('ctmcp-nav-width'));if(media.matches)pinned=false;}catch{}const stop=startScheduleRunner();return()=>{media.removeEventListener('change',resize);stop()}});
   $effect(()=>{const route=$page.url.href;mobileNav=false;mobileMore=false;settingsOpen=false;menuElement?.hidePopover();if(typeof window!=='undefined'&&window.innerWidth<700){pinned=false;hovered=false}});
   function beginConversationSwipe(){
@@ -175,7 +177,7 @@
   {:else if panel==='discussions'}
     {#if group}{#key group.key+($page.url.searchParams.get('discussion')??'')+($page.url.searchParams.get('createGroup')??'')}<DiscussionGroups workspaceId={group.workspace.id} folderId={group.folder.id}/>{/key}{:else}<section class="library-page"><p>{$t('chat.110')}</p></section>{/if}
   {:else if entries.some(entry=>entry.id===panel)}<section class="library-page"><header><h1>{$t(`shell.${panel}` as MessageKey)}</h1><select aria-label={$t('chat.109')} value={group?.key??''} onchange={event=>selectGroup(event.currentTarget.value)}>{#each groups as g}<option value={g.key}>{g.workspace.name} · {g.folder.name}</option>{/each}</select></header>
-    {#if group}{#if panel==='assets'}<AssetLibrary workspaceId={group.workspace.id} folderId={group.folder.id} focusSearchRequest={assetSearchRequest}/>{:else if panel==='scheduled'}<ScheduledTasks workspaceId={group.workspace.id} folderId={group.folder.id}/>{:else}<WorkspaceFeatureControls workspaceId={group.workspace.id} initialTab={panel==='plugins'?'mcp':'skills'}/>{/if}
+    {#if group}{#if panel==='seeds'}{#key group.key}<SeedLibrary workspaceId={group.workspace.id} folderId={group.folder.id}/>{/key}{:else if panel==='assets'}<AssetLibrary workspaceId={group.workspace.id} folderId={group.folder.id} focusSearchRequest={assetSearchRequest}/>{:else if panel==='scheduled'}<ScheduledTasks workspaceId={group.workspace.id} folderId={group.folder.id}/>{:else}<WorkspaceFeatureControls workspaceId={group.workspace.id} initialTab={panel==='plugins'?'mcp':'skills'}/>{/if}
     {:else}<p>{$t('chat.110')}</p>{#if onAddWorkspace}<button onclick={onAddWorkspace}>{$t('shell.openFolder')}</button>{/if}{/if}
   </section>{:else}{@render children()}{/if}
   </main>

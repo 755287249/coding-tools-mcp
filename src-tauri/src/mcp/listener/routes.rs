@@ -50,6 +50,7 @@ fn service_routes_for_prefix(prefix: &str) -> Router<ListenerState> {
         .route(&mcp, get(mcp_get).post(mcp_post).delete(mcp_delete))
         .route(&mcp_info_path, get(mcp_info))
         .route(&prefixed_route(prefix, "/mcp/pairing"), post(pairing_intent))
+        .route(&prefixed_route(prefix, "/mcp/seeds/{folder_id}/{seed_id}"), post(super::seeds::post))
         .route(
             &authorize,
             get(oauth_authorize_get).post(oauth_authorize_post),

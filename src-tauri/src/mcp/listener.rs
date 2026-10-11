@@ -1,4 +1,5 @@
 mod lifecycle;
+mod seeds;
 mod routes;
 
 use std::convert::Infallible;

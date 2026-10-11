@@ -309,6 +309,8 @@ export function tunnelPathAllowed(config: AgentConfig, pathname: string): boolea
     prefix = new URL(publicBase).pathname.replace(/\/$/, '');
   } catch { return false; }
   const scoped = (suffix: string) => `${prefix}${suffix}` || suffix;
+  const seedSuffix=pathname.startsWith(scoped('/mcp/seeds/'))?pathname.slice(scoped('/mcp/seeds/').length):'';
+  if(/^[A-Za-z0-9_-]{1,80}\/[A-Za-z0-9_-]{1,80}$/.test(seedSuffix))return true;
   return new Set([
     scoped('/mcp'),
     scoped('/mcp/info'),

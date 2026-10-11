@@ -39,6 +39,10 @@ jobs:
         run: python tests/publish-chat-release.test.py
       - name: Test chat storage on Windows
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib tools::chat::tests
+      - name: Test seed ownership and capability gateway
+        run: |
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib tools::chat::seeds
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib mcp::listener::seeds
       - name: Test native taskbar icon slots and theme pixels
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib icon_theme
       - name: Test group chat dispatch and member isolation
@@ -76,6 +80,10 @@ jobs:
       - run: pnpm run check
       - name: Test chat prompts
         run: node --test tests/local-chat-prompt.test.mjs tests/chat-preview.test.mjs tests/chat-preview-window.test.mjs tests/chat-task-state.test.mjs tests/chat-status.test.mjs tests/chat-tool-activity.test.mjs tests/chat-drafts.test.mjs tests/chat-session-cache.test.mjs tests/chat-connection.test.mjs tests/chat-mentions.test.mjs tests/chat-navigation.test.mjs tests/chat-schedules.test.mjs tests/chat-artifact-links.test.mjs tests/chat-local-links.test.mjs tests/portable-output-layout.test.mjs
+      - name: Verify browser seed plugin
+        run: |
+          node plugins/coderabbit-seeds/build.mjs --check
+          node --test tests/seed-plugin.test.mjs
       - name: Build production portable ZIP
         run: pnpm run desktop:portable
       - name: Verify ZIP and write checksum
