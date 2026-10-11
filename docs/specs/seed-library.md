@@ -173,3 +173,8 @@ from project files, logs and replies. Built-in tunnel request telemetry redacts 
 seed route suffix and drops query strings; a separately deployed tunnel needs the
 corresponding server update. External reverse proxies must avoid logging capability
 URLs. Ordinary OAuth and its catalog are unaffected.
+
+Rust standby scan keys and invalidation use the canonical workspace root, matching
+Node seedStore.path's existing realpathSync behavior. UI and MCP paths for the same
+Windows directory therefore share one cache identity, including extended-length
+path spelling; a newly created chat invalidates a prior idle result immediately.

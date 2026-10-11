@@ -128,9 +128,14 @@ fn write(root: &Path, data: &Library) -> Result<()> {
     }
     atomic(root, "seed-library", "seeds.json", &bytes)
 }
+fn scan_root(root: &Path) -> PathBuf {
+    // UI callers and the MCP workspace can spell the same Windows root differently.
+    root.canonicalize().unwrap_or_else(|_| root.to_path_buf())
+}
 pub fn invalidate(root: &Path) {
+    let canonical = scan_root(root);
     if let Ok(mut scans) = SCANS.get_or_init(Default::default).lock() {
-        scans.retain(|(folder, _, _, _), _| folder != root);
+        scans.retain(|(folder, _, _, _), _| folder != &canonical);
     }
 }
 pub fn enabled(root: &Path) -> Result<bool> {
@@ -668,7 +673,7 @@ fn poll_at(root: &Path, sid: &str, token: &str, time: u64) -> Result<Value> {
     data.seeds[index].ready = true;
     if data.seeds[index].chat_id.is_empty() {
         let scan_key = (
-            root.to_path_buf(),
+            scan_root(root),
             data.seeds[index].source.clone(),
             data.seeds[index].prefix.clone(),
             data.seeds[index].account.clone(),
@@ -806,9 +811,7 @@ fn poll_at(root: &Path, sid: &str, token: &str, time: u64) -> Result<Value> {
             s.attachment_id = attachment;
             s.generation = generation;
             dirty = true;
-            if let Ok(mut scans) = SCANS.get_or_init(Default::default).lock() {
-                scans.retain(|(folder, _, _, _), _| folder != root);
-            }
+            invalidate(root);
             break;
         }
     }
@@ -1389,6 +1392,37 @@ mod tests {
         assert_eq!(
             ui(root.path(), &json!({"action":"seed_list"})).unwrap()["retired_count"],
             0
+        );
+    }
+    #[test]
+    fn standby_cache_invalidation_uses_canonical_workspace_identity() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("nested")).unwrap();
+        let alias = root.path().join("nested").join("..");
+        let canonical = root.path().canonicalize().unwrap();
+        super::super::ui(
+            root.path(),
+            &json!({"action":"seed_settings","enabled":true}),
+        )
+        .unwrap();
+        let seed = super::super::ui(
+            root.path(),
+            &json!({"action":"seed_manual","account":"alias"}),
+        )
+        .unwrap()["batch"][0]
+            .clone();
+        let sid = seed["seed_id"].as_str().unwrap();
+        let token = initialize(root.path(), sid, seed["ticket"].as_str().unwrap()).unwrap();
+        let time = now();
+        assert_eq!(
+            poll_at(&canonical, sid, &token, time).unwrap()["status"],
+            "idle"
+        );
+        let chat =
+            super::super::ui(&alias, &json!({"action":"create"})).unwrap()["session"].clone();
+        assert_eq!(
+            poll_at(&canonical, sid, &token, time + 1).unwrap()["chat_id"],
+            chat["id"]
         );
     }
     #[test]
