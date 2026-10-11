@@ -89,6 +89,7 @@ export interface WorkspaceBackend {
   ): Promise<WorkspaceProfile>;
   removeFolder(id: string, folderId: string): Promise<WorkspaceProfile>;
   openDirectory(path: string): Promise<void>;
+  canDelete?(id: string): boolean;
   delete(id: string): Promise<void>;
   startRuntime(id: string): Promise<RuntimeStatus>;
   stopRuntime(id: string): Promise<RuntimeStatus>;

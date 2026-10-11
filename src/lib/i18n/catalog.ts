@@ -1,4 +1,7 @@
 export const MESSAGES = {
+  "workspace.waitOperation": ["Wait for the current start/stop operation, then retry.", "請等目前啟停操作完成後重試。", "请等当前启停操作完成后重试。", "起動・停止処理の完了後に再試行してください。"],
+  "workspace.removed": ["Workspace removed and services stopped.", "工作區已移除，服務已停止。", "工作区已移除，服务已停止。", "ワークスペースを削除し、サービスを停止しました。"],
+  "workspace.removingProgress": ["Stopping services, closing tunnels and cleaning workspace configuration. You can close this dialog; cleanup will continue. If it fails, retry from workspace settings.", "正在停止服務、關閉隧道與清理設定。可關閉視窗，清理會繼續；失敗時可從工作區設定重試。", "正在停止服务、关闭隧道与清理配置。可关闭窗口，清理会继续；失败时可从工作区设置重试。", "サービスとトンネルを停止し設定を削除しています。閉じても処理は続きます。失敗時は設定から再試行できます。"],
   "seeds.poolForChat": ["Seed pool", "種子分類", "种子分类", "シードプール"],
   "seeds.allPrefixes": ["All prefixes", "全部前綴", "全部前缀", "すべての接頭辞"],
   "seeds.loading": ["Loading a seed model, please wait", "正在載入種子模型，請稍候", "正在载入种子模型，请稍后", "シードモデルを読み込み中です"],

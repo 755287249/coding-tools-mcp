@@ -1131,7 +1131,7 @@ pub async fn stop_child(mut child: Child, pid: Option<u32>) -> AppResult<()> {
         let _ = platform().terminate_process_tree(pid);
     }
 
-    let _ = child.kill().await;
+    let _ = child.start_kill();
     let _ = time::timeout(Duration::from_secs(3), child.wait()).await;
     Ok(())
 }

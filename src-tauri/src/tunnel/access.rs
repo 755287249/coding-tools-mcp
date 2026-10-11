@@ -60,7 +60,12 @@ pub async fn stop_for_runtime(
 }
 
 pub async fn drop_workspace(workspace_id: &str) -> AppResult<()> {
-    let mut guard = supervisor().lock().await;
+    // Bound contention without cancelling cleanup after it has taken ownership of
+    // child handles or FRP routes. Builtin/child shutdown have their own deadlines.
+    let mut guard = tokio::time::timeout(std::time::Duration::from_secs(10), supervisor().lock())
+        .await.map_err(|_| crate::error::AppError::Message(
+            "Tunnel supervisor is busy. Services are stopped; retry workspace deletion shortly.".into()
+        ))?;
     guard.drop_workspace(workspace_id).await
 }
 

@@ -1,3 +1,4 @@
+import { workspaceBlocked, workspaceEpoch } from "./workspace-lifecycle";
 import { get, writable } from "svelte/store";
 import { installSoftware, listSoftware } from "$lib/api/software";
 import { getWorkspaceSecret } from "$lib/api/secrets";
@@ -32,6 +33,7 @@ export function sessionOf(all: Record<string, SessionState>, id: string): Sessio
 }
 
 function patch(id: string, next: Partial<SessionState>) {
+  if (workspaceBlocked(id)) return;
   sessions.update((all) => ({ ...all, [id]: { ...sessionOf(all, id), ...next } }));
   if (next.status) {
     const state = next.status.state;
@@ -78,8 +80,11 @@ async function refreshWorkspaceList(id: string): Promise<WorkspaceProfile | null
 }
 
 export async function refreshSession(id: string): Promise<void> {
+  if (workspaceBlocked(id)) return;
+  const epoch = workspaceEpoch(id);
   try {
-    patch(id, { status: await getRuntimeStatus(id) });
+    const status = await getRuntimeStatus(id);
+    if (epoch === workspaceEpoch(id)) patch(id, { status });
   } catch {
     // Keep the last known status; the next poll retries.
   }
@@ -156,7 +161,7 @@ async function waitForPublic(id: string, timeoutMs: number): Promise<RuntimeStat
 }
 
 export async function turnOn(id: string): Promise<void> {
-  if (sessionOf(get(sessions), id).working) return;
+  if (workspaceBlocked(id) || sessionOf(get(sessions), id).working) return;
   patch(id, { working: true, phase: "Preparing the tunnel…", error: "" });
   try {
     const profile = get(workspaces).find((item) => item.id === id) ?? (await refreshWorkspaceList(id));
@@ -195,7 +200,7 @@ export async function turnOn(id: string): Promise<void> {
 }
 
 export async function turnOff(id: string): Promise<void> {
-  if (sessionOf(get(sessions), id).working) return;
+  if (workspaceBlocked(id) || sessionOf(get(sessions), id).working) return;
   patch(id, { working: true, phase: "Stopping…", error: "" });
   try {
     patch(id, { status: await stopRuntime(id) });

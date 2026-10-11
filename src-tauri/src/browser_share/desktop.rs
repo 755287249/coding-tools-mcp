@@ -437,10 +437,12 @@ async fn dispatch(app: tauri::AppHandle, body: Value) -> Result<Value, String> {
             arg(args, "id")?,
             arg(args, "folderId")?,
         )),
-        "delete_workspace" => value(crate::commands::delete_workspace(
-            app.state::<crate::app_state::AppState>(),
-            arg(args, "id")?,
-        )),
+        "delete_workspace" => value(
+            crate::commands::delete_workspace(
+                app.state::<crate::app_state::AppState>(),
+                arg(args, "id")?,
+            ).await,
+        ),
         "get_workspace_skills" => value(crate::commands::get_workspace_skills(
             app.state::<crate::app_state::AppState>(),
             arg(args, "workspaceId")?,

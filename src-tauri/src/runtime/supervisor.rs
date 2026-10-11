@@ -43,6 +43,7 @@ struct RuntimeEntry {
 #[derive(Default)]
 pub struct RuntimeSupervisor {
     entries: HashMap<(String, ServiceKind), RuntimeEntry>,
+    deleting: HashSet<String>,
 }
 
 impl RuntimeSupervisor {
@@ -88,9 +89,17 @@ impl RuntimeSupervisor {
         self.refresh(profile, ServiceKind::Actions);
     }
 
-    pub fn drop_workspace(&mut self, profile: &WorkspaceProfile) {
-        self.sync_stop_and_wait(profile, ServiceKind::Mcp);
-        self.sync_stop_and_wait(profile, ServiceKind::Actions);
+    pub fn begin_delete(&mut self, id: &str) -> AppResult<()> {
+        if !self.deleting.insert(id.to_owned()) {
+            return Err(crate::error::AppError::Message(
+                "Workspace deletion is already in progress".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn cancel_delete(&mut self, id: &str) {
+        self.deleting.remove(id);
     }
 
     pub fn active_tunnel_service_keys(&self) -> HashSet<(String, TunnelServiceKind)> {
@@ -200,6 +209,11 @@ impl RuntimeSupervisor {
         profile: &WorkspaceProfile,
         kind: ServiceKind,
     ) -> AppResult<RuntimeStatusDto> {
+        if self.deleting.contains(&profile.id) {
+            return Err(crate::error::AppError::Message(
+                "Workspace is being deleted; retry after cleanup".into(),
+            ));
+        }
         let workspace_service = match kind {
             ServiceKind::Mcp => crate::workspace::resources::WorkspaceService::Mcp,
             ServiceKind::Actions => crate::workspace::resources::WorkspaceService::Actions,
@@ -600,6 +614,26 @@ fn actions_oauth_secret(profile_id: &str, key: &str) -> AppResult<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deleting_workspace_rejects_duplicate_delete_and_stale_starts() {
+        let mut supervisor = RuntimeSupervisor::default();
+        let profile = WorkspaceProfile::new("/tmp/deleting-workspace".into(), None);
+        supervisor.begin_delete(&profile.id).unwrap();
+        assert!(supervisor.begin_delete(&profile.id).is_err());
+        assert!(supervisor
+            .start_mcp(&profile)
+            .unwrap_err()
+            .to_string()
+            .contains("being deleted"));
+        assert!(supervisor
+            .start_actions(&profile)
+            .unwrap_err()
+            .to_string()
+            .contains("being deleted"));
+        supervisor.cancel_delete(&profile.id);
+        assert!(supervisor.begin_delete(&profile.id).is_ok());
+    }
 
     fn entry(phase: RuntimePhase, started_at: Option<std::time::Instant>) -> RuntimeEntry {
         RuntimeEntry {

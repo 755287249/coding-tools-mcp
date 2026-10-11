@@ -381,13 +381,25 @@ test('workspace registry can add and remove a secondary workspace', async t => {
   const configPath = path.join(dataDir, 'agent.json');
   await writeFile(configPath, `${JSON.stringify(document(root, dataDir), null, 2)}\n`);
   const application = await loadApplication(configPath);
-  const store = new ApplicationConfigStore(application);
+  let release, fail = true, calls = 0;
+  const store = new ApplicationConfigStore(application, async () => {
+    calls++; if (fail) throw new Error('shutdown failed');
+    await new Promise(resolve => {release = resolve;});
+  });
   const created = await store.addWorkspace(extra, 'Extra');
   assert.equal(created.ok, true);
   assert.equal(created.restartRequired, true);
   assert.equal(store.entries().length, 2);
   assert.equal(store.workspace(created.id).name, 'Extra');
-  const removed = await store.deleteWorkspace(created.id);
+  await assert.rejects(() => store.deleteWorkspace(created.id), /shutdown failed/);
+  assert.equal(store.entries().length, 2, 'failed shutdown preserves retryable registry');
+  fail = false;
+  const deleting = store.deleteWorkspace(created.id);
+  await assert.rejects(() => store.deleteWorkspace(created.id), /already in progress/);
+  release();
+  const removed = await deleting;
+  assert.equal(calls, 2);
+  assert.equal(removed.restartRequired, false);
   assert.equal(removed.ok, true);
   assert.equal(store.entries().length, 1);
   await assert.rejects(() => store.deleteWorkspace(store.primaryWorkspaceId), /primary workspace cannot be deleted/);

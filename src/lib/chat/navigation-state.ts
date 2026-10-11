@@ -1,3 +1,4 @@
+import { workspaceBlocked, workspaceEpoch } from '../stores/workspace-lifecycle';
 import { onChatCacheReset } from './cache-lifecycle.js';
 import { get, writable } from 'svelte/store';
 import { workspaces } from '../stores/app';
@@ -31,14 +32,15 @@ export function acquireNavigation() {
         for(let offset=0;offset<targets.length;offset+=4) {
           if (stopped || document.hidden) return;
           await Promise.all(targets.slice(offset,offset+4).map(async target => {
-            const epoch=identity;
+            if (workspaceBlocked(target.workspace)) return;
+            const workspaceVersion=workspaceEpoch(target.workspace),epoch=identity;
             try {
               const [chats, groups] = await Promise.all([localChat(target.workspace,target.folder,{action:'list'}), localDiscussion(target.workspace,target.folder,{action:'discussion_list'})]);
-              if (stopped || epoch!==identity) return;
+              if (stopped || epoch!==identity || workspaceVersion!==workspaceEpoch(target.workspace) || workspaceBlocked(target.workspace)) return;
               const next = [...(chats.sessions??[]),...(groups.discussions??[]).map(d=>discussionNavigation(d,chats.sessions??[]))].sort(conversationOrder);
               navigationSessions.update(current=>{const items=reconcileSnapshot(current[target.key],next);return items===current[target.key]?current:{...current,[target.key]:items}});
               if(get(navigationErrors)[target.key]) navigationErrors.update(current=>({...current,[target.key]:''}));
-            } catch(error) { if(!stopped && epoch===identity) navigationErrors.update(current=>({...current,[target.key]:String(error)})); }
+            } catch(error) { if(!stopped && epoch===identity && workspaceVersion===workspaceEpoch(target.workspace) && !workspaceBlocked(target.workspace)) navigationErrors.update(current=>({...current,[target.key]:String(error)})); }
           }));
         }
       },()=>3000);

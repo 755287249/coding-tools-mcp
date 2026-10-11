@@ -270,3 +270,30 @@ test('URL capability survives a new store, keeps fixed expiry, and isolates fold
  assert.throws(()=>seedUrl(store,seed.url_key,true,now+8*86400000),/expired/);
  const other=fixture(t,1);assert.throws(()=>seedUrl(other.store,seed.url_key,true),/invalid/);
 });
+
+test('workspace removal releases seeds offline, fences old replies and preserves chat history',async t=>{
+ const {seedReleaseWorkspace}=await import('../dist/chat/seeds.js');
+ const {root,store,batch,tokens}=fixture(t,1),sid=batch[0].seed_id;
+ const chat=chatUi(root,{action:'create',title:'Keep history'}).session;
+ const assigned=seedPoll(store,sid,tokens[0]);
+ assert.equal(assigned.chat_id,chat.id);
+ seedReleaseWorkspace(store);
+ const inventory=chatUi(root,{action:'seed_list'});
+ assert.equal(inventory.enabled,false);assert.equal(inventory.seeds[0].chat_id,'');
+ assert.equal(inventory.seeds[0].status,'offline');assert.equal(inventory.seeds[0].retired_at,0);
+ assert.throws(()=>seedBegin(store,sid,tokens[0],'chat_reply',{chat_id:chat.id,attachment_id:assigned.attachment_id}),/not assigned/);
+ assert.equal(chatUi(root,{action:'read',chat_id:chat.id}).session.title,'Keep history');
+ assert.equal(seedPoll(store,sid,tokens[0]).status,'idle');
+ seedReleaseWorkspace(store); // retry is safe
+ chatUi(root,{action:'seed_cleanup'});assert.equal(chatUi(root,{action:'seed_list'}).seeds[0].retired_at,0);
+ chatUi(root,{action:'seed_settings',enabled:true});
+ const next=chatUi(root,{action:'create',title:'New assignment'}).session;
+ const reused=seedPoll(store,sid,tokens[0]);assert.equal(reused.chat_id,next.id);assert.notEqual(reused.attachment_id,assigned.attachment_id);
+});
+
+test('workspace seed release refuses unresolved process ownership without partial detachment',async t=>{
+ const {seedReleaseWorkspace}=await import('../dist/chat/seeds.js');
+ const {root,store}=fixture(t,2),file=path.join(root,'docs/chat-sessions/seed-library.seeds.json');
+ const data=JSON.parse(readFileSync(file));data.seeds[1].operations=['running-operation'];writeFileSync(file,JSON.stringify(data));
+ const before=readFileSync(file,'utf8');assert.throws(()=>seedReleaseWorkspace(store),/unresolved/);assert.equal(readFileSync(file,'utf8'),before);
+});

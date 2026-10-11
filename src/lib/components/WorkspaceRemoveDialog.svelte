@@ -1,10 +1,12 @@
 <script lang="ts">
+  import { get } from 'svelte/store';
+  import { blockWorkspace, restoreWorkspace } from '$lib/stores/workspace-lifecycle';
+  import { sessions, sessionOf, messageOf } from '$lib/stores/sessions';
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
   import { page } from '$app/stores';
   import { appUrl } from '$lib/app-path';
   import { deleteWorkspace } from '$lib/api/workspaces';
-  import { getBackend } from '$lib/backend';
   import { workspaces, mcpRuntimeStates, actionsRuntimeStates } from '$lib/stores/app';
   import { showToast } from '$lib/stores/toast';
   import { t } from '$lib/i18n';
@@ -17,26 +19,35 @@
     if (busy) return;
     const id = workspace.id;
     busy = true; error = '';
+    if (sessionOf(get(sessions), id).working) {
+      error = $t('workspace.waitOperation'); busy = false; return;
+    }
+    blockWorkspace(id);
     try { await deleteWorkspace(id); }
-    catch (cause) { error = String(cause); busy = false; return; }
+    catch (cause) {
+      restoreWorkspace(id); error = messageOf(cause); busy = false;
+      showToast(error, {kind:'error'}); return;
+    }
+    sessions.update(items => { const next = {...items}; delete next[id]; return next; });
     workspaces.update(items => items.filter(item => item.id !== id));
     for (const states of [mcpRuntimeStates, actionsRuntimeStates]) states.update(items => {
       const next = {...items}; delete next[id]; return next;
     });
     const active = $page.params.id === id;
     dialog.close();
-    if (getBackend().capabilities.agentRestart) showToast($t('workspace.removedRestart'), {kind:'success'});
+    showToast($t('workspace.removed'), {kind:'success'});
     if (active) { try { await goto(appUrl('/')); } catch (cause) { showToast(String(cause), {kind:'error'}); } }
   }
 </script>
 
-<dialog bind:this={dialog} aria-label={$t('workspace.remove')} onclose={onClose} oncancel={event => {if(busy)event.preventDefault();}}>
+<dialog bind:this={dialog} aria-label={$t('workspace.remove')} onclose={onClose}>
   <h2>{$t('workspace.remove')}</h2>
   <p>{$t('workspace.removeConfirm', {name:workspace.name})}</p>
   <p class="hint">{$t('workspace.removeHint')}</p>
+  {#if busy}<p role="status">{$t('workspace.removingProgress')}</p>{/if}
   {#if error}<p class="error" role="alert">{error}</p>{/if}
   <div class="actions">
-    <button disabled={busy} onclick={() => dialog.close()}>{$t('Cancel')}</button>
+    <button onclick={() => dialog.close()}>{$t('Cancel')}</button>
     <button class="danger" disabled={busy} onclick={remove}>{busy ? $t('Working…') : $t('workspace.remove')}</button>
   </div>
 </dialog>

@@ -1,6 +1,8 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { chmod, mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { seedStore } from './chat/store.js';
+import { seedReleaseWorkspace } from './chat/seeds.js';
 import {
   createOAuthClientId,
   loadConfigBundle,
@@ -209,7 +211,9 @@ export class ApplicationConfigStore {
   private registry: WorkspaceRegistryDocument;
   private readonly workspaces = new Map<string, ManagedWorkspaceProfile>();
 
-  constructor(application: LoadedApplication) {
+  private readonly deleting = new Set<string>();
+
+  constructor(application: LoadedApplication, private readonly beforeDelete?: (id: string) => Promise<void>) {
     this.registryPath = application.registryPath;
     this.registry = structuredClone(application.registry);
     this.primaryWorkspaceId = application.workspaces[0]?.id ?? '';
@@ -407,10 +411,19 @@ export class ApplicationConfigStore {
     if (id === this.primaryWorkspaceId) throw new Error('The primary workspace cannot be deleted');
     if (this.registry.workspaces.length <= 1) throw new Error('At least one workspace must remain');
     if (!this.workspaces.has(id)) throw new Error(`Workspace was not found: ${id}`);
-    this.registry.workspaces = this.registry.workspaces.filter(item => item.id !== id);
-    this.workspaces.delete(id);
-    await writeRegistry(this.registryPath, this.registry);
-    return { ok: true, id, restartRequired: true };
+    if (this.deleting.has(id)) throw new Error('Workspace deletion is already in progress');
+    this.deleting.add(id);
+    try {
+      await this.beforeDelete?.(id);
+      for (const folder of this.workspace(id).store.current.folders) seedReleaseWorkspace(seedStore(folder.path));
+      const next = { ...this.registry, workspaces: this.registry.workspaces.filter(item => item.id !== id) };
+      await writeRegistry(this.registryPath, next);
+      this.registry = next;
+      this.workspaces.delete(id);
+      return { ok: true, id, restartRequired: !this.beforeDelete };
+    } finally {
+      this.deleting.delete(id);
+    }
   }
 
   workspace(id: string): { id: string; name: string; store: ConfigStore } {

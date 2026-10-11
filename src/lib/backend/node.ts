@@ -365,6 +365,7 @@ export function createNodeBackend(deps: NodeBackendDeps = {}): FrontendBackend {
           body: JSON.stringify({ path: folderPath }),
         });
       },
+      canDelete(id) { return !!snapshot && id !== snapshot.primaryWorkspaceId && snapshot.workspaces.length > 1; },
       async delete(id) {
         await request(`/admin/api/workspaces/${encodeURIComponent(id)}`, { method: "DELETE" });
       },

@@ -286,6 +286,60 @@ fn inventory(data: &Library, args: &Value, time: u64) -> Value {
     json!({"ready_groups":ready_groups,"account_summaries":account_summaries,"groups":groups,"sources":sources,"enabled":data.enabled,"seeds":filtered.iter().skip(offset).take(limit).collect::<Vec<_>>(),"retired_count":counts.get("retired").copied().unwrap_or(0),"total":all.len(),"filtered_total":filtered.len(),"offset":offset,"limit":limit,"counts":counts,"accounts":accounts,"pairing_enabled":!data.pairing_hash.is_empty(),"capacity":LIBRARY_LIMIT})
 }
 /// Caller owns the chat lock; no nested locking.
+fn ensure_settled(seed: &Seed) -> Result<()> {
+    if !seed.inflight.is_empty() || !seed.operations.is_empty() {
+        return Err(err(
+            "Seed has unresolved operations; finish or inspect them before release",
+        ));
+    }
+    Ok(())
+}
+fn release_seed(root: &Path, seed: &mut Seed) -> Result<()> {
+    ensure_settled(seed)?;
+    if !seed.chat_id.is_empty() && safe(root, &format!("{DIR}/{}.json", seed.chat_id))?.exists() {
+        let mut chat = load(root, &seed.chat_id)?;
+        // Never disconnect a replacement owner or a direct manual attachment.
+        if chat["seed_owner"] == seed.id && chat["attachment_id"] == seed.attachment_id {
+            chat["attachment_id"] = json!("");
+            chat["seed_owner"] = json!("");
+            chat["seed_auto"] = json!(false);
+            chat["seed_pending"] = json!(false);
+            chat["seed_generation"] = json!(chat["seed_generation"].as_u64().unwrap_or(0) + 1);
+            chat["updated_at"] = json!(now());
+            save(root, &chat)?;
+        }
+    }
+    seed.chat_id.clear();
+    seed.attachment_id.clear();
+    seed.generation += 1;
+    seed.last_seen = 0;
+    seed.ready = false;
+    seed.reason = "workspace_removed".into();
+    Ok(())
+}
+/// Preserve the folder's pool on disk; a stopped endpoint is offline, not ready.
+pub fn release_workspace(root: &Path) -> Result<()> {
+    if !safe(root, FILE)?.exists() {
+        return Ok(());
+    }
+    let _lock = lock(root)?;
+    let mut data = read(root)?;
+    for seed in &data.seeds {
+        ensure_settled(seed)?;
+    }
+    // Durable pause first: partial storage failures cannot reassign another chat.
+    data.enabled = false;
+    write(root, &data)?;
+    for seed in &mut data.seeds {
+        if seed.retired_at == 0 {
+            release_seed(root, seed)?;
+        }
+    }
+    write(root, &data)?;
+    invalidate(root);
+    Ok(())
+}
+
 pub fn ui(root: &Path, args: &Value) -> Result<Value> {
     let mut data = read(root)?;
     let time = now();
@@ -454,6 +508,7 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
         "seed_cleanup" => {
             for s in &mut data.seeds {
                 if s.retired_at == 0
+                    && s.reason != "workspace_removed"
                     && s.chat_id.is_empty()
                     && s.inflight.is_empty()
                     && s.operations.is_empty()
@@ -944,6 +999,71 @@ mod tests {
             .collect();
         (root, batch, tokens)
     }
+    #[test]
+    fn workspace_release_preserves_pool_and_fences_old_assignment() {
+        let (root, batch, tokens) = fixture();
+        let sid = batch[0]["seed_id"].as_str().unwrap();
+        let chat = super::super::ui(
+            root.path(),
+            &json!({"action":"create","title":"Keep history"}),
+        )
+        .unwrap()["session"]
+            .clone();
+        let assigned = poll(root.path(), sid, &tokens[0]).unwrap();
+        assert_eq!(assigned["chat_id"], chat["id"]);
+        release_workspace(root.path()).unwrap();
+        let data = read(root.path()).unwrap();
+        assert!(!data.enabled);
+        assert_eq!(data.seeds[0].retired_at, 0);
+        assert!(data.seeds[0].chat_id.is_empty());
+        assert_eq!(public(&data.seeds[0], now())["status"], "offline");
+        assert!(begin(
+            root.path(),
+            sid,
+            &tokens[0],
+            "chat_reply",
+            &json!({"chat_id":chat["id"],"attachment_id":assigned["attachment_id"]}),
+            "old"
+        )
+        .is_err());
+        assert_eq!(
+            load(root.path(), chat["id"].as_str().unwrap()).unwrap()["title"],
+            "Keep history"
+        );
+        assert_eq!(
+            poll(root.path(), sid, &tokens[0]).unwrap()["status"],
+            "idle"
+        );
+        release_workspace(root.path()).unwrap();
+        super::super::ui(root.path(), &json!({"action":"seed_cleanup"})).unwrap();
+        assert_eq!(read(root.path()).unwrap().seeds[0].retired_at, 0);
+        super::super::ui(
+            root.path(),
+            &json!({"action":"seed_settings","enabled":true}),
+        )
+        .unwrap();
+        let next = super::super::ui(
+            root.path(),
+            &json!({"action":"create","title":"New assignment"}),
+        )
+        .unwrap()["session"]
+            .clone();
+        assert_eq!(
+            poll(root.path(), sid, &tokens[0]).unwrap()["chat_id"],
+            next["id"]
+        );
+    }
+
+    #[test]
+    fn workspace_release_refuses_unresolved_operations_before_mutation() {
+        let (root, _, _) = fixture();
+        let mut data = read(root.path()).unwrap();
+        data.seeds[1].operations.push("running-operation".into());
+        write(root.path(), &data).unwrap();
+        assert!(release_workspace(root.path()).is_err());
+        assert!(read(root.path()).unwrap().enabled);
+    }
+
     #[test]
     fn account_cards_summarize_all_filtered_seeds_before_pagination() {
         let (root, _, _) = fixture();

@@ -340,26 +340,55 @@ pub fn open_external_url(url: String) -> AppResult<()> {
     open_url_in_browser(&url)
 }
 
-#[tauri::command(async)]
-pub fn delete_workspace(state: State<'_, AppState>, id: String) -> AppResult<()> {
+#[tauri::command]
+pub async fn delete_workspace(state: State<'_, AppState>, id: String) -> AppResult<()> {
+    use crate::runtime::{await_listener_shutdown, ServiceKind};
     let profile = state.with_workspaces(|store| {
         store
             .get(&id)
             .cloned()
             .ok_or_else(|| AppError::Message(format!("workspace not found: {id}")))
     })?;
-    tauri::async_runtime::block_on(drop_tunnel_workspace(&id))?;
+    let (mcp, actions) = state.with_runtime(|runtime| {
+        runtime.begin_delete(&id)?;
+        Ok((
+            runtime.begin_stop(&id, ServiceKind::Mcp),
+            runtime.begin_stop(&id, ServiceKind::Actions),
+        ))
+    })?;
+    // Shutdown futures own their handles. Never wait while holding AppState.runtime.
+    tokio::join!(
+        await_listener_shutdown(mcp, profile.runtime.local_port),
+        await_listener_shutdown(actions, profile.actions.local_port)
+    );
     state.with_runtime(|runtime| {
-        runtime.drop_workspace(&profile);
+        runtime.finish_stop(&id, ServiceKind::Mcp);
+        runtime.finish_stop(&id, ServiceKind::Actions);
         Ok(())
     })?;
-    crate::tools::hub::remove_live_hub(&id);
-    state.with_workspaces(|store| {
-        if store.remove(&id)?.is_some() {
-            teardown_workspace(store, &id)?;
+    let result = async {
+        drop_tunnel_workspace(&id).await?;
+        for folder in &profile.folders {
+            crate::tools::chat::seeds::release_workspace(std::path::Path::new(&folder.path))
+                .map_err(|e| AppError::Message(format!("Services stopped; seed release failed for {}: {}. Retry deletion after resolving the error.", folder.name, e)))?;
         }
+        state.with_workspaces(|store| {
+            // Keep the profile retryable until secret cleanup succeeds.
+            teardown_workspace(store, &id)?;
+            store.remove(&id)?;
+            Ok(())
+        })?;
+        crate::tools::hub::remove_live_hub(&id);
         Ok(())
-    })
+    }.await;
+    if result.is_err() {
+        state.with_runtime(|runtime| {
+            runtime.cancel_delete(&id);
+            Ok(())
+        })?;
+    }
+    // Keep a tombstone after success to reject starts holding an old profile.
+    result
 }
 
 #[cfg(test)]

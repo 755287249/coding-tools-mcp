@@ -79,6 +79,29 @@ function inventory(data:Library,args:Record<string,unknown>,now:number){
   return {ready_groups:[...readyGroups.values()],account_summaries,groups:[...groups.values()],sources:[...new Set(all.map(s=>s.source))].sort(),enabled:data.enabled,seeds:filtered.slice(offset,offset+limit),retired_count:counts.retired??0,total:all.length,filtered_total:filtered.length,offset,limit,counts,accounts,pairing_enabled:!!data.pairing_hash,capacity:SEED_LIBRARY_LIMIT};
 }
 // Called by chatUi while it already owns the folder lock.
+function ensureSettled(seed:Seed):void {
+  if(seed.inflight.length||seed.operations.length)throw Error('Seed has unresolved operations; finish or inspect them before release');
+}
+function releaseSeed(store:SeedStore,seed:Seed):void {
+  ensureSettled(seed);
+  if(seed.chat_id&&existsSync(store.path(`docs/chat-sessions/${seed.chat_id}.json`))){
+    const chat=store.read(seed.chat_id);
+    if(chat.seed_owner===seed.id&&chat.attachment_id===seed.attachment_id){
+      chat.attachment_id='';chat.seed_owner='';chat.seed_auto=false;chat.seed_pending=false;
+      chat.seed_generation=(chat.seed_generation??0)+1;chat.updated_at=Date.now();store.save(chat);
+    }
+  }
+  seed.chat_id='';seed.attachment_id='';seed.generation++;seed.last_seen=0;seed.ready=false;seed.reason='workspace_removed';
+}
+export function seedReleaseWorkspace(store:SeedStore):void {
+  if(!existsSync(store.path(FILE)))return;
+  store.locked(()=>{
+    const data=readSeeds(store);data.seeds.forEach(ensureSettled);
+    data.enabled=false;saveSeeds(store,data);
+    for(const seed of data.seeds)if(!seed.retired_at)releaseSeed(store,seed);
+    saveSeeds(store,data);seedInvalidate(store);
+  });
+}
 export function seedUi(store:SeedStore,args:Record<string,unknown>):Record<string,unknown> {
   const data=readSeeds(store),now=Date.now();
   if(args.action==='seed_pairing'){
@@ -111,7 +134,7 @@ export function seedUi(store:SeedStore,args:Record<string,unknown>):Record<strin
     if(!seed.retired_at)retirement(seed,'manual',now);saveSeeds(store,data);
   } else if(args.action==='seed_cleanup') {
     for(const s of data.seeds){
-      if(!s.retired_at&&!s.chat_id&&!s.inflight.length&&!s.operations.length&&((!s.redeemed_at&&now>s.enrollment_until)||(s.redeemed_at&&now-s.last_seen>SEED_REPLACE_MS)))retirement(s,'inactive',now);
+      if(!s.retired_at&&s.reason!=='workspace_removed'&&!s.chat_id&&!s.inflight.length&&!s.operations.length&&((!s.redeemed_at&&now>s.enrollment_until)||(s.redeemed_at&&now-s.last_seen>SEED_REPLACE_MS)))retirement(s,'inactive',now);
       if(s.retired_at)s.archived=true;
     }saveSeeds(store,data);
   } else if(args.action==='seed_resume_chat') {

@@ -51,6 +51,7 @@
   import MessageSquare from '@lucide/svelte/icons/message-square';
   import ArrowLeft from '@lucide/svelte/icons/arrow-left';
   import Trash2 from '@lucide/svelte/icons/trash-2';
+  import { workspaceBlocked } from "$lib/stores/workspace-lifecycle";
   import WorkspaceRemoveDialog from '$lib/components/WorkspaceRemoveDialog.svelte';
   let removingWorkspace = $state<{id:string;name:string}|null>(null);
   import ListChecks from '@lucide/svelte/icons/list-checks';
@@ -264,7 +265,7 @@
     runtime: { state: RuntimeState; localEndpoint: string; publicEndpoint: string; localMessage?: string },
     id = workspaceId,
   ) {
-    if (!id || id !== workspaceId) return;
+    if (!id || id !== workspaceId || workspaceBlocked(id)) return;
     mcpStatus = runtime.state;
     mcpStatusMessage = runtime.localMessage ?? "";
     mcpLocal = runtime.localEndpoint;
@@ -276,7 +277,7 @@
     runtime: { state: RuntimeState; localEndpoint: string; publicEndpoint: string; localMessage?: string },
     id = workspaceId,
   ) {
-    if (!id || id !== workspaceId) return;
+    if (!id || id !== workspaceId || workspaceBlocked(id)) return;
     actionsStatus = runtime.state;
     actionsStatusMessage = runtime.localMessage ?? "";
     actionsLocal = runtime.localEndpoint;
@@ -877,7 +878,7 @@
               onSaveSandbox={saveSandbox}
               {sandboxLocked}
             />
-            {#if capabilities.workspaceLifecycle}
+            {#if capabilities.workspaceLifecycle && (getBackend().workspaces.canDelete?.(workspaceId ?? "") ?? true)}
               <section class="workspace-delete"><button type="button" onclick={() => {if(profile)removingWorkspace={id:profile.id,name:profile.name};}}><Trash2 size={16}/>{$t('workspace.remove')}</button></section>
             {/if}
           {:catch cause}

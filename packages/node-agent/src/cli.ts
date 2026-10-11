@@ -13,7 +13,14 @@ if (configIndex >= 0 && !process.argv[configIndex + 1]) throw new Error('--confi
 const configPath = configIndex >= 0 ? process.argv[configIndex + 1] : undefined;
 const noUi = process.argv.includes('--no-ui');
 const application = await loadApplication(configPath);
-const workspaceStore = new ApplicationConfigStore(application);
+const workspaceStore = new ApplicationConfigStore(application, async id => {
+  const item = running.find(item => item.id === id);
+  if (item) {
+    await closeRuntime(item);
+    running.splice(running.indexOf(item), 1);
+    runtimeRegistry.delete(id);
+  }
+});
 const runtimeRegistry = new Map<string, WorkspaceRuntimeRecord>();
 
 const RESTART_EXIT_CODE = 75;
@@ -30,8 +37,17 @@ let stopping = false;
 let exitRequested = false;
 
 async function closeRuntime(item: RunningWorkspace): Promise<void> {
-  await item.tunnel.stop();
-  await item.runtime.close();
+  // Stop admission immediately; an outstanding long poll must not keep the
+  // removed workspace's listener alive indefinitely.
+  const closing = item.runtime.close();
+  const timer = setTimeout(() => item.runtime.server.closeAllConnections(), 5000);
+  try {
+    const results = await Promise.allSettled([item.tunnel.stop(), closing]);
+    const errors = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+    if (errors.length) throw new AggregateError(errors.map(r => r.reason), 'Workspace shutdown failed');
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function stop(): Promise<void> {
