@@ -1,8 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {routingContext,observeRouting} from '../plugins/coderabbit-seeds/context.mjs';
+import {routingContext,observeRouting,pageSession} from '../plugins/coderabbit-seeds/context.mjs';
 const route='/trpc/codingAgent.listTasks';
 const h=(org,ws='')=>({'x-coderabbitai-organization':org,...(ws?{'x-coderabbitai-workspace':ws}:{}),authorization:'secret',cookie:'private'});
+test('app session reads only expected storage keys and keeps token rotation separate from account identity',()=>{
+ const values=new Map([['user',JSON.stringify({state:{user:{id:'account'},currentOrganization:{id:'org'}}})],['accessToken','session-a']]);
+ const page={sessionStorage:{getItem:k=>{assert.ok(['user','accessToken'].includes(k));return values.get(k);}},localStorage:{getItem:k=>{assert.equal(k,'clerkGitProvider');return null;}}};
+ const first=pageSession(page);assert.equal(first.account,'account');assert.equal(first.provider,'');assert.equal(first.access,'session-a');
+ values.set('accessToken','session-b');assert.equal(pageSession(page).identity,first.identity);
+ values.set('user',JSON.stringify({state:{user:{id:123}}}));assert.equal(pageSession(page),null);
+});
 test('routing observation only accepts same-origin tRPC and outputs two identifiers',()=>{
  assert.deepEqual(routingContext(route,h('123','workspace')), {organization:'123',workspace:'workspace'});
  assert.equal(routingContext('https://elsewhere.example/trpc/read',h('123')),null);assert.equal(routingContext('/assets',h('123')),null);

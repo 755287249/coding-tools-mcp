@@ -3,7 +3,7 @@ const root=new URL('./',import.meta.url),target=new URL('../../static/plugins/co
 const header=`// ==UserScript==
 // @name         Coding Tools MCP 种子库
 // @namespace    https://github.com/755287249/coding-tools-mcp
-// @version      1.1.0
+// @version      1.1.1
 // @description  在当前 CodeRabbit 账号下批量创建并接入 MCP 项目种子库
 // @match        https://app.coderabbit.ai/*
 // @run-at       document-start

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Coding Tools MCP 种子库
 // @namespace    https://github.com/755287249/coding-tools-mcp
-// @version      1.1.0
+// @version      1.1.1
 // @description  在当前 CodeRabbit 账号下批量创建并接入 MCP 项目种子库
 // @match        https://app.coderabbit.ai/*
 // @run-at       document-start
@@ -14,6 +14,19 @@
 // ==/UserScript==
 
 (function(){'use strict';
+/** Match the app's session transport; Clerk's SDK token is not its API token. */
+function pageSession(page) {
+  try {
+    const account = JSON.parse(page.sessionStorage.getItem('user'))?.state?.user?.id;
+    const access = page.sessionStorage.getItem('accessToken');
+    const provider = page.localStorage.getItem('clerkGitProvider') || '';
+    if (typeof account !== 'string' || !account.trim() || typeof access !== 'string' || !access.trim()) return null;
+    if (provider && !/^[a-z0-9-]{1,80}$/.test(provider)) return null;
+    // Identity deliberately excludes the rotating access token. Never persist this object.
+    return {account, access, provider, identity: JSON.stringify([account, provider])};
+  } catch { return null; }
+}
+
 /** Capture only routing identifiers from the page's own same-origin tRPC calls. */
 function routingContext(url, headers, origin = 'https://app.coderabbit.ai') {
   let target;
@@ -96,7 +109,7 @@ function publicReceipt(seed,accountId,status,taskId=''){return {seed_id:seed.see
 const RECEIPTS='ctmcp-seed-receipts-v1';
 let stopped=false,running=false,detected=null,observedAccount='',contextRevision=0;
 const pageFetch=observeRouting(unsafeWindow,context=>{
-  const account=unsafeWindow.Clerk?.user?.id;
+  const account=pageSession(unsafeWindow)?.identity;
   if(account){if(!detected||detected.account!==account||detected.organization!==context.organization||detected.workspace!==context.workspace)contextRevision++;detected={...context,account};updateContext();}
 });
 const panel=document.createElement('div');panel.style.cssText='position:fixed;right:20px;bottom:20px;z-index:2147483647';
@@ -105,7 +118,7 @@ shadow.innerHTML=`<style>:host{font:14px system-ui;color:#e5e7eb}button,input,te
 const $=selector=>shadow.querySelector(selector),log=$('.log');
 const say=text=>{log.textContent=text;};
 function updateContext(){
-  const account=unsafeWindow.Clerk?.user?.id||'';
+  const account=pageSession(unsafeWindow)?.identity||'';
   if(account!==observedAccount){
     observedAccount=account;contextRevision++;
     if(detected?.account!==account)detected=null;
@@ -137,9 +150,9 @@ $('#start').onclick=async()=>{
   let bundle;
   try{
     bundle=parseBundle($('#batch').value);
-    const clerk=unsafeWindow.Clerk;
-    const accountId=clerk?.user?.id;
-    if(!accountId||!clerk?.session)throw Error('先在 CodeRabbit 页面登录；当前页面未提供可用的 Clerk 会话');
+    const login=pageSession(unsafeWindow);
+    if(!login)throw Error('CodeRabbit 页面登录会话尚未就绪。请先登录并刷新页面后重试。');
+    const accountId=login.account,identity=login.identity;
     const {organization:org,workspace}=selectedContext(),revision=contextRevision;
     const existing=GM_getValue(RECEIPTS,[]);
     const work=bundle.seeds.filter(seed=>!existing.some(r=>r.seed_id===seed.seed_id));
@@ -149,16 +162,16 @@ $('#start').onclick=async()=>{
     const lines=[];
     for(const seed of work){
       if(stopped)break;
-      if(clerk.user?.id!==accountId)throw Error('当前账号已切换，停止剩余批次');
+      const session=pageSession(unsafeWindow);
+      if(!session||session.identity!==identity)throw Error('当前登录会话已退出或账号已切换，停止剩余批次');
       if(seed.expires_at<=Date.now())throw Error('剩余入库票据已过期，请在客户端重新准备');
-      const access=await clerk.session.getToken();if(!access)throw Error('登录失效，请重新登录');
       const context=selectedContext();
-      if(clerk.user?.id!==accountId||contextRevision!==revision||context.organization!==org||context.workspace!==workspace)throw Error('账号、组织或工作区已切换，停止剩余批次；已提交任务保留。');
+      if(contextRevision!==revision||context.organization!==org||context.workspace!==workspace)throw Error('账号、组织或工作区已切换，停止剩余批次；已提交任务保留。');
       remember(publicReceipt(seed,accountId,'submitting'));
       lines.push(`${seed.seed_id.slice(0,8)} · 提交中`);say(lines.join('\n'));
       let taskId;
       try{
-        const response=await pageFetch('https://app.coderabbit.ai/trpc/codingAgent.enqueueCodingTask?batch=1',{method:'POST',credentials:'include',headers:{authorization:`Bearer ${access}`,'content-type':'application/json','x-trpc-source':'react','x-clerk-git-provider':'github','x-coderabbitai-organization':org,...(workspace?{'x-coderabbitai-workspace':workspace}:{})},body:JSON.stringify({'0':creationPayload(bundle,seed)}),signal:AbortSignal.timeout(30000)});
+        const response=await pageFetch('https://app.coderabbit.ai/trpc/codingAgent.enqueueCodingTask?batch=1',{method:'POST',credentials:'include',headers:{authorization:`Bearer ${session.access}`,'content-type':'application/json','x-trpc-source':'react',...(session.provider?{'x-clerk-git-provider':session.provider}:{}),'x-coderabbitai-organization':org,...(workspace?{'x-coderabbitai-workspace':workspace}:{})},body:JSON.stringify({'0':creationPayload(bundle,seed)}),signal:AbortSignal.timeout(30000)});
         if(!response.ok)throw Error(`HTTP ${response.status}`);
         taskId=createdTaskId(unwrapTrpc(await response.json()));
       }catch{

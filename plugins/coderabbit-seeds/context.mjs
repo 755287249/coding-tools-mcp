@@ -1,3 +1,16 @@
+/** Match the app's session transport; Clerk's SDK token is not its API token. */
+export function pageSession(page) {
+  try {
+    const account = JSON.parse(page.sessionStorage.getItem('user'))?.state?.user?.id;
+    const access = page.sessionStorage.getItem('accessToken');
+    const provider = page.localStorage.getItem('clerkGitProvider') || '';
+    if (typeof account !== 'string' || !account.trim() || typeof access !== 'string' || !access.trim()) return null;
+    if (provider && !/^[a-z0-9-]{1,80}$/.test(provider)) return null;
+    // Identity deliberately excludes the rotating access token. Never persist this object.
+    return {account, access, provider, identity: JSON.stringify([account, provider])};
+  } catch { return null; }
+}
+
 /** Capture only routing identifiers from the page's own same-origin tRPC calls. */
 export function routingContext(url, headers, origin = 'https://app.coderabbit.ai') {
   let target;
