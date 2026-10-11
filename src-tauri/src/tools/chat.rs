@@ -323,8 +323,16 @@ fn lock(root: &Path) -> Result<DiskLock> {
     loop {
         match fs::create_dir(&p) {
             Ok(()) => break,
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(e)
+                if e.kind() == std::io::ErrorKind::AlreadyExists
+                    || (cfg!(windows) && e.kind() == std::io::ErrorKind::PermissionDenied) =>
+            {
+                // A removed Windows lock directory can remain delete-pending
+                // while another process closes its last handle.
                 if std::time::Instant::now() >= deadline {
+                    if e.kind() != std::io::ErrorKind::AlreadyExists {
+                        return Err(io(e));
+                    }
                     return Err(err("Chat storage is busy; retry shortly. If it persists, stop all clients before inspecting docs/chat-sessions/.lock"));
                 }
                 std::thread::sleep(std::time::Duration::from_millis(20));

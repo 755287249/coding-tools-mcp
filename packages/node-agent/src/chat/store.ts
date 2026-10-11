@@ -123,8 +123,15 @@ function locked<T>(root: string, callback: () => T): T {
   while (true) {
     try { mkdirSync(lock); break; }
     catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      if (Date.now() >= deadline) throw new Error('Chat storage is busy; retry shortly. If it persists, stop all clients before inspecting docs/chat-sessions/.lock');
+      const code = (error as NodeJS.ErrnoException).code;
+      // Windows may deny recreation while another owner's removed directory
+      // still has open handles. Retry acquisition, never remove their lock.
+      const pendingRemoval = process.platform === 'win32' && (code === 'EPERM' || code === 'EACCES');
+      if (code !== 'EEXIST' && !pendingRemoval) throw error;
+      if (Date.now() >= deadline) {
+        if (pendingRemoval) throw error;
+        throw new Error('Chat storage is busy; retry shortly. If it persists, stop all clients before inspecting docs/chat-sessions/.lock');
+      }
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
     }
   }
