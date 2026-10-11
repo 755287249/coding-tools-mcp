@@ -57,6 +57,7 @@ jobs:
       - name: Verify chat storage and writer contention
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib tools::chat::tests -- --test-threads=1
       - name: Prepare scoped CI NUL device helper
+        id: ci-nul-helper
         shell: pwsh
         run: |
           @'
@@ -194,6 +195,7 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'Windows provider tests failed' }
           } finally { $lease.Dispose() }
       - name: Verify GitHub CLI runtime without credentials
+        if: ${{ !cancelled() && steps.ci-nul-helper.outcome == 'success' }}
         shell: pwsh
         run: |
           Add-Type -Path "$env:RUNNER_TEMP/ctmcp-ci-nul.cs"
@@ -205,6 +207,7 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'GitHub CLI runtime test failed' }
           } finally { $lease.Dispose() }
       - name: Verify desktop startup handoff
+        if: ${{ !cancelled() }}
         shell: powershell
         run: |
           ./tests/desktop-startup-handoff.Tests.ps1

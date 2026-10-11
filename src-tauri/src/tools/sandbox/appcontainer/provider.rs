@@ -5261,19 +5261,127 @@ console.log('ancestor-isolation-ok');
         let state = tempfile::tempdir().expect("state");
         let prepared =
             prepare_with_state_root(&model, state.path().join("state")).expect("prepare provider");
-        run_runtime_case(
+        let status_args = vec![
+            "--no-optional-locks".into(),
+            "status".into(),
+            "--porcelain".into(),
+            "--untracked-files=all".into(),
+        ];
+        let started = crate::tools::sandbox::start_prepared_sandbox_command(
             prepared.as_ref(),
-            &nested,
-            git,
-            vec![
-                "--no-optional-locks".into(),
-                "status".into(),
-                "--porcelain".into(),
-                "--untracked-files=all".into(),
-            ],
-            Some("fixture.txt"),
+            SandboxCommand::new(git.clone(), status_args.clone(), nested.clone()),
+            Vec::new(),
+            Vec::new(),
         )
-        .await;
+        .await
+        .expect("Git fixture launch");
+        assert!(started.child.process_tree_contained());
+        let output = started
+            .child
+            .wait_with_output()
+            .await
+            .expect("Git fixture output");
+        if !output.status.success() {
+            // Report only synthetic repository data/configuration key names. Keep
+            // the original status result as the gate, regardless of probe results.
+            let empty = nested.join("empty-config");
+            fs::write(&empty, "").expect("empty diagnostic config");
+            let empty = empty.to_string_lossy().into_owned();
+            let mut probes: Vec<(String, Vec<String>, Vec<(String, String)>)> = Vec::new();
+            for scope in ["--system", "--global", "--local"] {
+                probes.push((
+                    scope.into(),
+                    vec![
+                        "config".into(),
+                        scope.into(),
+                        "--list".into(),
+                        "--name-only".into(),
+                        "--show-origin".into(),
+                    ],
+                    Vec::new(),
+                ));
+            }
+            for path in [
+                "../.git/config".to_string(),
+                model
+                    .root()
+                    .join(".git/config")
+                    .to_string_lossy()
+                    .into_owned(),
+            ] {
+                probes.push((
+                    format!("explicit config {path}"),
+                    vec![
+                        "config".into(),
+                        "--file".into(),
+                        path,
+                        "--get".into(),
+                        "core.repositoryformatversion".into(),
+                    ],
+                    Vec::new(),
+                ));
+            }
+            for keys in [
+                vec!["GIT_CONFIG_SYSTEM"],
+                vec!["GIT_CONFIG_GLOBAL"],
+                vec!["GIT_CONFIG_SYSTEM", "GIT_CONFIG_GLOBAL"],
+            ] {
+                probes.push((
+                    format!("status with empty {keys:?}"),
+                    status_args.clone(),
+                    keys.into_iter()
+                        .map(|key| (key.into(), empty.clone()))
+                        .collect(),
+                ));
+            }
+            for (label, args, env) in probes {
+                match crate::tools::sandbox::start_prepared_sandbox_command(
+                    prepared.as_ref(),
+                    SandboxCommand::new(git.clone(), args, nested.clone()),
+                    env,
+                    Vec::new(),
+                )
+                .await
+                {
+                    Ok(started) => match started.child.wait_with_output().await {
+                        Ok(probe) => eprintln!(
+                            "Git diagnostic {label}: exit={:?} stdout={} stderr={}",
+                            probe.status.code(),
+                            String::from_utf8_lossy(&probe.stdout),
+                            String::from_utf8_lossy(&probe.stderr)
+                        ),
+                        Err(error) => eprintln!("Git diagnostic {label}: wait error={error}"),
+                    },
+                    Err(error) => eprintln!("Git diagnostic {label}: start error={error:?}"),
+                }
+            }
+            let node = which::which("node.exe").expect("Node runtime");
+            let started = crate::tools::sandbox::start_prepared_sandbox_command(
+                    prepared.as_ref(),
+                    SandboxCommand::new(node, vec!["-e".into(), "try { const b = require('node:fs').readFileSync(process.argv[1]); console.log('synthetic-config-readable bytes=' + b.length); } catch(e) { console.log('synthetic-config-read-error=' + e.code); process.exitCode=1; }".into(), model.root().join(".git/config").to_string_lossy().into_owned()], nested.clone()),
+                    Vec::new(),
+                    Vec::new(),
+                ).await.expect("configuration read probe launch");
+            let probe = started
+                .child
+                .wait_with_output()
+                .await
+                .expect("configuration read probe output");
+            eprintln!(
+                "Node diagnostic: exit={:?} stdout={} stderr={}",
+                probe.status.code(),
+                String::from_utf8_lossy(&probe.stdout),
+                String::from_utf8_lossy(&probe.stderr)
+            );
+        }
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("fixture.txt"));
     }
 
     #[tokio::test]
