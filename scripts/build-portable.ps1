@@ -47,7 +47,10 @@ try {
     $phaseTimer.Restart()
     Write-Host 'Building frontend assets...'
     # pnpm 12 may provide an EXE; older installations provide a CMD shim.
-    $pnpmCommand = (Get-Command pnpm -CommandType Application -ErrorAction Stop).Source
+    # Both can be on PATH (CI adds pnpm.cmd beside pnpm.exe), and invoking the
+    # resulting array fails, so run the first match in PATH/PATHEXT order.
+    $pnpmCommand = (Get-Command pnpm -CommandType Application -ErrorAction Stop |
+        Select-Object -First 1).Source
     & $pnpmCommand run build
     if ($LASTEXITCODE -ne 0) {
         throw "Frontend build failed with exit code $LASTEXITCODE."
