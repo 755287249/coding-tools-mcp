@@ -1810,3 +1810,18 @@ test('code preview has no admin token and runs only inside an opaque sandbox', a
   assert.match(html,/frame-src 'none'/);
   assert.equal((await fetch(`${runtime.base}/ui/chat-preview.html`,{method:'POST'})).status,405);
 });
+
+test('plugin frame has a dedicated blob loader CSP without weakening the management page', async t => {
+  const runtime=await startManagementServer(t);
+  const page=await fetch(`${runtime.base}/ui`);
+  assert.match(page.headers.get('content-security-policy'),/script-src 'self'(?:;|$)/);
+  assert.doesNotMatch(page.headers.get('content-security-policy'),/script-src[^;]*blob:/);
+  assert.match(page.headers.get('content-security-policy'),/frame-src 'self'/);
+  const response=await fetch(`${runtime.base}/ui/plugin-frame.html`);
+  assert.equal(response.status,200);
+  assert.match(response.headers.get('content-security-policy'),/script-src 'self' blob:/);
+  assert.equal(response.headers.get('x-frame-options'),null);
+  const html=await response.text();
+  assert.match(html,/plugin-frame\.js/);
+  assert.doesNotMatch(html,/ctmcp-admin-token/);
+});

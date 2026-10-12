@@ -77,7 +77,7 @@
         {#if $installedAppPlugins.includes(appPlugin.id)}
           {#if folderId}<div class="app-plugin-body"><PluginSlot id={appPlugin.id} {workspaceId} {folderId}/></div>{:else}<p class="catalog-notice">{$t('plugins.pickFolder')}</p>{/if}
         {:else}<p class="catalog-notice">{$t('plugins.installHint')}</p>{/if}
-        {#if appPlugin.userscript}<div class="app-plugin-extra"><h3>{$t('plugins.userscript')}</h3><p>{$t('plugins.userscriptHint')}</p><a class="secondary link-button" href={userscriptUrl(appPlugin.userscript)} target="_blank" rel="noreferrer"><Download size={14}/>{`${appPlugin.userscript} · v${appPlugin.version}`}</a></div>{/if}
+        {#if appPlugin.userscript}<div class="app-plugin-extra"><h3>{$t('plugins.userscript')}</h3><p>{$t('plugins.userscriptHint')}</p><a class="secondary link-button" href={userscriptUrl(appPlugin.userscript)} target="_blank" rel="noreferrer"><Download size={14}/>{`${appPlugin.userscript} · v${appPlugin.userscriptVersion ?? appPlugin.version}`}</a></div>{/if}
       </section>
     {:else if selected}
       <nav class="feature-breadcrumb" aria-label={$t('features.details')}><button onclick={()=>detail()}>{heading}</button><ChevronRight size={13}/><span>{selected.name}</span></nav>

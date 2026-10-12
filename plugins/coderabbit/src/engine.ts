@@ -44,7 +44,7 @@ export function parseSession(raw: CapturedStorage | string): CodeRabbitSession {
   const workspace = String(org.workspace_id ?? value.clerkSsoWorkspaceId ?? '');
   if (!ID.test(org.id) || (workspace && !ID.test(workspace))) throw new Error('Unexpected organization ID');
   return {
-    access, account: user.id, accountName: String(user.providerLogin || user.userName || user.id),
+    access, account: user.id, accountName: String(user.providerLogin || user.userName || user.user_name || user.email || user.id),
     providerUserId: String(user.providerUserId ?? ''), provider, organization: org.id, workspace,
     orgName: String(org.organization_name), providerOrg: String(org.provider_organization_id ?? ''),
     orgType: String(org.type || provider || 'github'), expiresAt: jwtExpiry(access),

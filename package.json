@@ -58,7 +58,8 @@
     "version:check": "node scripts/sync-version.mjs --check",
     "version:patch": "pnpm version patch --no-git-tag-version && pnpm run version:sync",
     "pretauri": "pnpm run version:sync",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "plugins:build": "pnpm --dir plugins/coderabbit run build && node -e \"require('fs').copyFileSync('plugins/coderabbit/dist/coderabbit-seeds.ctplugin.json','static/plugins/coderabbit-seeds.ctplugin.json')\""
   },
   "license": "Apache-2.0",
   "dependencies": {
