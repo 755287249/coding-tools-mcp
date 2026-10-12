@@ -478,4 +478,9 @@ C. 添加種子頁面卡片化（build 子代理，分支 `vorflux/seed-add-card
       授權選單淺色/深色/手機寬度截圖正常，點選與鍵盤（↑↓/Enter/Esc）可切換。svelte-check 0 錯誤；根目錄 `node --test tests/*.test.mjs` 278 通過。
 - [x] 版本 0.1.145（`version:sync` + parity manifest baseline）。
 - 備註：`node-agent:parity:check` 在本沙箱因沒有 cargo（rust-contract 子檢查）失敗，其餘 28 項通過；依 CI 結果為準。
-- [ ] 推送後跑 CI（Rust tests、Windows Manual source upgrade），再用 chat-beta.yml 發佈 v0.1.145 穩定版（流程同第五/六部分）。
+- [x] 推送 d0366e5；Rust tests run 38259115978 成功（含 fa50e3c 的 presence 測試）。
+- [x] 發佈 **v0.1.145** 穩定版：chat-beta run 38259119008 三個 job 成功；資產 `ctmcp-0.1.145-win64.exe`
+      （SHA-256 `7400165a8bc0604728808a308cc84f2e57a16060a54b1ab3f82748ba0b4c2a9f`）+ 種子腳本 1.3.2；中文發佈說明已補；
+      tag 觸發的舊 `Desktop Release` run 38259828397 已取消（理由同 v0.1.143）。
+- [ ] Windows `Manual source upgrade`（verify-repo + 完整建置）未跑，接手者可手動觸發確認。
+- 推送憑證：使用者提供的 PAT 只存在 agent 沙箱（不在倉庫），使用者會在完成後撤銷；接手者需向使用者索取新的。
