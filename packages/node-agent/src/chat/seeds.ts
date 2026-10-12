@@ -41,9 +41,10 @@ function optionalLabel(value:unknown,max=200):string {if(value===undefined||valu
 export function parseSeedFilter(value:unknown):SeedFilter {
   if(value===undefined||value===null)return {source:'',keyword:''};
   if(!value||typeof value!=='object'||Array.isArray(value))throw Error('Invalid seed filter');
-  const filter=value as Record<string,unknown>;return {source:optionalLabel(filter.source).toLowerCase(),keyword:optionalLabel(filter.keyword),...(filter.prefix!==undefined&&filter.prefix!==null?{prefix:optionalLabel(filter.prefix)}:{}),...(filter.account!==undefined&&filter.account!==null?{account:optionalLabel(filter.account)}:{}),...(filter.standby===true?{standby:true}:{}),...(typeof filter.seed_id==='string'&&filter.seed_id?{seed_id:optionalLabel(filter.seed_id)}:{})};
+  const filter=value as Record<string,unknown>;return {source:optionalLabel(filter.source).toLowerCase(),keyword:optionalLabel(filter.keyword),...(filter.prefix!==undefined&&filter.prefix!==null?{prefix:optionalLabel(filter.prefix)}:{}),...(filter.account!==undefined&&filter.account!==null?{account:optionalLabel(filter.account)}:{}),...(filter.standby===true?{standby:true}:{}),...(typeof filter.seed_id==='string'&&filter.seed_id?{seed_id:seedIdFilter(filter.seed_id)}:{})};
 }
 const sourceOf=(s:Seed)=>s.source||'coderabbit';
+function seedIdFilter(value:string):string {const v=optionalLabel(value);if(v.length>80)throw Error('Invalid seed filter');return v;}
 function matches(s:Seed,filter:SeedFilter):boolean {return (!filter.source||sourceOf(s)===filter.source)&&(!filter.keyword||(s.prefix??'').toLowerCase().includes(filter.keyword.toLowerCase()))&&(filter.prefix===undefined||(s.prefix??'')===filter.prefix)&&(!filter.account||s.account===filter.account)&&(filter.standby!==true||s.standby===true)&&(!filter.seed_id||s.id===filter.seed_id);}
 export function readSeeds(store:SeedStore):Library {
   let body:Buffer;try{body=readFileSync(store.path(FILE));}catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')return {version:1,enabled:false,seeds:[]};throw e;}
@@ -109,7 +110,8 @@ export function seedReleaseWorkspace(store:SeedStore):void {
     const data=readSeeds(store);data.seeds.forEach(ensureSettled);
     data.enabled=false;saveSeeds(store,data);
     // Explicit pool choices bypass `enabled`; withdraw them as well.
-    for(const id of store.ids()){let chat;try{chat=store.read(id);}catch{continue;}if(chat.seed_explicit){chat.seed_explicit=false;store.save(chat);}}
+    for(const id of store.ids()){let chat;try{chat=store.read(id);}catch{continue;}if(chat.seed_explicit||chat.seed_direct){if(chat.seed_direct&&!chat.seed_owner){chat.seed_auto=false;chat.seed_direct=false;}chat.seed_explicit=false;store.save(chat);}}
+    for(const seed of data.seeds)if(!seed.retired_at&&seed.bound_chat&&!seed.chat_id)retirement(seed,'workspace_released',Date.now());
     for(const seed of data.seeds)if(!seed.retired_at)releaseSeed(store,seed);
     saveSeeds(store,data);seedInvalidate(store);
   });
@@ -126,7 +128,7 @@ export function seedReleaseToStandby(store:SeedStore,chat:ChatSession):boolean {
 export function seedRetireUnusedDirect(store:SeedStore,chatId:string):void {
   if(!existsSync(store.path(FILE)))return;
   const data=readSeeds(store),now=Date.now();let changed=false;
-  for(const s of data.seeds)if(s.bound_chat===chatId&&!s.retired_at&&!s.redeemed_at){retirement(s,'conversation_detached',now);changed=true;}
+  for(const s of data.seeds)if(s.bound_chat===chatId&&!s.retired_at&&!s.chat_id){retirement(s,'conversation_detached',now);changed=true;}
   if(changed){saveSeeds(store,data);seedInvalidate(store);}
 }
 /** Enroll a directly connected AI that left a chat as a standby seed; returns its one-hour URL key. */
@@ -145,8 +147,12 @@ function seedDirectUrl(store:SeedStore,args:Record<string,unknown>):Record<strin
   if(chat.closed||chat.mode==='group')throw Error('Only open work chats support direct connect URLs');
   if(chat.attachment_id)throw Error('Disconnect the current AI before connecting another one');
   const data=readSeeds(store),now=Date.now();let changed=false;
-  for(const s of data.seeds)if(s.bound_chat===chat.id&&!s.retired_at&&!s.redeemed_at){retirement(s,'replaced',now);changed=true;}
+  // Replace every URL of this chat that is not serving it; drop never-used rows so they do not pile up.
+  const before=data.seeds.length;data.seeds=data.seeds.filter(s=>!(s.bound_chat===chat.id&&!s.redeemed_at));changed=data.seeds.length!==before;
+  for(const s of data.seeds)if(s.bound_chat===chat.id&&!s.retired_at&&!s.chat_id){retirement(s,'replaced',now);changed=true;}
   if(changed)saveSeeds(store,data);
+  // A stale owner (e.g. a busy seed that was plainly detached) would block the bound seed.
+  if(chat.seed_owner){chat.seed_owner='';chat.seed_pending=false;chat.seed_generation=(chat.seed_generation??0)+1;}
   const created=seedUi(store,{action:'seed_manual',source:'direct',prefix:'接入AI',account:'direct',_bound_chat:chat.id}) as {batch:{seed_id:string}[]};
   const seed=created.batch[0];if(!seed)throw Error('Direct connect URL failed');
   chat.seed_auto=true;chat.seed_explicit=true;chat.seed_direct=true;chat.seed_filter={source:'',keyword:'',seed_id:seed.seed_id};chat.updated_at=now;store.save(chat);seedInvalidate(store);

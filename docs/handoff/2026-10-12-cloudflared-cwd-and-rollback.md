@@ -253,6 +253,17 @@
       連接指引中可切換回 OAuth（偏好存在 localStorage `ctmcp-connect-oauth`）。Node 同步。
       端點不是 https 或 loopback 時自動改用 OAuth 提示詞。斷開時未使用的一次性網址會退役。
       綁定種子不出現在種子池分類中。測試：Rust `direct_url_is_bound_to_its_chat_only`、Node `direct connect URL is bound to its chat only`。
+- [x] 內部 review（風險 5/10）後修正：
+  - 切換到 OAuth 時先撤回待用的接入網址（detach），避免對話卡在接入網址模式、右上角沒有 [斷開]。
+  - 重新產生網址時，退役「已使用但未分配」的舊網址，並刪除從未使用的舊網址列；斷開時同理。
+  - 重新打開接入指引時，若舊網址仍未使用且未過期，直接沿用，不會讓已貼出的網址失效。
+  - 產生網址時清除過時的 seed_owner。release_workspace 也撤回待用接入網址。
+  - 文字更正：網址需在 1 小時內首次連接，連接後 7 天內有效（不是「一次性、1 小時」）。
+- 已知差異（已告知使用者，後續可改）：
+  - 接入網址走種子閘道，工具集比 OAuth 少（沒有 chat_discuss、exec_many、request_permissions、
+    history_session_* 等），每個種子最多 4 個進行中操作。
+  - 取消重疊檢查後，父專案的 AI 可以寫入子專案的 `docs/chat-sessions/seed-library.seeds.json`，
+    理論上可偽造子專案的種子並以子專案的權限設定執行。只有子專案權限比父專案寬鬆時才有影響。
 - [ ] C.（下一步，較大）每個對話的授權模式（完全/一般/嚴格）與專案外路徑核准。
       現況：檔案工具的 `Workspace::resolve_*` 一律拒絕絕對路徑與越界路徑；專案隔離會清空
       `sandbox.external_paths`。需要：專案層級的「已核准外部路徑」清單（讀/寫），

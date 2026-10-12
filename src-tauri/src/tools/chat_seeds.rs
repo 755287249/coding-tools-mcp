@@ -382,11 +382,25 @@ pub fn release_workspace(root: &Path) -> Result<()> {
                 let Ok(mut chat) = load(root, cid) else {
                     continue;
                 };
-                if chat["seed_explicit"] == true {
+                if chat["seed_explicit"] == true || chat["seed_direct"] == true {
+                    // A pending direct URL does not survive a release: the
+                    // chat returns to a plain [接入AI] state.
+                    if chat["seed_direct"] == true
+                        && chat["seed_owner"].as_str().unwrap_or("").is_empty()
+                    {
+                        chat["seed_auto"] = json!(false);
+                        chat["seed_direct"] = json!(false);
+                    }
                     chat["seed_explicit"] = json!(false);
                     save(root, &chat)?;
                 }
             }
+        }
+    }
+    let time = now();
+    for seed in &mut data.seeds {
+        if seed.retired_at == 0 && !seed.bound_chat.is_empty() && seed.chat_id.is_empty() {
+            retire(seed, "workspace_released", time);
         }
     }
     for seed in &mut data.seeds {
@@ -730,11 +744,17 @@ fn direct_url(root: &Path, args: &Value) -> Result<Value> {
     let time = now();
     let mut data = read(root)?;
     let mut changed = false;
-    // Re-issuing replaces an unused URL; a connected seed keeps working.
+    // Re-issuing replaces every URL of this chat that is not serving it, used
+    // or not, so no AI is left waiting on a credential that can never match.
+    // Never-used rows are dropped so retired URLs do not pile up.
+    let before = data.seeds.len();
+    data.seeds
+        .retain(|s| !(s.bound_chat == cid && s.redeemed_at == 0));
+    changed |= data.seeds.len() != before;
     for seed in data
         .seeds
         .iter_mut()
-        .filter(|s| s.bound_chat == cid && s.retired_at == 0 && s.redeemed_at == 0)
+        .filter(|s| s.bound_chat == cid && s.retired_at == 0 && s.chat_id.is_empty())
     {
         retire(seed, "replaced", time);
         changed = true;
@@ -750,6 +770,13 @@ fn direct_url(root: &Path, args: &Value) -> Result<Value> {
     let sid = ticket["seed_id"]
         .as_str()
         .ok_or_else(|| err("Direct connect URL failed"))?;
+    // A stale owner (e.g. a busy seed that was plainly detached) would block
+    // the bound seed until the replacement timeout.
+    if !chat["seed_owner"].as_str().unwrap_or("").is_empty() {
+        chat["seed_owner"] = json!("");
+        chat["seed_pending"] = json!(false);
+        chat["seed_generation"] = json!(chat["seed_generation"].as_u64().unwrap_or(0) + 1);
+    }
     chat["seed_auto"] = json!(true);
     chat["seed_explicit"] = json!(true);
     chat["seed_direct"] = json!(true);
@@ -771,7 +798,7 @@ pub(super) fn retire_unused_direct(root: &Path, chat_id: &str) -> Result<()> {
     for seed in data
         .seeds
         .iter_mut()
-        .filter(|s| s.bound_chat == chat_id && s.retired_at == 0 && s.redeemed_at == 0)
+        .filter(|s| s.bound_chat == chat_id && s.retired_at == 0 && s.chat_id.is_empty())
     {
         retire(seed, "conversation_detached", time);
         changed = true;
@@ -2361,11 +2388,16 @@ mod standby_tests {
             &json!({"action":"seed_direct","chat_id":chat["id"]}),
         )
         .unwrap();
+        // The first URL is used but not yet assigned when the guide reissues.
+        let first_key = first["seed"]["url_key"].as_str().unwrap().to_owned();
+        let first_sid = url(root.path(), &first_key, true).unwrap();
         let issued = super::super::ui(
             root.path(),
             &json!({"action":"seed_direct","chat_id":chat["id"]}),
         )
         .unwrap();
+        // Its AI is told to stop instead of waiting forever.
+        assert!(poll(root.path(), &first_sid, &first_key).is_err());
         // Re-issuing retires the unused URL.
         assert!(url(
             root.path(),

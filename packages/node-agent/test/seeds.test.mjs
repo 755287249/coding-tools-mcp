@@ -370,7 +370,7 @@ test('choosing a pool after a stale seed owner is allowed',t=>{
 test('direct connect URL is bound to its chat only',async t=>{
  const root=mkdtempSync(path.join(tmpdir(),'seeds-'));t.after(()=>rmSync(root,{recursive:true,force:true}));const {seedUrl}=await import('../dist/chat/seeds.js');const store=seedStore(root);
  const other=chatUi(root,{action:'create',seed_filter:{source:'',keyword:''}}).session;const chat=chatUi(root,{action:'create',seed_manual:true}).session;
- const first=chatUi(root,{action:'seed_direct',chat_id:chat.id});const issued=chatUi(root,{action:'seed_direct',chat_id:chat.id});
+ const first=chatUi(root,{action:'seed_direct',chat_id:chat.id});const firstSid=seedUrl(store,first.seed.url_key,true);const issued=chatUi(root,{action:'seed_direct',chat_id:chat.id});assert.throws(()=>seedPoll(store,firstSid,first.seed.url_key));
  assert.throws(()=>seedUrl(store,first.seed.url_key));
  const sid=seedUrl(store,issued.seed.url_key,true);const read=chatUi(root,{action:'read',chat_id:chat.id}).session;assert.equal(read.seed_direct,true);
  const assigned=seedPoll(store,sid,issued.seed.url_key);assert.equal(assigned.chat_id,chat.id);assert.notEqual(assigned.chat_id,other.id);

@@ -17,6 +17,9 @@
   const OAUTH_PREF='ctmcp-connect-oauth';
   let connectWithOAuth=$state(typeof localStorage!=='undefined'&&localStorage.getItem(OAUTH_PREF)==='1');
   let directPrompt=$state(false);
+  // The last direct URL prompt per chat is reused while it is still unused, so
+  // reopening the guide does not invalidate a URL the user already pasted.
+  let directCache:{chat:string;prompt:string;expires:number}|null=null;
   function setConnectWithOAuth(value:boolean){connectWithOAuth=value;try{localStorage.setItem(OAUTH_PREF,value?'1':'0');}catch{}void openConnection();}
   import { chatConnectionTone } from '$lib/chat/connection-tone';
   import { fileDrop } from '$lib/chat/file-drop';
@@ -199,7 +202,7 @@
   let queueElement=$state<HTMLDivElement>(),queueExpanded=$state(false);
   let runtimeState=$state('');
   $effect(()=>{const ws=workspaceId;runtimeState='';if(!ws)return;let stopped=false;const stop=startVisiblePolling(async()=>{try{const value=await getRuntimeStatus(ws);if(!stopped)runtimeState=value.state;}catch{if(!stopped)runtimeState='';}},()=>4000);return()=>{stopped=true;stop()}});
-  const queueNotice=$derived(!workspaceId||!folderId?'':runtimeState&&runtimeState!=='running'?'chat.enableMcp':needsAi?(seedStartPending?'':detail?.seed_auto?'seeds.loading':'chat.connectAi'):'');
+  const queueNotice=$derived(!workspaceId||!folderId?'':runtimeState&&runtimeState!=='running'?'chat.enableMcp':needsAi?(seedStartPending?'':detail?.seed_auto&&!detail?.seed_direct?'seeds.loading':'chat.connectAi'):'');
   function collapseQueue(){queueElement?.querySelectorAll('details[open]').forEach(item=>(item as HTMLDetailsElement).open=false);queueExpanded=false;}
 
   async function toggleQueueMode() {
@@ -294,17 +297,29 @@
       let urlReady = false; try { urlReady = !!connectionEndpoint && !!pairingAddress(connectionEndpoint, folder); } catch { urlReady = false; }
       if (urlReady && mode !== 'group' && !connectWithOAuth) {
         try {
-          const direct = await seedRequest<{seed:SeedTicket}>(ws, folder, { action: 'seed_direct', chat_id: chat });
-          if (request !== promptSequence || scope !== currentScope || !guide) return;
-          connectionPrompt = directConnectPrompt(connectionEndpoint, folder, direct.seed);
+          const cached = directCache && directCache.chat === chat && directCache.expires > Date.now() + 60_000 && detail?.seed_direct && !detail.seed_owner ? directCache.prompt : '';
+          if (cached) connectionPrompt = cached;
+          else {
+            const direct = await seedRequest<{seed:SeedTicket}>(ws, folder, { action: 'seed_direct', chat_id: chat });
+            if (request !== promptSequence || scope !== currentScope || !guide) return;
+            connectionPrompt = directConnectPrompt(connectionEndpoint, folder, direct.seed);
+            directCache = { chat, prompt: connectionPrompt, expires: direct.seed.expires_at };
+          }
           directPrompt = true;
           const fresh = await localChat(ws, folder, { action: 'read', chat_id: chat });
           if (request === promptSequence && scope === currentScope && selected === chat) { readSequence++; detail = fresh.session ?? detail; }
           await prepareConnection(request);
           return;
-        } catch { if (request !== promptSequence || scope !== currentScope || !guide) return; }
+        } catch (e) { console.warn('direct connect URL unavailable; using OAuth', e); if (request !== promptSequence || scope !== currentScope || !guide) return; }
       }
       directPrompt = false;
+      // Leaving the URL mode: withdraw a pending direct URL so the OAuth AI can attach.
+      if (detail?.seed_direct && !detail.seed_owner) {
+        const reset = await localChat(ws, folder, { action: 'detach', chat_id: chat });
+        directCache = null;
+        if (request !== promptSequence || scope !== currentScope || !guide) return;
+        readSequence++; detail = reset.session ?? detail;
+      }
       const loaded=connectionEndpoint?await loadMcpAuthSecrets(getBackend(),transport.id,transport.auth):null;
       if (request !== promptSequence || scope !== currentScope || !guide) return;
       const connection = loaded ? buildConnectionPrompt({ workspaceName: selectedFolder?.name ?? '', endpoint:connectionEndpoint, authType: transport.auth.type, clientId: loaded.oauth_client_id || transport.auth.oauth_client_id, password: loaded.oauth_password ?? '', bearerToken: loaded.bearer_token ?? '', folders: folders.map(f => f.path) }, $locale, true) : '';
@@ -721,7 +736,7 @@
       return false;
     } catch (e) { if (gen === generation) error = String(e); return false; } finally { busy = false; }
   }
-  const aiKind = $derived(!detail || detail.closed ? 'none' : detail.seed_direct ? (detail.seed_owner ? 'direct' : 'none') : detail.seed_auto ? 'seed' : (detail.status === 'connected' || detail.status === 'waiting') ? 'direct' : 'none');
+  const aiKind = $derived(!detail || detail.closed ? 'none' : detail.seed_direct && detail.seed_owner ? 'direct' : detail.seed_auto && !detail.seed_direct ? 'seed' : (detail.status === 'connected' || detail.status === 'waiting') ? 'direct' : 'none');
   async function switchToDirect() {
     if (aiKind === 'seed' && !(await detach())) return;
     await openConnection();
@@ -806,7 +821,7 @@
     {#if error}<div class="chat-error" role="alert">{error}<button onclick={() => error = ''} aria-label={$t("chat.38")}>×</button></div>{/if}
     {#if isNewConversation}<div class="mode-switch" aria-label={$t('chat.mode')}><button type="button" aria-pressed={mode==='group'} disabled={busy||memberBusy||detail?.closed||!workspaceId||!folderId} onclick={()=>changeMode('group')}>{$t('chat.group')}</button><button type="button" aria-pressed={mode==='work'} disabled={busy||memberBusy||detail?.closed} onclick={()=>changeMode('work')}>{$t('chat.work')}</button></div>{/if}
     {#if standbyNotice}<p class="seed-pool-note" role="status">{standbyNotice}</p>{/if}
-    {#if detail?.seed_auto&&detail.seed_filter}<p class="seed-pool-note">{$t('seeds.poolForChat')}: {detail.seed_filter.source||$t('seeds.allSources')} · {detail.seed_filter.prefix!==undefined?(detail.seed_filter.prefix||$t('seeds.unlabelled')):detail.seed_filter.keyword||$t('seeds.allPrefixes')}{#if detail.seed_filter.account} · {detail.seed_filter.account}{/if}</p>{/if}
+    {#if detail?.seed_auto&&!detail.seed_direct&&detail.seed_filter}<p class="seed-pool-note">{$t('seeds.poolForChat')}: {detail.seed_filter.source||$t('seeds.allSources')} · {detail.seed_filter.prefix!==undefined?(detail.seed_filter.prefix||$t('seeds.unlabelled')):detail.seed_filter.keyword||$t('seeds.allPrefixes')}{#if detail.seed_filter.account} · {detail.seed_filter.account}{/if}</p>{/if}
     <div class="conversation-body">
     <div class="feed-frame">
     <div class="message-feed" bind:this={feed} onscroll={scheduleScroll} aria-busy={loadingDetail}>
@@ -814,7 +829,7 @@
       {:else if !messages.length}<div class="empty-state">
         {#if workspaceId&&folderId&&mode==='work'&&!selected&&startNew}
           <SeedStart {workspaceId} {folderId} onEnabled={value=>seedStartPending=value} onChoose={filter=>create(true,filter)}/>
-        {:else if detail?.seed_auto&&needsAi}<SeedLoading/>
+        {:else if detail?.seed_auto&&!detail.seed_direct&&needsAi}<SeedLoading/>
         {:else}<h2>{$t(!workspaceId||!folderId?'chat.selectFolder':mode==='group'?'chat.inviteTitle':needsAi?'chat.connectTitle':'seeds.connectedReady')}</h2>{/if}
       </div>
       {:else}<div class="message-column" bind:this={column}>{#if historyStart}<button type="button" class="load-older" onclick={showOlder}>{$t('chat.loadOlder')}</button>{/if}{#each visibleFeedItems as item (item.id)}{#if item.kind === 'reply'}<ReplyGroup group={item} {workspaceId} {folderId} chatId={selected} copied={copiedMessage} disabled={busy||memberBusy||!!detail?.closed} onCopy={copyMessage} onShare={m=>shareMessage=m} onAnswer={(m,id,answers)=>memberAction({action:'answer_question',question_message_id:m.id,message_id:id,answers})}/>{:else}{@const m = item.message}<article data-user-message={m.role === 'user' ? m.id : undefined} tabindex="-1" class:user={m.role === 'user'} class:assistant={m.role === 'assistant'}><div class="message-meta">{m.role === 'user' ? $t('chat.26') : m.agent_name ?? detail?.agent_name ?? (m.final === false ? $t('chat.27') : 'AI')}<time>{new Date(m.created_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</time></div>{#if (m.attachments??[]).some(file=>file.mime.startsWith('image/'))}<div class="message-images"><div class="image-strip">{#each (m.attachments??[]).filter(file=>file.mime.startsWith('image/')) as file (workspaceId+":"+folderId+":"+selected+":"+file.id+":"+file.sha256)}<ChatAttachment {workspaceId} {folderId} chatId={selected} {file}/>{/each}</div></div>{/if}<div class="message-body" class:image-only={!m.text.trim()&&!(m.attachments??[]).some(file=>!file.mime.startsWith('image/'))}>{#if editingMessage===m.id}<MessageEditor text={m.text} hasAttachments={!!m.attachments?.length} onSend={(text:string,id:string)=>resendMessage(m,text,id)} onCancel={()=>editingMessage=''}/>{:else}<MessageText text={m.text} attachments={m.attachments ?? []} {workspaceId} {folderId} chatId={selected} collapsible={m.role==='user'}/>{/if}{#each (m.attachments??[]).filter(file=>!file.mime.startsWith('image/')) as file (workspaceId + ":" + folderId + ":" + selected + ":" + file.id)}<ChatAttachment {workspaceId} {folderId} chatId={selected} {file}/>{/each}{#if m.questions?.length}<QuestionCard message={m} disabled={busy||memberBusy||!!detail?.closed} onAnswer={(id,answers)=>memberAction({action:'answer_question',question_message_id:m.id,message_id:id,answers})}/>{/if}<ChatReplyState state={chatReplyState(detail,m.id)==='supplementing'?null:chatReplyState(detail,m.id)}/><ChatUserState state={chatUserState(detail, m.id)} hideProcessing/></div>{#if editingMessage!==m.id}<div class="message-actions"><button type="button" title={$t('chat.copyMessage')} aria-label={$t('chat.copyMessage')} onclick={()=>copyMessage(m)}>{#if copiedMessage===m.id}<Check size={15}/>{:else}<Copy size={15}/>{/if}</button>{#if m.role==='user'}<button type="button" title={$t('chat.editMessage')} aria-label={$t('chat.editMessage')} disabled={busy||!!detail?.closed} onclick={()=>editingMessage=m.id}><Pencil size={15}/></button>{:else}<button type="button" title={$t('chat.shareMessage')} aria-label={$t('chat.shareMessage')} onclick={()=>shareMessage=m}><Share2 size={15}/></button>{/if}</div>{/if}</article>{/if}{/each}{#if footerState}<div class="pending" role="status" aria-live="polite"><ChatStatusIcon state={footerState} label={footerLabel}/>{footerLabel}</div>{/if}</div>{/if}

@@ -16,5 +16,5 @@ export function directConnectPrompt(address:string,folder:string,seed:SeedTicket
   if(!seed.url_key||!/^[a-f0-9]{64}$/.test(seed.url_key)||seed.expires_at<=Date.now())throw Error('Invalid or expired direct connect URL');
   const pairing=pairingAddress(address,folder),endpoint=pairing.slice(0,pairing.lastIndexOf('/seed-library/'))+'/seeds/'+encodeURIComponent(folder)+'/'+seed.url_key;
   return `${endpoint}
-连接这个 MCP（地址已含认证，无需其他凭据，1 小时内有效）。按服务端 instructions：seed_connect → 读 skill.text → chat_wait。收到本对话的消息后按 Skill 处理并用 chat_reply 回复，然后继续 chat_wait。idle 时立即再次 chat_wait，不要询问是否继续等待。`;
+连接这个 MCP（地址已含认证，无需其他凭据；首次连接需在 1 小时内完成）。按服务端 instructions：seed_connect → 读 skill.text → chat_wait。收到本对话的消息后按 Skill 处理并用 chat_reply 回复，然后继续 chat_wait。idle 时立即再次 chat_wait，不要询问是否继续等待。`;
 }
