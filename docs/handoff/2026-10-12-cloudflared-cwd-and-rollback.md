@@ -429,4 +429,8 @@ C. 添加種子頁面卡片化（build 子代理，分支 `vorflux/seed-add-card
       Rust `deleting_an_account_card_removes_only_its_settled_seeds`（在 `tools::chat::seeds` 過濾下由 chat-beta Windows job 執行）。
 - [x] 預覽：在沙箱用 Node Agent + 真實 UI（`build:ui`）+ Playwright 截圖給使用者確認（不入庫）。
 - [x] 版本 0.1.144（`version:sync`；`docs/todo/node-agent-parity/manifest.json` baseline 同步，否則根測試失敗）。
-- [ ] 推送、CI、發佈 v0.1.144（同 v0.1.143 流程）。
+- [x] 推送 0123c98；Rust tests 38251159960 成功（含新的 `tools::chat::seeds` 測試）。
+- [x] 發佈 **v0.1.144** 穩定版：chat-beta run 38251406089 三個 job 成功；資產 `ctmcp-0.1.144-win64.exe`
+      （SHA-256 `25482bca083fd8c8c0ad3e7c609ede2886e736d49b90e84ef6cf62ea25c329d6`）+ 種子腳本 1.3.2；中文發佈說明已補；
+      tag 觸發的舊 `Desktop Release` run 38252191671 已取消（理由同 v0.1.143）。
+- [ ] Windows `Manual source upgrade` run 38251162121（verify-repo + 完整建置）發佈時仍在跑，接手者請確認結果。
