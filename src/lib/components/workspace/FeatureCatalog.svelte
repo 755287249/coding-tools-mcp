@@ -16,12 +16,13 @@
   import Copy from '@lucide/svelte/icons/copy';
   import X from '@lucide/svelte/icons/x';
   import { featureRows, filterFeatureRows, type FeatureRow } from '$lib/workspace/feature-catalog';
-  import { APP_PLUGINS, APP_PLUGIN_PREFIX, installedAppPlugins, setAppPlugin } from '$lib/plugins/registry';
+  import { APP_PLUGINS, APP_PLUGIN_PREFIX, installedAppPlugins, setAppPlugin, importPlugin, removeAppPlugin } from '$lib/plugins/registry';
+  import type { PluginPackage } from '$lib/plugins/types';
   import { APP_VERSION } from '$lib/app-version';
   import type { MessageKey } from '$lib/i18n/catalog';
   import Rabbit from '@lucide/svelte/icons/rabbit';
   import Download from '@lucide/svelte/icons/download';
-  import CodeRabbitPlugin from '$lib/components/chat/CodeRabbitPlugin.svelte';
+  import PluginSlot from '$lib/components/plugins/PluginSlot.svelte';
   let { workspaceId, activeTab, skills, extensions, loading, error, isBusy, onRefresh, onTab, onSkill, onExtension, onSkillsActive, onExtensionActive, workspacePicker, folderId='' }: {
     workspaceId:string;activeTab:'skills'|'hooks'|'mcp';skills:SkillInventoryPayload|null;extensions:ExtensionInventoryPayload|null;loading:boolean;error:string;
     isBusy:(key:string)=>boolean;onRefresh:()=>void;onTab:(tab:'skills'|'hooks'|'mcp')=>void;
@@ -41,9 +42,9 @@
   const description=$derived($t(activeTab==='skills'?'features.skillsDescription':activeTab==='hooks'?'features.hooksDescription':'features.pluginsDescription'));
   const configured=$derived(extensions?.mcpServers??[]);
   const featureParam=$derived($page.url.searchParams.get('feature')??'');
-  const appPlugin=$derived(activeTab==='mcp'&&featureParam.startsWith(APP_PLUGIN_PREFIX)?APP_PLUGINS.find(p=>p.id===featureParam.slice(APP_PLUGIN_PREFIX.length)):undefined);
+  const appPlugin=$derived(activeTab==='mcp'&&featureParam.startsWith(APP_PLUGIN_PREFIX)?$APP_PLUGINS.find(p=>p.id===featureParam.slice(APP_PLUGIN_PREFIX.length)):undefined);
   const appQuery=$derived(query.trim().toLowerCase());
-  const appRows=$derived(activeTab==='mcp'&&scope!=='workspace'?APP_PLUGINS.filter(p=>!appQuery||p.name.toLowerCase().includes(appQuery)||$t(p.summary as MessageKey).toLowerCase().includes(appQuery)):[]);
+  const appRows=$derived(activeTab==='mcp'&&scope!=='workspace'?$APP_PLUGINS.filter(p=>!appQuery||p.name.toLowerCase().includes(appQuery)||p.summary.toLowerCase().includes(appQuery)):[]);
   const userscriptUrl=(file:string)=>`https://github.com/755287249/coding-tools-mcp/releases/download/v${APP_VERSION}/${file}`;
   let addTab=$state<'app'|'config'>('app');
   function openAdd(){addTab=activeTab==='mcp'?'app':'config';addDialog.showModal();}
@@ -52,6 +53,7 @@
   function toggle(row:FeatureRow){if(row.kind==='skill')onSkill(row.key,!row.selected);else onExtension(row.kind,row.key,!row.selected);}
   function disabled(row:FeatureRow){return loading||!master||!row.supported||!row.sourceEnabled||isBusy(`${row.kind}:${row.key}`);}
   async function copy(value:string){try{await copyText(value);feedback=$t('Copied')}catch(e){feedback=String(e)}}
+  async function importFile(event:Event){const input=event.currentTarget as HTMLInputElement,file=input.files?.[0];if(!file)return;try{const plugin=JSON.parse(await file.text()) as PluginPackage;await importPlugin(plugin);addDialog.close();detail(APP_PLUGIN_PREFIX+plugin.manifest.id);}catch(e){feedback=String(e)}finally{input.value=''}}
   function sidePlugin(key:string){const url=new URL($page.url);url.searchParams.delete('featureTab');url.searchParams.set('panel','plugins');url.searchParams.set('feature',key);void goto(url.pathname+url.search,{noScroll:true});}
   const sample=$derived(activeTab==='skills'?'---\nname: my-skill\ndescription: Describe when to use this skill.\n---\n\n# My skill\n\nWrite the steps the assistant should follow.\n':activeTab==='hooks'?'~/.claude/settings.json\n.codex/hooks.json':'{\n  "mcpServers": {\n    "my-server": {\n      "type": "http",\n      "url": "https://example.com/mcp"\n    }\n  }\n}');
 </script>
@@ -62,7 +64,7 @@
     <button class:active={activeTab==='mcp'} onclick={()=>onTab('mcp')}><Puzzle size={17}/>{$t('shell.plugins')}</button>
     <button class:active={activeTab==='skills'} onclick={()=>onTab('skills')}><BookOpen size={17}/>{$t('shell.skills')}</button>
     <p class="sidebar-label">{$t('features.configured')}</p>
-    {#each APP_PLUGINS.filter(p=>$installedAppPlugins.includes(p.id)) as plugin (plugin.id)}<button class="sidebar-plugin" class:active={appPlugin?.id===plugin.id} onclick={()=>sidePlugin(APP_PLUGIN_PREFIX+plugin.id)} title={plugin.name}><Rabbit size={14}/><span>{plugin.name}</span><i class="connected"></i></button>{/each}
+    {#each $APP_PLUGINS.filter(p=>$installedAppPlugins.includes(p.id)) as plugin (plugin.id)}<button class="sidebar-plugin" class:active={appPlugin?.id===plugin.id} onclick={()=>sidePlugin(APP_PLUGIN_PREFIX+plugin.id)} title={plugin.name}><Rabbit size={14}/><span>{plugin.name}</span><i class="connected"></i></button>{/each}
     {#each configured as plugin (plugin.key)}<button class="sidebar-plugin" class:active={activeTab==='mcp'&&selected?.key===plugin.key} onclick={()=>sidePlugin(plugin.key)} title={plugin.name}><Puzzle size={14}/><span>{plugin.name}</span>{#if plugin.selected}<i class:connected={plugin.connected}></i>{/if}</button>{:else}{#if !$installedAppPlugins.length}<p class="sidebar-empty">{$t('No MCP servers discovered.')}</p>{/if}{/each}
     <div class="sidebar-workspace">{#if workspacePicker}{@render workspacePicker()}{/if}</div>
   </aside>
@@ -70,10 +72,10 @@
     {#if appPlugin}
       <section class="feature-detail">
         <nav class="feature-breadcrumb" aria-label={$t('features.details')}><button onclick={()=>detail()}>{heading}</button><ChevronRight size={13}/><span>{appPlugin.name}</span></nav>
-        <header class="detail-heading"><div class="app-title"><span class="feature-icon app"><Rabbit size={26}/></span><div><h1>{appPlugin.name}</h1><p>{$t(appPlugin.summary as MessageKey)}</p></div></div>
-          <div class="detail-actions">{#if $installedAppPlugins.includes(appPlugin.id)}<button class="secondary" onclick={()=>setAppPlugin(appPlugin!.id,false)}>{$t('plugins.remove')}</button>{:else}<button class="primary" onclick={()=>setAppPlugin(appPlugin!.id,true)}><Plus size={14}/>{$t('plugins.install')}</button>{/if}</div></header>
+        <header class="detail-heading"><div class="app-title"><span class="feature-icon app"><Rabbit size={26}/></span><div><h1>{appPlugin.name}</h1><p>{appPlugin.summary}</p></div></div>
+          <div class="detail-actions">{#if $installedAppPlugins.includes(appPlugin.id)}<button class="secondary" onclick={()=>void removeAppPlugin(appPlugin!.id)}>{$t('plugins.remove')}</button>{:else}<button class="primary" onclick={()=>setAppPlugin(appPlugin!.id,true)}><Plus size={14}/>{$t('plugins.install')}</button>{/if}</div></header>
         {#if $installedAppPlugins.includes(appPlugin.id)}
-          {#if folderId}<div class="app-plugin-body"><CodeRabbitPlugin {workspaceId} {folderId}/></div>{:else}<p class="catalog-notice">{$t('plugins.pickFolder')}</p>{/if}
+          {#if folderId}<div class="app-plugin-body"><PluginSlot id={appPlugin.id} {workspaceId} {folderId}/></div>{:else}<p class="catalog-notice">{$t('plugins.pickFolder')}</p>{/if}
         {:else}<p class="catalog-notice">{$t('plugins.installHint')}</p>{/if}
         {#if appPlugin.userscript}<div class="app-plugin-extra"><h3>{$t('plugins.userscript')}</h3><p>{$t('plugins.userscriptHint')}</p><a class="secondary link-button" href={userscriptUrl(appPlugin.userscript)} target="_blank" rel="noreferrer"><Download size={14}/>{`${appPlugin.userscript} · v${appPlugin.version}`}</a></div>{/if}
       </section>
@@ -111,11 +113,11 @@
   </main>
 </div>
 
-{#snippet appCard(plugin:typeof APP_PLUGINS[number])}
+{#snippet appCard(plugin:import('$lib/plugins/registry').AppPlugin)}
   {@const installed=$installedAppPlugins.includes(plugin.id)}
   <div class="feature-card">
-    <button class="feature-summary" onclick={()=>detail(APP_PLUGIN_PREFIX+plugin.id)}><span class="feature-icon app"><Rabbit size={24}/></span><span class="feature-card-text"><strong>{plugin.name}</strong><small>{$t(plugin.summary as MessageKey)}</small><span class="app-badge">{`${$t('plugins.builtIn')} · v${plugin.version}`}</span></span></button>
-    <button class="feature-toggle" role="switch" aria-checked={installed} aria-label={`${$t(installed?'plugins.remove':'plugins.install')}: ${plugin.name}`} title={$t(installed?'plugins.remove':'plugins.install')} onclick={()=>{setAppPlugin(plugin.id,!installed);if(!installed)detail(APP_PLUGIN_PREFIX+plugin.id);}}>{#if installed}<Check size={18}/>{:else}<Plus size={20}/>{/if}</button>
+    <button class="feature-summary" onclick={()=>detail(APP_PLUGIN_PREFIX+plugin.id)}><span class="feature-icon app"><Rabbit size={24}/></span><span class="feature-card-text"><strong>{plugin.name}</strong><small>{plugin.summary}</small><span class="app-badge">{`${plugin.builtIn?$t('plugins.builtIn'):'User'} · v${plugin.version}`}</span></span></button>
+    <button class="feature-toggle" role="switch" aria-checked={installed} aria-label={`${$t(installed?'plugins.remove':'plugins.install')}: ${plugin.name}`} title={$t(installed?'plugins.remove':'plugins.install')} onclick={()=>{if(installed)void removeAppPlugin(plugin.id);else{setAppPlugin(plugin.id,true);detail(APP_PLUGIN_PREFIX+plugin.id);}}}>{#if installed}<Check size={18}/>{:else}<Plus size={20}/>{/if}</button>
   </div>
 {/snippet}
 
@@ -138,8 +140,9 @@
   {#if activeTab==='mcp'}<div class="add-tabs" role="tablist"><button role="tab" aria-selected={addTab==='app'} class:active={addTab==='app'} onclick={()=>addTab='app'}>{$t('plugins.appPlugins')}</button><button role="tab" aria-selected={addTab==='config'} class:active={addTab==='config'} onclick={()=>addTab='config'}>{$t('plugins.mcpServer')}</button></div>{/if}
   {#if activeTab==='mcp'&&addTab==='app'}
     <p>{$t('plugins.addHelp')}</p>
-    <div class="add-list">{#each APP_PLUGINS as plugin (plugin.id)}{@const installed=$installedAppPlugins.includes(plugin.id)}
-      <div class="add-row"><span class="feature-icon app"><Rabbit size={22}/></span><div><strong>{plugin.name}</strong><small>{$t(plugin.summary as MessageKey)}</small></div>
+    <label class="secondary import-plugin">{$t('plugins.importFile')}<input type="file" accept=".json,.ctplugin.json" onchange={importFile}/></label>
+    <div class="add-list">{#each $APP_PLUGINS as plugin (plugin.id)}{@const installed=$installedAppPlugins.includes(plugin.id)}
+      <div class="add-row"><span class="feature-icon app"><Rabbit size={22}/></span><div><strong>{plugin.name}</strong><small>{plugin.summary}</small></div>
         {#if installed}<button class="secondary" onclick={()=>{addDialog.close();detail(APP_PLUGIN_PREFIX+plugin.id);}}>{$t('plugins.open')}</button>{:else}<button class="primary" onclick={()=>{setAppPlugin(plugin.id,true);addDialog.close();detail(APP_PLUGIN_PREFIX+plugin.id);}}><Plus size={14}/>{$t('plugins.install')}</button>{/if}</div>
     {/each}</div>
   {:else}
@@ -162,4 +165,5 @@
 .add-tabs{display:inline-flex;gap:2px;padding:3px;margin:4px 0 12px;border-radius:999px;border:1px solid var(--color-border);background:var(--surface-2,var(--color-surface))}
 .add-tabs button{height:28px;padding:0 14px;border:0;border-radius:999px;background:transparent;color:var(--color-text-muted);font-size:12.5px;cursor:pointer}.add-tabs button.active{background:var(--card-bg);color:var(--color-text);box-shadow:0 1px 3px rgb(0 0 0 / .12)}
 .add-list{display:grid;gap:10px;margin-top:12px}.add-row{display:flex;align-items:center;gap:12px;padding:12px;border:1px solid var(--color-border);border-radius:12px}.add-row>div{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}.add-row small{font-size:12px;color:var(--color-text-muted)}
+.import-plugin{display:inline-flex;align-items:center;cursor:pointer;padding:8px 12px;border:1px solid var(--color-border);border-radius:8px}.import-plugin input{display:none}
 </style>

@@ -1,0 +1,10 @@
+{
+  "name": "@coding-tools/plugin-sdk",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": "./src/index.ts",
+  "bin": { "ctplugin-build": "./build.mjs" },
+  "scripts": { "build": "node build.mjs" },
+  "peerDependencies": { "vite": ">=6" },
+  "devDependencies": { "vite": "^8.2.1", "typescript": "~6.0.3" }
+}

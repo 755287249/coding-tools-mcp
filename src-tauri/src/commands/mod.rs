@@ -6,7 +6,10 @@ mod history;
 pub use chat::{local_chat, start_schedule_worker};
 mod logs;
 mod plugins;
-pub use plugins::{plugin_http, plugin_login_window};
+pub use plugins::{
+    plugin_data_get, plugin_data_set, plugin_http, plugin_install, plugin_list,
+    plugin_login_window, plugin_remove,
+};
 mod runtime;
 mod sandbox;
 mod secrets;

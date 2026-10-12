@@ -5,49 +5,75 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use base64::Engine as _;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
 use crate::error::{AppError, AppResult};
+use crate::platform::platform;
 
-const HEADERS: [&str; 8] = [
-    "authorization",
-    "content-type",
-    "accept",
-    "x-trpc-source",
-    "x-clerk-git-provider",
-    "x-coderabbitai-organization",
-    "x-coderabbitai-workspace",
-    "x-github-api-version",
-];
 const MAX_RESPONSE: usize = 4 * 1024 * 1024;
+const MAX_REQUEST: usize = 512 * 1024;
 const CAPTURE_HOST: &str = "ctmcp-capture.invalid";
 const LOGIN_LABEL: &str = "plugin-login";
 
-fn rules() -> &'static [(&'static str, regex::Regex)] {
-    static RULES: std::sync::OnceLock<Vec<(&'static str, regex::Regex)>> =
-        std::sync::OnceLock::new();
-    RULES.get_or_init(|| {
-        [
-            ("GET", r"^https://app\.coderabbit\.ai/trpc/[A-Za-z][A-Za-z0-9.,]{0,200}\?batch=1(&input=[^#]*)?$"),
-            ("POST", r"^https://app\.coderabbit\.ai/trpc/[A-Za-z][A-Za-z0-9.,]{0,200}\?batch=1$"),
-            ("POST", r"^https://github\.com/login/device/code$"),
-            ("POST", r"^https://github\.com/login/oauth/access_token$"),
-            ("POST", r"^https://api\.github\.com/user/repos$"),
-            ("PUT", r"^https://api\.github\.com/repos/[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}/contents/[A-Za-z0-9_./-]{1,200}$"),
-        ]
-        .into_iter()
-        .map(|(method, pattern)| (method, regex::Regex::new(pattern).expect("valid plugin rule")))
-        .collect()
-    })
+fn public_address(address: std::net::IpAddr) -> bool {
+    match address {
+        std::net::IpAddr::V4(ip) => {
+            let [a, b, _, _] = ip.octets();
+            !(ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                || a == 0
+                || (a == 100 && (64..=127).contains(&b))
+                || (a == 198 && (b == 18 || b == 19)))
+        }
+        std::net::IpAddr::V6(ip) => {
+            if let Some(ipv4) = ip.to_ipv4_mapped() {
+                return public_address(std::net::IpAddr::V4(ipv4));
+            }
+            let first = ip.segments()[0];
+            !(ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                || (first & 0xfe00) == 0xfc00
+                || (first & 0xffc0) == 0xfe80)
+        }
+    }
 }
 
-pub(crate) fn plugin_request_allowed(method: &str, url: &str) -> bool {
-    !url.contains("..")
-        && rules()
+async fn public_url(raw: &str) -> AppResult<(reqwest::Url, Vec<std::net::SocketAddr>)> {
+    let url = reqwest::Url::parse(raw)
+        .map_err(|_| AppError::Message("Plugin request URL is invalid".into()))?;
+    if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
+        return Err(AppError::Message("Plugin requests must use HTTPS".into()));
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| AppError::Message("Plugin request host not allowed".into()))?;
+    let lower = host.to_ascii_lowercase();
+    if lower == "localhost"
+        || lower.ends_with(".localhost")
+        || lower.ends_with(".local")
+        || lower.ends_with(".internal")
+    {
+        return Err(AppError::Message("Plugin request host not allowed".into()));
+    }
+    let addresses: Vec<_> =
+        tokio::net::lookup_host((host, url.port_or_known_default().unwrap_or(443)))
+            .await
+            .map_err(|_| AppError::Message("Plugin request host not allowed".into()))?
+            .collect();
+    if addresses.is_empty()
+        || addresses
             .iter()
-            .any(|(m, rule)| *m == method && rule.is_match(url))
+            .any(|address| !public_address(address.ip()))
+    {
+        return Err(AppError::Message("Plugin request host not allowed".into()));
+    }
+    Ok((url, addresses))
 }
 
 #[derive(Deserialize)]
@@ -62,24 +88,52 @@ pub struct PluginHttpRequest {
 
 #[tauri::command(async)]
 pub async fn plugin_http(request: PluginHttpRequest) -> AppResult<Value> {
-    if !plugin_request_allowed(&request.method, &request.url) {
-        return Err(AppError::Message("Plugin request not allowed".into()));
+    let method = reqwest::Method::from_bytes(request.method.to_ascii_uppercase().as_bytes())
+        .map_err(|_| AppError::Message("Invalid method".into()))?;
+    if !matches!(
+        method,
+        reqwest::Method::GET
+            | reqwest::Method::POST
+            | reqwest::Method::PUT
+            | reqwest::Method::PATCH
+            | reqwest::Method::DELETE
+    ) {
+        return Err(AppError::Message(
+            "Plugin request method not allowed".into(),
+        ));
     }
-    if request.body.as_ref().is_some_and(|b| b.len() > 256 * 1024) {
+    let (url, addresses) = public_url(&request.url).await?;
+    if request.body.as_ref().is_some_and(|b| b.len() > MAX_REQUEST) {
         return Err(AppError::Message("Plugin request body too large".into()));
     }
-    let client = reqwest::Client::builder()
+    let mut client_builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(30))
-        .user_agent("Coding-Tools-MCP-Plugin/1.0")
+        .user_agent("Coding-Tools-MCP-Plugin/1.0");
+    for address in addresses {
+        client_builder = client_builder.resolve(url.host_str().unwrap_or_default(), address);
+    }
+    let client = client_builder
         .build()
         .map_err(|e| AppError::Message(e.to_string()))?;
-    let method = reqwest::Method::from_bytes(request.method.as_bytes())
-        .map_err(|_| AppError::Message("Invalid method".into()))?;
-    let mut builder = client.request(method.clone(), &request.url);
+    let mut builder = client.request(method.clone(), url);
     for (key, value) in &request.headers {
         let name = key.to_ascii_lowercase();
-        if HEADERS.contains(&name.as_str()) && !value.contains(['\r', '\n']) {
+        if !matches!(
+            name.as_str(),
+            "host"
+                | "content-length"
+                | "connection"
+                | "transfer-encoding"
+                | "upgrade"
+                | "keep-alive"
+                | "proxy-authorization"
+                | "te"
+                | "trailer"
+        ) && !name.starts_with("proxy-")
+            && !name.starts_with("sec-")
+            && !value.contains(['\r', '\n'])
+        {
             builder = builder.header(name, value);
         }
     }
@@ -93,6 +147,21 @@ pub async fn plugin_http(request: PluginHttpRequest) -> AppResult<Value> {
         .await
         .map_err(|e| AppError::Message(e.to_string()))?;
     let status = response.status().as_u16();
+    let mut headers = serde_json::Map::new();
+    for name in response.headers().keys() {
+        let values: Vec<_> = response
+            .headers()
+            .get_all(name)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .map(str::to_owned)
+            .collect();
+        if values.len() == 1 {
+            headers.insert(name.to_string(), Value::String(values[0].clone()));
+        } else if !values.is_empty() {
+            headers.insert(name.to_string(), json!(values));
+        }
+    }
     let bytes = response
         .bytes()
         .await
@@ -100,7 +169,137 @@ pub async fn plugin_http(request: PluginHttpRequest) -> AppResult<Value> {
     if bytes.len() > MAX_RESPONSE {
         return Err(AppError::Message("Plugin response too large".into()));
     }
-    Ok(json!({"status": status, "body": String::from_utf8_lossy(&bytes)}))
+    Ok(json!({"status": status, "headers": headers, "body": String::from_utf8_lossy(&bytes)}))
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct PluginManifest {
+    id: String,
+    name: String,
+    version: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    permissions: Value,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct PluginPackage {
+    format: u8,
+    manifest: PluginManifest,
+    code: String,
+}
+
+fn valid_plugin(package: &PluginPackage) -> AppResult<()> {
+    let id = &package.manifest.id;
+    if package.format != 1
+        || id.len() < 2
+        || id.len() > 64
+        || !id.bytes().next().is_some_and(|c| c.is_ascii_lowercase())
+        || !id
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+        || package.manifest.name.trim().is_empty()
+        || package.manifest.version.trim().is_empty()
+        || package.code.trim().is_empty()
+        || package.code.len() > MAX_RESPONSE
+    {
+        return Err(AppError::Message("Invalid plugin package".into()));
+    }
+    Ok(())
+}
+
+fn plugins_dir() -> AppResult<std::path::PathBuf> {
+    Ok(platform().app_config_dir()?.join("plugins"))
+}
+fn plugin_path(id: &str, suffix: &str) -> AppResult<std::path::PathBuf> {
+    if id.len() < 2
+        || id.len() > 64
+        || !id
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+    {
+        return Err(AppError::Message("Invalid plugin ID".into()));
+    }
+    Ok(plugins_dir()?.join(format!("{id}{suffix}")))
+}
+
+#[tauri::command]
+pub fn plugin_list() -> AppResult<Vec<PluginPackage>> {
+    let dir = plugins_dir()?;
+    std::fs::create_dir_all(&dir)?;
+    let mut result = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.to_string_lossy().ends_with(".ctplugin.json") {
+            if let Ok(package) = serde_json::from_slice::<PluginPackage>(&std::fs::read(path)?) {
+                if valid_plugin(&package).is_ok() {
+                    result.push(package);
+                }
+            }
+        }
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn plugin_install(package: PluginPackage) -> AppResult<PluginPackage> {
+    valid_plugin(&package)?;
+    let dir = plugins_dir()?;
+    std::fs::create_dir_all(&dir)?;
+    let path = plugin_path(&package.manifest.id, ".ctplugin.json")?;
+    let temporary = path.with_extension("json.tmp");
+    std::fs::write(&temporary, serde_json::to_vec(&package)?)?;
+    if path.exists() {
+        std::fs::remove_file(&path)?;
+    }
+    std::fs::rename(temporary, path)?;
+    Ok(package)
+}
+
+#[tauri::command]
+pub fn plugin_remove(id: String) -> AppResult<()> {
+    for suffix in [".ctplugin.json", ".data.json"] {
+        let path = plugin_path(&id, suffix)?;
+        if path.exists() {
+            std::fs::remove_file(path)?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn plugin_data_get(id: String) -> AppResult<Value> {
+    let path = plugin_path(&id, ".data.json")?;
+    if !path.exists() {
+        return Ok(json!({}));
+    }
+    let value: Value = serde_json::from_slice(&std::fs::read(path)?)?;
+    if !value.is_object() {
+        return Err(AppError::Message("Invalid plugin data".into()));
+    }
+    Ok(value)
+}
+
+#[tauri::command]
+pub fn plugin_data_set(id: String, data: Value) -> AppResult<()> {
+    if !data.is_object() {
+        return Err(AppError::Message("Invalid plugin data".into()));
+    }
+    let bytes = serde_json::to_vec(&data)?;
+    if bytes.len() > 1024 * 1024 {
+        return Err(AppError::Message("Plugin data too large".into()));
+    }
+    let dir = plugins_dir()?;
+    std::fs::create_dir_all(dir)?;
+    let path = plugin_path(&id, ".data.json")?;
+    let temporary = path.with_extension("json.tmp");
+    std::fs::write(&temporary, bytes)?;
+    if path.exists() {
+        std::fs::remove_file(&path)?;
+    }
+    std::fs::rename(temporary, path)?;
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -224,30 +423,21 @@ pub async fn plugin_login_window(
 
 #[cfg(test)]
 mod tests {
-    use super::plugin_request_allowed;
+    use super::public_address;
 
     #[test]
-    fn plugin_proxy_allow_list_matches_node_agent() {
-        assert!(plugin_request_allowed(
-            "GET",
-            "https://app.coderabbit.ai/trpc/repositories.getAllRepos?batch=1&input=%7B%7D"
-        ));
-        assert!(plugin_request_allowed(
-            "POST",
-            "https://app.coderabbit.ai/trpc/codingAgent.enqueueCodingTask?batch=1"
-        ));
-        assert!(plugin_request_allowed(
-            "PUT",
-            "https://api.github.com/repos/me/seed-1/contents/src/a.py"
-        ));
-        for (method, url) in [
-            ("GET", "http://127.0.0.1:3789/admin/api/config"),
-            ("POST", "https://app.coderabbit.ai.evil.test/trpc/x?batch=1"),
-            ("DELETE", "https://api.github.com/user/repos"),
-            ("PUT", "https://api.github.com/repos/me/r/contents/../x"),
-            ("GET", "https://github.com/login/device/code"),
+    fn plugin_proxy_rejects_non_public_addresses() {
+        for address in [
+            "127.0.0.1",
+            "10.0.0.2",
+            "192.168.1.1",
+            "169.254.1.2",
+            "::1",
+            "fd00::1",
+            "::ffff:127.0.0.1",
         ] {
-            assert!(!plugin_request_allowed(method, url), "{url}");
+            assert!(!public_address(address.parse().unwrap()), "{address}");
         }
+        assert!(public_address("1.1.1.1".parse().unwrap()));
     }
 }

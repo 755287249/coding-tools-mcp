@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseSession, runSeeding, CodeRabbitClient, publicMcpEndpoint, SessionExpiredError, jwtExpiry } from '../src/lib/plugins/coderabbit/engine.ts';
-import { createStarterRepository, pollDeviceToken, randomSource } from '../src/lib/plugins/coderabbit/github.ts';
+import { parseSession, runSeeding, CodeRabbitClient, publicMcpEndpoint, SessionExpiredError, jwtExpiry } from '../plugins/coderabbit/src/engine.ts';
+import { createStarterRepository, pollDeviceToken, randomSource } from '../plugins/coderabbit/src/github.ts';
 
 const user = JSON.stringify({ state: { user: { id: 'u1', providerLogin: 'alice', providerUserId: '42' }, currentOrganization: { id: 'org1', organization_name: 'alice', provider_organization_id: '42', workspace_id: 'ws1', type: 'github' } } });
 const captured = { accessToken: 'tok-1', user, clerkGitProvider: 'github' };

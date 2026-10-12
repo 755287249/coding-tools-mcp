@@ -23,7 +23,7 @@
   import {slide} from 'svelte/transition';
   let motionMs=$state(0);
   onMount(()=>{const query=matchMedia('(prefers-reduced-motion: reduce)');const update=()=>motionMs=query.matches?0:140;update();query.addEventListener('change',update);return()=>query.removeEventListener('change',update);});
-  import CodeRabbitPlugin from './CodeRabbitPlugin.svelte';
+  import PluginSlot from '$lib/components/plugins/PluginSlot.svelte';
   import {installedAppPlugins,setAppPlugin} from '$lib/plugins/registry';
   import Sprout from '@lucide/svelte/icons/sprout';
   import {pairingKey,pairingAddress,pairingWebhook,loadPairing,savePairing,newPairingToken} from '$lib/chat/seed-pairing';
@@ -32,7 +32,7 @@
   let inventory=$state<SeedInventory>(empty()),address=$state(''),token=$state('');
   let busy=$state(false),error=$state(''),notice=$state(''),history=$state(false),filter=$state(''),status=$state(''),search=$state(''),page=$state(0),sourceFilter=$state(''),keyword=$state('');
   let addMethod=$state<'manual'|'pair'|'rabbit'>('manual'),view=$state<'accounts'|'seeds'>('accounts'),loading=$state(true);
-  let addOpen=$state(false),refreshing=$state(false),updatedAt=$state(0),refreshKey=$state(0),debouncedSearch=$state(''),debouncedKeyword=$state('');
+  let addOpen=$state(false),pluginOpen=$state(false),refreshing=$state(false),updatedAt=$state(0),refreshKey=$state(0),debouncedSearch=$state(''),debouncedKeyword=$state('');
   let refreshingAccount=$state('');
   function refreshAccount(account:string){if(busy||refreshing)return;refreshingAccount=account;refreshKey++;}
   function accountHue(account:string){let hash=0;for(const char of account)hash=(Math.imul(hash,31)+char.charCodeAt(0))>>>0;return [215,270,155,32,335,185][hash%6];}
@@ -60,7 +60,7 @@
     address=saved.address;token=saved.token;
     // Prefer the current public address: a changed tunnel URL must not leave a stale webhook.
     if(profile?.tunnel.public_url){try{address=pairingAddress(profile.tunnel.public_url.replace(/\/$/,'').replace(/\/mcp$/,'')+'/mcp',folderId);}catch{}}
-    addMethod='manual';view='accounts';addOpen=false;updatedAt=0;selected=[];confirmation=null;reissuedPrompt='';
+    addMethod='manual';view='accounts';addOpen=false;pluginOpen=false;updatedAt=0;selected=[];confirmation=null;reissuedPrompt='';
     inventory=empty();error='';notice='';history=false;filter='';status='';search='';page=0;sourceFilter='';keyword='';
   });});
   $effect(()=>{const value=search,label=keyword;const timer=setTimeout(()=>{debouncedSearch=value;debouncedKeyword=label;page=0;},300);return()=>clearTimeout(timer);});
@@ -121,17 +121,17 @@
       <span class="method-icon"><Puzzle size={20}/></span>
       <span class="method-text"><strong>{$t('seeds.browserPair')}<span class="pair-state" class:connected={inventory.pairing_enabled}>{$t(inventory.pairing_enabled?'seeds.pairEnabled':'seeds.pairDisabled')}</span></strong><small>{$t('seeds.methodPairDesc')}</small></span>
     </button>
-    {#if $installedAppPlugins.includes('coderabbit-seeds')}<button role="tab" aria-selected={addMethod==='rabbit'} class:active={addMethod==='rabbit'} onclick={()=>addMethod='rabbit'}>
+    {#if $installedAppPlugins.includes('coderabbit-seeds')}<button role="tab" aria-selected={addMethod==='rabbit'} class:active={addMethod==='rabbit'} onclick={()=>{addMethod='rabbit';addOpen=false;pluginOpen=true}}>
       <span class="method-icon"><Sprout size={20}/></span>
       <span class="method-text"><strong>{$t('rabbit.title')}</strong><small>{$t('rabbit.desc')}</small></span>
-    </button>{:else}<button role="tab" aria-selected="false" class="install-card" onclick={()=>{setAppPlugin('coderabbit-seeds',true);addMethod='rabbit';}}>
+    </button>{:else}<button role="tab" aria-selected="false" class="install-card" onclick={()=>{setAppPlugin('coderabbit-seeds',true);addMethod='rabbit';addOpen=false;pluginOpen=true}}>
       <span class="method-icon"><Sprout size={20}/></span>
       <span class="method-text"><strong>{$t('rabbit.title')}</strong><small>{$t('plugins.installHere')}</small></span>
     </button>{/if}
   </div>
   <div class="method-panel" role="tabpanel">
   {#if addMethod==='rabbit'}
-  <CodeRabbitPlugin {workspaceId} {folderId}/>
+  <PluginSlot id="coderabbit-seeds" {workspaceId} {folderId}/>
   {:else if addMethod==='manual'}
   <ManualSeed {workspaceId} {folderId} {address} onCreated={()=>refreshKey++}/>
   {:else}
@@ -146,6 +146,7 @@
   {/if}
   </div>
   </dialog>{/if}
+  {#if pluginOpen}<section class="plugin-overlay"><header><h2>{$t('rabbit.title')}</h2><button class="dialog-close" aria-label={$t('Close')} onclick={()=>pluginOpen=false}><X size={18}/></button></header><PluginSlot id="coderabbit-seeds" {workspaceId} {folderId}/></section>{/if}
 
   <div class="toolbar filters">
     <input class="search" type="search" aria-label={$t('seeds.search')} placeholder={$t('seeds.search')} bind:value={search}/>
@@ -258,4 +259,5 @@
 .row-more{margin-top:12px;border-top:1px solid var(--color-border);padding-top:10px}.row-more>summary{cursor:pointer;font-size:12px;color:var(--color-text-muted);width:max-content;list-style:none;display:inline-flex;gap:6px;align-items:center}.row-more>summary::-webkit-details-marker{display:none}.row-more>summary::before{content:'›';display:inline-block;transition:transform 120ms}.row-more[open]>summary::before{transform:rotate(90deg)}.row-more[open]>summary{margin-bottom:10px}.row-more .row-facts{margin:0}
 .install-link{display:inline-block;margin-top:10px;font-size:12px}
 .install-card{border-style:dashed!important;opacity:.85}
+.plugin-overlay{position:fixed;inset:58px max(20px,5vw) 24px;z-index:800;display:flex;flex-direction:column;padding:14px;border:1px solid var(--color-border);border-radius:16px;background:var(--surface-1);box-shadow:var(--dialog-shadow)}.plugin-overlay>header{display:flex;align-items:center;gap:12px;margin-bottom:10px}.plugin-overlay>header h2{margin:0 auto 0 0;font-size:17px}.plugin-overlay :global(.plugin-slot){flex:1;height:auto;min-height:0}
 </style>

@@ -602,7 +602,8 @@ C. 添加種子頁面卡片化（build 子代理，分支 `vorflux/seed-add-card
 - iframe 掛在 SimpleShell 的 PluginDock，離開頁面不銷毀（播種不中斷），頁面上用佔位框定位。
 
 ## 進度
-- [ ] SDK + 打包腳本 + 範例插件 + 文件
-- [ ] 宿主：PluginDock/bridge/安裝匯入 UI
-- [ ] 後端：代理泛化 + 插件包與資料存儲（Node + Rust）
-- [ ] CodeRabbit 插件：搬到 plugins/coderabbit，多帳號、協議登入、郵件驗證碼、額度排序
+- [x] SDK + 打包腳本 + 範例插件 + 文件：`packages/plugin-sdk`、`plugins/template`、`docs/plugins.md`；Vite 產生單檔 `.ctplugin.json`。
+- [x] 宿主：`PluginDock` 在 `SimpleShell` 常駐 sandbox iframe，bridge 按 manifest 檢查 HTTP/種子庫/進度/storage；插件目錄支援內建包及匯入/移除自製包，種子庫第三張卡使用插件槽。
+- [x] 後端：Node/Rust HTTPS 公開主機代理（SSRF 檢查、不跟轉址、cookie/location/set-cookie）+ 應用資料目錄的插件包與每插件 data 安裝/list/remove/get/set。
+- [x] CodeRabbit 插件：已搬到 `plugins/coderabbit` 並產生 `static/plugins/coderabbit-seeds.ctplugin.json`；多帳號、密碼及 cookie 私有存儲、GitHub 表單/verified-device 郵件 OTP/CodeRabbit OAuth、額度查詢排序、播種及貼 session fallback。
+- [ ] 真實帳號 Windows 實機：純協議登入與額度查詢尚待以使用者帳號驗證；額度 0 帳號不得呼叫 enqueue（插件也只選正額度帳號）。

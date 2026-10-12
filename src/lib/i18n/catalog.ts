@@ -227,6 +227,7 @@ export const MESSAGES = {
   "plugins.builtIn": ["Built in", "內建", "内置", "内蔵"],
   "plugins.install": ["Add", "新增", "添加", "追加"],
   "plugins.remove": ["Remove", "移除", "移除", "削除"],
+  "plugins.importFile": ["Import plugin file", "匯入插件檔案", "导入插件文件", "プラグインファイルを読み込む"],
   "plugins.open": ["Open", "開啟", "打开", "開く"],
   "plugins.addHelp": ["App plugins run inside Coding Tools MCP. Add one to use it from this page and the seed library.", "應用插件在 Coding Tools MCP 內執行。新增後可在此頁及種子庫使用。", "应用插件在 Coding Tools MCP 内运行。添加后可以在本页和种子库中使用。", "アプリプラグインは Coding Tools MCP 内で動作します。追加するとこのページとシードライブラリで使えます。"],
   "plugins.installHint": ["Add the plugin to log in and start seeding.", "新增插件後即可登入並開始播種。", "添加插件后即可登录并开始播种。", "追加するとログインしてシードを作成できます。"],

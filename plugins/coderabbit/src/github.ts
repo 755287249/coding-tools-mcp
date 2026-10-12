@@ -4,7 +4,7 @@
  * GitHub's device flow (the code is entered on github.com in the login window).
  * The GitHub token stays in memory only.
  */
-import type { PluginHttp } from './engine';
+import type { PluginHttp } from './engine.ts';
 
 /** Public OAuth client of GitHub CLI; replace with a dedicated OAuth app if one is registered. */
 export const GITHUB_CLIENT_ID = '178c6fc778ccc68e1d6a';

@@ -1,0 +1,12 @@
+{
+  "id": "coderabbit-seeds",
+  "name": "CodeRabbit",
+  "version": "2.0.0",
+  "description": "Manage CodeRabbit accounts, quota and seed tasks",
+  "permissions": {
+    "hosts": ["app.coderabbit.ai", "github.com", "api.github.com", "www.mailapi.pro"],
+    "seedLibrary": true,
+    "progress": true,
+    "storage": true
+  }
+}

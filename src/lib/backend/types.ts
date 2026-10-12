@@ -409,11 +409,17 @@ export interface ChatBackend {
 }
 
 export interface PluginLoginOptions { url: string; capture: boolean; auto?: boolean; hidden?: boolean }
+export interface PluginCapturedStorage { accessToken: string; user: string; clerkGitProvider?: string; clerkSsoWorkspaceId?: string }
 export interface PluginsBackend {
-  /** Allow-listed HTTPS proxy for plugins (CodeRabbit tRPC, GitHub device flow and repository API). */
-  http(request: import("../plugins/coderabbit/engine").PluginHttpRequest): Promise<import("../plugins/coderabbit/engine").PluginHttpResponse>;
+  /** HTTPS-only proxy. The iframe bridge also enforces each manifest host list. */
+  http(request: import("../plugins/types").PluginHttpRequest): Promise<import("../plugins/types").PluginHttpResponse>;
+  list(): Promise<import("../plugins/types").PluginPackage[]>;
+  install(plugin: import("../plugins/types").PluginPackage): Promise<import("../plugins/types").PluginPackage>;
+  remove(id: string): Promise<void>;
+  dataGet(id: string): Promise<Record<string, unknown>>;
+  dataSet(id: string, data: Record<string, unknown>): Promise<void>;
   /** Desktop only: open a login window; with `capture` resolve with the CodeRabbit web storage after login. */
-  loginWindow?(options: PluginLoginOptions): Promise<import("../plugins/coderabbit/engine").CapturedStorage | null>;
+  loginWindow?(options: PluginLoginOptions): Promise<PluginCapturedStorage | null>;
 }
 
 export interface FrontendBackend {

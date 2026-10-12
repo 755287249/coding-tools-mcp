@@ -8,8 +8,7 @@ export const CODERABBIT = 'https://app.coderabbit.ai';
 export const DEFAULT_SEED_COUNT = 30;
 const BATCH = 10;
 
-export interface PluginHttpRequest { url: string; method: 'GET' | 'POST' | 'PUT'; headers?: Record<string, string>; body?: string }
-export interface PluginHttpResponse { status: number; body: string }
+import type { HttpRequest as PluginHttpRequest, HttpResponse as PluginHttpResponse } from '@coding-tools/plugin-sdk';
 export type PluginHttp = (request: PluginHttpRequest) => Promise<PluginHttpResponse>;
 
 /** Values the CodeRabbit web app keeps in session/local storage after login. */
@@ -19,6 +18,7 @@ export interface CodeRabbitSession {
   organization: string; workspace: string; orgName: string; providerOrg: string; orgType: string;
   /** Access-token expiry in ms when the token is a JWT, else 0. */
   expiresAt: number;
+  cookies?: string;
 }
 export interface SeedTicketLike { seed_id: string; ticket: string; url_key?: string; prefix?: string; repo_id: string; branch: string }
 export interface Repository { id: string; name: string; branch: string }
@@ -69,6 +69,7 @@ export function trpcHeaders(session: CodeRabbitSession): Record<string, string> 
     ...(session.provider ? { 'x-clerk-git-provider': session.provider } : {}),
     'x-coderabbitai-organization': session.organization,
     ...(session.workspace ? { 'x-coderabbitai-workspace': session.workspace } : {}),
+    ...(session.cookies ? { cookie: session.cookies } : {}),
   };
 }
 

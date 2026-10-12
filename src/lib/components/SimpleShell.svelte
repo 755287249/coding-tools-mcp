@@ -8,6 +8,7 @@
   import Info from '@lucide/svelte/icons/info';
   import AboutDialog from './AboutDialog.svelte';
   import SeedingProgressBar from './SeedingProgressBar.svelte';
+  import PluginDock from './plugins/PluginDock.svelte';
   import {appUpdate,checkAppUpdate,loadInstallOutcome} from '$lib/stores/app-updates';
   import McpConnectionStatus from './McpConnectionStatus.svelte';
   import {localDesktop} from '$lib/api/distribution';
@@ -129,6 +130,7 @@
 </script>
 {#if aboutOpen}<AboutDialog onClose={()=>aboutOpen=false}/>{/if}
 <SeedingProgressBar/>
+<PluginDock/>
 {#if shareOpen}<BrowserShareDialog onClose={()=>shareOpen=false}/>{/if}
 {#if searchOpen}<ConversationSearch onClose={()=>searchOpen=false} onNewChat={async()=>{await newChat()}} onOpenWorkspace={onAddWorkspace} canSearchFiles={!!group} onSearchFiles={()=>{assetSearchRequest++;openPanel('assets')}}/>{/if}
 <svelte:window onkeydown={shortcuts} onresize={()=>{if(innerWidth<700){pinned=false;hovered=false}}}/>

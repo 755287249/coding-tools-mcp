@@ -117,6 +117,11 @@ export function createTauriBackend(deps: TauriBackendDeps): FrontendBackend {
 
     plugins: {
       http: (request) => invoke("plugin_http", { request }),
+      list: () => invoke("plugin_list"),
+      install: (plugin) => invoke("plugin_install", { package: plugin }),
+      remove: (id) => invoke("plugin_remove", { id }),
+      dataGet: (id) => invoke("plugin_data_get", { id }),
+      dataSet: (id, data) => invoke("plugin_data_set", { id, data }),
       loginWindow: (options) => invoke("plugin_login_window", { options }),
     },
 

@@ -1,12 +1,12 @@
 <script lang="ts">
   import { t } from '$lib/i18n';
-  import { seedingJob, stopJob } from '$lib/plugins/coderabbit/store';
+  import { pluginProgress, stopPluginJob } from '$lib/plugins/runtime';
   import Minus from '@lucide/svelte/icons/minus';
   import X from '@lucide/svelte/icons/x';
   import Sprout from '@lucide/svelte/icons/sprout';
-  const job = $derived($seedingJob);
+  const job = $derived($pluginProgress);
   const percent = $derived(job && job.total ? Math.round(job.done / job.total * 100) : 0);
-  const minimize = (value: boolean) => seedingJob.update(current => current && { ...current, minimized: value });
+  const minimize = (value: boolean) => pluginProgress.update(current => current && { ...current, minimized: value });
 </script>
 {#if job}
   {#if job.minimized}
@@ -16,11 +16,11 @@
   {:else}
     <div class="seed-bar" class:error={job.status === 'error'} role="status" aria-live="polite">
       <Sprout size={15}/>
-      <div class="text"><strong>{$t('rabbit.progress', { done: job.done, total: job.total })}</strong><span>{job.status === 'done' ? $t('rabbit.done') : job.status === 'stopped' ? $t('rabbit.stopped') : job.message}{job.repo ? ` · ${job.repo}` : ''}</span></div>
+      <div class="text"><strong>{$t('rabbit.progress', { done: job.done, total: job.total })}</strong><span>{job.status === 'done' ? $t('rabbit.done') : job.status === 'stopped' ? $t('rabbit.stopped') : job.message}{job.detail ? ` · ${job.detail}` : ''}</span></div>
       <div class="track"><i style:width={`${percent}%`}></i></div>
-      {#if job.status === 'running'}<button type="button" class="stop" onclick={stopJob}>{$t('rabbit.stop')}</button>{/if}
+      {#if job.status === 'running'}<button type="button" class="stop" onclick={stopPluginJob}>{$t('rabbit.stop')}</button>{/if}
       <button type="button" class="icon" title={$t('rabbit.minimize')} aria-label={$t('rabbit.minimize')} onclick={() => minimize(true)}><Minus size={15}/></button>
-      {#if job.status !== 'running'}<button type="button" class="icon" title={$t('Close')} aria-label={$t('Close')} onclick={() => seedingJob.set(null)}><X size={15}/></button>{/if}
+      {#if job.status !== 'running'}<button type="button" class="icon" title={$t('Close')} aria-label={$t('Close')} onclick={() => pluginProgress.set(null)}><X size={15}/></button>{/if}
     </div>
   {/if}
 {/if}
