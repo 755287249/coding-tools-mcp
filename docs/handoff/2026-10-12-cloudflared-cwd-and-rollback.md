@@ -221,3 +221,38 @@
 - 種子庫頁面沒有「備用」標籤；重新分配後 `reason` 仍是 `standby`。
 - 工作對話的回覆沒有記錄作者，切換 AI 後舊回覆會顯示新 AI 的名稱（舊行為）。
 - 尚未在 Windows 桌面實機驗證新的種子流程。
+
+---
+
+# 第三部分：接入流程簡化與目錄重疊（2026-10-12）
+
+## 使用者回報
+
+- 接入AI 與接入種子都失敗：`Project directories overlap. Use separate directory roots before enabling isolated access.`
+  （專案目錄 `C:\Users\belly\Documents` 內還有其他專案。）
+- 接入AI 提示詞太長（pairing POST、OAuth/PKCE、Client ID、密碼、redirect_uri），部分 AI 會拒絕連線。
+
+## 使用者決定
+
+1. 取消重疊檢查：父目錄包含子目錄、子目錄不包含父目錄。專案目錄內預設可讀寫；
+   存取專案外路徑需要使用者確認。輸入框提供三種授權模式：完全授權（自動允許）、
+   一般授權（低風險自動、高風險確認）、嚴格授權（有風險就確認）。
+2. 接入AI 改成和種子一樣的一次性網址（認證在網址內），提示詞簡短；OAuth 方式可在設定中切換。
+
+## 根本原因
+
+- `src-tauri/src/mcp/listener/gateway.rs::project_context_for_epoch` 與
+  `packages/node-agent/src/server/projectGateway.ts::contextFor` 在任一其他專案目錄與本專案目錄
+  互相包含時直接拒絕。種子網址也走同一個函式，所以兩種接入都失敗。
+
+## 計畫與進度
+
+- [ ] A. 移除重疊拒絕（Rust + Node），保留其餘隔離（每個專案仍以自己的目錄為根）。
+- [ ] B. 接入AI 一次性網址：新的 `seed_direct` 動作替對話建立「綁定此對話」的手動種子
+      （`Seed.bound_chat`，對話 `seed_direct=true`、`seed_filter.seed_id`），提示詞只有網址＋一段話；
+      連接指引中可切換回 OAuth（偏好存在 localStorage）。Node 同步。
+- [ ] C.（下一步，較大）每個對話的授權模式（完全/一般/嚴格）與專案外路徑核准。
+      現況：檔案工具的 `Workspace::resolve_*` 一律拒絕絕對路徑與越界路徑；專案隔離會清空
+      `sandbox.external_paths`。需要：專案層級的「已核准外部路徑」清單（讀/寫），
+      檔案工具與沙箱（AppContainer 已支援 `SandboxPathGrant`）都要讀它；越界時回傳
+      `OUTSIDE_PROJECT_REQUIRES_APPROVAL`，聊天介面顯示核准卡片；模式決定是否自動核准。
