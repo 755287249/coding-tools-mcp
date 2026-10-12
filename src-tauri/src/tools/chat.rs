@@ -59,20 +59,27 @@ static WAITERS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 /// library (disconnect/switch). Keyed by attachment digest; value is the
 /// optional standby seed URL key for a direct AI and an expiry. Memory only:
 /// the URL key is a credential and never touches disk in plain text.
-static STANDBY_HANDOFFS: OnceLock<Mutex<std::collections::HashMap<String, (String, u64)>>> =
+type StandbyHandoff = (String, String, u64);
+static STANDBY_HANDOFFS: OnceLock<Mutex<std::collections::HashMap<String, StandbyHandoff>>> =
     OnceLock::new();
 const STANDBY_HANDOFF_MS: u64 = 3_600_000;
-fn remember_standby(attachment: &str, url_key: String) {
+fn remember_standby(attachment: &str, url_key: String, folder: &str) {
     if attachment.is_empty() {
         return;
     }
     if let Ok(mut map) = STANDBY_HANDOFFS.get_or_init(Default::default).lock() {
         let time = now();
-        map.retain(|_, (_, until)| *until > time);
+        map.retain(|_, (_, _, until)| *until > time);
         map.insert(
             digest(attachment.as_bytes()),
-            (url_key, time + STANDBY_HANDOFF_MS),
+            (url_key, folder.to_owned(), time + STANDBY_HANDOFF_MS),
         );
+    }
+}
+/// A redeemed standby URL is a 7-day credential: stop handing it out.
+pub(super) fn forget_standby_url(url_key: &str) {
+    if let Ok(mut map) = STANDBY_HANDOFFS.get_or_init(Default::default).lock() {
+        map.retain(|_, (key, _, _)| key != url_key);
     }
 }
 /// Answer for a chat_wait from an attachment that was moved to the seed
@@ -81,15 +88,22 @@ fn remember_standby(attachment: &str, url_key: String) {
 pub(crate) fn standby_handoff(args: &Value) -> Option<Value> {
     let attachment = args["attachment_id"].as_str().filter(|a| !a.is_empty())?;
     let map = STANDBY_HANDOFFS.get_or_init(Default::default).lock().ok()?;
-    let (url_key, until) = map.get(&digest(attachment.as_bytes()))?;
+    let (url_key, stored_folder, until) = map.get(&digest(attachment.as_bytes()))?;
     if *until <= now() {
         return None;
     }
     if url_key.is_empty() {
         return Some(json!({"ok":true,"status":"idle","standby":true,
-            "instruction":"You left this conversation and returned to the seed library as a standby seed. Do not reply to it again. Immediately make one new independent chat_wait(timeout_ms:25000) and keep waiting for a new assignment. Never ask the user whether to keep waiting."}));
+            "instruction":"You left this conversation and returned to the seed library as a standby seed. Do not reply to it again. Immediately make one new independent chat_wait(timeout_ms:25000) and keep waiting for a new assignment. Omit chat_id and attachment_id from now on. Never ask the user whether to keep waiting."}));
     }
-    let folder = args["workspace_folder_id"].as_str().unwrap_or("");
+    let folder = if stored_folder.is_empty() {
+        args["workspace_folder_id"].as_str().unwrap_or("")
+    } else {
+        stored_folder.as_str()
+    };
+    if folder.is_empty() {
+        return None;
+    }
     let suffix = format!("/seeds/{folder}/{url_key}");
     Some(
         json!({"ok":true,"status":"standby","seed_url_suffix":suffix,
@@ -1107,13 +1121,24 @@ fn ui_unlocked(root: &Path, args: &Value) -> Result<Value> {
             // standby=true: a still-valid AI goes to the seed library instead
             // of being dropped. Seeds return as standby; a direct AI is
             // enrolled as a new standby seed. Invalid AIs are just detached.
+            // Disconnect is a safety action: a standby failure falls back to
+            // a plain detach instead of leaving the AI attached.
             let mut moved = "";
             let attachment = s["attachment_id"].as_str().unwrap_or("").to_owned();
+            let folder = args["_folder_id"]
+                .as_str()
+                .or(args["workspace_folder_id"].as_str())
+                .unwrap_or("")
+                .to_owned();
             if args["standby"] == true && !group::grouped(&s) && !attachment.is_empty() {
                 if !s["seed_owner"].as_str().unwrap_or("").is_empty() {
-                    if seeds::release_to_standby(root, &s)? {
-                        remember_standby(&attachment, String::new());
-                        moved = "seed";
+                    match seeds::release_to_standby(root, &s) {
+                        Ok(true) => {
+                            remember_standby(&attachment, String::new(), &folder);
+                            moved = "seed";
+                        }
+                        Ok(false) => {}
+                        Err(e) => eprintln!("seed standby skipped: {}", e.message()),
                     }
                 } else {
                     let waiting = WAITERS
@@ -1123,9 +1148,13 @@ fn ui_unlocked(root: &Path, args: &Value) -> Result<Value> {
                         .contains(&wait_key(root, &s, &json!({"attachment_id":attachment}))?);
                     if waiting || s["lease_until"].as_u64().unwrap_or(0) > now() {
                         let name = s["agent_name"].as_str().unwrap_or("AI").to_owned();
-                        let key = seeds::enroll_direct_standby(root, &name)?;
-                        remember_standby(&attachment, key);
-                        moved = "direct";
+                        match seeds::enroll_direct_standby(root, &name) {
+                            Ok(key) => {
+                                remember_standby(&attachment, key, &folder);
+                                moved = "direct";
+                            }
+                            Err(e) => eprintln!("direct AI standby skipped: {}", e.message()),
+                        }
                     }
                 }
             }

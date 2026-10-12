@@ -325,6 +325,15 @@ async fn execute(
                         json!({"status":"retired","registered":false,"instruction":"Seed retired. Stop waiting and do not switch identities."}),
                     )));
                 }
+                if status["status"] != "assigned"
+                    && crate::tools::chat::standby_handoff(&args).is_some()
+                {
+                    // Returned to standby: the old chat IDs no longer apply.
+                    if let Some(map) = args.as_object_mut() {
+                        map.remove("chat_id");
+                        map.remove("attachment_id");
+                    }
+                }
                 if args.get("chat_id").is_some() && args["chat_id"] != status["chat_id"] {
                     return Err("Seed may only access its assigned chat".into());
                 }
@@ -718,6 +727,34 @@ mod tests {
         assert_eq!(
             replied["result"]["structuredContent"]["persisted"], true,
             "{replied}"
+        );
+        // Disconnect sends the live seed back as standby. Its next wait with
+        // the old IDs keeps waiting instead of failing, and it can be
+        // assigned again through the standby pool.
+        let old_attachment = opened["result"]["structuredContent"]["attachment_id"].clone();
+        let moved = ui(json!({"action":"detach","chat_id":url_chat["id"],"standby":true}));
+        assert_eq!(moved["standby"], "seed", "{moved}");
+        let standby = url_rpc("tools/call",json!({"name":"chat_wait","arguments":{"timeout_ms":0,"chat_id":url_chat["id"],"attachment_id":old_attachment}})).await.unwrap().json::<Value>().await.unwrap();
+        assert_eq!(
+            standby["result"]["structuredContent"]["status"], "idle",
+            "{standby}"
+        );
+        let standby_chat =
+            ui(json!({"action":"create","seed_filter":{"source":"","keyword":"","standby":true}}))
+                ["session"]
+                .clone();
+        let reassigned = url_rpc(
+            "tools/call",
+            json!({"name":"chat_wait","arguments":{"timeout_ms":3000}}),
+        )
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+        assert_eq!(
+            reassigned["result"]["structuredContent"]["chat_id"], standby_chat["id"],
+            "{reassigned}"
         );
         assert!(url_rpc("initialize", json!({}))
             .await

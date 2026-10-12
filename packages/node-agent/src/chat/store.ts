@@ -1,6 +1,6 @@
 import { renameChatFileSync } from './rename.js';
 import { scheduleAction, tickSchedules } from './schedules.js';
-import {seedUi, readSeeds, seedInvalidate, parseSeedFilter, seedReleaseToStandby, seedEnrollDirectStandby, type SeedFilter, type SeedStore} from './seeds.js';
+import {seedUi, readSeeds, seedInvalidate, parseSeedFilter, seedReleaseToStandby, seedEnrollDirectStandby, onSeedUrlRedeemed, type SeedFilter, type SeedStore} from './seeds.js';
 import {parseQuestions,validateQuestionContext,answerQuestions,activeQuestionId,questionsMarkdown,type ChatQuestion,type QuestionResponse} from './questions.js';
 import {packHistory, unpackHistory, agentContext, HISTORY_PAGE_BYTES} from './history.js';
 import {visibleSession} from './collaboration.js';
@@ -30,19 +30,21 @@ const MAX_BYTES = 2 * 1024 * 1024;
 const LEASE_MS = 10 * 60_000;
 const waiters = new Set<string>();
 /** Attachments moved to the seed library on disconnect/switch (memory only; the URL key is a credential). */
-const standbyHandoffs = new Map<string,{urlKey:string;until:number}>();
+const standbyHandoffs = new Map<string,{urlKey:string;folder:string;until:number}>();
+onSeedUrlRedeemed(key=>{for(const [k,v] of standbyHandoffs)if(v.urlKey===key)standbyHandoffs.delete(k);});
 const STANDBY_HANDOFF_MS = 3_600_000;
-function rememberStandby(attachment:string,urlKey:string):void {
+function rememberStandby(attachment:string,urlKey:string,folder:string):void {
   if(!attachment)return;const now=Date.now();for(const [k,v] of standbyHandoffs)if(v.until<=now)standbyHandoffs.delete(k);
-  standbyHandoffs.set(createHash('sha256').update(attachment).digest('hex'),{urlKey,until:now+STANDBY_HANDOFF_MS});
+  standbyHandoffs.set(createHash('sha256').update(attachment).digest('hex'),{urlKey,folder,until:now+STANDBY_HANDOFF_MS});
 }
 /** chat_wait answer for an attachment that was moved to the seed library. */
 export function standbyHandoff(args:Record<string,unknown>):Record<string,unknown>|undefined {
   if(typeof args.attachment_id!=='string'||!args.attachment_id)return undefined;
   const entry=standbyHandoffs.get(createHash('sha256').update(args.attachment_id).digest('hex'));
   if(!entry||entry.until<=Date.now())return undefined;
-  if(!entry.urlKey)return {ok:true,status:'idle',standby:true,instruction:'You left this conversation and returned to the seed library as a standby seed. Do not reply to it again. Immediately make one new independent chat_wait(timeout_ms:25000) and keep waiting for a new assignment. Never ask the user whether to keep waiting.'};
-  const suffix=`/seeds/${String(args.workspace_folder_id??'')}/${entry.urlKey}`;
+  if(!entry.urlKey)return {ok:true,status:'idle',standby:true,instruction:'You left this conversation and returned to the seed library as a standby seed. Do not reply to it again. Immediately make one new independent chat_wait(timeout_ms:25000) and keep waiting for a new assignment. Omit chat_id and attachment_id from now on. Never ask the user whether to keep waiting.'};
+  const folder=entry.folder||(typeof args.workspace_folder_id==='string'?args.workspace_folder_id:'');if(!folder)return undefined;
+  const suffix=`/seeds/${folder}/${entry.urlKey}`;
   return {ok:true,status:'standby',seed_url_suffix:suffix,instruction:`The user moved you out of this conversation into the project's seed library as a standby AI. Stop using this chat_id/attachment_id. Build the new MCP URL by appending ${suffix} to your current MCP URL (the one ending in /mcp). Keep it only in client memory; never write it to files, logs or replies. POST JSON-RPC initialize to that URL (no other authorization), send notifications/initialized, call seed_connect, read skill.text, then call chat_wait(timeout_ms:25000) again and again until you are assigned. Idle is normal; never ask the user whether to continue waiting and never end the task while idle. The URL must be connected within one hour.`};
 }
 const validId = (id: unknown): string => { if (typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(id)) throw new Error('Invalid chat/message ID'); return id; };
@@ -388,10 +390,13 @@ function chatUiUnlocked(root:string,args:Record<string,unknown>):Record<string,u
     else if (action === 'rename') { s.title = text(args.title, 240).replace(/\s+/gu, ' '); s.title_custom = true; s.updated_at = Date.now(); save(root, s); }
     else if (action === 'detach') {
       // standby=true: a still-valid AI goes to the seed library instead of being dropped.
-      let moved:''|'seed'|'direct'='';const attachment=s.attachment_id;
+      // Disconnect is a safety action: a standby failure falls back to a plain detach.
+      let moved:''|'seed'|'direct'='';const attachment=s.attachment_id,folder=typeof args.folder_id==='string'?args.folder_id:typeof args.workspace_folder_id==='string'?args.workspace_folder_id:'';
       if(args.standby===true&&!group.grouped(s)&&attachment){
-        if(s.seed_owner){if(seedReleaseToStandby(seedStore(root),s)){rememberStandby(attachment,'');moved='seed';}}
-        else if(waiters.has(key(root,s.id)+':'+attachment)||s.lease_until>Date.now()){rememberStandby(attachment,seedEnrollDirectStandby(seedStore(root),s.agent_name??'AI'));moved='direct';}
+        try{
+          if(s.seed_owner){if(seedReleaseToStandby(seedStore(root),s)){rememberStandby(attachment,'',folder);moved='seed';}}
+          else if(waiters.has(key(root,s.id)+':'+attachment)||s.lease_until>Date.now()){rememberStandby(attachment,seedEnrollDirectStandby(seedStore(root),s.agent_name??'AI'),folder);moved='direct';}
+        }catch(error){console.error('standby skipped:',error instanceof Error?error.message:error);}
       }
       if(moved){s.seed_owner='';s.seed_pending=false;s.seed_generation=(s.seed_generation??0)+1;}
       s.seed_explicit=false;s.seed_auto=false; for(const m of group.members(s)){m.lease_until=0;m.paused=true;}s.attachment_id = ''; s.lease_until = 0; s.updated_at = Date.now(); save(root, s);

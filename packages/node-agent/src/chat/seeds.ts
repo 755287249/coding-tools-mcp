@@ -25,6 +25,9 @@ const FILE='docs/chat-sessions/seed-library.seeds.json';
 export const SEED_LIBRARY_LIMIT=10000;
 const REGISTRY_BYTES=32*1024*1024;
 const exchanges=new Map<string,{token:string;expires:number}>();
+/** Set by the chat store: a redeemed standby URL must stop being handed out. */
+let urlRedeemedHook:((key:string)=>void)|undefined;
+export function onSeedUrlRedeemed(hook:(key:string)=>void):void {urlRedeemedHook=hook;}
 const scans=new Map<string,number>();
 export function seedInvalidate(store:SeedStore):void {const base=store.path(FILE)+'\0';for(const key of scans.keys())if(key.startsWith(base))scans.delete(key);}
 export const SEED_SUSPECT_MS=600_000, SEED_REPLACE_MS=720_000;
@@ -103,6 +106,8 @@ export function seedReleaseWorkspace(store:SeedStore):void {
   store.locked(()=>{
     const data=readSeeds(store);data.seeds.forEach(ensureSettled);
     data.enabled=false;saveSeeds(store,data);
+    // Explicit pool choices bypass `enabled`; withdraw them as well.
+    for(const id of store.ids()){const chat=store.read(id);if(chat.seed_explicit){chat.seed_explicit=false;store.save(chat);}}
     for(const seed of data.seeds)if(!seed.retired_at)releaseSeed(store,seed);
     saveSeeds(store,data);seedInvalidate(store);
   });
@@ -117,7 +122,11 @@ export function seedReleaseToStandby(store:SeedStore,chat:ChatSession):boolean {
 }
 /** Enroll a directly connected AI that left a chat as a standby seed; returns its one-hour URL key. */
 export function seedEnrollDirectStandby(store:SeedStore,agentName:string):string {
-  const name=[...agentName].filter(c=>c>=' '&&c!=='\u007f').slice(0,60).join('').trim()||'AI';
+  const name=[...agentName].filter(c=>c>=' '&&!(c>='\u007f'&&c<='\u009f')).slice(0,60).join('').trim()||'AI';
+  // Standby URLs never connected within an hour are retired so the standby card stays clean.
+  const data=readSeeds(store),now=Date.now();let changed=false;
+  for(const s of data.seeds)if(s.standby&&!s.retired_at&&!s.redeemed_at&&now>s.enrollment_until){retirement(s,'inactive',now);changed=true;}
+  if(changed)saveSeeds(store,data);
   const created=seedUi(store,{action:'seed_manual',source:'standby',prefix:name,account:name,_standby:true}) as {batch:{url_key:string}[]};
   const key=created.batch[0]?.url_key;if(!key)throw Error('Standby enrollment failed');return key;
 }
@@ -178,7 +187,8 @@ export function seedUi(store:SeedStore,args:Record<string,unknown>):Record<strin
   } else if(args.action==='seed_resume_chat') {
     const chat=store.read(uid(args.chat_id));if(chat.closed||chat.mode==='group')throw Error('Only open work chats support seeds');
     const explicit=!!args.seed_filter&&typeof args.seed_filter==='object'&&!Array.isArray(args.seed_filter);
-    if(explicit&&(chat.seed_owner||chat.attachment_id))throw Error('Disconnect the current AI before choosing a seed pool');
+    // A stale seed_owner without an attachment is replaced once that seed is gone; only a live attachment blocks.
+    if(explicit&&chat.attachment_id)throw Error('Disconnect the current AI before choosing a seed pool');
     chat.seed_auto=true;if(explicit){chat.seed_filter=parseSeedFilter(args.seed_filter);chat.seed_explicit=true;}chat.updated_at=now;store.save(chat);seedInvalidate(store);
   } else if(args.action!=='seed_list')throw Error('Unknown seed action');
   return inventory(data,args,now);
@@ -216,7 +226,7 @@ export function seedUrl(store:SeedStore,key:string,redeem=false,now=Date.now()):
     if(!/^[a-f0-9]{64}$/.test(key))throw Error('Seed URL invalid or expired');
     const data=readSeeds(store),s=data.seeds.find(s=>s.url_hash===hash(key));
     if(!s||s.retired_at||now>(s.redeemed_at?s.access_until:s.enrollment_until))throw Error('Seed URL invalid or expired');
-    if(redeem&&!s.redeemed_at){s.redeemed_at=now;s.access_until=now+7*86400_000;s.last_seen=now;saveSeeds(store,data);}
+    if(redeem&&!s.redeemed_at){s.redeemed_at=now;s.access_until=now+7*86400_000;s.last_seen=now;saveSeeds(store,data);urlRedeemedHook?.(key);}
     return s.id;
   });
 }

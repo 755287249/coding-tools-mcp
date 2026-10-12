@@ -357,4 +357,13 @@ test('disconnecting a live direct AI enrolls a standby seed and hands it the see
  const key=handoff.seed_url_suffix.replace('/seeds/folder1/','');assert.match(key,/^[a-f0-9]{64}$/);
  const seed=chatUi(root,{action:'seed_list'}).seeds[0];assert.equal(seed.source,'standby');assert.equal(seed.standby,true);
  assert.equal(chatUi(root,{action:'detach',chat_id:chat.id,standby:true}).standby,undefined);
+ const {seedUrl}=await import('../dist/chat/seeds.js');assert.equal(typeof seedUrl(seedStore(root),key,true),'string');
+ assert.equal(standbyHandoff({attachment_id:opened.attachment_id,workspace_folder_id:'folder1'}),undefined);
+});
+test('choosing a pool after a stale seed owner is allowed',t=>{
+ const root=mkdtempSync(path.join(tmpdir(),'seeds-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
+ const batch=chatUi(root,{action:'seed_batch',count:1,account:'acct',repo_id:'r',branch:'main'}).batch;const store=seedStore(root);const token=seedInitialize(store,batch[0].seed_id,batch[0].ticket);
+ const chat=chatUi(root,{action:'create',seed_filter:{source:'',keyword:''}}).session;assert.equal(seedPoll(store,batch[0].seed_id,token).chat_id,chat.id);
+ chatUi(root,{action:'detach',chat_id:chat.id});chatUi(root,{action:'seed_resume_chat',chat_id:chat.id,seed_filter:{source:'',keyword:'',account:'acct'}});
+ assert.equal(chatUi(root,{action:'read',chat_id:chat.id}).session.seed_auto,true);
 });

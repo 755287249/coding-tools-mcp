@@ -269,7 +269,8 @@
   });
   async function openConnection() {
     if (busy || !folderId) return;
-    if (!selected) await create(true);
+    // An explicit [接入AI] on a new chat creates a manual chat; create() then reopens this guide.
+    if (!selected) { await create(true, null); return; }
     if (!selected || detail?.closed || detail?.seed_auto) return;
     onNavigate?.(folderId, selected);
     connectionMembers=(detail?.members??[]).map(m=>m.id);connectionScope = currentScope; connectionError = ''; connectionSending = false; copied = false; revealPrompt=false; pairingAttempt=randomId(); pairingExpires=0; guide = true;
@@ -707,7 +708,9 @@
     seedPicker?.close();
     if (filter === null) { await openConnection(); return true; }
     if (!selected) return await create(true, filter);
-    if (aiKind === 'direct' && !(await detach())) return false;
+    // Always detach first: it also clears a stale attachment from an AI that went
+    // offline without disconnecting. A still-valid AI moves to standby.
+    if (!(await detach())) return false;
     if (busy || !selected) return false;
     busy = true; error = ''; const gen = generation, target = selected;
     try {

@@ -200,4 +200,13 @@
       svelte-check 0 錯誤 0 警告；前端測試 276 項通過。
 - [x] E 提示詞（seed-enrollment.ts、seed-connect SKILL.md、idle 指令 Rust/Node）
 - [x] F Node parity（含直接 AI 轉備用）
-- [ ] 測試、推送、更新 PR #2
+- [x] 內部 review（風險 6/10）後修正：
+  - 既有對話選種子池前一律先斷開（也清掉離線 AI 的舊 attachment）；後端只在仍有 attachment 時拒絕，舊的 seed_owner 不再擋住。
+  - 回到備用的種子用舊 chat_id/attachment_id 呼叫 chat_wait 時，種子閘道自動移除這兩個參數，繼續等待（新增 gateway 層測試）。
+  - 轉備用失敗不再阻止斷開（退回一般斷開並記錄）。
+  - 備用 URL 被兌換後立即從記憶體移除；URL 的資料夾 ID 在斷開時記錄（Tauri 指令注入 `_folder_id`，Node 用 `folder_id`）。
+  - `release_workspace` 也清除 `seed_explicit`；一小時未連線的備用種子在下次建立備用時退役。
+  - 新對話按 [接入AI] 會建立手動對話並開啟接入指引。
+  - 修改 seed-connect SKILL.md 後需執行 `pnpm --filter @coding-tools/node-agent run sync:rust-contract` 重新產生 `rustCatalog.generated.ts`。
+- [ ] 瀏覽器端到端測試（node agent + 瀏覽器）
+- [ ] 推送、更新 PR #2 描述

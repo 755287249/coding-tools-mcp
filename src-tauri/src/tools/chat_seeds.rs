@@ -357,6 +357,22 @@ pub fn release_workspace(root: &Path) -> Result<()> {
     // Durable pause first: partial storage failures cannot reassign another chat.
     data.enabled = false;
     write(root, &data)?;
+    // Explicit pool choices bypass `enabled`; withdraw them as well.
+    if safe(root, DIR)?.is_dir() {
+        for entry in fs::read_dir(safe(root, DIR)?).map_err(io)? {
+            let filename = entry.map_err(io)?.file_name().to_string_lossy().to_string();
+            if let Some(cid) = filename
+                .strip_suffix(".json")
+                .filter(|cid| id(&json!(cid)).is_ok())
+            {
+                let mut chat = load(root, cid)?;
+                if chat["seed_explicit"] == true {
+                    chat["seed_explicit"] = json!(false);
+                    save(root, &chat)?;
+                }
+            }
+        }
+    }
     for seed in &mut data.seeds {
         if seed.retired_at == 0 {
             release_seed(root, seed)?;
@@ -618,9 +634,9 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
             if chat["closed"] == true || group::grouped(&chat) {
                 return Err(err("Only open work chats support seeds"));
             }
-            if !chat["seed_owner"].as_str().unwrap_or("").is_empty()
-                || !chat["attachment_id"].as_str().unwrap_or("").is_empty()
-            {
+            // A stale seed_owner without an attachment is replaced by
+            // poll_at once that seed is gone; only a live attachment blocks.
+            if !chat["attachment_id"].as_str().unwrap_or("").is_empty() {
                 // Explicit pool choice for a chat that still has an AI attached
                 // must go through detach first (the UI does this on switch).
                 if args.get("seed_filter").is_some_and(Value::is_object) {
@@ -690,6 +706,20 @@ pub(super) fn enroll_direct_standby(root: &Path, agent_name: &str) -> Result<Str
     } else {
         label
     };
+    // Standby URLs that were never connected expire after an hour; retire
+    // them so the standby card does not fill with dead entries.
+    let mut data = read(root)?;
+    let time = now();
+    let mut changed = false;
+    for seed in data.seeds.iter_mut().filter(|s| {
+        s.standby && s.retired_at == 0 && s.redeemed_at == 0 && time > s.enrollment_until
+    }) {
+        retire(seed, "inactive", time);
+        changed = true;
+    }
+    if changed {
+        write(root, &data)?;
+    }
     let created = ui(
         root,
         &json!({"action":"seed_manual","source":"standby","prefix":label,"account":label,"_standby":true}),
@@ -827,6 +857,7 @@ pub fn url(root: &Path, key: &str, redeem: bool) -> Result<String> {
         s.access_until = time + 7 * 86400_000;
         s.last_seen = time;
         write(root, &data)?;
+        super::forget_standby_url(key);
     }
     Ok(sid)
 }
@@ -2170,8 +2201,12 @@ mod standby_tests {
         let suffix = handoff["seed_url_suffix"].as_str().unwrap();
         let key = suffix.strip_prefix("/seeds/folder1/").unwrap();
         assert_eq!(key.len(), 64);
-        assert!(!handoff["instruction"].as_str().unwrap().contains(key) || suffix.contains(key));
         let sid = url(root.path(), key, true).unwrap();
+        // Once redeemed, the URL is no longer handed out again.
+        assert!(super::super::standby_handoff(
+            &json!({"attachment_id":attachment,"workspace_folder_id":"folder1"})
+        )
+        .is_none());
         let row = seed_row(root.path(), &sid);
         assert_eq!(row["source"], "standby");
         assert_eq!(row["standby"], true);
@@ -2182,6 +2217,34 @@ mod standby_tests {
             true
         )
         .is_err());
+    }
+
+    #[test]
+    fn choosing_a_pool_after_a_stale_seed_owner_is_allowed() {
+        let (root, batch, tokens) = library(false);
+        let sid = batch[0]["seed_id"].as_str().unwrap();
+        let chat = super::super::ui(
+            root.path(),
+            &json!({"action":"create","seed_filter":{"source":"","keyword":""}}),
+        )
+        .unwrap()["session"]
+            .clone();
+        let assigned = poll(root.path(), sid, &tokens[0]).unwrap();
+        assert_eq!(assigned["chat_id"], chat["id"]);
+        // Plain detach (e.g. the seed was offline) keeps seed_owner set.
+        super::super::ui(
+            root.path(),
+            &json!({"action":"detach","chat_id":chat["id"]}),
+        )
+        .unwrap();
+        super::super::ui(
+            root.path(),
+            &json!({"action":"seed_resume_chat","chat_id":chat["id"],"seed_filter":{"source":"","keyword":"","account":"acct"}}),
+        )
+        .unwrap();
+        let read =
+            super::super::ui(root.path(), &json!({"action":"read","chat_id":chat["id"]})).unwrap();
+        assert_eq!(read["session"]["seed_auto"], true);
     }
 
     #[test]

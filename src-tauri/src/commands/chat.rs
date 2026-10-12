@@ -18,6 +18,11 @@ pub fn local_chat(
             .map(|folder| std::path::PathBuf::from(&folder.path))
             .ok_or_else(|| AppError::Message("Select a configured folder".into()))
     })?;
+    let mut args = args;
+    if args["action"] == "detach" {
+        // The standby hand-off builds the seed URL from the folder ID.
+        args["_folder_id"] = Value::String(folder_id);
+    }
     crate::tools::chat::ui(&root, &args).map_err(|e| AppError::Message(e.message()))
 }
 
