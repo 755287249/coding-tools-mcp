@@ -83,7 +83,7 @@ export async function handleSeedRoute(req:IncomingMessage,res:ServerResponse,pat
       if(args.workspace_folder_id!==undefined&&args.workspace_folder_id!==folder.id)throw Error('Seed workspace mismatch');
       if(name==='seed_connect'){
         const status=seedPoll(store,seedId,token);
-        sendJson(res,200,{jsonrpc:'2.0',id,result:wrapped({...status,registered:status.status!=='retired',seed_id:seedId,workspace_folder_id:folder.id,workspace:folder,skill:seedConnectSkill,instruction:'Read skill.text, then immediately chat_wait(timeout_ms:25000).'})});return true;
+        sendJson(res,200,{jsonrpc:'2.0',id,result:wrapped({...status,registered:status.status!=='retired',seed_id:seedId,workspace_folder_id:folder.id,workspace:folder,skill:seedConnectSkill,instruction:'Read skill.text, then immediately chat_wait(timeout_ms:25000). Keep calling chat_wait one at a time until assigned. Never ask the user whether to keep waiting, never end the task while idle, and do not stop after a few idle results; waiting has no time limit.'})});return true;
       }
       let autoOpen=false;
       const chatWait=name==='chat_wait';
@@ -106,7 +106,7 @@ export async function handleSeedRoute(req:IncomingMessage,res:ServerResponse,pat
           seedFinish(store,seedId,binding.call_id,'chat_open',openArgs,opened);
           if(opened.ok!==true)throw Error('Could not open assigned chat; retry chat_wait');
           result=wrapped({...opened,status:'assigned',chat_id:binding.chat_id,workspace_folder_id:folder.id});
-        }else result=wrapped(chatWait?{...status,registered:status.status!=='retired',instruction:status.status==='retired'?'Seed retired. Stop waiting and do not switch identities.':'Immediately call chat_wait(timeout_ms:25000) again. Idle is normal.'}:status);}finally{waiting.delete(key);}
+        }else result=wrapped(chatWait?{...status,registered:status.status!=='retired',instruction:status.status==='retired'?'Seed retired. Stop waiting and do not switch identities.':'Immediately call chat_wait(timeout_ms:25000) again. Idle is normal. Never ask the user whether to keep waiting, never end the task while idle, and do not stop after a few idle results; waiting has no time limit.'}:status);}finally{waiting.delete(key);}
       }else{
         if(!SEED_TOOLS.has(name)||!catalog.names.includes(name))throw Error('Tool not available to seeds');
         if(args.workspace_folder_id!==undefined&&args.workspace_folder_id!==folder.id)throw Error('Seed workspace mismatch');

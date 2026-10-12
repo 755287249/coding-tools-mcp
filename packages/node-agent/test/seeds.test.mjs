@@ -328,3 +328,33 @@ test('reissue rotates only expired unconnected enrollment and rejects stale brow
  assert.equal(chatUi(root,{action:'seed_list'}).total,2);
  const persisted=readFileSync(file,'utf8');assert.ok(!persisted.includes(fresh.ticket));assert.ok(!persisted.includes(fresh.url_key));
 });
+test('explicit pools are served while automatic assignment is off',t=>{
+ const root=mkdtempSync(path.join(tmpdir(),'seeds-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
+ const batch=chatUi(root,{action:'seed_batch',count:2,account:'acct',prefix:'p',repo_id:'r',branch:'main'}).batch;const store=seedStore(root);
+ const tokens=batch.map(s=>seedInitialize(store,s.seed_id,s.ticket));
+ assert.notEqual(chatUi(root,{action:'create'}).session.seed_auto,true);
+ const chosen=chatUi(root,{action:'create',seed_filter:{source:'',keyword:'',account:'acct'}}).session;assert.equal(chosen.seed_auto,true);
+ assert.equal(seedPoll(store,batch[0].seed_id,tokens[0]).chat_id,chosen.id);
+ assert.ok(chatUi(root,{action:'seed_list'}).pool_groups.some(g=>g.account==='acct'&&g.total===2));
+});
+test('disconnecting a live seed returns it as an assignable standby seed',async t=>{
+ const {root,batch,store,tokens}=fixture(t,2);const {standbyHandoff}=await import('../dist/chat/store.js');
+ const chat=chatUi(root,{action:'create'}).session;const assigned=seedPoll(store,batch[0].seed_id,tokens[0]);chatTool(root,'chat_open',assigned);
+ assert.equal(chatUi(root,{action:'detach',chat_id:chat.id,standby:true}).standby,'seed');
+ assert.equal(standbyHandoff(assigned).status,'idle');
+ const row=()=>chatUi(root,{action:'seed_list'}).seeds.find(s=>s.id===batch[0].seed_id);
+ assert.equal(row().standby,true);assert.equal(row().retired_at,0);
+ assert.equal(seedPoll(store,batch[0].seed_id,tokens[0],Date.now()+2000).status,'idle');
+ const next=chatUi(root,{action:'create',seed_filter:{source:'',keyword:'',standby:true}}).session;
+ assert.equal(seedPoll(store,batch[1].seed_id,tokens[1],Date.now()+4000).status,'idle');
+ assert.equal(seedPoll(store,batch[0].seed_id,tokens[0],Date.now()+6000).chat_id,next.id);assert.equal(row().standby,false);
+});
+test('disconnecting a live direct AI enrolls a standby seed and hands it the seed URL',async t=>{
+ const root=mkdtempSync(path.join(tmpdir(),'seeds-'));t.after(()=>rmSync(root,{recursive:true,force:true}));const {standbyHandoff}=await import('../dist/chat/store.js');
+ const chat=chatUi(root,{action:'create',seed_manual:true}).session;const opened=chatTool(root,'chat_open',{chat_id:chat.id,agent_name:'Claude'});
+ const detached=chatUi(root,{action:'detach',chat_id:chat.id,standby:true});assert.equal(detached.standby,'direct');
+ const handoff=standbyHandoff({attachment_id:opened.attachment_id,workspace_folder_id:'folder1'});assert.equal(handoff.status,'standby');
+ const key=handoff.seed_url_suffix.replace('/seeds/folder1/','');assert.match(key,/^[a-f0-9]{64}$/);
+ const seed=chatUi(root,{action:'seed_list'}).seeds[0];assert.equal(seed.source,'standby');assert.equal(seed.standby,true);
+ assert.equal(chatUi(root,{action:'detach',chat_id:chat.id,standby:true}).standby,undefined);
+});

@@ -2,7 +2,7 @@ import { toolsForProfile, toolNamesForProfile, toolsetRevisionForProfile } from 
 import { createHash } from 'node:crypto';
 import { realpath } from 'node:fs/promises';
 import path from 'node:path';
-import { authorizeProjectAttachment } from '../chat/store.js';
+import { authorizeProjectAttachment, standbyHandoff } from '../chat/store.js';
 import { projectToolAllowed } from '../projectIsolation.js';
 import { localChatSkill } from '../rustCatalog.generated.js';
 import { wrapMcpToolResult } from '../toolContract.js';
@@ -78,6 +78,10 @@ export class ProjectGateway {
       if (method === 'resources/read' && params.uri === localChatSkill.uri) return { ...selection, result: { contents: [localChatSkill] } };
       if (method === 'tools/call' && name === 'list_workspace_folders') return { ...selection, result: wrapMcpToolResult(name, scope, { ok: true, folders: this.folders() }) };
       if (method !== 'tools/call' || name !== 'chat_open' || !scope.chat_id) denied('Open a chat first and include its project/chat/attachment capability in every project operation');
+    }
+    if (attached && method === 'tools/call' && name === 'chat_wait') {
+      const handoff = standbyHandoff(scope);
+      if (handoff) return { ...selection, result: wrapMcpToolResult(name, scope, handoff) };
     }
     const context = await this.contextFor(String(scope.workspace_folder_id ?? ''));
     if (attached) authorizeProjectAttachment(context.config.folders[0].path, scope, name === 'chat_wait');

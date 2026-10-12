@@ -296,7 +296,7 @@ async fn execute(
                 status["workspace"] = folder.clone();
                 status["skill"] = seeds::skill();
                 status["instruction"] =
-                    json!("Read skill.text, then immediately chat_wait(timeout_ms:25000).");
+                    json!("Read skill.text, then immediately chat_wait(timeout_ms:25000). Keep calling chat_wait one at a time until assigned. Never ask the user whether to keep waiting, never end the task while idle, and do not stop after a few idle results; waiting has no time limit.");
                 return Ok(Some(wrapped(status)));
             }
             let chat_wait = name == "chat_wait";
@@ -422,7 +422,7 @@ async fn execute(
                             result["instruction"] = json!(if result["status"] == "retired" {
                                 "Seed retired. Stop waiting and do not switch identities."
                             } else {
-                                "Immediately call chat_wait(timeout_ms:25000) again. Idle is normal."
+                                "Immediately call chat_wait(timeout_ms:25000) again. Idle is normal. Never ask the user whether to keep waiting, never end the task while idle, and do not stop after a few idle results; waiting has no time limit."
                             });
                         }
                         break wrapped(result);

@@ -45,6 +45,10 @@ pub struct Seed {
     pub generation: u64,
     pub inflight: Vec<String>,
     pub operations: Vec<String>,
+    /// A still-valid AI that left a conversation (disconnect or switch) and
+    /// now waits in the library as an assignable standby seed.
+    #[serde(default)]
+    pub standby: bool,
 }
 #[derive(Serialize, Deserialize)]
 struct Library {
@@ -80,6 +84,9 @@ pub fn parse_filter(value: &Value) -> Result<Value> {
             filter[field] = json!(optional_label(&value[field])?);
         }
     }
+    if value["standby"] == true {
+        filter["standby"] = json!(true);
+    }
     Ok(filter)
 }
 fn matches(seed: &Seed, filter: &Value) -> bool {
@@ -94,6 +101,7 @@ fn matches(seed: &Seed, filter: &Value) -> bool {
             .as_str()
             .filter(|account| !account.is_empty())
             .is_none_or(|account| seed.account == account)
+        && (filter["standby"] != true || seed.standby)
 }
 fn read(root: &Path) -> Result<Library> {
     let target = safe(root, FILE)?;
@@ -183,7 +191,7 @@ fn public(s: &Seed, time: u64) -> Value {
     } else {
         "preparing"
     };
-    json!({"enrollment_until":s.enrollment_until,"redeemed_at":s.redeemed_at,"access_until":s.access_until,"id":s.id,"source":s.source,"prefix":s.prefix,"manual":s.manual,"account":s.account,"repo_id":s.repo_id,"branch":s.branch,"metadata":s.metadata,"created_at":s.created_at,"last_seen":s.last_seen,"status":status,"reason":s.reason,"archived":s.archived,"retired_at":s.retired_at,"host_task_id":s.host_task_id,"chat_id":s.chat_id,"generation":s.generation,"unresolved_operations":s.inflight.len()+s.operations.len()})
+    json!({"enrollment_until":s.enrollment_until,"redeemed_at":s.redeemed_at,"access_until":s.access_until,"id":s.id,"source":s.source,"prefix":s.prefix,"manual":s.manual,"account":s.account,"repo_id":s.repo_id,"branch":s.branch,"metadata":s.metadata,"created_at":s.created_at,"last_seen":s.last_seen,"status":status,"reason":s.reason,"archived":s.archived,"retired_at":s.retired_at,"host_task_id":s.host_task_id,"chat_id":s.chat_id,"generation":s.generation,"unresolved_operations":s.inflight.len()+s.operations.len(),"standby":s.standby})
 }
 fn inventory(data: &Library, args: &Value, time: u64) -> Value {
     let mut grouped = std::collections::BTreeMap::<(String, String), (usize, usize)>::new();
@@ -212,6 +220,25 @@ fn inventory(data: &Library, args: &Value, time: u64) -> Value {
         }
     }
     let ready_groups: Vec<_> = ready_groups.into_iter().map(|((source,prefix,account),ready)|json!({"source":source,"prefix":prefix,"account":account,"ready":ready})).collect();
+    // Every non-retired pool, including empty ones, so a new chat can always
+    // show the categories (with 0 ready) instead of hiding the choice.
+    let mut pool_groups =
+        std::collections::BTreeMap::<(String, String, String, bool), (usize, usize)>::new();
+    for seed in data.seeds.iter().filter(|s| s.retired_at == 0) {
+        let entry = pool_groups
+            .entry((
+                seed.source.clone(),
+                seed.prefix.clone(),
+                seed.account.clone(),
+                seed.standby,
+            ))
+            .or_default();
+        entry.0 += 1;
+        if public(seed, time)["status"] == "ready" {
+            entry.1 += 1;
+        }
+    }
+    let pool_groups: Vec<_> = pool_groups.into_iter().map(|((source,prefix,account,standby),(total,ready))|json!({"source":source,"prefix":prefix,"account":account,"standby":standby,"total":total,"ready":ready})).collect();
     let source = args["source"].as_str().unwrap_or("").trim().to_lowercase();
     let keyword = args["keyword"].as_str().unwrap_or("").trim().to_lowercase();
     let all: Vec<_> = data.seeds.iter().map(|s| public(s, time)).collect();
@@ -283,7 +310,7 @@ fn inventory(data: &Library, args: &Value, time: u64) -> Value {
         .as_u64()
         .map(|v| v.clamp(1, 200) as usize)
         .unwrap_or(all.len());
-    json!({"ready_groups":ready_groups,"account_summaries":account_summaries,"groups":groups,"sources":sources,"enabled":data.enabled,"seeds":filtered.iter().skip(offset).take(limit).collect::<Vec<_>>(),"retired_count":counts.get("retired").copied().unwrap_or(0),"total":all.len(),"filtered_total":filtered.len(),"offset":offset,"limit":limit,"counts":counts,"accounts":accounts,"pairing_enabled":!data.pairing_hash.is_empty(),"capacity":LIBRARY_LIMIT})
+    json!({"pool_groups":pool_groups,"ready_groups":ready_groups,"account_summaries":account_summaries,"groups":groups,"sources":sources,"enabled":data.enabled,"seeds":filtered.iter().skip(offset).take(limit).collect::<Vec<_>>(),"retired_count":counts.get("retired").copied().unwrap_or(0),"total":all.len(),"filtered_total":filtered.len(),"offset":offset,"limit":limit,"counts":counts,"accounts":accounts,"pairing_enabled":!data.pairing_hash.is_empty(),"capacity":LIBRARY_LIMIT})
 }
 /// Caller owns the chat lock; no nested locking.
 fn ensure_settled(seed: &Seed) -> Result<()> {
@@ -466,6 +493,7 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
                     generation: 0,
                     inflight: vec![],
                     operations: vec![],
+                    standby: args["_standby"] == true,
                 };
                 batch.push(json!({"seed_id":s.id,"ticket":ticket,"url_key":url_key,"source":source,"prefix":prefix,"manual":manual,"repo_id":repo_id,"branch":branch,"account":account,"expires_at":s.enrollment_until}));
                 data.seeds.push(s);
@@ -590,8 +618,23 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
             if chat["closed"] == true || group::grouped(&chat) {
                 return Err(err("Only open work chats support seeds"));
             }
+            if !chat["seed_owner"].as_str().unwrap_or("").is_empty()
+                || !chat["attachment_id"].as_str().unwrap_or("").is_empty()
+            {
+                // Explicit pool choice for a chat that still has an AI attached
+                // must go through detach first (the UI does this on switch).
+                if args.get("seed_filter").is_some_and(Value::is_object) {
+                    return Err(err("Disconnect the current AI before choosing a seed pool"));
+                }
+            }
             chat["seed_auto"] = json!(true);
+            if args.get("seed_filter").is_some_and(Value::is_object) {
+                chat["seed_filter"] = parse_filter(&args["seed_filter"])?;
+                chat["seed_explicit"] = json!(true);
+            }
+            chat["updated_at"] = json!(time);
             save(root, &chat)?;
+            invalidate(root);
         }
         "seed_list" => (),
         _ => return Err(err("Unknown seed action")),
@@ -599,6 +642,63 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
     Ok(inventory(&data, args, time))
 }
 /// Browser pairing is folder-scoped and only grants status/provisioning access.
+/// Return a still-valid seed that owns `chat` to the library as standby.
+/// Caller holds the chat lock and detaches the chat afterwards. Returns false
+/// when the seed is gone, offline or busy; it is then retired as before.
+pub(super) fn release_to_standby(root: &Path, chat: &Value) -> Result<bool> {
+    let owner = chat["seed_owner"].as_str().unwrap_or("");
+    if owner.is_empty() || !safe(root, FILE)?.exists() {
+        return Ok(false);
+    }
+    let mut data = read(root)?;
+    let time = now();
+    let Some(seed) = data.seeds.iter_mut().find(|s| s.id == owner) else {
+        return Ok(false);
+    };
+    let live = seed.retired_at == 0
+        && seed.redeemed_at > 0
+        && seed.chat_id == chat["id"].as_str().unwrap_or("")
+        && seed.attachment_id == chat["attachment_id"].as_str().unwrap_or("")
+        && seed.inflight.is_empty()
+        && seed.operations.is_empty()
+        && time.saturating_sub(seed.last_seen) <= SUSPECT_MS;
+    if !live {
+        return Ok(false);
+    }
+    seed.chat_id.clear();
+    seed.attachment_id.clear();
+    seed.generation += 1;
+    seed.standby = true;
+    seed.ready = true;
+    seed.reason = "standby".into();
+    write(root, &data)?;
+    invalidate(root);
+    Ok(true)
+}
+/// Enroll a directly connected AI that left a chat as a standby seed. Returns
+/// the one-hour URL key; the caller hands it to that AI's next chat_wait.
+pub(super) fn enroll_direct_standby(root: &Path, agent_name: &str) -> Result<String> {
+    let label: String = agent_name
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(60)
+        .collect::<String>()
+        .trim()
+        .to_owned();
+    let label = if label.is_empty() {
+        "AI".to_owned()
+    } else {
+        label
+    };
+    let created = ui(
+        root,
+        &json!({"action":"seed_manual","source":"standby","prefix":label,"account":label,"_standby":true}),
+    )?;
+    created["batch"][0]["url_key"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| err("Standby enrollment failed"))
+}
 pub fn provision(root: &Path, token: &str, args: &Value) -> Result<Value> {
     let _lock = lock(root)?;
     let data = read(root)?;
@@ -810,7 +910,7 @@ fn poll_at(root: &Path, sid: &str, token: &str, time: u64) -> Result<Value> {
                 write(root, &data)?;
             }
             return Ok(
-                json!({"status":"idle","instruction":"Make one new independent seed_wait(timeout_ms:25000). Idle is normal. Respect host execution limits."}),
+                json!({"status":"idle","instruction":"Make one new independent wait (chat_wait or seed_wait, timeout_ms:25000). Idle is normal. Never ask the user whether to keep waiting, never end the task while idle, and do not stop after a few idle results; waiting has no time limit. Respect host execution limits."}),
             );
         }
         if scans.len() > 1024 {
@@ -886,9 +986,14 @@ fn poll_at(root: &Path, sid: &str, token: &str, time: u64) -> Result<Value> {
             return Ok(json!({"status":"retired"}));
         }
     }
-    if data.enabled && data.seeds[index].chat_id.is_empty() {
+    if data.seeds[index].chat_id.is_empty() {
         chats.sort_by_key(|chat| chat["created_at"].as_u64().unwrap_or(0));
         for mut chat in chats {
+            // The library switch only governs automatic assignment. A pool the
+            // user explicitly chose for a chat is always served.
+            if !data.enabled && chat["seed_explicit"] != true {
+                continue;
+            }
             if !eligible(&chat)
                 || !matches(&data.seeds[index], &parse_filter(&chat["seed_filter"])?)
             {
@@ -929,6 +1034,7 @@ fn poll_at(root: &Path, sid: &str, token: &str, time: u64) -> Result<Value> {
             s.chat_id = id(&chat["id"])?.into();
             s.attachment_id = attachment;
             s.generation = generation;
+            s.standby = false;
             dirty = true;
             invalidate(root);
             break;
@@ -939,7 +1045,7 @@ fn poll_at(root: &Path, sid: &str, token: &str, time: u64) -> Result<Value> {
     }
     let s = &data.seeds[index];
     Ok(if s.chat_id.is_empty() {
-        json!({"status":"idle","instruction":"Make one new independent seed_wait(timeout_ms:25000). Idle is normal. Respect host execution limits."})
+        json!({"status":"idle","instruction":"Make one new independent wait (chat_wait or seed_wait, timeout_ms:25000). Idle is normal. Never ask the user whether to keep waiting, never end the task while idle, and do not stop after a few idle results; waiting has no time limit. Respect host execution limits."})
     } else {
         json!({"status":"assigned","needs_open":load(root, &s.chat_id)?["seed_pending"] == true,"chat_id":s.chat_id,"attachment_id":s.attachment_id,"generation":s.generation,"instruction":"Call chat_open with this chat_id and attachment_id. Read the complete returned skill and history. Preserve the existing pending message, plan and user constraints; inspect files and prior operation results before resuming. Work through this MCP workspace. Do not replay completed actions or use an old host sandbox as the project source."})
     })
@@ -1927,4 +2033,171 @@ pub fn process_settled(root: &Path, sid: &str, session: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod standby_tests {
+    use super::*;
+    fn library(enabled: bool) -> (tempfile::TempDir, Vec<Value>, Vec<String>) {
+        let root = tempfile::tempdir().unwrap();
+        super::super::ui(
+            root.path(),
+            &json!({"action":"seed_settings","enabled":enabled}),
+        )
+        .unwrap();
+        let batch = super::super::ui(root.path(), &json!({"action":"seed_batch","count":2,"account":"acct","prefix":"p","repo_id":"r","branch":"main"})).unwrap()["batch"].as_array().unwrap().clone();
+        let tokens = batch
+            .iter()
+            .map(|s| {
+                initialize(
+                    root.path(),
+                    s["seed_id"].as_str().unwrap(),
+                    s["ticket"].as_str().unwrap(),
+                )
+                .unwrap()
+            })
+            .collect();
+        (root, batch, tokens)
+    }
+    fn seed_row(root: &Path, sid: &str) -> Value {
+        super::super::ui(root, &json!({"action":"seed_list"})).unwrap()["seeds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == sid)
+            .cloned()
+            .unwrap()
+    }
+
+    #[test]
+    fn explicit_pool_is_served_while_automatic_assignment_is_off() {
+        let (root, batch, tokens) = library(false);
+        let sid = batch[0]["seed_id"].as_str().unwrap();
+        let plain =
+            super::super::ui(root.path(), &json!({"action":"create"})).unwrap()["session"].clone();
+        assert_ne!(plain["seed_auto"], true);
+        let chosen = super::super::ui(
+            root.path(),
+            &json!({"action":"create","seed_filter":{"source":"","keyword":"","account":"acct"}}),
+        )
+        .unwrap()["session"]
+            .clone();
+        assert_eq!(chosen["seed_auto"], true);
+        let assigned = poll(root.path(), sid, &tokens[0]).unwrap();
+        assert_eq!(assigned["status"], "assigned");
+        assert_eq!(assigned["chat_id"], chosen["id"]);
+        let inventory = super::super::ui(root.path(), &json!({"action":"seed_list"})).unwrap();
+        assert!(inventory["pool_groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g["account"] == "acct" && g["total"] == 2));
+    }
+
+    #[test]
+    fn disconnecting_a_live_seed_returns_it_as_assignable_standby() {
+        let (root, batch, tokens) = library(true);
+        let sid = batch[0]["seed_id"].as_str().unwrap();
+        let chat =
+            super::super::ui(root.path(), &json!({"action":"create"})).unwrap()["session"].clone();
+        let assigned = poll(root.path(), sid, &tokens[0]).unwrap();
+        assert_eq!(assigned["chat_id"], chat["id"]);
+        super::super::tool(root.path(), "chat_open", &assigned).unwrap();
+        let detached = super::super::ui(
+            root.path(),
+            &json!({"action":"detach","chat_id":chat["id"],"standby":true}),
+        )
+        .unwrap();
+        assert_eq!(detached["standby"], "seed");
+        let handoff = super::super::standby_handoff(&assigned).unwrap();
+        assert_eq!(handoff["status"], "idle");
+        assert_eq!(handoff["standby"], true);
+        let row = seed_row(root.path(), sid);
+        assert_eq!(row["standby"], true);
+        assert_eq!(row["retired_at"], 0);
+        assert_eq!(
+            poll_at(root.path(), sid, &tokens[0], now() + 2_000).unwrap()["status"],
+            "idle"
+        );
+        assert_eq!(seed_row(root.path(), sid)["status"], "ready");
+        let next = super::super::ui(
+            root.path(),
+            &json!({"action":"create","seed_filter":{"source":"","keyword":"","standby":true}}),
+        )
+        .unwrap()["session"]
+            .clone();
+        // The other (non-standby) seed must not match a standby-only pool.
+        assert_eq!(
+            poll_at(
+                root.path(),
+                batch[1]["seed_id"].as_str().unwrap(),
+                &tokens[1],
+                now() + 4_000
+            )
+            .unwrap()["status"],
+            "idle"
+        );
+        let again = poll_at(root.path(), sid, &tokens[0], now() + 6_000).unwrap();
+        assert_eq!(again["chat_id"], next["id"]);
+        assert_eq!(seed_row(root.path(), sid)["standby"], false);
+    }
+
+    #[test]
+    fn disconnecting_a_live_direct_ai_enrolls_a_standby_seed() {
+        let root = tempfile::tempdir().unwrap();
+        let chat = super::super::ui(root.path(), &json!({"action":"create","seed_manual":true}))
+            .unwrap()["session"]
+            .clone();
+        let opened = super::super::tool(
+            root.path(),
+            "chat_open",
+            &json!({"chat_id":chat["id"],"agent_name":"Claude"}),
+        )
+        .unwrap();
+        let attachment = opened["attachment_id"].as_str().unwrap().to_owned();
+        let detached = super::super::ui(
+            root.path(),
+            &json!({"action":"detach","chat_id":chat["id"],"standby":true}),
+        )
+        .unwrap();
+        assert_eq!(detached["standby"], "direct");
+        assert_eq!(detached["session"]["seed_auto"], false);
+        let handoff = super::super::standby_handoff(
+            &json!({"attachment_id":attachment,"workspace_folder_id":"folder1"}),
+        )
+        .unwrap();
+        assert_eq!(handoff["status"], "standby");
+        let suffix = handoff["seed_url_suffix"].as_str().unwrap();
+        let key = suffix.strip_prefix("/seeds/folder1/").unwrap();
+        assert_eq!(key.len(), 64);
+        assert!(!handoff["instruction"].as_str().unwrap().contains(key) || suffix.contains(key));
+        let sid = url(root.path(), key, true).unwrap();
+        let row = seed_row(root.path(), &sid);
+        assert_eq!(row["source"], "standby");
+        assert_eq!(row["standby"], true);
+        // The old attachment can no longer act on the chat.
+        assert!(super::super::authorize_project_attachment(
+            root.path(),
+            &json!({"chat_id":chat["id"],"attachment_id":attachment}),
+            true
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn plain_detach_keeps_previous_behaviour() {
+        let root = tempfile::tempdir().unwrap();
+        let chat = super::super::ui(root.path(), &json!({"action":"create","seed_manual":true}))
+            .unwrap()["session"]
+            .clone();
+        super::super::tool(root.path(), "chat_open", &json!({"chat_id":chat["id"]})).unwrap();
+        let detached = super::super::ui(
+            root.path(),
+            &json!({"action":"detach","chat_id":chat["id"]}),
+        )
+        .unwrap();
+        assert!(detached["standby"].is_null());
+        let inventory = super::super::ui(root.path(), &json!({"action":"seed_list"})).unwrap();
+        assert_eq!(inventory["total"], 0);
+    }
 }

@@ -191,10 +191,11 @@
 ## 第二部分進度
 
 - [x] 找到根本原因。
-- [ ] A 後端明確選擇不受開關限制
-- [ ] B standby 欄位與過濾
-- [ ] C 斷開轉備用（種子 / 直接 AI）
+- [x] A 後端明確選擇不受開關限制（Rust `chat.rs` create / `chat_seeds.rs` poll_at；Node `store.ts` / `seeds.ts`）
+- [x] B standby 欄位與過濾、`pool_groups`（含 0 可分配的池）
+- [x] C 斷開轉備用：`detach` 帶 `standby:true`；`release_to_standby` / `enroll_direct_standby`；
+      記憶體 `STANDBY_HANDOFFS`，`chat_wait`（gateway 與 wait 迴圈）回傳 standby 指令。Rust `standby_tests` 4 項、Node 3 項通過。
 - [ ] D 前端按鈕與卡片
-- [ ] E 提示詞
-- [ ] F Node parity
+- [x] E 提示詞（seed-enrollment.ts、seed-connect SKILL.md、idle 指令 Rust/Node）
+- [x] F Node parity（含直接 AI 轉備用）
 - [ ] 測試、推送、更新 PR #2

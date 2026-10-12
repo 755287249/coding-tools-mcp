@@ -283,6 +283,14 @@ async fn post_with_projects(
         Ok(v) => v,
         Err(e) => return fail(id, e),
     };
+    if attached && method == "tools/call" && name == "chat_wait" {
+        // An AI moved to the seed library gets its standby hand-off instead of
+        // an "attachment expired" error, so it keeps waiting.
+        if let Some(handoff) = crate::tools::chat::standby_handoff(&scope) {
+            return json_no_store(json!({"jsonrpc":"2.0","id":id,
+                "result":crate::tools::wrap_mcp_tool_result(&name,&scope,handoff)}));
+        }
+    }
     if attached {
         if let Err(error) = crate::tools::chat::authorize_project_attachment(
             routed.mcp.workspace.root(),
