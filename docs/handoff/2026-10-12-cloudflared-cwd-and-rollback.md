@@ -378,6 +378,7 @@ C. 添加種子頁面卡片化（build 子代理，分支 `vorflux/seed-add-card
 - Rust：`src-tauri/src/tools/chat_access.rs`（新，在 `chat.rs` 以 `#[path] mod access` 引入，含單元測試
   `approvals_are_bound_to_the_exact_call_and_single_use`）、`tools/chat.rs`（同兩個動作 + 視圖欄位）、`mcp/listener/seeds.rs`（`apply_access_mode`）。
   **本機無法完整編譯**（記憶體 1GB）；`chat_access.rs` 已用 mock 外殼在獨立 crate 編譯並通過測試，閘道膠水碼只能靠 CI 編譯。若 CI 編譯失敗，先看 `seeds.rs` 的 `apply_access_mode`。
+  CI run 38235118860（be2e8e4）：**整個 crate 編譯通過**，156 項通過；唯一失敗是單元測試用了 1970 年的時間戳，被 `resolve()`（用真實時鐘）當成過期 → 測試改用 `now()`。
 - 前端：`src/lib/components/chat/AccessMode.svelte`（輸入框工具列的模式選單，群組模式不顯示）、`ApprovalCards.svelte`（輸入框上方的批准卡片）、
   `ChatPanel.svelte`（`setAccessMode`/`resolveApproval`）、`src/lib/api/chat.ts` 型別、i18n `chat.access.*` 11 個鍵。
 - 未改 SKILL.md（改了要跑 `sync:rust-contract`，需要 cargo）；`APPROVAL_REQUIRED` 回傳文字本身就說明了「等使用者批准後帶 approval_id 重試」。

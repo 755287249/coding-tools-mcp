@@ -271,16 +271,18 @@ mod tests {
 
     #[test]
     fn approvals_are_bound_to_the_exact_call_and_single_use() {
+        // resolve() checks expiry against the real clock.
+        let t0 = now();
         let mut s = json!({"id":"c"});
         assert_eq!(mode(&s), "normal");
         assert!(set_mode(&mut s, &json!("root")).is_err());
         set_mode(&mut s, &json!("strict")).unwrap();
         assert_eq!(mode(&s), "strict");
         let args = json!({"path":"a.txt","content":"x"});
-        let first = request(&mut s, "write_file", &args, 1_000);
-        let again = request(&mut s, "write_file", &args, 1_001);
+        let first = request(&mut s, "write_file", &args, t0);
+        let again = request(&mut s, "write_file", &args, t0 + 1);
         assert_eq!(first["id"], again["id"]);
-        let other = request(&mut s, "write_file", &json!({"path":"b.txt"}), 1_002);
+        let other = request(&mut s, "write_file", &json!({"path":"b.txt"}), t0 + 2);
         assert_ne!(first["id"], other["id"]);
         // Ignored keys do not change the identity of a call.
         assert_eq!(
@@ -296,7 +298,7 @@ mod tests {
             .unwrap()
             .iter()
             .all(|a| a["id"] != id.as_str()));
-        prune(&mut s, 1_002 + APPROVAL_TTL_MS + 1);
+        prune(&mut s, t0 + 2 + APPROVAL_TTL_MS + 1);
         assert!(s["approvals"].as_array().unwrap().is_empty());
     }
 }
