@@ -18,7 +18,7 @@
 </script>
 <div class="chat-home">
   {#key selected?.id ?? ''}
-    <ChatPanel externalNavigation startNew workspaceId={selected?.id??''} folders={selected?workspaceFolders(selected):[]} activeFolderId={selected?.active_folder_id} {endpoint} auth={selected?.auth??{type:'none',oauth_client_id:''}} onNavigate={(folder,chat)=>{if(selected)void goto(appUrl(chatLocation(selected.id,folder,chat)),{noScroll:true})}}>
+    <ChatPanel externalNavigation startNew workspaceId={selected?.id??''} folders={selected?workspaceFolders(selected):[]} activeFolderId={selected?.active_folder_id} {endpoint} auth={selected?.auth??{type:'none',oauth_client_id:''}} onNavigate={(folder,chat,connect)=>{if(selected)void goto(appUrl(chatLocation(selected.id,folder,chat)+(connect&&chat?'&connect=1':'')),{noScroll:true})}}>
       {#snippet workspacePicker()}
         <WorkspacePicker workspaces={$workspaces} bind:value={projectId} onCreate={canCreate?()=>connectionActions.newConnection?.():undefined}/>
       {/snippet}

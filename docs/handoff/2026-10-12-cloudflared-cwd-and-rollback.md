@@ -208,5 +208,15 @@
   - `release_workspace` 也清除 `seed_explicit`；一小時未連線的備用種子在下次建立備用時退役。
   - 新對話按 [接入AI] 會建立手動對話並開啟接入指引。
   - 修改 seed-connect SKILL.md 後需執行 `pnpm --filter @coding-tools/node-agent run sync:rust-contract` 重新產生 `rustCatalog.generated.ts`。
-- [ ] 瀏覽器端到端測試（node agent + 瀏覽器）
-- [ ] 推送、更新 PR #2 描述
+- [x] 第二輪 review：風險 4/10，可合併；已補「轉備用失敗時顯示提示」與「release_workspace 跳過無法讀取的對話」。
+- [x] 瀏覽器端到端測試（node agent + 瀏覽器，簡體中文介面）：9 項全部通過。
+      測試中發現：新對話按 [接入AI] 後導航到對話網址，舊的 ChatPanel 被卸載，接入指引沒有打開；
+      已改為在網址加 `&connect=1`（`onNavigate(folder, chat, connect)`）。
+- [x] 推送、更新 PR #2 描述。
+
+## 尚未處理（低優先，可後續）
+
+- 直接 AI 轉成的備用種子，除了「備用 AI」卡片，也會以代理名稱（source `standby`）出現在前綴/帳號分類中。
+- 種子庫頁面沒有「備用」標籤；重新分配後 `reason` 仍是 `standby`。
+- 工作對話的回覆沒有記錄作者，切換 AI 後舊回覆會顯示新 AI 的名稱（舊行為）。
+- 尚未在 Windows 桌面實機驗證新的種子流程。

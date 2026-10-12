@@ -75,7 +75,7 @@
   import { buildChatPrompt, pairingPrelude } from '$lib/connect/chat-prompt';
   import { pendingChatState, chatReplyState, chatUserState, USER_MESSAGE_STATUS_KEYS } from '$lib/chat/status';
   import type { AuthConfig, WorkspaceFolder } from '$lib/types';
-  let { onPlugins, tasksOpen=false, tasksExpanded=false, onCloseTasks=()=>{}, onToggleTasksExpanded=()=>{}, workspaceId, connectionId, folders, activeFolderId = '', endpoint = '', auth, externalNavigation = false, requestedChatId = '', requestedFolderId = '', startNew = false, connectRequested = false, workspacePicker, headerActions, onNavigate }: { onPlugins?:(folderId:string)=>void;tasksOpen?:boolean;tasksExpanded?:boolean;onCloseTasks?:()=>void;onToggleTasksExpanded?:()=>void; workspaceId: string; connectionId?:string; workspacePicker?: Snippet; folders: WorkspaceFolder[]; activeFolderId?: string; endpoint?: string; auth: AuthConfig; externalNavigation?: boolean; requestedChatId?: string; requestedFolderId?: string; startNew?: boolean; connectRequested?: boolean; headerActions?: Snippet; onNavigate?: (folderId: string, chatId: string) => void } = $props();
+  let { onPlugins, tasksOpen=false, tasksExpanded=false, onCloseTasks=()=>{}, onToggleTasksExpanded=()=>{}, workspaceId, connectionId, folders, activeFolderId = '', endpoint = '', auth, externalNavigation = false, requestedChatId = '', requestedFolderId = '', startNew = false, connectRequested = false, workspacePicker, headerActions, onNavigate }: { onPlugins?:(folderId:string)=>void;tasksOpen?:boolean;tasksExpanded?:boolean;onCloseTasks?:()=>void;onToggleTasksExpanded?:()=>void; workspaceId: string; connectionId?:string; workspacePicker?: Snippet; folders: WorkspaceFolder[]; activeFolderId?: string; endpoint?: string; auth: AuthConfig; externalNavigation?: boolean; requestedChatId?: string; requestedFolderId?: string; startNew?: boolean; connectRequested?: boolean; headerActions?: Snippet; onNavigate?: (folderId: string, chatId: string, connect?: boolean) => void } = $props();
   const mobileHeader=getContext<MobileHeaderContext|undefined>(MOBILE_CHAT_HEADER);
   const mobileHeaderOwner=Symbol('chat-header');
   let newMode=$state<'work'|'group'>('work');
@@ -589,8 +589,11 @@
       if (selected) { const unsent = draft; activateDraft(workspaceId, folderId, selected); if (keepDraft) { draft = unsent; persistDraft(); chatDrafts.save(chatDraftKey(workspaceId, folderId, 'new'), {text:'',attachments:[],retry:null}); } }
       guide = false;
       await refresh(workspaceId, folderId, gen);
-      if (selected) onNavigate?.(folderId, selected);
-      if ((!keepDraft||seedFilter===null) && selected&&!detail?.seed_auto) { setTimeout(() => { if (gen === generation && selected === result.session?.id) void openConnection(); }, 0); }
+      // Opening the guide must survive navigation: from the root route the chat URL mounts a new
+      // ChatPanel, so the guide is requested through the URL (connect=1) when a navigator exists.
+      const openGuide = (!keepDraft||seedFilter===null) && !!selected && !detail?.seed_auto;
+      if (selected) onNavigate?.(folderId, selected, openGuide);
+      if (openGuide && !onNavigate) { setTimeout(() => { if (gen === generation && selected === result.session?.id) void openConnection(); }, 0); }
       seedStartPending=false;return !!selected;
     } catch(e) { if (gen === generation) error = String(e);return false; } finally { busy = false; }
   }
