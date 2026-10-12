@@ -351,9 +351,47 @@ C. 添加種子頁面卡片化（build 子代理，分支 `vorflux/seed-add-card
       `Accept: text/html` 時回 HTML（可點連結 + 回覆表單，無 script）、`x-robots-tag: noindex`、`/robots.txt`（`server.ts`）。測試：`test/projectGateway.test.mjs`。
 - [x] P3 Rust 同步（`seeds.rs`：`page`/`html_page`/`linkify`/`summarize` 回傳 `(text, reply_to)`；`routes.rs` 加 `/robots.txt`）。
       本機只有 rustfmt + 抽出純函式用獨立 crate 編譯測試通過（`get_page_tests` 2 項）；完整編譯待 CI。
-- [ ] P4 Node 測試 + Rust 測試更新；Windows CI
+- [x] P4 測試與 CI：`rust-tests.yml` 過濾清單加 `mcp::listener::seeds`、`tools::chat::access`（之前 seeds 的 Rust 測試根本沒在 CI 跑）。
+      Rust tests run 38234070066（3ebcbe4）成功。Windows run 38234039618 失敗原因：**84b47bb（第四部分 A）改了
+      `CHAT_IDLE_INSTRUCTION` 文案（"Idle only means … it is not an exit"），但沒改測試** → `chatGuidance.test.mjs` 3 項 +
+      `src-tauri/tests/chat_contract.rs` 1 項斷言 `Idle is not an exit`。已把斷言改成 `it is not an exit`。
 - [x] C 添加種子對話框卡片化：兩張方式卡片（手動加入單個 AI〔推薦〕/ 瀏覽器腳本配對），手動方式改為步驟卡片
       （來源快捷籤 arena/chatgpt/claude/gemini/grok/kimi/doubao/qwen/deepseek、命名、進階連接地址），結果卡片含複製與「再生成一個」。
       帳號留空時用來源名稱。新 i18n 鍵 `seeds.addIntro` 等 9 個（4 語）。svelte-check 0/0，前端測試 276 通過。
-- [ ] B 授權模式（完全/一般/嚴格）— 見下方 B 設計
+- [x] B1 每個對話的授權模式（完全/一般/嚴格），兩個通道（接入AI、種子）都在種子閘道強制執行 — 設計與檔案見下方「B 設計」
+- [ ] B2 專案外路徑授權（延後，計畫見下方）
 - [ ] 更新 PR #2 描述
+
+## B 設計（B1 已實作；B2 為計畫）
+
+### B1 授權模式（per-chat `access_mode`，預設 `normal`）
+
+| 模式 | 行為（只影響 AI 經種子閘道呼叫的工具；專案內路徑） |
+|---|---|
+| `full` 完全授權 | 有 `confirm` 參數的工具自動補 `confirm:true`，不再回傳「需要確認」 |
+| `normal` 一般授權 | 原本行為不變：唯讀/低風險直接執行，高風險回傳 confirm 流程 |
+| `strict` 嚴格授權 | 任何**非唯讀**工具（非 `is_retry_safe_tool_name`）先建立待批准項目，回 `APPROVAL_REQUIRED`+`approval_id`；閘道最多等 `CTMCP_APPROVAL_WAIT_MS`（預設 20 秒）讓使用者在聊天介面按「允許一次/拒絕」。批准綁定「工具名 + 參數規範化 JSON 的 sha256 前 16 bytes」，只能用一次；AI 用同樣參數 + `approval_id` 重試即可執行 |
+
+- 不用「發一則使用者訊息喚醒 AI」：回覆進行中時排隊訊息不會送達，所以改成閘道內等待 + approval_id 重試。
+- Node：`packages/node-agent/src/chat/access.ts`（新）、`chat/store.ts`（`set_access_mode`、`resolve_approval` 動作，視圖加 `access_mode`、`pending_approvals`）、
+  `server/routes/seeds.ts`（`applyAccessMode`）。測試：`test/projectGateway.test.mjs`「chat authorization modes …」。
+- Rust：`src-tauri/src/tools/chat_access.rs`（新，在 `chat.rs` 以 `#[path] mod access` 引入，含單元測試
+  `approvals_are_bound_to_the_exact_call_and_single_use`）、`tools/chat.rs`（同兩個動作 + 視圖欄位）、`mcp/listener/seeds.rs`（`apply_access_mode`）。
+  **本機無法完整編譯**（記憶體 1GB）；`chat_access.rs` 已用 mock 外殼在獨立 crate 編譯並通過測試，閘道膠水碼只能靠 CI 編譯。若 CI 編譯失敗，先看 `seeds.rs` 的 `apply_access_mode`。
+- 前端：`src/lib/components/chat/AccessMode.svelte`（輸入框工具列的模式選單，群組模式不顯示）、`ApprovalCards.svelte`（輸入框上方的批准卡片）、
+  `ChatPanel.svelte`（`setAccessMode`/`resolveApproval`）、`src/lib/api/chat.ts` 型別、i18n `chat.access.*` 11 個鍵。
+- 未改 SKILL.md（改了要跑 `sync:rust-contract`，需要 cargo）；`APPROVAL_REQUIRED` 回傳文字本身就說明了「等使用者批准後帶 approval_id 重試」。
+
+### B2 專案外路徑（計畫，未實作）
+
+1. 專案層級設定 `external_paths: [{path, mode: "read"|"write", approved_at}]`（存在專案狀態，不放對話）。
+2. `Workspace::resolve_*` 目前拒絕絕對路徑與越界路徑；改成：越界時查 `external_paths`，命中才允許（寫入需 `write`），否則回
+   `OUTSIDE_PROJECT_REQUIRES_APPROVAL`（帶 `path`、`mode`、`approval_id`），聊天介面顯示同款批准卡片，選項「允許一次 / 加入專案白名單」。
+3. AppContainer 沙箱：專案隔離現在會清空 `sandbox.external_paths`；改成用上面的白名單填入（唯讀/讀寫分開 ACL）。
+4. Node 端同步，或在 `docs/todo/node-agent-parity/manifest.json` 記錄差異（Node 無 AppContainer）。
+5. `full` 模式**不**自動放行專案外路徑（安全邊界），仍需白名單。
+
+### GET 相容模式的已知限制（如實告知使用者）
+
+- 只有當 AI 的網頁讀取工具允許打開「提示詞/前一頁中出現過的網址」時才有效；讀取與等待可行，回覆需要在網址後附加文字（`text=`），
+  部分廠商工具會拒絕被修改過的網址 → 這類 AI 只能讀不能回，伺服器端無法繞過。

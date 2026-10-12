@@ -38,6 +38,7 @@ jobs:
           tunnel::cloudflare
           mcp::listener::tests
           mcp::listener::seeds
+          tools::chat::access
           auth::
           mcp::server::tests
           tools::hub

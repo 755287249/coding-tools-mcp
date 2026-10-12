@@ -1,4 +1,6 @@
 //! Local chat. JSON manifests and immutable pages are authoritative; Markdown is a projection.
+#[path = "chat_access.rs"]
+pub(crate) mod access;
 #[path = "chat_collaboration.rs"]
 mod collaboration;
 #[path = "chat_discussion.rs"]
@@ -1067,6 +1069,15 @@ fn ui_unlocked(root: &Path, args: &Value) -> Result<Value> {
                 save(root, &s)?;
             }
         }
+        "set_access_mode" => {
+            access::set_mode(&mut s, &args["mode"])?;
+            s["updated_at"] = json!(now());
+            save(root, &s)?;
+        }
+        "resolve_approval" => {
+            access::resolve(&mut s, args)?;
+            save(root, &s)?;
+        }
         "set_queue_mode" => {
             if args["mode"] != "merge" && args["mode"] != "split" {
                 return Err(err("Invalid queue mode"));
@@ -1911,6 +1922,8 @@ fn local_view(root: &Path, s: &Value) -> Result<Value> {
         .get("queue_mode")
         .cloned()
         .unwrap_or_else(|| json!(if group::grouped(s) { "split" } else { "merge" }));
+    result["access_mode"] = json!(access::mode(s));
+    result["pending_approvals"] = access::pending(s);
     Ok(result)
 }
 fn publish_queued(s: &mut Value) {

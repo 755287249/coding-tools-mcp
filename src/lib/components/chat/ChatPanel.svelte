@@ -65,6 +65,8 @@
   import Pencil from '@lucide/svelte/icons/pencil';
   import X from '@lucide/svelte/icons/x';
   import ComposerTools from './ComposerTools.svelte';
+  import AccessMode from './AccessMode.svelte';
+  import ApprovalCards from './ApprovalCards.svelte';
   import { readChatFile } from '$lib/chat/attachment-transfer';
   import { chatDrafts, chatDraftKey, conversationAccent } from '$lib/chat/drafts';
   import { chatSessionReader, sessionCacheKey } from '$lib/chat/session-cache';
@@ -215,6 +217,19 @@
     const mode=detail.queue_mode==='split'?'merge':'split';queueChanging=true;
     try{const result=await localChat(ws,folder,{action:'set_queue_mode',chat_id:chat,mode});if(scope===currentScope&&result.session){readSequence++;detail=result.session;}}
     catch(e){if(scope===currentScope)error=String(e)}finally{queueChanging=false}
+  }
+  let accessBusy=$state(false);
+  async function setAccessMode(mode:'full'|'normal'|'strict') {
+    if(accessBusy || !detail || !selected || detail.closed || loadingDetail || detail.access_mode===mode)return;
+    const scope=currentScope,ws=workspaceId,folder=folderId,chat=selected;accessBusy=true;
+    try{const result=await localChat(ws,folder,{action:'set_access_mode',chat_id:chat,mode});if(scope===currentScope&&result.session){readSequence++;detail=result.session;}}
+    catch(e){if(scope===currentScope)error=String(e)}finally{accessBusy=false}
+  }
+  async function resolveApproval(id:string,approve:boolean) {
+    if(accessBusy || !detail || !selected)return;
+    const scope=currentScope,ws=workspaceId,folder=folderId,chat=selected;accessBusy=true;
+    try{const result=await localChat(ws,folder,{action:'resolve_approval',chat_id:chat,approval_id:id,approve});if(scope===currentScope&&result.session){readSequence++;detail=result.session;}}
+    catch(e){if(scope===currentScope)error=String(e)}finally{accessBusy=false}
   }
   async function cancelQueued(messageId: string) {
     if(cancellingQueue || !detail || !selected || loadingDetail)return;
@@ -842,6 +857,7 @@
     <ChatOutline {messages} activeId={activeMessage} onSelect={jumpToMessage}/>
     </div>
     <footer class="composer-area">
+      {#if detail?.pending_approvals?.length}<ApprovalCards approvals={detail.pending_approvals} busy={accessBusy} onResolve={resolveApproval}/>{/if}
       {#if queueNotice}<p class="queue-notice" role="status">{$t(queueNotice)}{#if detail?.queued_messages?.length} · {$t('chat.queuedRetained')}{/if}</p>{/if}
       {#if detail?.queued_messages?.length}<div class="outbox" class:expanded={queueExpanded} aria-label={$t('chat.outbox')}>
         <button type="button" class="queue-mode" disabled={queueChanging||loadingDetail||detail.closed} aria-pressed={detail.queue_mode!=='split'} aria-busy={queueChanging} onclick={toggleQueueMode} title={$t(detail.queue_mode==='split'?'chat.queueSplitHint':'chat.queueMergeHint')} aria-label={$t(detail.queue_mode==='split'?'chat.queueSplitHint':'chat.queueMergeHint')}>{$t(detail.queue_mode==='split'?'chat.queueSplit':'chat.queueMerge')}</button>
@@ -861,7 +877,7 @@
   </div>
   {#if mentionHistoryExpanded && mentionGroups.history.length}<div role="group" aria-label={$t('chat.historyAttachments')}><p class="mention-section-title">{$t('chat.historyAttachments')}</p>{#each mentionGroups.history as file,i (file.id)}{@render mentionOption(file,mentionGroups.current.length+i)}{/each}</div>
   {:else if hasMoreMentions}<button type="button" class="mention-more" role="option" aria-selected={mentionIndex===choices.length} class:active={mentionIndex===choices.length} onpointerdown={event=>event.preventDefault()} onclick={()=>mentionHistoryExpanded=true}>{$t('chat.moreAttachments')} ({mentionGroups.history.length})<ChevronDown size={14}/></button>{/if}
-</div>{/if}</div><input class="file-input" type="file" multiple bind:this={fileInput} onchange={() => uploadFiles(fileInput.files)} aria-label={$t('chat.50')}/><div class="composer-toolbar"><span class="attach-trigger" role="group" onpointerenter={()=>tonguePointer=true} onpointerleave={()=>tonguePointer=false} onfocusin={()=>tongueFocused=true} onfocusout={()=>tongueFocused=false}><button class="attach-button" type="button" disabled={busy || !folderId || detail?.closed} title={$t('chat.51')} aria-label={$t('chat.50')} onclick={attachClick}><Plus size={19}/></button></span><div><button class="send-button" aria-label={$t("chat.41")} disabled={messageBytes(draft)>32000 || busy || (!!selected && !detail) || (!draft.trim() && !attachments.length) || !folderId || detail?.closed}><ArrowUp size={18}/></button></div></div></form><div class="composer-tongue" class:revealed={tongueVisible} inert={!tongueVisible} role="group" aria-label={$t('chat.project')} onpointerenter={()=>tonguePointer=true} onpointerleave={()=>tonguePointer=false} onfocusin={()=>tongueFocused=true} onfocusout={()=>tongueFocused=false}>
+</div>{/if}</div><input class="file-input" type="file" multiple bind:this={fileInput} onchange={() => uploadFiles(fileInput.files)} aria-label={$t('chat.50')}/><div class="composer-toolbar"><span class="attach-trigger" role="group" onpointerenter={()=>tonguePointer=true} onpointerleave={()=>tonguePointer=false} onfocusin={()=>tongueFocused=true} onfocusout={()=>tongueFocused=false}><button class="attach-button" type="button" disabled={busy || !folderId || detail?.closed} title={$t('chat.51')} aria-label={$t('chat.50')} onclick={attachClick}><Plus size={19}/></button></span><div>{#if selected&&detail&&mode!=='group'}<AccessMode mode={detail.access_mode??'normal'} disabled={accessBusy||loadingDetail||!!detail.closed} onChange={setAccessMode}/>{/if}<button class="send-button" aria-label={$t("chat.41")} disabled={messageBytes(draft)>32000 || busy || (!!selected && !detail) || (!draft.trim() && !attachments.length) || !folderId || detail?.closed}><ArrowUp size={18}/></button></div></div></form><div class="composer-tongue" class:revealed={tongueVisible} inert={!tongueVisible} role="group" aria-label={$t('chat.project')} onpointerenter={()=>tonguePointer=true} onpointerleave={()=>tonguePointer=false} onfocusin={()=>tongueFocused=true} onfocusout={()=>tongueFocused=false}>
       {#if workspacePicker}{@render workspacePicker()}{/if}
       <ComposerTools {workspaceId} {folderId} disabled={busy||!!detail?.closed} selectedFolderName={selectedFolder?.name??''} onOpenChange={value=>toolsOpen=value} onBeforeNavigate={persistDraft} onSelectFolder={selectProject} onAttach={attachLibraryFile} onChooseLocal={()=>fileInput.click()} onReference={()=>referenceOpen=!referenceOpen} {onPlugins}/>
 

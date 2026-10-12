@@ -1,4 +1,5 @@
 import { renameChatFileSync } from './rename.js';
+import {type AccessState,type AccessMode,type PendingApproval,accessMode,setAccessMode,requestApproval,consumeApproval,resolveApproval,pendingApprovals} from './access.js';
 import { scheduleAction, tickSchedules } from './schedules.js';
 import {seedUi, readSeeds, seedInvalidate, parseSeedFilter, seedReleaseToStandby, seedEnrollDirectStandby, seedRetireUnusedDirect, onSeedUrlRedeemed, type SeedFilter, type SeedStore} from './seeds.js';
 import {parseQuestions,validateQuestionContext,answerQuestions,activeQuestionId,questionsMarkdown,type ChatQuestion,type QuestionResponse} from './questions.js';
@@ -22,7 +23,7 @@ import { resolveChatPath } from './reveal.js';
 export interface ChatFile { label?: string; local_reference?: boolean; id: string; name: string; path: string; mime: string; size: number; sha256: string }
 export interface ToolEvent { name: string; status: 'running' | 'completed' | 'failed'; input?: string; output?: string; output_truncated?: boolean }
 export interface ChatMessage { questions?:ChatQuestion[];question_answer?:QuestionResponse;question_response?:QuestionResponse;questions_active?:boolean; discussion?:{hidden?:boolean;id:string;post_id:string;source_chat_id:string;purpose:string}; received_by?:string[]; agent_id?:string;agent_name?:string;recipient_ids?:string[];agent_plans?:{agent_id:string;plan:ChatTaskPlan}[]; task_plan?:ChatTaskPlan; kind?: 'connection_request' | 'assignment'; awaiting_user?: boolean; received_at?: number; attachments?: ChatFile[]; tool_event?: ToolEvent; id: string; role: 'user' | 'assistant'; text: string; created_at: number; reply_to?: string; final?: boolean }
-export interface ChatSession {terminal_attachment_hashes?:string[];seed_filter?:SeedFilter;seed_auto?:boolean;seed_explicit?:boolean;seed_direct?:boolean;seed_pending?:boolean;seed_owner?:string;seed_generation?:number;pending_pairing?:string; note?:string; title_agent_name?:string; work_member?:ChatMember; mode?:'work'|'group';members?:ChatMember[];agent_name?:string; pinned?: boolean; archived?: boolean; queue?: ChatMessage[]; queue_mode?: 'merge' | 'split'; queue_receipts?: Record<string,string>; title_custom?: boolean; files?: ChatFile[]; version: 1|2; id: string; title: string; created_at: number; updated_at: number; closed: boolean; messages: ChatMessage[]; attachment_id: string; lease_until: number }
+export interface ChatSession extends AccessState {terminal_attachment_hashes?:string[];seed_filter?:SeedFilter;seed_auto?:boolean;seed_explicit?:boolean;seed_direct?:boolean;seed_pending?:boolean;seed_owner?:string;seed_generation?:number;pending_pairing?:string; note?:string; title_agent_name?:string; work_member?:ChatMember; mode?:'work'|'group';members?:ChatMember[];agent_name?:string; pinned?: boolean; archived?: boolean; queue?: ChatMessage[]; queue_mode?: 'merge' | 'split'; queue_receipts?: Record<string,string>; title_custom?: boolean; files?: ChatFile[]; version: 1|2; id: string; title: string; created_at: number; updated_at: number; closed: boolean; messages: ChatMessage[]; attachment_id: string; lease_until: number }
 const DIR = 'docs/chat-sessions';
 const ASSET_DIR = 'mcp-assistant/chat-assets';
 const ARTIFACT_DIR = 'mcp-assistant/artifacts/';
@@ -377,7 +378,9 @@ function chatUiUnlocked(root:string,args:Record<string,unknown>):Record<string,u
         Object.defineProperty(s.queue_receipts??={},id,{value:queuedFingerprint(message.text,message.attachments??[]),enumerable:true,writable:true,configurable:true});
         s.queue!.splice(index,1);s.updated_at=Date.now();save(root,s);
       }
-    } else if(action==='set_queue_mode'){if(args.mode!=='merge'&&args.mode!=='split')throw new Error('Invalid queue mode');s.queue_mode=args.mode;save(root,s);}
+    } else if(action==='set_access_mode'){setAccessMode(s,args.mode);s.updated_at=Date.now();save(root,s);}
+    else if(action==='resolve_approval'){resolveApproval(s,args.approval_id,args.approve);save(root,s);}
+    else if(action==='set_queue_mode'){if(args.mode!=='merge'&&args.mode!=='split')throw new Error('Invalid queue mode');s.queue_mode=args.mode;save(root,s);}
     else if(action==='pin'){if(typeof args.pinned!=='boolean')throw new Error('pinned must be a boolean');s.pinned=args.pinned;save(root,s);}
     else if(action==='archive'){if(typeof args.archived!=='boolean')throw new Error('archived must be a boolean');s.archived=args.archived;save(root,s);}
     else if(action==='delete'){
@@ -644,7 +647,7 @@ function awaitingConfirmation(session: ChatSession): boolean {
 function queuedFingerprint(content: string, attachments: ChatFile[]): string {
   return createHash('sha256').update(JSON.stringify([content,attachments.map(f=>f.id)])).digest('hex');
 }
-function localView(root: string, session: ChatSession) {const s=visibleSession(session);const ops=readChatOperations(root,s.id);const visibleIds=new Set(s.messages.map(m=>m.id));ops.operations=ops.operations?.filter(op=>visibleIds.has(op.reply_to));const activeQuestion=activeQuestionId(s);return {...view(root,s),messages:s.messages.map(m=>m.questions?{...m,questions_active:m.id===activeQuestion}:m),pairing:pairingStatus(root,s.id),connection_id:s.attachment_id?createHash('sha256').update(s.attachment_id).digest('hex').slice(0,12):undefined,...ops,queued_messages:s.queue ?? [],queue_mode:s.queue_mode ?? (group.grouped(s)?'split':'merge')};}
+function localView(root: string, session: ChatSession) {const s=visibleSession(session);const ops=readChatOperations(root,s.id);const visibleIds=new Set(s.messages.map(m=>m.id));ops.operations=ops.operations?.filter(op=>visibleIds.has(op.reply_to));const activeQuestion=activeQuestionId(s);return {...view(root,s),messages:s.messages.map(m=>m.questions?{...m,questions_active:m.id===activeQuestion}:m),pairing:pairingStatus(root,s.id),connection_id:s.attachment_id?createHash('sha256').update(s.attachment_id).digest('hex').slice(0,12):undefined,...ops,queued_messages:s.queue ?? [],queue_mode:s.queue_mode ?? (group.grouped(s)?'split':'merge'),access_mode:accessMode(s),pending_approvals:pendingApprovals(s)};}
 function publishQueued(s: ChatSession): void {
   if(pending(s)||awaitingConfirmation(s)||!s.queue?.length)return;
   const boundary=s.queue.findIndex(m=>!!m.discussion);
@@ -710,4 +713,29 @@ export function writeChatOperation(root:string,chatId:string,event:ChatOperation
 
 export function seedStore(root:string):SeedStore {
   return {path:relative=>safe(root,relative),read:id=>load(root,id),save:chat=>save(root,chat),ids:()=>readdirSync(safe(root,DIR)).filter(n=>/^[a-zA-Z0-9_-]{1,80}\.json$/.test(n)).map(n=>n.slice(0,-5)),locked:run=>locked(root,run)};
+}
+
+export type AccessGate={kind:'run';args:Record<string,unknown>}|{kind:'blocked';result:Record<string,unknown>}|{kind:'wait';approval:PendingApproval};
+/**
+ * Applies the chat's authorization mode to one project tool call from the seed
+ * gateway. full: adds confirm=true where the tool accepts it. strict: tools that
+ * are not read-only need an approval the user grants in the app.
+ */
+export function chatAccessGate(root:string,chatId:string,tool:string,args:Record<string,unknown>,readOnly:boolean,acceptsConfirm:boolean):AccessGate {
+  return locked(root,()=>{
+    let s:ChatSession;try{s=load(root,validId(chatId));}catch{return {kind:'run',args};}
+    const mode:AccessMode=accessMode(s);
+    const next={...args};delete next.approval_id;
+    if(mode==='full'){if(acceptsConfirm)next.confirm=true;return {kind:'run',args:next};}
+    if(mode==='normal'||readOnly)return {kind:'run',args:next};
+    const approval=requestApproval(s,tool,args);
+    if(approval.status==='approved'){consumeApproval(s,approval.id);save(root,s);if(acceptsConfirm)next.confirm=true;return {kind:'run',args:next};}
+    save(root,s);
+    if(approval.status==='denied'){consumeApproval(s,approval.id);save(root,s);return {kind:'blocked',result:{ok:false,error:{code:'APPROVAL_DENIED',message:'用户拒绝了这个操作（严格授权）。不要重试同一操作；用 chat_reply 说明情况或询问用户下一步。The user denied this operation.',category:'permission',retryable:false},approval_id:approval.id}};}
+    return {kind:'wait',approval};
+  });
+}
+/** Re-reads one approval while the gateway waits for the user's decision. */
+export function approvalStatus(root:string,chatId:string,id:string):PendingApproval['status']|'missing' {
+  try{return load(root,validId(chatId)).approvals?.find(a=>a.id===id)?.status??'missing';}catch{return 'missing';}
 }

@@ -6,7 +6,8 @@ import {sendJson} from '../../oauth.js';
 import {readRequestBody} from '../http.js';
 import {currentToolCatalog} from '../catalog.js';
 import {dispatchMcpMethod} from '../mcp/dispatcher.js';
-import {seedStore,standbyHandoff} from '../../chat/store.js';
+import {seedStore,standbyHandoff,chatAccessGate,approvalStatus} from '../../chat/store.js';
+import {readOnlyTools} from '../../catalog.js';
 import {seedUrl,seedProvision,seedInitialize,seedAuthenticate,seedCreated,seedPoll,seedBegin,seedFinish,seedPendingProcesses,seedProcessSettled} from '../../chat/seeds.js';
 import {seedConnectSkill,localChatSkill} from '../../rustCatalog.generated.js';
 import {setTimeout as sleep} from 'node:timers/promises';
@@ -128,6 +129,12 @@ export async function handleSeedRoute(req:IncomingMessage,res:ServerResponse,pat
         args.workspace_folder_id=folder.id;
         if(name.startsWith('chat_')||['set_todos','update_plan','report_progress'].includes(name)){args.chat_id=binding.chat_id;args.attachment_id=binding.attachment_id;}
         if(name==='exec_command'&&!args.operation_id)args.operation_id=`seed-${seedId}-${binding.call_id.slice(0,20)}`;
+        // The chat's authorization mode (完全/一般/严格) applies to project tools.
+        if(!name.startsWith('chat_')&&!['set_todos','update_plan','report_progress'].includes(name)&&binding.chat_id){
+          const gated=await applyAccessMode(folder.path,String(binding.chat_id),name,args,catalog.tools);
+          if(gated.blocked){seedFinish(store,seedId,binding.call_id,name,args,gated.blocked);sendJson(res,200,{jsonrpc:'2.0',id,result:wrapped(gated.blocked)});return true;}
+          for(const k of Object.keys(args))delete args[k];Object.assign(args,gated.args);
+        }
         let actual:JsonObject={__unknown:true};const lifecycle=new McpToolCallLifecycle(context,req,res);
         try{
           const request={jsonrpc:'2.0',id,method,params:{name,arguments:args,_meta:{'openai/session':`seed:${seedId}`}}};
@@ -254,4 +261,22 @@ async function handleSeedGet(req:IncomingMessage,res:ServerResponse,pathname:str
     }else throw Error('Unknown action. Use connect, wait, reply, call or tools.');
     sendPage(req,res,page.text,base,page.replyTo);
   }catch(error){sendPage(req,res,`error: ${error instanceof Error?error.message:'Seed request failed'}\n\n${nextLinks(base,query.get('to')??undefined)}`,base);}
+}
+
+/** Strict mode waits this long per call for the user's decision; the AI retries with approval_id. */
+export const APPROVAL_WAIT_MS=20_000;
+async function applyAccessMode(root:string,chatId:string,name:string,args:JsonObject,tools:readonly ToolDefinition[],waitMs=Number(process.env.CTMCP_APPROVAL_WAIT_MS??APPROVAL_WAIT_MS)):Promise<{args?:JsonObject;blocked?:JsonObject}> {
+  const schema=tools.find(t=>t.name===name)?.inputSchema as {properties?:Record<string,unknown>}|undefined;
+  const acceptsConfirm=!!schema?.properties&&Object.hasOwn(schema.properties,'confirm');
+  const deadline=Date.now()+waitMs;
+  while(true){
+    const gate=chatAccessGate(root,chatId,name,args as Record<string,unknown>,readOnlyTools.has(name),acceptsConfirm);
+    if(gate.kind==='run')return {args:gate.args as JsonObject};
+    if(gate.kind==='blocked')return {blocked:gate.result as JsonObject};
+    args={...args,approval_id:gate.approval.id};
+    while(Date.now()<deadline&&approvalStatus(root,chatId,gate.approval.id)==='pending')await sleep(Math.min(1000,Math.max(0,deadline-Date.now())));
+    if(approvalStatus(root,chatId,gate.approval.id)!=='pending')continue;
+    return {blocked:{ok:false,approval_id:gate.approval.id,error:{code:'APPROVAL_REQUIRED',category:'permission',retryable:true,
+      message:`严格授权：这个操作需要用户在应用里批准，批准卡片已显示给用户。请用相同参数并加上 approval_id="${gate.approval.id}" 再次调用 ${name}（每次会等待约 20 秒）；也可以先 chat_reply(final=false) 告诉用户正在等待批准。Strict mode: the user must approve this in the app. Retry the same call with approval_id.`}}};
+  }
 }

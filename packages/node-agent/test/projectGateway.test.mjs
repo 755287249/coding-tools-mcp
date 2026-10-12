@@ -1,3 +1,4 @@
+import {readFileSync} from 'node:fs';
 import {createHash} from 'node:crypto';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -138,6 +139,44 @@ test('global seed endpoint retains its project capability and isolated catalog',
  const robots=await fetch(endpoint.replace(/\/mcp\/.*$/,'/robots.txt'));assert.equal(robots.status,200);assert.match(await robots.text(),/Allow: \//);
  assert.match(await page('/call?n=c&tool=list_workspace_folders'),/selected_folder_id/);
  registry.delete('a');assert.ok((await rpc('tools/list')).error);
+});
+
+test('chat authorization modes: strict needs in-app approval, full auto-confirms, normal is unchanged',async t=>{
+ process.env.CTMCP_APPROVAL_WAIT_MS='300';t.after(()=>{delete process.env.CTMCP_APPROVAL_WAIT_MS;});
+ const create=await fixture(t),registry=new Map(),a=await create('a',false,{runtimeRegistry:registry});const control=await create('control',true,{runtimeRegistry:registry});
+ const root=a.context.config.folders[0].path;
+ const chat=chatUi(root,{action:'create',seed_manual:true}).session;
+ assert.equal(chatUi(root,{action:'read',chat_id:chat.id}).session.access_mode,'normal');
+ const direct=chatUi(root,{action:'seed_direct',chat_id:chat.id});
+ await new Promise(resolve=>control.server.listen(0,'127.0.0.1',resolve));
+ const endpoint=`http://127.0.0.1:${control.server.address().port}/mcp/seeds/a/${direct.seed.url_key}`;
+ const rpc=async(method,params={})=>fetch(endpoint,{method:'POST',headers:{'content-type':'application/json','MCP-Protocol-Version':'2025-03-26'},body:JSON.stringify({jsonrpc:'2.0',id:Math.random(),method,params})}).then(r=>r.json());
+ const call=async(name,args)=>(await rpc('tools/call',{name,arguments:args})).result?.structuredContent;
+ const add=(file,text,extra={})=>call('apply_patch',{patch:`--- /dev/null\n+++ b/${file}\n@@ -0,0 +1 @@\n+${text}\n`,...extra});
+ assert.ok((await rpc('initialize')).result);
+ await call('seed_connect',{});const opened=await call('chat_wait',{timeout_ms:0});assert.equal(opened.status,'assigned',JSON.stringify(opened).slice(0,300));
+ assert.throws(()=>chatUi(root,{action:'set_access_mode',chat_id:chat.id,mode:'root'}),/Invalid access mode/);
+ chatUi(root,{action:'set_access_mode',chat_id:chat.id,mode:'strict'});
+ // Read-only tools still run in strict mode.
+ assert.notEqual((await call('list_workspace_folders',{}))?.error?.code,'APPROVAL_REQUIRED');
+ const blocked=await add('strict.txt','one');
+ assert.equal(blocked.error.code,'APPROVAL_REQUIRED',JSON.stringify(blocked));
+ const card=chatUi(root,{action:'read',chat_id:chat.id}).session.pending_approvals;
+ assert.equal(card.length,1);assert.equal(card[0].id,blocked.approval_id);assert.match(card[0].summary,/^apply_patch/);
+ // A changed call cannot reuse the approval.
+ chatUi(root,{action:'resolve_approval',chat_id:chat.id,approval_id:blocked.approval_id,approve:true});
+ assert.equal((await add('other.txt','x',{approval_id:blocked.approval_id})).error.code,'APPROVAL_REQUIRED');
+ const done=await add('strict.txt','one',{approval_id:blocked.approval_id});
+ assert.notEqual(done?.error?.code,'APPROVAL_REQUIRED',JSON.stringify(done));
+ assert.match(readFileSync(path.join(root,'strict.txt'),'utf8'),/^one/);
+ // Single use: the same call needs a new approval.
+ const again=await add('again.txt','one');assert.equal(again.error.code,'APPROVAL_REQUIRED');
+ chatUi(root,{action:'resolve_approval',chat_id:chat.id,approval_id:again.approval_id,approve:false});
+ assert.equal((await add('again.txt','one',{approval_id:again.approval_id})).error.code,'APPROVAL_DENIED');
+ chatUi(root,{action:'set_access_mode',chat_id:chat.id,mode:'full'});
+ const full=await add('full.txt','two');
+ assert.ok(!['APPROVAL_REQUIRED','PERMISSION_REQUIRED'].includes(full?.error?.code),JSON.stringify(full));
+ assert.equal(chatUi(root,{action:'read',chat_id:chat.id}).session.access_mode,'full');
 });
 
 test('new projects receive distinct directory identities; ambiguous legacy identities are denied',async t=>{

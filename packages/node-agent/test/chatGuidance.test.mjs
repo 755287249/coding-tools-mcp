@@ -26,7 +26,7 @@ for (const mode of ['work', 'group']) test(`chat next actions survive text-only 
   assert.equal(resumed.attachment_id, opened.attachment_id);
   assert.equal(resumed.instruction, opened.instruction);
   const immediate = chatTool(root, 'chat_wait', args);
-  assert.match(guidance('chat_wait', args, immediate), /one new independent chat_wait.*Idle is not an exit/);
+  assert.match(guidance('chat_wait', args, immediate), /one new independent chat_wait.*it is not an exit/);
   for (const timeout_ms of [0, 1]) {
     const idle = await chatWait(root, { ...args, timeout_ms });
     assert.equal(idle.status, 'idle');
@@ -134,6 +134,6 @@ test('HTTP chat returns the same next action in text and structured content', as
   assert.equal(final.structuredContent.persisted, true);
   assert.match(final.content[0].text, /chat_wait/);
   const idle = await call('chat_wait', { ...args, timeout_ms: 0 });
-  assert.match(idle.content[0].text, /Idle is not an exit/);
+  assert.match(idle.content[0].text, /it is not an exit/);
   assert.match((await call('chat_close', args)).content[0].text, /Stop waiting/);
 });

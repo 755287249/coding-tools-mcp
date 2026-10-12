@@ -498,6 +498,31 @@ async fn execute(
                             .collect::<String>()
                     ));
                 }
+                // The chat's authorization mode (完全/一般/严格) applies to project tools.
+                if !name.starts_with("chat_")
+                    && !matches!(name, "set_todos" | "update_plan" | "report_progress")
+                {
+                    if let Some(chat_id) = binding["chat_id"]
+                        .as_str()
+                        .filter(|c| !c.is_empty())
+                        .map(str::to_owned)
+                    {
+                        match apply_access_mode(&root, &chat_id, name, &args).await {
+                            Ok(next) => args = next,
+                            Err(blocked) => {
+                                seeds::finish(
+                                    &root,
+                                    seed_id,
+                                    binding["call_id"].as_str().unwrap_or(""),
+                                    &args,
+                                    &blocked,
+                                )
+                                .map_err(|e| e.message())?;
+                                return Ok(Some(wrapped(blocked)));
+                            }
+                        }
+                    }
+                }
                 let response=handle_request_async(state.mcp,json!({"jsonrpc":"2.0","id":body["id"],"method":"tools/call","params":{"name":name,"arguments":args,"_meta":{"openai/session":format!("seed:{seed_id}")}}})).await;
                 let actual = response["result"]["structuredContent"].clone();
                 seeds::finish(
@@ -528,6 +553,52 @@ async fn execute(
         _ => return Err("Method not available to seeds".into()),
     };
     Ok(Some(result))
+}
+
+/// Strict mode waits this long per call for the user's decision; the AI then
+/// retries with `approval_id`. `CTMCP_APPROVAL_WAIT_MS` overrides it (tests).
+const APPROVAL_WAIT_MS: u64 = 20_000;
+async fn apply_access_mode(
+    root: &std::path::Path,
+    chat_id: &str,
+    name: &str,
+    args: &Value,
+) -> std::result::Result<Value, Value> {
+    use crate::tools::chat::access::{self, Gate};
+    let read_only = coding_tools_tunnel_protocol::is_retry_safe_tool_name(name);
+    let accepts_confirm = crate::tools::registry::input_schema(name)["properties"]
+        .get("confirm")
+        .is_some();
+    let wait_ms = std::env::var("CTMCP_APPROVAL_WAIT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(APPROVAL_WAIT_MS);
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(wait_ms);
+    let mut current = args.clone();
+    loop {
+        let gate = access::gate(root, chat_id, name, &current, read_only, accepts_confirm)
+            .map_err(|e| json!({"ok":false,"error":{"code":"ACCESS_CHECK_FAILED","category":"permission","retryable":true,"message":e.message()}}))?;
+        match gate {
+            Gate::Run(next) => return Ok(next),
+            Gate::Blocked(result) => return Err(result),
+            Gate::Wait(id) => {
+                current["approval_id"] = json!(id);
+                while tokio::time::Instant::now() < deadline
+                    && access::status(root, chat_id, &id) == "pending"
+                {
+                    tokio::time::sleep(
+                        Duration::from_secs(1)
+                            .min(deadline.saturating_duration_since(tokio::time::Instant::now())),
+                    )
+                    .await;
+                }
+                if access::status(root, chat_id, &id) != "pending" {
+                    continue;
+                }
+                return Err(access::required_result(name, &id));
+            }
+        }
+    }
 }
 
 #[cfg(test)]
