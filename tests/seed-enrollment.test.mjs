@@ -14,10 +14,11 @@ test('manual prompt enrolls only its seed and folder, exchanges credentials, and
  assert.throws(()=>seedEnrollmentPrompt('http://elsewhere.test/mcp','folder',seed));
  assert.throws(()=>seedEnrollmentPrompt('https://example.test/mcp','folder',{...seed,expires_at:0}));
 });
-test('URL-first manual prompt carries one capability URL and the requested concise instruction',()=>{
+test('URL-first manual prompt carries one capability URL and the shared concise instruction',()=>{
  const url_key='b'.repeat(64),prompt=seedEnrollmentPrompt('https://example.test/clients/mine/mcp','folder',{...seed,url_key});
- assert.ok(prompt.startsWith('https://example.test/clients/mine/mcp/seeds/folder/'+url_key+' '));
- assert.ok(prompt.includes('chat_wait/chat_reply'));assert.ok(prompt.length<350);
- for(const secret of [seed.ticket,'Bearer','seed_access_token','seed_wait','initialize'])assert.ok(!prompt.includes(secret));
+ assert.ok(prompt.startsWith('https://example.test/clients/mine/mcp/seeds/folder/'+url_key+'\n'));
+ for(const word of ['chat_wait','chat_reply','Streamable HTTP','只能读网页','入库'])assert.ok(prompt.includes(word),word);
+ assert.ok(prompt.length<420,String(prompt.length));
+ for(const secret of [seed.ticket,'Bearer','seed_access_token','seed_wait','无人值守'])assert.ok(!prompt.includes(secret));
  assert.throws(()=>seedEnrollmentPrompt('https://example.test/mcp','folder',{...seed,url_key:'bad'}));
 });

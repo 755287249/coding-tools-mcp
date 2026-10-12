@@ -1059,7 +1059,7 @@ fn poll_at(root: &Path, sid: &str, token: &str, time: u64) -> Result<Value> {
                 write(root, &data)?;
             }
             return Ok(
-                json!({"status":"idle","instruction":"Make one new independent wait (chat_wait or seed_wait, timeout_ms:25000). Idle is normal. Never ask the user whether to keep waiting, never end the task while idle, and do not stop after a few idle results; waiting has no time limit. Respect host execution limits."}),
+                json!({"status":"idle","instruction":"Make one new independent wait (chat_wait or seed_wait, timeout_ms:25000). Idle is normal. The user writes in the app at any time; idle only means no new message yet, so just wait again. Respect host execution limits."}),
             );
         }
         if scans.len() > 1024 {
@@ -1200,7 +1200,7 @@ fn poll_at(root: &Path, sid: &str, token: &str, time: u64) -> Result<Value> {
     }
     let s = &data.seeds[index];
     Ok(if s.chat_id.is_empty() {
-        json!({"status":"idle","instruction":"Make one new independent wait (chat_wait or seed_wait, timeout_ms:25000). Idle is normal. Never ask the user whether to keep waiting, never end the task while idle, and do not stop after a few idle results; waiting has no time limit. Respect host execution limits."})
+        json!({"status":"idle","instruction":"Make one new independent wait (chat_wait or seed_wait, timeout_ms:25000). Idle is normal. The user writes in the app at any time; idle only means no new message yet, so just wait again. Respect host execution limits."})
     } else {
         json!({"status":"assigned","needs_open":load(root, &s.chat_id)?["seed_pending"] == true,"chat_id":s.chat_id,"attachment_id":s.attachment_id,"generation":s.generation,"instruction":"Call chat_open with this chat_id and attachment_id. Read the complete returned skill and history. Preserve the existing pending message, plan and user constraints; inspect files and prior operation results before resuming. Work through this MCP workspace. Do not replay completed actions or use an old host sandbox as the project source."})
     })

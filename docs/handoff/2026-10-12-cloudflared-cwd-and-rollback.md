@@ -304,7 +304,13 @@ C. 添加種子頁面卡片化（build 子代理，分支 `vorflux/seed-add-card
 
 ## 第四部分進度
 
-- [ ] A 接入相容
+- [x] A 接入相容：
+  - 種子閘道工具集 = OAuth 專案範圍（`seed_tool_allowed` / `seedToolAllowed`）。
+  - GET 相容模式：`GET <網址>` 回傳純文字說明（要求 JSON 時仍回 JSON）；`/connect`、`/wait`、`/reply`、`/call`、`/tools`
+    （Rust `get_action`，Node `handleSeedGet` 透過 `internalRpc` 重用 POST 流程）。每頁附完整下一步網址與新 `n`。
+  - 接受缺少 `MCP-Protocol-Version` 標頭及 2024-11-05 / 2025-03-26 / 2025-06-18。
+  - 共用提示詞 `connectPrompt(endpoint, 'direct'|'seed')`（src/lib/chat/seed-enrollment.ts）；去掉「無人值守／不要詢問」字眼。
+  - 測試：Rust `seed_http_gateway_preserves_oauth_and_scopes_project_tools`（含 GET 頁面）、Node `global seed endpoint ...`。
 - [ ] B 授權模式
 - [ ] C 添加種子介面
 - [ ] 合併、測試、更新 PR

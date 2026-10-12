@@ -278,7 +278,7 @@ export function seedPoll(store:SeedStore,id:string,token:string,now=Date.now()):
     const key=store.path(FILE)+'\0'+JSON.stringify([sourceOf(s),s.prefix??'',s.account]),lastScan=scans.get(key);
     if(!s.chat_id&&wasReady&&lastScan!==undefined&&now>=lastScan&&now-lastScan<1000){
       if(dirty)saveSeeds(store,data);
-      return {status:'idle',instruction:'Make one new independent wait (chat_wait or seed_wait, timeout_ms:25000). Idle is normal. Never ask the user whether to keep waiting, never end the task while idle, and do not stop after a few idle results; waiting has no time limit. Respect host execution limits.'};
+      return {status:'idle',instruction:'Make one new independent wait (chat_wait or seed_wait, timeout_ms:25000). Idle is normal. The user writes in the app at any time; idle only means no new message yet, so just wait again. Respect host execution limits.'};
     }
     if(!s.chat_id){if(scans.size>1024)for(const [key,time] of scans)if(now-time>60000)scans.delete(key);scans.set(key,now);}
     // Reconcile interrupted registry saves using the authoritative chat owner.
@@ -304,7 +304,7 @@ export function seedPoll(store:SeedStore,id:string,token:string,now=Date.now()):
       }
     }
     if(dirty)saveSeeds(store,data);
-    return s.chat_id?{status:'assigned',needs_open:store.read(s.chat_id).seed_pending===true,chat_id:s.chat_id,attachment_id:s.attachment_id,generation:s.generation,instruction:'Call chat_open with this chat_id and attachment_id. Read the complete returned skill and history. Preserve the existing pending message, plan and user constraints; inspect files and prior operation results before resuming. Work through this MCP workspace. Do not replay completed actions or use an old host sandbox as the project source.'}:{status:'idle',instruction:'Make one new independent wait (chat_wait or seed_wait, timeout_ms:25000). Idle is normal. Never ask the user whether to keep waiting, never end the task while idle, and do not stop after a few idle results; waiting has no time limit. Respect host execution limits.'};
+    return s.chat_id?{status:'assigned',needs_open:store.read(s.chat_id).seed_pending===true,chat_id:s.chat_id,attachment_id:s.attachment_id,generation:s.generation,instruction:'Call chat_open with this chat_id and attachment_id. Read the complete returned skill and history. Preserve the existing pending message, plan and user constraints; inspect files and prior operation results before resuming. Work through this MCP workspace. Do not replay completed actions or use an old host sandbox as the project source.'}:{status:'idle',instruction:'Make one new independent wait (chat_wait or seed_wait, timeout_ms:25000). Idle is normal. The user writes in the app at any time; idle only means no new message yet, so just wait again. Respect host execution limits.'};
   });
 }
 export function seedBegin(store:SeedStore,id:string,token:string,name:string,args:Record<string,unknown>,requestId:string):{chat_id:string;attachment_id:string;call_id:string} {

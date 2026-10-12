@@ -227,7 +227,7 @@ test('URL-only HTTP onboarding discovers rules, registers, waits, opens and repl
  const seed=chatUi(f.root,{action:'seed_manual',account:'url-fixture'}).batch[0],endpoint=`${f.endpoint}/seeds/repo/${seed.url_key}`;let seq=0;
  const rpc=async(method,params={},target=endpoint,notification=false)=>{const r=await fetch(target,{method:'POST',headers:{'content-type':'application/json','MCP-Protocol-Version':'2025-03-26'},body:JSON.stringify({jsonrpc:'2.0',...(!notification?{id:++seq}:{}),method,params})});return r.status===202?{accepted:true}:r.json();};
  const call=(name,args={})=>rpc('tools/call',{name,arguments:args});
- const intro=await fetch(endpoint);assert.equal(intro.status,200);assert.equal(intro.headers.get('cache-control'),'no-store');assert.match((await intro.json()).instructions,/seed_connect/);
+ const intro=await fetch(endpoint,{headers:{accept:'application/json'}});assert.equal(intro.status,200);assert.equal(intro.headers.get('cache-control'),'no-store');assert.match((await intro.json()).instructions,/seed_connect/);
  assert.equal(chatUi(f.root,{action:'seed_list'}).seeds[0].status,'preparing');
  assert.ok((await call('seed_connect')).error,'GET did not redeem');
  assert.ok((await rpc('initialize',{},`${f.endpoint}/seeds/repo/${seed.seed_id}`)).error,'public ID is not a capability');

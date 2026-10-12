@@ -123,6 +123,13 @@ test('global seed endpoint retains its project capability and isolated catalog',
  assert.ok(catalog.some(t=>t.name==='seed_connect'));assert.ok(!catalog.some(t=>['git_status','format_files','switch_workspace_folder'].includes(t.name)));
  const ready=(await rpc('tools/call',{name:'seed_connect',arguments:{}})).result.structuredContent;
  assert.equal(ready.workspace_folder_id,'a');
+ // Same tool set as OAuth projects, and a plain-text GET-only mode for web-fetch AIs.
+ assert.ok(catalog.some(t=>t.name==='chat_discuss')&&catalog.some(t=>t.name==='request_permissions'));
+ const page=suffix=>fetch(`${endpoint}${suffix}`).then(r=>r.text());
+ const guide=await page('');assert.match(guide,/\/connect\?n=/);assert.match(guide,/Streamable HTTP/);
+ assert.match(await page('/tools?n=a'),/chat_reply/);
+ const waited=await page('/wait?n=b&wait=0');assert.match(waited,/status: /);assert.match(waited,/\/wait\?n=/);
+ assert.match(await page('/call?n=c&tool=list_workspace_folders'),/selected_folder_id/);
  registry.delete('a');assert.ok((await rpc('tools/list')).error);
 });
 

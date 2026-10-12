@@ -10,6 +10,10 @@ import {seedStore,standbyHandoff} from '../../chat/store.js';
 import {seedUrl,seedProvision,seedInitialize,seedAuthenticate,seedCreated,seedPoll,seedBegin,seedFinish,seedPendingProcesses,seedProcessSettled} from '../../chat/seeds.js';
 import {seedConnectSkill,localChatSkill} from '../../rustCatalog.generated.js';
 import {setTimeout as sleep} from 'node:timers/promises';
+import {Readable} from 'node:stream';
+import {EventEmitter} from 'node:events';
+import {createHash, randomUUID} from 'node:crypto';
+import {projectScopedToolNames} from '../../rustCatalog.generated.js';
 
 // Exclude external tools, workspace switching, permissions replay and other chats.
 export const SEED_TOOLS=new Set(['chat_open','chat_wait','chat_reply','chat_upload','chat_close','set_todos','update_plan','report_progress','read_file','list_files','list_directory','search_files','search_text','search_code','grep','glob','view_image','apply_patch','edit','read_many','project_map','patch_check','format_files','edit_file','write_file','file_ops','exec_command','wait_command','send_input','kill_session','read_output','git_status','git_diff','git_log']);
@@ -25,6 +29,10 @@ function scopedTool(tool: ToolDefinition): ToolDefinition {
 }
 const waiting=new Set<string>();
 const probeTimes=new Map<string,number>();
+/** Same tool set as an OAuth project connection: both channels are equal. */
+const PROJECT_TOOLS=new Set<string>(projectScopedToolNames);
+function seedToolAllowed(name:string):boolean {return name!=='switch_workspace_folder'&&(SEED_TOOLS.has(name)||PROJECT_TOOLS.has(name));}
+const SUPPORTED_PROTOCOLS=['2024-11-05','2025-03-26','2025-06-18'];
 function wrapped(result:unknown){return {content:[{type:'text',text:JSON.stringify(result)}],structuredContent:result,isError:false};}
 export async function handleSeedRoute(req:IncomingMessage,res:ServerResponse,pathname:string,context:ToolContext):Promise<boolean>{
   const pairing=pathname.match(/^\/mcp\/seed-library\/([A-Za-z0-9_-]{1,80})$/);
@@ -41,6 +49,8 @@ export async function handleSeedRoute(req:IncomingMessage,res:ServerResponse,pat
     }catch(error){sendJson(res,400,{error:error instanceof Error?error.message:'Pairing request failed'});}
     return true;
   }
+  const action=pathname.match(/^\/mcp\/seeds\/([A-Za-z0-9_-]{1,80})\/([a-f0-9]{64})\/([a-z]{1,16})$/);
+  if(action&&req.method==='GET'){await handleSeedGet(req,res,pathname,action[3],context);return true;}
   const match=pathname.match(/^\/mcp\/seeds\/([A-Za-z0-9_-]{1,80})\/([A-Za-z0-9_-]{1,80})$/);if(!match)return false;
   res.setHeader('cache-control','no-store');
   const folder=context.config.folders.find(f=>f.id===match[1]);if(!folder){sendJson(res,404,{error:'Seed unavailable'});return true;}
@@ -48,7 +58,7 @@ export async function handleSeedRoute(req:IncomingMessage,res:ServerResponse,pat
   let seedId=match[2],token=String(req.headers.authorization??'').replace(/^Bearer /,'');
   if(req.method==='GET'){
     if(req.headers.accept==='text/event-stream'){res.setHeader('allow','POST');sendJson(res,405,{error:'SSE stream not provided; use POST'});return true;}
-    try{seedUrl(store,match[2]);if(!currentToolCatalog(context).names.includes('chat_open'))throw Error();res.setHeader('referrer-policy','no-referrer');sendJson(res,200,{name:'coding-tools-seed',transport:'streamable-http',instructions:seedConnectSkill.text});}
+    try{seedUrl(store,match[2]);if(!currentToolCatalog(context).names.includes('chat_open'))throw Error();res.setHeader('referrer-policy','no-referrer');if(String(req.headers.accept??'').includes('application/json'))sendJson(res,200,{name:'coding-tools-seed',transport:'streamable-http',instructions:seedConnectSkill.text});else sendPlain(res,guideText(baseUrl(req,pathname)));}
     catch{sendJson(res,404,{error:'Seed unavailable'});}return true;
   }
   if(req.method!=='POST'){sendJson(res,405,{error:'POST required'});return true;}
@@ -58,12 +68,14 @@ export async function handleSeedRoute(req:IncomingMessage,res:ServerResponse,pat
     if(body.jsonrpc!=='2.0'||typeof body.method!=='string')throw Error('Invalid JSON-RPC request');
     const method=body.method,params=(body.params??{}) as JsonObject;
     const protocol=req.headers['mcp-protocol-version'];
-    if(method!=='initialize'&&protocol!=='2025-03-26')throw Error('MCP-Protocol-Version must match negotiated 2025-03-26');
+    // Accept a missing header (curl users, older clients) and every published revision.
+    if(method!=='initialize'&&protocol!==undefined&&!SUPPORTED_PROTOCOLS.includes(String(protocol)))throw Error('Unsupported MCP-Protocol-Version');
+    const negotiated=SUPPORTED_PROTOCOLS.includes(String((body.params as JsonObject|undefined)?.protocolVersion))?String((body.params as JsonObject).protocolVersion):'2025-03-26';
     if(!currentToolCatalog(context).names.includes('chat_open'))throw Error('Seed access requires a tool profile with local chat enabled');
     if(urlMode){seedId=seedUrl(store,match[2],method==='initialize');token=match[2];}
     if(method==='initialize'){
       const access=urlMode?'':seedInitialize(store,seedId,token);
-      sendJson(res,200,{jsonrpc:'2.0',id,result:{protocolVersion:'2025-03-26',capabilities:{tools:{},resources:{}},serverInfo:{name:'coding-tools-seed',version:'1'},instructions:seedConnectSkill.text,...(urlMode?{}:{_meta:{seed_access_token:access}})}});return true;
+      sendJson(res,200,{jsonrpc:'2.0',id,result:{protocolVersion:negotiated,capabilities:{tools:{},resources:{}},serverInfo:{name:'coding-tools-seed',version:'1'},instructions:seedConnectSkill.text,...(urlMode?{}:{_meta:{seed_access_token:access}})}});return true;
     }
     if(method==='seed/created'){seedCreated(store,seedId,token,String(params.task_id??''));sendJson(res,200,{jsonrpc:'2.0',id,result:{ok:true}});return true;}
     seedAuthenticate(store,seedId,token);
@@ -71,7 +83,7 @@ export async function handleSeedRoute(req:IncomingMessage,res:ServerResponse,pat
     if(body.id===undefined)throw Error('Request ID required');
     let result:unknown;
     const catalog=currentToolCatalog(context);
-    if(method==='tools/list')result={tools:[connectTool,foldersTool,waitTool,...catalog.tools.filter(t=>SEED_TOOLS.has(t.name)).map(scopedTool)]};
+    if(method==='tools/list')result={tools:[connectTool,foldersTool,waitTool,...catalog.tools.filter(t=>seedToolAllowed(t.name)).map(scopedTool)]};
     else if(method==='resources/read'&&params.uri===seedConnectSkill.uri)result={contents:[seedConnectSkill]};
     else if(method==='resources/read'&&params.uri===localChatSkill.uri)result={contents:[localChatSkill]};
     else if(method==='resources/list')result={resources:[seedConnectSkill,localChatSkill].map(({uri,name,mimeType})=>({uri,name,mimeType}))};
@@ -83,7 +95,7 @@ export async function handleSeedRoute(req:IncomingMessage,res:ServerResponse,pat
       if(args.workspace_folder_id!==undefined&&args.workspace_folder_id!==folder.id)throw Error('Seed workspace mismatch');
       if(name==='seed_connect'){
         const status=seedPoll(store,seedId,token);
-        sendJson(res,200,{jsonrpc:'2.0',id,result:wrapped({...status,registered:status.status!=='retired',seed_id:seedId,workspace_folder_id:folder.id,workspace:folder,skill:seedConnectSkill,instruction:'Read skill.text, then immediately chat_wait(timeout_ms:25000). Keep calling chat_wait one at a time until assigned. Never ask the user whether to keep waiting, never end the task while idle, and do not stop after a few idle results; waiting has no time limit.'})});return true;
+        sendJson(res,200,{jsonrpc:'2.0',id,result:wrapped({...status,registered:status.status!=='retired',seed_id:seedId,workspace_folder_id:folder.id,workspace:folder,skill:seedConnectSkill,instruction:'Read skill.text, then immediately chat_wait(timeout_ms:25000). Keep calling chat_wait one at a time until assigned. The user writes in the app at any time; idle only means no new message yet, so just wait again.'})});return true;
       }
       let autoOpen=false;
       const chatWait=name==='chat_wait';
@@ -106,9 +118,9 @@ export async function handleSeedRoute(req:IncomingMessage,res:ServerResponse,pat
           seedFinish(store,seedId,binding.call_id,'chat_open',openArgs,opened);
           if(opened.ok!==true)throw Error('Could not open assigned chat; retry chat_wait');
           result=wrapped({...opened,status:'assigned',chat_id:binding.chat_id,workspace_folder_id:folder.id});
-        }else result=wrapped(chatWait?{...status,registered:status.status!=='retired',instruction:status.status==='retired'?'Seed retired. Stop waiting and do not switch identities.':'Immediately call chat_wait(timeout_ms:25000) again. Idle is normal. Never ask the user whether to keep waiting, never end the task while idle, and do not stop after a few idle results; waiting has no time limit.'}:status);}finally{waiting.delete(key);}
+        }else result=wrapped(chatWait?{...status,registered:status.status!=='retired',instruction:status.status==='retired'?'Seed retired. Stop waiting and do not switch identities.':'Immediately call chat_wait(timeout_ms:25000) again. Idle is normal. The user writes in the app at any time; idle only means no new message yet, so just wait again.'}:status);}finally{waiting.delete(key);}
       }else{
-        if(!SEED_TOOLS.has(name)||!catalog.names.includes(name))throw Error('Tool not available to seeds');
+        if(!seedToolAllowed(name)||!catalog.names.includes(name))throw Error('Tool not available to seeds');
         if(args.workspace_folder_id!==undefined&&args.workspace_folder_id!==folder.id)throw Error('Seed workspace mismatch');
         if(name==='read_output'&&!args.session_id)throw Error('Session ID required');
         const binding=seedBegin(store,seedId,token,name,args,String(id));
@@ -127,4 +139,86 @@ export async function handleSeedRoute(req:IncomingMessage,res:ServerResponse,pat
     sendJson(res,200,{jsonrpc:'2.0',id,result});
   }catch(error){sendJson(res,200,{jsonrpc:'2.0',id,error:{code:-32000,message:error instanceof Error?error.message:'Seed request failed'}});}finally{if(waitKey)waiting.delete(waitKey);}
   return true;
+}
+
+// GET compatibility mode: AIs that can only read web pages follow plain-text pages.
+// Every page lists the complete next URL with a fresh `n` so fetch caches never replay.
+function sendPlain(res:ServerResponse,text:string):void {
+  res.writeHead(200,{'content-type':'text/plain; charset=utf-8','cache-control':'no-store','referrer-policy':'no-referrer','x-content-type-options':'nosniff'}).end(text);
+}
+const nonce=()=>randomUUID().replace(/-/g,'').slice(0,12);
+function baseUrl(req:IncomingMessage,path:string):string {
+  const host=String(req.headers['x-forwarded-host']??req.headers.host??'127.0.0.1');
+  const loopback=/^(127\.|localhost|\[::1\])/.test(host);
+  const proto=String(req.headers['x-forwarded-proto']??(loopback?'http':'https'));
+  return `${proto}://${host}${path.replace(/\/$/,'')}`;
+}
+export function guideText(base:string):string {
+  return `Coding Tools MCP — 用户本人的本机项目连接 (the user's own local coding tool)
+
+这个网址由用户在自己的 Coding Tools MCP 应用里生成，用来让你访问用户指定的项目并在应用的对话里和用户交流。
+消息都由用户本人在应用里发出；chat_wait / chat_reply 等工具在这个 MCP 服务器上，不在你的客户端里。
+
+选一种你能用的方式连接 (pick the first one you can use):
+1. MCP 客户端 MCP client: 把 ${base} 添加为 Streamable HTTP MCP 服务器（不需要额外认证），然后调用 seed_connect，再 chat_wait。
+2. HTTP POST (curl/python): POST JSON-RPC 到 ${base}，Content-Type: application/json，Accept: application/json, text/event-stream；
+   先 initialize {"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"ai","version":"1"}}，
+   再 notifications/initialized，之后请求加 MCP-Protocol-Version: 2025-03-26；tools/call seed_connect，然后 chat_wait {"timeout_ms":25000}。
+3. 只能读网页 (GET only): 打开 ${base}/connect?n=${nonce()}，之后每个页面都会给出下一步网址。
+
+收到消息后按说明完成工作并回复；回复后继续等待下一条消息。等待返回 idle 只表示用户还没发消息，再等一次即可。
+`;
+}
+function nextLinks(base:string):string {
+  const n=nonce();
+  return `下一步 / Next (open the URL with your web/fetch tool):
+- 等待用户消息 Wait for the next message: ${base}/wait?n=${n}
+- 回复用户 Reply: ${base}/reply?n=${n}&to=<message.id>&final=1&text=<URL-encoded reply>
+- 进度回复（未完成）Progress: same as Reply with final=0
+- 调用项目工具 Call a tool: ${base}/call?n=${n}&tool=<name>&args=<URL-encoded JSON>  (e.g. tool=read_file&args=%7B%22path%22%3A%22README.md%22%7D)
+- 工具列表 Tool list: ${base}/tools?n=${n}`;
+}
+function summarize(action:string,result:JsonObject):string {
+  const data=(result.structuredContent??result) as JsonObject;
+  let out=`action: ${action}\nstatus: ${String(data.status??(data.ok===true?'ok':'-'))}\n`;
+  if(data.status==='message'){const m=(data.message??{}) as JsonObject;out+=`\n用户消息 User message (id=${String(m.id??'')}):\n${String(m.text??'')}\n`;}
+  if(typeof data.instruction==='string')out+=`\ninstruction: ${data.instruction}\n`;
+  let body=JSON.stringify(data,null,2);if(body.length>24000)body=body.slice(0,24000)+'\n…(truncated)';
+  return out+`\nresult:\n${body}\n`;
+}
+/** Run one JSON-RPC request through the POST handler without a network round trip. */
+async function internalRpc(path:string,context:ToolContext,body:JsonObject):Promise<JsonObject|undefined> {
+  const req=Object.assign(Readable.from([Buffer.from(JSON.stringify(body))]),{method:'POST',headers:{'mcp-protocol-version':'2025-03-26','content-type':'application/json'}}) as unknown as IncomingMessage;
+  let text='';
+  const res=Object.assign(new EventEmitter(),{writableEnded:false,statusCode:200,setHeader(){return res;},writeHead(){return res;},end(chunk?:unknown){text=chunk===undefined?'':String(chunk);res.writableEnded=true;queueMicrotask(()=>res.emit('close'));return res;}});
+  await handleSeedRoute(req,res as unknown as ServerResponse,path,context);
+  if(!text)return undefined;
+  const parsed=JSON.parse(text) as JsonObject;
+  if(parsed.error)throw Error(String((parsed.error as JsonObject).message??'Seed request failed'));
+  return parsed.result as JsonObject;
+}
+async function handleSeedGet(req:IncomingMessage,res:ServerResponse,pathname:string,action:string,context:ToolContext):Promise<void> {
+  const seedPath=pathname.replace(/\/[a-z]{1,16}$/,''),base=baseUrl(req,seedPath);
+  const query=new URL(req.url??'/','http://local').searchParams,n=query.get('n')??'';
+  const call=(name:string,args:JsonObject)=>internalRpc(seedPath,context,{jsonrpc:'2.0',id:`get-${n}`,method:'tools/call',params:{name,arguments:args}});
+  try{
+    // Every page works as the first page: redeeming is idempotent.
+    await internalRpc(seedPath,context,{jsonrpc:'2.0',id:'get-init',method:'initialize',params:{protocolVersion:'2025-03-26'}});
+    let text:string;
+    if(action==='connect')text=summarize(action,(await call('seed_connect',{}))??{});
+    else if(action==='wait'){const wait=Math.min(Number(query.get('wait')??20000)||0,25000);text=summarize(action,(await call('chat_wait',{timeout_ms:wait}))??{});}
+    else if(action==='reply'){
+      const to=query.get('to')??'',reply=query.get('text')??'';if(!n||!to||!reply.trim())throw Error('reply needs n, to and text');
+      const message_id=`get-${createHash('sha256').update(`${n}\0${to}`).digest('hex').slice(0,24)}`;
+      text=summarize(action,(await call('chat_reply',{reply_to:to,message_id,text:reply,final:query.get('final')!=='0',...(query.get('ask')==='1'?{awaiting_user:true}:{})}))??{});
+    }else if(action==='call'){
+      const tool=query.get('tool')??'';if(!tool)throw Error('call needs tool');
+      const raw=query.get('args');let args:JsonObject={};if(raw&&raw.trim()){try{args=JSON.parse(raw) as JsonObject;}catch(e){throw Error(`args must be JSON: ${e instanceof Error?e.message:e}`);}}
+      text=summarize(action,(await call(tool,args))??{});
+    }else if(action==='tools'){
+      const listed=(await internalRpc(seedPath,context,{jsonrpc:'2.0',id:'get-tools',method:'tools/list'}))??{};
+      text='tools:\n'+((listed.tools??[]) as JsonObject[]).map(t=>`- ${String(t.name)}: ${String(t.description??'').slice(0,160)}`).join('\n')+'\n';
+    }else throw Error('Unknown action. Use connect, wait, reply, call or tools.');
+    sendPlain(res,`${text}\n${nextLinks(base)}`);
+  }catch(error){sendPlain(res,`error: ${error instanceof Error?error.message:'Seed request failed'}\n\n${nextLinks(base)}`);}
 }

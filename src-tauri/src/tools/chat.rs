@@ -94,7 +94,7 @@ pub(crate) fn standby_handoff(args: &Value) -> Option<Value> {
     }
     if url_key.is_empty() {
         return Some(json!({"ok":true,"status":"idle","standby":true,
-            "instruction":"You left this conversation and returned to the seed library as a standby seed. Do not reply to it again. Immediately make one new independent chat_wait(timeout_ms:25000) and keep waiting for a new assignment. Omit chat_id and attachment_id from now on. Never ask the user whether to keep waiting."}));
+            "instruction":"You left this conversation and returned to the seed library as a standby seed. Do not reply to it again. Immediately make one new independent chat_wait(timeout_ms:25000) and keep waiting for a new assignment. Omit chat_id and attachment_id from now on. The user writes in the app at any time."}));
     }
     let folder = if stored_folder.is_empty() {
         args["workspace_folder_id"].as_str().unwrap_or("")
@@ -107,7 +107,7 @@ pub(crate) fn standby_handoff(args: &Value) -> Option<Value> {
     let suffix = format!("/seeds/{folder}/{url_key}");
     Some(
         json!({"ok":true,"status":"standby","seed_url_suffix":suffix,
-        "instruction":format!("The user moved you out of this conversation into the project's seed library as a standby AI. Stop using this chat_id/attachment_id. Build the new MCP URL by appending {suffix} to your current MCP URL (the one ending in /mcp). Keep it only in client memory; never write it to files, logs or replies. POST JSON-RPC initialize to that URL (no other authorization), send notifications/initialized, call seed_connect, read skill.text, then call chat_wait(timeout_ms:25000) again and again until you are assigned. Idle is normal; never ask the user whether to continue waiting and never end the task while idle. The URL must be connected within one hour.")}),
+        "instruction":format!("The user moved you out of this conversation into the project's seed library as a standby AI. Stop using this chat_id/attachment_id. Build the new MCP URL by appending {suffix} to your current MCP URL (the one ending in /mcp). Keep it only in client memory; never write it to files, logs or replies. POST JSON-RPC initialize to that URL (no other authorization), send notifications/initialized, call seed_connect, read skill.text, then call chat_wait(timeout_ms:25000) again and again until you are assigned. Idle only means the user has not written yet; just wait again. The URL must be connected within one hour.")}),
     )
 }
 type Result<T> = std::result::Result<T, WorkspaceError>;
@@ -597,6 +597,10 @@ fn file_path(s: &Value, f: &Value) -> Result<String> {
         Some(p) if p == current => Ok(current),
         _ => Err(err("Invalid attachment path")),
     }
+}
+/// Stable hex digest used for idempotent IDs derived outside this module.
+pub(crate) fn digest_text(text: &str) -> String {
+    digest(text.as_bytes())
 }
 fn digest(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
@@ -1334,7 +1338,7 @@ fn assign_agent_title(root: &Path, s: &mut Value, name: &str) -> Result<()> {
 }
 const CHAT_OPEN_INSTRUCTION: &str = "Read the complete skill.text and follow it for this session. Save the returned attachment_id; use the same chat_id, workspace_folder_id and attachment_id. Call chat_wait(timeout_ms:25000) now, shorter if the host requires. Reply only to delivered message IDs.";
 const CHAT_MESSAGE_INSTRUCTION: &str = "Process the delivered message; use message.id as reply_to. Follow skill.text, check existing replies before repeating work, and require chat_reply persisted=true. Progress uses final=false; after a final reply start another independent chat_wait(timeout_ms:25000), within host limits.";
-const CHAT_IDLE_INSTRUCTION: &str = "No message. Immediately make one new independent chat_wait(timeout_ms:25000), shorter if the host requires, with the same session and attachment. Idle is not an exit and has no time limit; never ask the user whether to keep waiting and never end the task while idle. Do not batch waits in a polling script.";
+const CHAT_IDLE_INSTRUCTION: &str = "No message. Immediately make one new independent chat_wait(timeout_ms:25000), shorter if the host requires, with the same session and attachment. Idle only means the user has not written yet; it is not an exit. Do not batch waits in a polling script.";
 const CHAT_PROGRESS_INSTRUCTION: &str = "Progress reply persisted. Continue the current task under skill.text; send a final chat_reply when complete or when user input is needed. Require persisted=true before advancing.";
 const CHAT_FINAL_INSTRUCTION: &str = "Final reply persisted; this acknowledges the message and does not close the chat. Immediately make one independent chat_wait(timeout_ms:25000) with the same session and attachment, shorter if the host requires, including when awaiting user input.";
 const CHAT_CLOSED_INSTRUCTION: &str = "Conversation is closed. Stop waiting; do not retry chat_wait or create a new attachment for this closed session.";
