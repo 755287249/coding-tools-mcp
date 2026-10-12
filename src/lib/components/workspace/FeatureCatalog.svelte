@@ -75,7 +75,7 @@
         {#if $installedAppPlugins.includes(appPlugin.id)}
           {#if folderId}<div class="app-plugin-body"><CodeRabbitPlugin {workspaceId} {folderId}/></div>{:else}<p class="catalog-notice">{$t('plugins.pickFolder')}</p>{/if}
         {:else}<p class="catalog-notice">{$t('plugins.installHint')}</p>{/if}
-        {#if appPlugin.userscript}<div class="app-plugin-extra"><h3>{$t('plugins.userscript')}</h3><p>{$t('plugins.userscriptHint')}</p><a class="secondary link-button" href={userscriptUrl(appPlugin.userscript)} target="_blank" rel="noreferrer"><Download size={14}/>{appPlugin.userscript} · v{appPlugin.version}</a></div>{/if}
+        {#if appPlugin.userscript}<div class="app-plugin-extra"><h3>{$t('plugins.userscript')}</h3><p>{$t('plugins.userscriptHint')}</p><a class="secondary link-button" href={userscriptUrl(appPlugin.userscript)} target="_blank" rel="noreferrer"><Download size={14}/>{`${appPlugin.userscript} · v${appPlugin.version}`}</a></div>{/if}
       </section>
     {:else if selected}
       <nav class="feature-breadcrumb" aria-label={$t('features.details')}><button onclick={()=>detail()}>{heading}</button><ChevronRight size={13}/><span>{selected.name}</span></nav>
@@ -114,7 +114,7 @@
 {#snippet appCard(plugin:typeof APP_PLUGINS[number])}
   {@const installed=$installedAppPlugins.includes(plugin.id)}
   <div class="feature-card">
-    <button class="feature-summary" onclick={()=>detail(APP_PLUGIN_PREFIX+plugin.id)}><span class="feature-icon app"><Rabbit size={24}/></span><span class="feature-card-text"><strong>{plugin.name}</strong><small>{$t(plugin.summary as MessageKey)}</small><span class="app-badge">{$t('plugins.builtIn')} · v{plugin.version}</span></span></button>
+    <button class="feature-summary" onclick={()=>detail(APP_PLUGIN_PREFIX+plugin.id)}><span class="feature-icon app"><Rabbit size={24}/></span><span class="feature-card-text"><strong>{plugin.name}</strong><small>{$t(plugin.summary as MessageKey)}</small><span class="app-badge">{`${$t('plugins.builtIn')} · v${plugin.version}`}</span></span></button>
     <button class="feature-toggle" role="switch" aria-checked={installed} aria-label={`${$t(installed?'plugins.remove':'plugins.install')}: ${plugin.name}`} title={$t(installed?'plugins.remove':'plugins.install')} onclick={()=>{setAppPlugin(plugin.id,!installed);if(!installed)detail(APP_PLUGIN_PREFIX+plugin.id);}}>{#if installed}<Check size={18}/>{:else}<Plus size={20}/>{/if}</button>
   </div>
 {/snippet}
