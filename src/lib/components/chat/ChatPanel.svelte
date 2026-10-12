@@ -19,7 +19,11 @@
   let directPrompt=$state(false);
   // The last direct URL prompt per chat is reused while it is still unused, so
   // reopening the guide does not invalidate a URL the user already pasted.
-  let directCache:{chat:string;prompt:string;expires:number}|null=null;
+  // Kept per chat in sessionStorage so a page reload does not discard a URL the user already pasted.
+  const DIRECT_CACHE='ctmcp-direct-connect';
+  type DirectEntry={prompt:string;expires:number};
+  function directCacheRead():Record<string,DirectEntry>{try{const all=JSON.parse(sessionStorage.getItem(DIRECT_CACHE)||'{}') as Record<string,DirectEntry>;const now=Date.now();return Object.fromEntries(Object.entries(all).filter(([,v])=>v&&typeof v.prompt==='string'&&v.expires>now));}catch{return {};}}
+  function directCacheWrite(key:string,entry:DirectEntry|null){try{const all=directCacheRead();if(entry)all[key]=entry;else delete all[key];sessionStorage.setItem(DIRECT_CACHE,JSON.stringify(all));}catch{}}
   function setConnectWithOAuth(value:boolean){connectWithOAuth=value;try{localStorage.setItem(OAUTH_PREF,value?'1':'0');}catch{}void openConnection();}
   import { chatConnectionTone } from '$lib/chat/connection-tone';
   import { fileDrop } from '$lib/chat/file-drop';
@@ -297,13 +301,14 @@
       let urlReady = false; try { urlReady = !!connectionEndpoint && !!pairingAddress(connectionEndpoint, folder); } catch { urlReady = false; }
       if (urlReady && mode !== 'group' && !connectWithOAuth) {
         try {
-          const cached = directCache && directCache.chat === chat && directCache.expires > Date.now() + 60_000 && detail?.seed_direct && !detail.seed_owner ? directCache.prompt : '';
+          const cacheKey = `${ws}:${folder}:${chat}`, entry = directCacheRead()[cacheKey];
+          const cached = entry && entry.expires > Date.now() + 60_000 && detail?.seed_direct && !detail.seed_owner ? entry.prompt : '';
           if (cached) connectionPrompt = cached;
           else {
             const direct = await seedRequest<{seed:SeedTicket}>(ws, folder, { action: 'seed_direct', chat_id: chat });
             if (request !== promptSequence || scope !== currentScope || !guide) return;
             connectionPrompt = directConnectPrompt(connectionEndpoint, folder, direct.seed);
-            directCache = { chat, prompt: connectionPrompt, expires: direct.seed.expires_at };
+            directCacheWrite(cacheKey, { prompt: connectionPrompt, expires: direct.seed.expires_at });
           }
           directPrompt = true;
           const fresh = await localChat(ws, folder, { action: 'read', chat_id: chat });
@@ -316,7 +321,7 @@
       // Leaving the URL mode: withdraw a pending direct URL so the OAuth AI can attach.
       if (detail?.seed_direct && !detail.seed_owner) {
         const reset = await localChat(ws, folder, { action: 'detach', chat_id: chat });
-        directCache = null;
+        directCacheWrite(`${ws}:${folder}:${chat}`, null);
         if (request !== promptSequence || scope !== currentScope || !guide) return;
         readSequence++; detail = reset.session ?? detail;
       }

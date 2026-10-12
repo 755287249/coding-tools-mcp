@@ -325,10 +325,9 @@ async fn execute(
                         json!({"status":"retired","registered":false,"instruction":"Seed retired. Stop waiting and do not switch identities."}),
                     )));
                 }
-                if status["status"] != "assigned"
-                    && crate::tools::chat::standby_handoff(&args).is_some()
-                {
-                    // Returned to standby: the old chat IDs no longer apply.
+                if crate::tools::chat::standby_handoff(&args).is_some() {
+                    // Returned to standby: the old chat IDs no longer apply, even when this
+                    // same poll already assigned the seed to another chat.
                     if let Some(map) = args.as_object_mut() {
                         map.remove("chat_id");
                         map.remove("attachment_id");

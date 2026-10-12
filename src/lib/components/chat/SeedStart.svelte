@@ -12,8 +12,9 @@
   let mode=$state<PoolMode>('prefix'),more=$state(false),source=$state(''),search=$state(''),page=$state(0),dialog:HTMLDialogElement;
   let version=0;
   const modes=[{id:'prefix' as const,key:'seeds.byPrefix' as const,icon:Layers},{id:'account' as const,key:'seeds.byAccount' as const,icon:UserRound},{id:'source' as const,key:'seeds.bySource' as const,icon:Boxes}];
-  const pools=$derived(availablePools(groups,mode,'','',true));
-  const filtered=$derived(availablePools(groups,mode,search,source,true));
+  const regular=$derived(groups.filter(g=>!g.standby));
+  const pools=$derived(availablePools(regular,mode,'','',true));
+  const filtered=$derived(availablePools(regular,mode,search,source,true));
   const standby=$derived(standbyPool(groups));
   const sources=$derived([...new Set(groups.map(g=>g.source))].sort());
   const pages=$derived(Math.max(1,Math.ceil(filtered.length/30)));
