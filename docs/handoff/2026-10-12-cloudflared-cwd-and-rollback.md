@@ -262,6 +262,7 @@
 - [x] 端到端測試（node agent + 瀏覽器）通過：巢狀專案、接入網址、OAuth 切換、重新打開沿用網址、斷開轉備用。
   測試後再修：網址快取改存 sessionStorage（重新整理頁面不會讓已貼出的網址失效）；
   備用種子在同一次 poll 被重新分配時也會移除舊 ID；備用種子只顯示在「備用 AI」卡片，不再重複出現在分類中。
+- [x] Windows CI 在 c964c7c 通過（run 38226003382，含可攜版 exe）。
 - 已知差異（已告知使用者，後續可改）：
   - 接入網址走種子閘道，工具集比 OAuth 少（沒有 chat_discuss、exec_many、request_permissions、
     history_session_* 等），每個種子最多 4 個進行中操作。
