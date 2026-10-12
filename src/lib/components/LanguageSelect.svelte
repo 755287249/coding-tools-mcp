@@ -1,21 +1,10 @@
 <script lang="ts">
   import Languages from "@lucide/svelte/icons/languages";
-  import ChevronDown from "@lucide/svelte/icons/chevron-down";
+  import MenuSelect from "./MenuSelect.svelte";
   import { LOCALE_OPTIONS, localePreference, setLocale, t, type LocalePreference } from "$lib/i18n";
-
-  function handleChange(event: Event) {
-    setLocale((event.currentTarget as HTMLSelectElement).value as LocalePreference);
-  }
+  const options = $derived([{ value: "system" as LocalePreference, label: $t("Follow system") }, ...LOCALE_OPTIONS.map(o => ({ value: o.value as LocalePreference, label: o.label }))]);
 </script>
 
-<label class="tx-lang-select">
-  <Languages size={14} aria-hidden="true" />
-  <span class="sr-only">{$t("Language")}</span>
-  <select aria-label={$t("Language")} value={$localePreference} onchange={handleChange}>
-    <option value="system">{$t("Follow system")}</option>
-    {#each LOCALE_OPTIONS as option}
-      <option value={option.value}>{option.label}</option>
-    {/each}
-  </select>
-  <ChevronDown class="pointer-events-none shrink-0 opacity-60" size={12} aria-hidden="true" />
-</label>
+<MenuSelect value={$localePreference} {options} label={$t("Language")} onChange={setLocale}>
+  {#snippet icon()}<Languages size={14} aria-hidden="true" />{/snippet}
+</MenuSelect>

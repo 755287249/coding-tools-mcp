@@ -37,7 +37,6 @@
   import RotateCw from "@lucide/svelte/icons/rotate-cw";
   import Search from "@lucide/svelte/icons/search";
   import SlidersHorizontal from "@lucide/svelte/icons/sliders-horizontal";
-  import Download from "@lucide/svelte/icons/download";
   import LogOut from "@lucide/svelte/icons/log-out";
   import type { RuntimeState } from "$lib/types";
 
@@ -173,16 +172,15 @@
     <SimpleShell onQuickSetup={capabilities.guidedSetup ? openQuickSetup : undefined} onAddWorkspace={capabilities.workspaceLifecycle ? addWorkspace : undefined}>
         {#snippet settingsNav()}
           {#if remoteDesktop}<button type="button" class="tx-settings-link" onclick={browserLogout}><LogOut size={15} aria-hidden="true"/><span class="tx-sidebar-text">{$t("sharing.logout")}</span></button>{/if}
-          <button type="button" class="tx-settings-link {routePath($page.url.pathname) === '/settings/updates' ? 'active' : ''}" onclick={()=>goto(appUrl("/settings/updates"))}><Download size={15} aria-hidden="true"/><span class="tx-sidebar-text">{$t("updates.title")}</span></button>
           {#if capabilities.host === "desktop"}
             <button
               type="button"
               class="tx-settings-link {routePath($page.url.pathname) === '/settings/general' ? 'active' : ''}"
               onclick={openGeneralSettings}
-              title={$t("General")}
+              title={$t("settings.proxy")}
             >
               <SlidersHorizontal size={15} aria-hidden="true" />
-              <span class="tx-sidebar-text">{$t("General")}</span>
+              <span class="tx-sidebar-text">{$t("settings.proxy")}</span>
             </button>
           {/if}
           {#if capabilities.sharedSecretStore}

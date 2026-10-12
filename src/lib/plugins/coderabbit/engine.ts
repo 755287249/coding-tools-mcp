@@ -23,7 +23,7 @@ export interface CodeRabbitSession {
 export interface SeedTicketLike { seed_id: string; ticket: string; url_key?: string; prefix?: string; repo_id: string; branch: string }
 export interface Repository { id: string; name: string; branch: string }
 
-export class SessionExpiredError extends Error { constructor() { super('CodeRabbit session expired; log in again'); } }
+export class SessionExpiredError extends Error { constructor() { super('CodeRabbit session expired; log in again'); this.name = 'SessionExpiredError'; } }
 /** The task may exist on CodeRabbit; never retry it automatically. */
 export class UncertainTaskError extends Error {}
 
@@ -114,7 +114,9 @@ export function publicMcpEndpoint(publicUrl: string | undefined | null): string 
 }
 
 export class CodeRabbitClient {
-  constructor(private http: PluginHttp, public session: CodeRabbitSession) {}
+  private http: PluginHttp;
+  session: CodeRabbitSession;
+  constructor(http: PluginHttp, session: CodeRabbitSession) { this.http = http; this.session = session; }
   private async call(procedure: string, input: unknown, method: 'GET' | 'POST'): Promise<any> {
     const query = method === 'GET' ? '&input=' + encodeURIComponent(JSON.stringify({ 0: input })) : '';
     const response = await this.http({ url: `${CODERABBIT}/trpc/${procedure}?batch=1${query}`, method,

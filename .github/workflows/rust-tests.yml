@@ -48,4 +48,5 @@ jobs:
           mcp::activity::
           commands::activity::
           commands::workspace::
+          commands::plugins::
           tools::patch::

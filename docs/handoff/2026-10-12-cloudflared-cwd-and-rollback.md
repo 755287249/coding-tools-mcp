@@ -541,5 +541,16 @@ C. 添加種子頁面卡片化（build 子代理，分支 `vorflux/seed-add-card
   - [x] 引擎 `src/lib/plugins/coderabbit/engine.ts`（parseSession、CodeRabbitClient、runSeeding：每批 10、遇 401 重新登入一次、結果不明即停止）、`store.ts`（seedingJob、記憶體內 session）。
   - [x] 後端代理（白名單）：Node `management/pluginHttp.ts`（`/admin/api/plugins/http`，測試 `test/pluginHttp.test.mjs`）、Rust `commands/plugins.rs::plugin_http`。
   - [x] 桌面登入視窗 `plugin_login_window`：初始化腳本在 app.coderabbit.ai 讀取 session，導向保留主機 `ctmcp-capture.invalid` 由 on_navigation 攔截；`auto` 會自動點 GitHub Cloud（靜默續期）。Node Agent 無視窗→貼上 `SESSION_SNIPPET` 產生的 JSON。
-  - [ ] UI：新增種子對話框第三張卡「CodeRabbit 插件」、頂部可最小化進度條（SimpleShell）、引擎單元測試。
+  - [x] UI：新增種子對話框第三張卡「CodeRabbit 插件」（`CodeRabbitPlugin.svelte`，`runner.ts`）、頂部可最小化進度條（`SeedingProgressBar.svelte`，掛在 SimpleShell）、
+        引擎測試 `tests/coderabbit-plugin.test.mjs`（30 顆/批 10、401 重新登入、無倉庫建倉、結果不明即停止、device flow）。
+  - [ ] **未實機驗證**：桌面登入視窗（Windows WebView2 上 on_navigation 攔截 `ctmcp-capture.invalid`）、真實 CodeRabbit 回應格式（`repos[].defaultBranch` 欄位是否存在、`repoSort:'activity'` 是否被接受）。
+        測試帳號 GitHub 密碼錯誤，無法登入；需使用者在 Windows 實測後回報。
 - [ ] 無倉庫時自動建立 GitHub 倉庫
+
+# 第十一部分：介面整理（0.1.147）
+
+- 瀏覽器共享（`BrowserSharing.svelte` + `sharing-settings.ts`）：預設選全域 MCP 連接；已啟用時若臨時隧道網址變了，自動以新網址取代舊的公開來源（`refreshedOrigins`）。
+- 連接狀態對話框：「連接設置」藍色、「瀏覽器共享」紫色，帶圖示。
+- 全域連接頁（`routes/connection/+page.svelte`）：右上「快速設置/重新配置」（已有公開位址時顯示重新配置）+「簡潔/高級」藥丸切換；MCP/Actions 分頁只在高級模式顯示。
+- 側欄：有新版本時「關於」圖示換成藍色更新圖示（CircleArrowUp）；「更多」移除「新建項目」與「應用更新」；「通用」改名「代理設置」。
+- 語言與主題改用自訂彈出選單 `MenuSelect.svelte`（取代原生 select），`tests/i18n.test.mjs` 相應更新。

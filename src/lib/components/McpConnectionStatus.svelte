@@ -5,6 +5,8 @@
   import {appUrl} from '$lib/app-path';
   import Globe from '@lucide/svelte/icons/globe';
   import X from '@lucide/svelte/icons/x';
+  import Settings2 from '@lucide/svelte/icons/settings-2';
+  import MonitorUp from '@lucide/svelte/icons/monitor-up';
   import {connectionHealth,acquireConnectionHealth,refreshConnectionHealth} from '$lib/stores/connection-health';
   let {mobile=false,onSharing}:{mobile?:boolean;onSharing?:()=>void}=$props();
   let dialog:HTMLDialogElement;
@@ -28,9 +30,13 @@
   <p class="scope-note">{$t('connection.scopeHelp')}</p>
   {#if $connectionHealth.error}<p class="scope-note">{$connectionHealth.error}</p>{/if}
   <footer><span>{$connectionHealth.receivedAt?$t('connection.updated',{time:new Date($connectionHealth.receivedAt).toLocaleTimeString()}):$t('connection.noStatus')}</span><button onclick={()=>void refreshConnectionHealth()}>{$t('connection.recheck')}</button></footer>
-  <footer><button onclick={configure}>{$t('connection.settings')}</button>{#if onSharing}<button onclick={()=>{close();onSharing?.()}}>{$t('connection.sharing')}</button>{/if}</footer>
+  <footer class="actions"><button class="settings-action" onclick={configure}><Settings2 size={14}/>{$t('connection.settings')}</button>{#if onSharing}<button class="share-action" onclick={()=>{close();onSharing?.()}}><MonitorUp size={14}/>{$t('connection.sharing')}</button>{/if}</footer>
 </dialog>
 <style>
 .connection-trigger{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;width:36px;min-height:51px;border-radius:9px;color:var(--status-color);cursor:pointer;flex:none}.connection-trigger:hover{background:var(--surface-hover)}.connection-trigger:focus-visible,.close:focus-visible,footer button:focus-visible{outline:2px solid var(--primary);outline-offset:2px}.connection-label{font-size:10px;line-height:13px;white-space:nowrap}.connection-trigger.mobile{margin:6px 14px 12px;flex-direction:row;width:calc(100% - 28px);gap:9px;justify-content:flex-start;padding:8px 12px;min-height:44px;border:1px solid var(--color-border)}.mobile .connection-label{font-size:12px;order:2;margin-left:auto}.mobile-caption{font-size:12px;color:var(--color-text-muted)}
 .connection-dialog{position:fixed;margin:auto;width:min(430px,calc(100vw - 28px));max-height:88dvh;overflow:auto;padding:24px;border:1px solid var(--color-border);border-radius:18px;background:rgb(var(--glass-base));color:var(--color-text);box-shadow:0 24px 80px #0005}.connection-dialog::backdrop{background:#0007}header{display:flex;justify-content:space-between;align-items:flex-start}header p{font-size:11px;color:var(--color-text-muted);margin-bottom:5px}h2{font-size:20px;font-weight:600}.close{padding:5px;border-radius:7px;cursor:pointer;color:var(--color-text-muted)}.status-summary{display:flex;gap:14px;align-items:center;margin:24px 0;color:var(--status-color)}.status-summary strong{font-size:17px;font-weight:600}.status-summary p{font-size:12px;color:var(--color-text-muted);margin-top:5px}dl{border-top:1px solid var(--color-border);border-bottom:1px solid var(--color-border);padding:10px 0}dl div{display:flex;justify-content:space-between;gap:14px;font-size:12px;padding:8px 0}dt{color:var(--color-text-muted)}.scope-note{font-size:12px;line-height:1.8;color:var(--color-text-muted);margin-top:16px}footer{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:22px;font-size:10px;color:var(--color-text-muted)}footer button{font-size:12px;border:1px solid var(--color-border);padding:6px 10px;border-radius:7px;cursor:pointer;white-space:nowrap}
+footer.actions{justify-content:stretch}footer.actions button{flex:1;display:inline-flex;align-items:center;justify-content:center;gap:7px;padding:9px 12px;border-radius:10px;font-weight:500}
+.settings-action{background:color-mix(in srgb,#2563eb 12%,transparent);border-color:color-mix(in srgb,#2563eb 35%,var(--color-border))!important;color:#2563eb}.settings-action:hover{background:color-mix(in srgb,#2563eb 18%,transparent)}
+.share-action{background:color-mix(in srgb,#7c3aed 11%,transparent);border-color:color-mix(in srgb,#7c3aed 35%,var(--color-border))!important;color:#7c3aed}.share-action:hover{background:color-mix(in srgb,#7c3aed 17%,transparent)}
+:global([data-theme='dark']) .settings-action{color:#93b4ff}:global([data-theme='dark']) .share-action{color:#c4a8ff}
 </style>

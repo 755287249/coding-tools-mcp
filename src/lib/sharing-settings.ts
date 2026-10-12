@@ -12,3 +12,19 @@ export function restoreSharingSettings(status: ShareStatus, profiles: WorkspaceP
   const publicOrigin = origins.find(url => url !== local && url !== lan);
   return { id: (profile || profiles[0])?.id ?? '', lan: !!lan, publicUrl: publicOrigin?.origin ?? '' };
 }
+
+const GLOBAL_MCP_ID = '00000000000000000000000000000001';
+/** Shared MCP connection first: its tunnel is the one the user configures. */
+export function preferredSharingProfile(profiles: WorkspaceProfile[], restoredId: string): string {
+  return profiles.find(p => p.id === GLOBAL_MCP_ID)?.id ?? (restoredId || profiles[0]?.id || '');
+}
+
+/**
+ * A temporary tunnel gets a new address on every start. Replace the saved
+ * public origin with the tunnel's current one so the share link keeps working.
+ */
+export function refreshedOrigins(origins: string[], stalePublic: string, currentPublic: string): string[] | null {
+  if (!currentPublic || currentPublic === stalePublic) return null;
+  const kept = origins.filter(origin => origin !== stalePublic);
+  return kept.includes(currentPublic) ? null : [...kept, currentPublic];
+}
