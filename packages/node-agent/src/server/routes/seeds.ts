@@ -36,7 +36,10 @@ function seedToolAllowed(name:string):boolean {return name!=='switch_workspace_f
 const SUPPORTED_PROTOCOLS=['2024-11-05','2025-03-26','2025-06-18'];
 function wrapped(result:unknown){return {content:[{type:'text',text:JSON.stringify(result)}],structuredContent:result,isError:false};}
 export async function handleSeedRoute(req:IncomingMessage,res:ServerResponse,pathname:string,context:ToolContext):Promise<boolean>{
-  const pairing=pathname.match(/^\/mcp\/seed-library\/([A-Za-z0-9_-]{1,80})$/);
+  // Webhook form: the pairing token is the last path segment, so one URL is the
+  // whole capability. The older Bearer-header form was removed in 0.1.147.
+  const pairing=pathname.match(/^\/mcp\/seed-library\/([A-Za-z0-9_-]{1,80})\/([a-f0-9]{64})$/);
+  if(/^\/mcp\/seed-library\/[A-Za-z0-9_-]{1,80}$/.test(pathname)){res.setHeader('cache-control','no-store');sendJson(res,410,{error:'Use the seed webhook URL from the app (address and token are now one URL)'});return true;}
   if(pairing){
     res.setHeader('cache-control','no-store');
     if(req.method!=='POST'){sendJson(res,405,{error:'POST required'});return true;}
@@ -45,7 +48,7 @@ export async function handleSeedRoute(req:IncomingMessage,res:ServerResponse,pat
     try{
       const body=await readRequestBody(req,16384);
       const args=JSON.parse(body.toString());if(!args||Array.isArray(args)||typeof args!=='object')throw Error('Invalid pairing request');
-      const result=seedProvision(seedStore(folder.path),String(req.headers.authorization??'').replace(/^Bearer /,''),args);
+      const result=seedProvision(seedStore(folder.path),pairing[2],args);
       sendJson(res,200,{...result,workspace_folder_id:folder.id});
     }catch(error){sendJson(res,400,{error:error instanceof Error?error.message:'Pairing request failed'});}
     return true;

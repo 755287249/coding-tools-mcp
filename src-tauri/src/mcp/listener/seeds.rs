@@ -123,10 +123,18 @@ pub(super) async fn get(
     response
 }
 struct WaitGuard(String);
+/// The Bearer-header pairing form was removed in 0.1.147: the token is now the
+/// last segment of one webhook URL.
+pub(super) async fn provision_removed() -> Response {
+    (
+        StatusCode::GONE,
+        json_no_store(json!({"error":"Use the seed webhook URL from the app (address and token are now one URL)"})),
+    )
+        .into_response()
+}
 pub(super) async fn provision(
     State(state): State<ListenerState>,
-    Path(folder_id): Path<String>,
-    headers: HeaderMap,
+    Path((folder_id, token)): Path<(String, String)>,
     Json(body): Json<Value>,
 ) -> Response {
     let result = (|| -> Result<Value, String> {
@@ -146,12 +154,7 @@ pub(super) async fn provision(
             .ok_or("Seed library unavailable")?;
         let root =
             std::path::PathBuf::from(folder["path"].as_str().ok_or("Seed library unavailable")?);
-        let token = headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .unwrap_or("");
-        let mut result = seeds::provision(&root, token, &body).map_err(|e| e.message())?;
+        let mut result = seeds::provision(&root, &token, &body).map_err(|e| e.message())?;
         result["workspace_folder_id"] = json!(folder_id);
         Ok(result)
     })();
@@ -646,10 +649,21 @@ mod tests {
         let base = format!("http://{address}/clients/seed/mcp");
         let pairing = "d".repeat(64);
         ui(json!({"action":"seed_pairing","token":pairing}));
-        let paired = format!("{base}/seed-library/legacy");
+        let legacy = format!("{base}/seed-library/legacy");
+        // The removed Bearer form now answers 410 Gone, even with a valid token.
+        assert_eq!(
+            client
+                .post(&legacy)
+                    .json(&json!({"action":"status"}))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::GONE
+        );
+        let paired = format!("{legacy}/{pairing}");
         let state = client
             .post(&paired)
-            .bearer_auth(&pairing)
             .json(&json!({"action":"status"}))
             .send()
             .await
@@ -667,8 +681,7 @@ mod tests {
             assert_eq!(
                 client
                     .post(&paired)
-                    .bearer_auth(&pairing)
-                    .json(&json!({"action":action}))
+                            .json(&json!({"action":action}))
                     .send()
                     .await
                     .unwrap()
@@ -678,8 +691,7 @@ mod tests {
         }
         assert_eq!(
             client
-                .post(&paired)
-                .bearer_auth("wrong")
+                .post(format!("{legacy}/{}", "e".repeat(64)))
                 .json(&json!({"action":"status"}))
                 .send()
                 .await
@@ -690,8 +702,7 @@ mod tests {
         assert_eq!(
             client
                 .post(&paired)
-                .bearer_auth(&pairing)
-                .header("content-type", "application/json")
+                    .header("content-type", "application/json")
                 .body("x".repeat(20000))
                 .send()
                 .await
@@ -702,8 +713,7 @@ mod tests {
         assert_eq!(
             client
                 .post(&base)
-                .bearer_auth(&pairing)
-                .json(&json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}))
+                    .json(&json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}))
                 .send()
                 .await
                 .unwrap()
@@ -712,7 +722,6 @@ mod tests {
         );
         assert!(!client
             .post(format!("{paired}/extra"))
-            .bearer_auth(&pairing)
             .json(&json!({"action":"status"}))
             .send()
             .await

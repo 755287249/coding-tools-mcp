@@ -23,12 +23,12 @@
   import {slide} from 'svelte/transition';
   let motionMs=$state(0);
   onMount(()=>{const query=matchMedia('(prefers-reduced-motion: reduce)');const update=()=>motionMs=query.matches?0:140;update();query.addEventListener('change',update);return()=>query.removeEventListener('change',update);});
-  import {pairingKey,pairingAddress,loadPairing,savePairing,newPairingToken} from '$lib/chat/seed-pairing';
+  import {pairingKey,pairingAddress,pairingWebhook,loadPairing,savePairing,newPairingToken} from '$lib/chat/seed-pairing';
   let {workspaceId,folderId,workspacePicker}:{workspaceId:string;folderId:string;workspacePicker?:Snippet}=$props();
   const empty=():SeedInventory=>({enabled:false,seeds:[],retired_count:0});
   let inventory=$state<SeedInventory>(empty()),address=$state(''),token=$state('');
   let busy=$state(false),error=$state(''),notice=$state(''),history=$state(false),filter=$state(''),status=$state(''),search=$state(''),page=$state(0),sourceFilter=$state(''),keyword=$state('');
-  let addMethod=$state<'manual'|'pair'>('manual'),showToken=$state(false),view=$state<'accounts'|'seeds'>('accounts'),loading=$state(true);
+  let addMethod=$state<'manual'|'pair'>('manual'),view=$state<'accounts'|'seeds'>('accounts'),loading=$state(true);
   let addOpen=$state(false),refreshing=$state(false),updatedAt=$state(0),refreshKey=$state(0),debouncedSearch=$state(''),debouncedKeyword=$state('');
   let refreshingAccount=$state('');
   function refreshAccount(account:string){if(busy||refreshing)return;refreshingAccount=account;refreshKey++;}
@@ -55,8 +55,9 @@
   $effect(()=>{const key=pairingKey(workspaceId,folderId);untrack(()=>{
     const saved=loadPairing(key),profile=$mcpConnection;
     address=saved.address;token=saved.token;
-    if(!address&&profile?.tunnel.public_url){try{address=pairingAddress(profile.tunnel.public_url.replace(/\/$/,'').replace(/\/mcp$/,'')+'/mcp',folderId);}catch{}}
-    addMethod='manual';showToken=false;view='accounts';addOpen=false;updatedAt=0;selected=[];confirmation=null;reissuedPrompt='';
+    // Prefer the current public address: a changed tunnel URL must not leave a stale webhook.
+    if(profile?.tunnel.public_url){try{address=pairingAddress(profile.tunnel.public_url.replace(/\/$/,'').replace(/\/mcp$/,'')+'/mcp',folderId);}catch{}}
+    addMethod='manual';view='accounts';addOpen=false;updatedAt=0;selected=[];confirmation=null;reissuedPrompt='';
     inventory=empty();error='';notice='';history=false;filter='';status='';search='';page=0;sourceFilter='';keyword='';
   });});
   $effect(()=>{const value=search,label=keyword;const timer=setTimeout(()=>{debouncedSearch=value;debouncedKeyword=label;page=0;},300);return()=>clearTimeout(timer);});
@@ -75,12 +76,14 @@
   });
   function query(){return {limit:50,offset:page*50,account:filter,status,search:debouncedSearch,source:sourceFilter,keyword:debouncedKeyword,include_archived:history};}
   async function action(args:Record<string,unknown>){if(busy||refreshing)return;busy=true;error='';const generation=scope;if(args.action==='seed_delete_account'&&filter===args.account)filter='';try{const result=await seedRequest(workspaceId,folderId,{...query(),...args});if(generation===scope){notice=result.affected_count===undefined?$t('seeds.actionSaved'):$t('seeds.affected',{count:result.affected_count});selected=[];showToast(notice,{kind:'success'});refreshKey++;}}catch(e){if(generation===scope){error=e instanceof Error?e.message:String(e);showToast(error,{kind:'error'});}}finally{busy=false;}}
+  const webhook=$derived(inventory.pairing_enabled?pairingWebhook(address,token):'');
+  /** Issue a new webhook token; the previous webhook stops working at once. */
   async function connect(){if(busy||refreshing)return;busy=true;error='';notice='';const generation=scope,ws=workspaceId,folder=folderId;try{
-    const saved={address:pairingAddress(address,folder),token:token.trim()};
+    const saved={address:pairingAddress(address,folder),token:newPairingToken()};
     if(!/^[a-f0-9]{64}$/.test(saved.token))throw Error($t('seeds.tokenInvalid'));
     const result=await seedRequest(ws,folder,{...query(),action:'seed_pairing',token:saved.token});
     const stored=savePairing(pairingKey(ws,folder),saved);
-    if(generation===scope){address=saved.address;token=saved.token;inventory=result;notice=$t(stored?'seeds.pairSaved':'seeds.pairStorage');}
+    if(generation===scope){address=saved.address;token=saved.token;inventory=result;notice=$t(stored?'seeds.webhookSaved':'seeds.pairStorage');}
   }catch(e){if(generation===scope)error=String(e);}finally{busy=false;}}
   async function copy(value:string){try{await copyText(value);notice=$t('seeds.copied');showToast(notice,{kind:'success'});}catch(e){error=String(e);showToast(error,{kind:'error'});}}
   const date=(value:number)=>value?new Date(value).toLocaleString():$t('seeds.never');
@@ -121,12 +124,12 @@
   <ManualSeed {workspaceId} {folderId} {address} onCreated={()=>refreshKey++}/>
   {:else}
   <div class="pairing">
-    <p class="notice">{$t('seeds.pairHelp')}</p>
-    <form onsubmit={e=>{e.preventDefault();void connect();}}>
-      <label>{$t('seeds.pairAddress')}<div class="input-row"><input bind:value={address} type="url" required placeholder="https://example.com/mcp"/><button type="button" onclick={()=>copy(address)}>{$t('seeds.copy')}</button></div></label>
-      <label>{$t('seeds.pairToken')}<div class="input-row"><input bind:value={token} type={showToken?'text':'password'} autocomplete="off" maxlength="64" required/><button type="button" aria-pressed={showToken} onclick={()=>showToken=!showToken}>{$t(showToken?'sharing.hidePassword':'sharing.showPassword')}</button><button type="button" onclick={()=>copy(token)}>{$t('seeds.copy')}</button><button type="button" disabled={busy||refreshing} onclick={()=>{token=newPairingToken();notice=$t('seeds.tokenUnsaved');}}>{$t('seeds.generateToken')}</button></div></label>
-      <div class="toolbar"><button class="primary" disabled={busy||refreshing}>{$t('seeds.savePair')}</button><button type="button" disabled={busy||refreshing||!inventory.pairing_enabled} onclick={()=>action({action:'seed_pairing',enabled:false})}>{$t('seeds.revokePair')}</button><a href={`https://github.com/755287249/coding-tools-mcp/releases/download/v${APP_VERSION}/coderabbit-seeds.user.js`} target="_blank" rel="noreferrer">{$t('seeds.install')}</a></div>
-    </form>
+    <p class="notice">{$t('seeds.webhookHelp')}</p>
+    {#if !$mcpConnection?.tunnel.public_url}<label>{$t('seeds.pairAddress')}<input bind:value={address} type="url" placeholder="https://example.com/mcp"/></label>{/if}
+    <label>{$t('seeds.webhook')}<div class="input-row"><input readonly value={webhook} placeholder={$t('seeds.webhookEmpty')} onfocus={e=>e.currentTarget.select()}/>
+      <button type="button" disabled={!webhook} onclick={()=>copy(webhook)}>{$t('seeds.copy')}</button>
+      <button type="button" class:primary={!webhook} disabled={busy||refreshing||!address} title={$t('seeds.webhookRefreshHint')} onclick={()=>void connect()}>{$t('seeds.refresh')}</button></div></label>
+    <a class="install-link" href={`https://github.com/755287249/coding-tools-mcp/releases/download/v${APP_VERSION}/coderabbit-seeds.user.js`} target="_blank" rel="noreferrer">{$t('seeds.install')}</a>
   </div>
   {/if}
   </div>
@@ -241,4 +244,5 @@
 @media(max-width:700px){.account-delete{min-width:36px;min-height:36px}}
 .row-facts{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px 20px;margin:0 0 12px}.row-facts div{min-width:0}.row-facts .wide{grid-column:1/-1}.row-facts dt{font-size:11px;color:var(--color-text-muted);margin-bottom:2px}.row-facts dd{margin:0;font-size:13px;overflow-wrap:anywhere}
 .row-more{margin-top:12px;border-top:1px solid var(--color-border);padding-top:10px}.row-more>summary{cursor:pointer;font-size:12px;color:var(--color-text-muted);width:max-content;list-style:none;display:inline-flex;gap:6px;align-items:center}.row-more>summary::-webkit-details-marker{display:none}.row-more>summary::before{content:'›';display:inline-block;transition:transform 120ms}.row-more[open]>summary::before{transform:rotate(90deg)}.row-more[open]>summary{margin-bottom:10px}.row-more .row-facts{margin:0}
+.install-link{display:inline-block;margin-top:10px;font-size:12px}
 </style>

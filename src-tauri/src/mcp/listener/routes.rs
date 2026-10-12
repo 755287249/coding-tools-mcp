@@ -65,6 +65,10 @@ fn service_routes_for_prefix(prefix: &str) -> Router<ListenerState> {
         )
         .route(
             &prefixed_route(prefix, "/mcp/seed-library/{folder_id}"),
+            post(super::seeds::provision_removed),
+        )
+        .route(
+            &prefixed_route(prefix, "/mcp/seed-library/{folder_id}/{token}"),
             post(super::seeds::provision).layer(axum::extract::DefaultBodyLimit::max(16384)),
         )
         .route(

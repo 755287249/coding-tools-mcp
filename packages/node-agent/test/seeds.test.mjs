@@ -131,15 +131,25 @@ test('600 records paginate, filter and summarize; 500 warm standby polls share o
  assert.equal(chatUi(root,{action:'seed_list',limit:1000}).seeds.length,200);
  const chat=chatUi(root,{action:'create'}).session;assert.equal(seedPoll(counted,'load-0',tokens[0],now).chat_id,chat.id);assert.equal(scans,3);
 });
-test('paired HTTP endpoint is exact, folder scoped, no-store and cannot authenticate ordinary MCP',async t=>{
- const f=await createMcpFixture(t),token='d'.repeat(64),endpoint=f.endpoint+'/seed-library/repo';chatUi(f.root,{action:'seed_pairing',token});
- const post=async(url,args,secret=token)=>fetch(url,{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+secret},body:JSON.stringify(args)});
+test('seed webhook URL is exact, folder scoped, no-store and cannot authenticate ordinary MCP',async t=>{
+ const f=await createMcpFixture(t),token='d'.repeat(64),legacy=f.endpoint+'/seed-library/repo',endpoint=legacy+'/'+token;chatUi(f.root,{action:'seed_pairing',token});
+ const post=async(url,args)=>fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(args)});
  const state=await post(endpoint,{action:'status'});assert.equal(state.status,200);assert.equal(state.headers.get('cache-control'),'no-store');assert.equal((await state.json()).workspace_folder_id,'repo');
- assert.equal((await post(endpoint,{action:'status'},'e'.repeat(64))).status,400);assert.equal((await post(endpoint,{action:'read_file'})).status,400);
- assert.equal((await post(f.endpoint+'/seed-library/other',{action:'status'})).status,404);
+ // The removed address + Bearer token form answers 410 even with the right token.
+ assert.equal((await fetch(legacy,{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+token},body:'{"action":"status"}'})).status,410);
+ assert.equal((await post(legacy+'/'+'e'.repeat(64),{action:'status'})).status,400);assert.equal((await post(endpoint,{action:'read_file'})).status,400);
+ assert.equal((await post(f.endpoint+'/seed-library/other/'+token,{action:'status'})).status,404);
  assert.equal((await post(f.endpoint,{jsonrpc:'2.0',id:1,method:'tools/list'})).status,401);
  assert.equal(tunnelPathAllowed(f.config,new URL(endpoint).pathname),true);assert.equal(tunnelPathAllowed(f.config,new URL(endpoint).pathname+'/extra'),false);
  assert.equal((await fetch(endpoint)).status,405);
+});
+
+test('seed_created UI action registers the host task with the batch ticket',t=>{
+ const {root}=fixture(t,1);const [seed]=chatUi(root,{action:'seed_batch',count:1,account:'a',repo_id:'r',branch:'main'}).batch;
+ const task='11111111-2222-3333-4444-555555555555';
+ assert.throws(()=>chatUi(root,{action:'seed_created',seed_id:seed.seed_id,ticket:'f'.repeat(64),task_id:task}));
+ assert.deepEqual(chatUi(root,{action:'seed_created',seed_id:seed.seed_id,ticket:seed.ticket,task_id:task}),{ok:true});
+ assert.equal(JSON.parse(readFileSync(path.join(root,'docs/chat-sessions/seed-library.seeds.json'))).seeds.find(s=>s.id===seed.seed_id).host_task_id,task);
 });
 
 test('source and prefix route initial and replacement owners; another warm pool cannot suppress matching scans',t=>{

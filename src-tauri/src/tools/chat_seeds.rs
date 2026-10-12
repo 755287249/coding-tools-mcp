@@ -448,6 +448,17 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
     if args["action"] == "seed_direct" {
         return direct_url(root, args);
     }
+    if args["action"] == "seed_created" {
+        // In-app plugins keep the batch tickets; register the host task the
+        // same way the seed endpoint's seed/created method does.
+        created_unlocked(
+            root,
+            args["seed_id"].as_str().unwrap_or(""),
+            args["ticket"].as_str().unwrap_or(""),
+            args["task_id"].as_str().unwrap_or(""),
+        )?;
+        return Ok(json!({"ok":true}));
+    }
     let mut data = read(root)?;
     let time = now();
     match args["action"].as_str().unwrap_or("") {
@@ -1062,8 +1073,12 @@ pub fn authenticate(root: &Path, sid: &str, token: &str) -> Result<()> {
     Ok(())
 }
 pub fn created(root: &Path, sid: &str, ticket: &str, task: &str) -> Result<()> {
-    id(&json!(task))?;
     let _lock = lock(root)?;
+    created_unlocked(root, sid, ticket, task)
+}
+/// Caller holds the chat store lock (`ui` runs inside `chat::ui`'s lock).
+fn created_unlocked(root: &Path, sid: &str, ticket: &str, task: &str) -> Result<()> {
+    id(&json!(task))?;
     let mut data = read(root)?;
     let s = data
         .seeds

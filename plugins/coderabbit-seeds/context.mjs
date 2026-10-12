@@ -29,14 +29,15 @@ export function pageSelection(page) {
   return {...login,repoName,branch,selection:JSON.stringify([login.identity,login.organization,login.workspace,repoName,branch])};
 }
 
-export function browserPairing(address,token) {
-  const url=new URL(address.trim());
-  if(url.protocol!=='https:'&&!(url.protocol==='http:'&&['localhost','127.0.0.1','[::1]'].includes(url.hostname)))throw Error('配对地址须为 HTTPS 或本机回环地址');
-  if(url.username||url.password||url.search||url.hash)throw Error('配对地址格式不正确');
+/** Parse the app's seed webhook: `<origin>/…/mcp/seed-library/<folder>/<64-hex token>`. */
+export function browserPairing(webhook) {
+  const url=new URL(String(webhook).trim());
+  if(url.protocol!=='https:'&&!(url.protocol==='http:'&&['localhost','127.0.0.1','[::1]'].includes(url.hostname)))throw Error('Webhook 须为 HTTPS 或本机回环地址');
+  if(url.username||url.password||url.search||url.hash)throw Error('Webhook 格式不正确');
   url.pathname=url.pathname.replace(/\/$/,'');
-  const match=url.pathname.match(/^(.*\/mcp)\/seed-library\/([A-Za-z0-9_-]{1,80})$/);
-  if(!match||!/^[a-f0-9]{64}$/.test(token.trim()))throw Error('请复制客户端的完整配对地址和 64 位令牌');
-  return {address:url.toString(),token:token.trim(),endpoint:url.origin+match[1],workspace_folder_id:match[2]};
+  const match=url.pathname.match(/^(.*\/mcp)\/seed-library\/([A-Za-z0-9_-]{1,80})\/([a-f0-9]{64})$/);
+  if(!match)throw Error('请复制客户端种子库里的完整 Webhook 网址');
+  return {address:url.toString(),endpoint:url.origin+match[1],workspace_folder_id:match[2]};
 }
 
 /** Capture only routing identifiers from the page's own same-origin tRPC calls. */

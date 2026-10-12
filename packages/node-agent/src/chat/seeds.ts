@@ -173,6 +173,12 @@ export function seedUi(store:SeedStore,args:Record<string,unknown>):Record<strin
     else {const token=String(args.token??'');if(!/^[a-f0-9]{64}$/.test(token))throw Error('Pairing token must contain 64 hexadecimal characters');data.pairing_hash=hash(token);}
     saveSeeds(store,data);
   }
+  else if(args.action==='seed_created') {
+    // In-app plugins hold the batch tickets themselves; register the host task
+    // exactly like the seed endpoint's seed/created method does.
+    createdUnlocked(store,String(args.seed_id??''),String(args.ticket??''),String(args.task_id??''));
+    return {ok:true};
+  }
   else if(args.action==='seed_settings') {if(typeof args.enabled!=='boolean')throw Error('enabled must be boolean');data.enabled=args.enabled;saveSeeds(store,data);}
   else if(args.action==='seed_batch'||args.action==='seed_manual') {
     const manual=args.action==='seed_manual',source=optionalLabel(args.source)|| (manual?'custom':'coderabbit'),prefix=optionalLabel(args.prefix);
@@ -281,10 +287,13 @@ function authorized(data:Library,id:string,token:string,now:number):Seed {
   touch(s.id,now);return s;
 }
 export function seedCreated(store:SeedStore,id:string,ticket:string,taskId:string):void {
-  store.locked(()=>{const data=readSeeds(store),s=data.seeds.find(s=>s.id===uid(id));
-    if(!s||s.retired_at||hash(ticket)!==s.enrollment_hash||Date.now()>s.enrollment_until)throw Error('Invalid enrollment');
-    uid(taskId);if(s.host_task_id&&s.host_task_id!==taskId)throw Error('Seed already bound to another task');s.host_task_id=taskId;saveSeeds(store,data);
-  });
+  store.locked(()=>createdUnlocked(store,id,ticket,taskId));
+}
+/** Caller holds the chat store lock (seedUi runs inside chatUi's lock). */
+function createdUnlocked(store:SeedStore,id:string,ticket:string,taskId:string):void {
+  const data=readSeeds(store),s=data.seeds.find(s=>s.id===uid(id));
+  if(!s||s.retired_at||hash(ticket)!==s.enrollment_hash||Date.now()>s.enrollment_until)throw Error('Invalid enrollment');
+  uid(taskId);if(s.host_task_id&&s.host_task_id!==taskId)throw Error('Seed already bound to another task');s.host_task_id=taskId;saveSeeds(store,data);
 }
 export function seedAuthenticate(store:SeedStore,id:string,token:string):void {store.locked(()=>{authorized(readSeeds(store),id,token,Date.now());});}
 export function seedPoll(store:SeedStore,id:string,token:string,now=Date.now()):Record<string,unknown> {

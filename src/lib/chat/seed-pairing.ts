@@ -17,3 +17,8 @@ export function savePairing(key:string,value:SeedPairing):boolean {
   try{localStorage.setItem(key,JSON.stringify({address:value.address,token:value.token}));return true;}catch{return false;}
 }
 export function newPairingToken():string {return [...crypto.getRandomValues(new Uint8Array(32))].map(x=>x.toString(16).padStart(2,'0')).join('');}
+/** One URL that carries the whole pairing capability: `<address>/<token>`. */
+export function pairingWebhook(address:string,token:string):string {
+  if(!address||!/^[a-f0-9]{64}$/.test(token))return '';
+  return address.replace(/\/$/,'')+'/'+token;
+}
