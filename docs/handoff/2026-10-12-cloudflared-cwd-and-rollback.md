@@ -583,6 +583,17 @@ C. 添加種子頁面卡片化（build 子代理，分支 `vorflux/seed-add-card
   tRPC `accessToken.exchangeBrowserOAuthCode {state,code}`。
 - 額度：網頁用 tRPC `onDemandProducts.access`（`agent.state`、`agent.remainingSeconds`、`security.remainingCents`）、`codingAgent.personalTrial`。實際欄位需登入後確認。
 
+## 實測（2026-10-12 17:50 UTC，測試帳號，curl）
+- 密碼 `Gy**755287249` 正確（之前瀏覽器填寫失敗是填寫問題）。GitHub：`GET /login` 取表單欄位 → `POST /session`（login,password,authenticity_token,timestamp,timestamp_secret…）→ 302 `/sessions/verified-device`
+  → 表單 `authenticity_token`+`otp`；郵件約 **6 分鐘**後才出現在取件 API（要輪詢，且要只接受登入之後收到的郵件 `received_at` 為 UTC+8）→ `POST /sessions/verified-device` → 302 `/`。
+- 之後 GET authorize 直接 302 到 `https://app.coderabbit.ai/login?code=…&state=…`（已授權過，無授權頁）。
+- `exchangeBrowserOAuthCode {state,code,isCoderabbitSelfHosted:false}` → `{data:{accessToken,refreshToken:null,expiresIn:"never"}}`，並設 cookie `cr-session`。
+  **所有 tRPC 都需要 cookie（`cr-session`、`__Host-cr-login-session`）+ Bearer**，只有 Bearer 會 401 "Cookie session is required"。→ 舊引擎也要帶 cookie。
+- `session.getUser {}` → `{rotatedAccessToken, data:{user, currentOrganization}}`：**要用 rotatedAccessToken 取代舊 token**。
+- 額度：`onDemandProducts.access` → `agent.remainingSeconds`（試用 6000 秒 = 100 分鐘）+ `agent.monthlyRemainingSeconds`；額度(分鐘)=合計/60。測試帳號 = 0（exhausted）。
+- 倉庫：`repositories.getAllRepos` 接受 `repoSort:'activity'`，回傳沒有 defaultBranch → `codingAgent.getRepositoryDefaultBranch {repoId}` → `{defaultBranch:'main'}`。
+- 沒測 enqueue（測試帳號額度 0）。
+
 ## 設計
 - 插件包格式：單一檔案 `<id>.ctplugin.json` = `{format:1, manifest, code}`；manifest = `{id,name,version,description,permissions:{hosts:[...],seedLibrary,progress}}`。
 - 開發：`packages/plugin-sdk`（型別 + iframe 內的 RPC 客戶端 + cookie jar）；`plugins/coderabbit/`（manifest.json + src + build.mjs，用 vite 打包成單檔）；`plugins/template/` 範例；`docs/plugins.md` 開發指南。
