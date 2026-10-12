@@ -452,3 +452,25 @@ C. 添加種子頁面卡片化（build 子代理，分支 `vorflux/seed-add-card
 - [x] 測試：Node「a disconnected direct AI is assignable while it waits and offline as soon as it stops」、Rust
       `disconnected_direct_ai_is_assignable_while_waiting_and_offline_once_it_stops`。
 - 備註：AI 自己結束回合屬宿主行為，服務端無法喚醒；使用者需在 AI 那邊讓它繼續等待，或重新簽發。
+
+# 第八部分：「管理種子」按鈕無效、授權模式選單太醜（0.1.144 之後）
+
+## 使用者回報
+1. 種子庫帳號卡片右上的「管理種子」（滑桿圖示）點了沒反應，應該展開並顯示該帳號的種子資訊。
+2. 輸入框旁「完全／一般／嚴格授權」切換是原生 `<select>`，下拉選單很醜。
+3.（同第七部分）斷開接入AI後種子庫狀態不即時 — 後端修正已在 fa50e3c，尚未發佈。
+
+## 調查
+- 「管理種子」根因（已在沙箱 Node Agent + 真實 UI 重現）：直接 AI 斷開後回到種子庫時，後端把種子 `reason` 設為 `standby`
+  （Node `chat/seeds.ts`、Rust `tools/chat_seeds.rs`），但 i18n 沒有 `seeds.reason.standby`。
+  `SeedLibrary.svelte` 的 `details(seed)` 用 `$t(\`seeds.reason.${seed.reason}\`)`，`translateFor` 讀 `MESSAGES[key][i]`，
+  鍵不存在就丟 TypeError → 切到種子列表時渲染中斷：畫面只更新一半（出現「返回帳號」但仍是帳號卡片），看起來像按鈕沒反應。
+  只要目前頁面上有任何一顆 `standby` 種子，所有帳號卡片的管理按鈕都會壞。
+- 重現：建立手動種子並連線，把 `docs/chat-sessions/seed-library.seeds.json` 中該種子的 `reason` 改成 `standby`，按「管理種子」。
+
+## 處理（進行中，勾選表示已完成）
+- [ ] i18n 新增 `seeds.reason.standby`（4 語）。
+- [ ] `translateFor` 對未知鍵回傳鍵名（不再丟例外），避免後端新增 reason/status 時整個畫面壞掉。
+- [ ] 測試：後端出現的每個 `reason` 都要有 `seeds.reason.*` 鍵；未知鍵不丟例外。
+- [ ] 授權模式改成自訂彈出選單（圖示 + 名稱 + 說明 + 勾選），取代原生 `<select>`；支援鍵盤（上下鍵、Enter、Esc）與點外部關閉。
+- [ ] svelte-check、前端測試、Node 測試、截圖確認；推送；發佈新版。
