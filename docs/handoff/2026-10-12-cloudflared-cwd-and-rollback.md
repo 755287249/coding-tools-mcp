@@ -469,8 +469,13 @@ C. 添加種子頁面卡片化（build 子代理，分支 `vorflux/seed-add-card
 - 重現：建立手動種子並連線，把 `docs/chat-sessions/seed-library.seeds.json` 中該種子的 `reason` 改成 `standby`，按「管理種子」。
 
 ## 處理（進行中，勾選表示已完成）
-- [ ] i18n 新增 `seeds.reason.standby`（4 語）。
-- [ ] `translateFor` 對未知鍵回傳鍵名（不再丟例外），避免後端新增 reason/status 時整個畫面壞掉。
-- [ ] 測試：後端出現的每個 `reason` 都要有 `seeds.reason.*` 鍵；未知鍵不丟例外。
-- [ ] 授權模式改成自訂彈出選單（圖示 + 名稱 + 說明 + 勾選），取代原生 `<select>`；支援鍵盤（上下鍵、Enter、Esc）與點外部關閉。
-- [ ] svelte-check、前端測試、Node 測試、截圖確認；推送；發佈新版。
+- [x] i18n 新增 `seeds.reason.standby`、`seeds.reason.replaced`、`seeds.reason.workspace_released`（4 語；後兩個也是後端會寫、但缺翻譯的 reason）。
+- [x] `src/lib/i18n/index.ts` `translateFor` 對未知鍵回傳鍵名（不再丟例外），避免後端新增 reason/status 時整個畫面壞掉。
+- [x] 測試 `tests/seed-reasons.test.mjs`：掃描 Node `chat/seeds.ts` 與 Rust `tools/chat_seeds.rs` 寫入的每個 reason（含 retire 呼叫），都要有 `seeds.reason.*` 鍵；未知鍵不丟例外。
+- [x] `AccessMode.svelte` 授權模式改成自訂彈出選單（圖示 + 名稱 + 說明 + 勾選），取代原生 `<select>`；支援鍵盤（上下鍵、Enter、Esc）與點外部關閉。
+- [x] 順手修正：`ChatToolActivity.svelte` 宣告了名為 `state` 的變數，讓 `$state(false)` 被當成 store 讀取（svelte-check 報錯）→ 改名 `activityState`。
+- [x] 驗證（沙箱 Node Agent + `build:ui` + agent-browser）：standby 種子下按「管理種子」正常展開；種子 chat_wait 時顯示「可分配」，停止等待 60 秒後變「離線」；
+      授權選單淺色/深色/手機寬度截圖正常，點選與鍵盤（↑↓/Enter/Esc）可切換。svelte-check 0 錯誤；根目錄 `node --test tests/*.test.mjs` 278 通過。
+- [x] 版本 0.1.145（`version:sync` + parity manifest baseline）。
+- 備註：`node-agent:parity:check` 在本沙箱因沒有 cargo（rust-contract 子檢查）失敗，其餘 28 項通過；依 CI 結果為準。
+- [ ] 推送後跑 CI（Rust tests、Windows Manual source upgrade），再用 chat-beta.yml 發佈 v0.1.145 穩定版（流程同第五/六部分）。
