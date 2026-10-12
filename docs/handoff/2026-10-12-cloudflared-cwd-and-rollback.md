@@ -134,7 +134,7 @@
 - [x] Linux：`cargo test --lib -- data:: tunnel::` 98 項通過；`version:check`、`node-agent:parity:check` 通過。
 - [x] 推送、開 PR：https://github.com/755287249/coding-tools-mcp/pull/2（base：`coderabbit/sandbox-mcp-setup/bf9588fc`）。
 - [x] 內部 review（風險 3/10）：已修正「還原前先檢查備份」、確認視窗中的備份路徑、測試版本號、還原失敗訊息。
-- [ ] 在 Windows CI 跑 `Manual source upgrade (Windows)`（Windows 專屬測試 + 可攜版 exe）。
+- [x] Windows CI `Manual source upgrade (Windows)` 通過（run 38211322270：provider 測試、handoff/rollback 測試、可攜版 exe 建置）。可攜版 exe 在該 run 的 Artifacts（保留 14 天）。
 - [ ] 使用者在 Windows 實機驗證：全局連接 + Cloudflare 隧道可啟動。
 
 ## 7. 安全提醒
