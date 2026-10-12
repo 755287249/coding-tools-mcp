@@ -3246,7 +3246,7 @@ fn trusted_windows_runtime(program: &Path) -> WorkspaceResult<Option<PathBuf>> {
     if name == "cmd.exe" {
         let cmd = windows_system_directory()?.join("cmd.exe");
         if is_bare_program(program, "cmd.exe") || same_existing_path(program, &cmd) {
-            return Ok(Some(canonical_or_original(cmd)));
+            return Ok(Some(trusted_runtime_launch_path(cmd)));
         }
     }
 
@@ -3262,7 +3262,7 @@ fn trusted_windows_runtime(program: &Path) -> WorkspaceResult<Option<PathBuf>> {
             if (!selected_name.is_empty() && is_bare_program(program, selected_name))
                 || same_existing_path(program, &selected)
             {
-                return Ok(Some(canonical_or_original(selected)));
+                return Ok(Some(trusted_runtime_launch_path(selected)));
             }
         }
     }
@@ -3275,7 +3275,7 @@ fn trusted_windows_runtime(program: &Path) -> WorkspaceResult<Option<PathBuf>> {
                     || is_bare_program(program, tool)
                     || same_existing_path(program, &selected)
                 {
-                    return Ok(Some(canonical_or_original(selected)));
+                    return Ok(Some(trusted_runtime_launch_path(selected)));
                 }
             }
         }
@@ -3331,8 +3331,17 @@ fn same_existing_path(left: &Path, right: &Path) -> bool {
         .eq_ignore_ascii_case(&right.to_string_lossy())
 }
 
-fn canonical_or_original(path: PathBuf) -> PathBuf {
-    path.canonicalize().unwrap_or(path)
+/// Resolves a trusted runtime to the canonical path used to launch it.
+///
+/// `canonicalize()` returns verbatim `\\?\C:\...` paths. A child launched from
+/// a verbatim path sees that prefix in its own module path, and Git for Windows
+/// then looks for its system config at `//?/C:/.../etc/gitconfig`. Git rejects
+/// that path, so every repository command fails with "unknown error occurred
+/// while reading the configuration files". Launch from the plain Win32 form.
+fn trusted_runtime_launch_path(path: PathBuf) -> PathBuf {
+    path.canonicalize()
+        .map(|canonical| acl_win32_path(&canonical))
+        .unwrap_or(path)
 }
 
 fn resolve_reparse_target(path: &Path) -> WorkspaceResult<PathBuf> {
@@ -3881,6 +3890,29 @@ mod tests {
         assert!(trusted_windows_runtime(&fake_git)
             .expect("fake Git lookup")
             .is_none());
+    }
+
+    #[test]
+    fn trusted_runtimes_launch_from_plain_win32_paths() {
+        // Git for Windows derives its system config path from its own module
+        // path, so a verbatim launch path breaks every repository command.
+        let cmd = windows_system_directory()
+            .expect("system directory")
+            .join("cmd.exe");
+        let git = which::which("git.exe")
+            .or_else(|_| which::which("git"))
+            .expect("Git runtime");
+        for (requested, expected) in [(Path::new("cmd.exe"), &cmd), (git.as_path(), &git)] {
+            let trusted = trusted_windows_runtime(requested)
+                .expect("trusted runtime lookup")
+                .expect("trusted runtime");
+            assert!(
+                !trusted.as_os_str().to_string_lossy().starts_with(r"\\?\"),
+                "trusted runtime must launch from a plain Win32 path: {}",
+                trusted.display()
+            );
+            assert!(same_existing_path(&trusted, expected));
+        }
     }
 
     #[test]
