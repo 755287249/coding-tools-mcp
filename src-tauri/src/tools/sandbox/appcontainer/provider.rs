@@ -3337,11 +3337,18 @@ fn same_existing_path(left: &Path, right: &Path) -> bool {
 /// a verbatim path sees that prefix in its own module path, and Git for Windows
 /// then looks for its system config at `//?/C:/.../etc/gitconfig`. Git rejects
 /// that path, so every repository command fails with "unknown error occurred
-/// while reading the configuration files". Launch from the plain Win32 form.
+/// while reading the configuration files". Launch from the plain Win32 form
+/// when it resolves to the same file.
 fn trusted_runtime_launch_path(path: PathBuf) -> PathBuf {
-    path.canonicalize()
-        .map(|canonical| acl_win32_path(&canonical))
-        .unwrap_or(path)
+    let Ok(canonical) = path.canonicalize() else {
+        return path;
+    };
+    let plain = acl_win32_path(&canonical);
+    if same_existing_path(&plain, &canonical) {
+        plain
+    } else {
+        canonical
+    }
 }
 
 fn resolve_reparse_target(path: &Path) -> WorkspaceResult<PathBuf> {
