@@ -4,8 +4,13 @@
   import PresenceDot from './PresenceDot.svelte';
   import SeedStart from './SeedStart.svelte';
   import SeedLoading from './SeedLoading.svelte';
-  import type {SeedFilter} from '$lib/api/seeds';
+  import {seedRequest,type SeedFilter} from '$lib/api/seeds';
   let seedStartPending=$state(false);
+  // Seed library switch: the two header buttons are [接入AI] [种子库]; the one
+  // that is connected becomes [断开] and the other switches to it.
+  let seedPicker=$state<HTMLDialogElement>();
+  let seedPickerOpen=$state(false);
+  let standbyNotice=$state('');
   import { chatConnectionTone } from '$lib/chat/connection-tone';
   import { fileDrop } from '$lib/chat/file-drop';
   let dropActive=$state(false);
@@ -524,7 +529,7 @@
   $effect(() => {
     const ws = workspaceId, folder = folderId; const gen = ++generation;
     untrack(() => { persistDraft(); rememberReadingPosition(); }); readingScope = ''; pendingPosition = null; activeDraftKey = ''; draftStorageError = false;
-    readSequence++; loadingDetail = false; readError = '';seedStartPending=false;
+    readSequence++; loadingDetail = false; readError = '';seedStartPending=false;standbyNotice='';
     seen = restoreSeen(ws, folder);
     sessions = []; selected = ''; detail = null; draft = ''; error = ''; retry = null; attachments = []; renameId = ''; renameTitle = '';
     untrack(() => { if (folder && requestedChatId) selectSession(ws, folder, requestedChatId); });
@@ -675,13 +680,42 @@
       if (gen === generation && target === selected && [document.body, fileInput, composer].includes(document.activeElement as HTMLElement)) composer?.focus({ preventScroll: true });
     }
   }
-  async function detach() {
-    if (busy || !selected || !detail || detail.closed) return;
+  /** A still-valid AI moves to the seed library as standby; an invalid one is just disconnected. */
+  async function detach(): Promise<boolean> {
+    if (busy || !selected || !detail || detail.closed) return false;
     busy = true; error = ''; const gen = generation, target = selected;
     try {
-      const result = await localChat(workspaceId, folderId, { action: 'detach', chat_id: target });
-      if (gen === generation && target === selected) { readSequence++; detail = result.session ?? null; guide = false; }
-    } catch (e) { if (gen === generation) error = String(e); } finally { busy = false; }
+      const result = await localChat(workspaceId, folderId, { action: 'detach', chat_id: target, standby: mode !== 'group' });
+      if (gen === generation && target === selected) {
+        readSequence++; detail = result.session ?? null; guide = false;
+        standbyNotice = result.standby === 'seed' ? $t('seeds.movedSeed') : result.standby === 'direct' ? $t('seeds.movedDirect') : '';
+        return true;
+      }
+      return false;
+    } catch (e) { if (gen === generation) error = String(e); return false; } finally { busy = false; }
+  }
+  const aiKind = $derived(!detail || detail.closed ? 'none' : detail.seed_auto ? 'seed' : (detail.status === 'connected' || detail.status === 'waiting') ? 'direct' : 'none');
+  async function switchToDirect() {
+    if (aiKind === 'seed' && !(await detach())) return;
+    await openConnection();
+  }
+  function openSeedPicker() {
+    if (busy || !folderId || detail?.closed) return;
+    seedPickerOpen = true; seedPicker?.showModal();
+  }
+  async function chooseSeedPool(filter: SeedFilter | null): Promise<boolean> {
+    seedPicker?.close();
+    if (filter === null) { await openConnection(); return true; }
+    if (!selected) return await create(true, filter);
+    if (aiKind === 'direct' && !(await detach())) return false;
+    if (busy || !selected) return false;
+    busy = true; error = ''; const gen = generation, target = selected;
+    try {
+      await seedRequest(workspaceId, folderId, { action: 'seed_resume_chat', chat_id: target, seed_filter: filter });
+      const result = await localChat(workspaceId, folderId, { action: 'read', chat_id: target });
+      if (gen === generation && target === selected) { readSequence++; detail = result.session ?? detail; guide = false; }
+      return true;
+    } catch (e) { if (gen === generation) error = String(e); return false; } finally { busy = false; }
   }
   async function copyPrompt() {
     if (!connectionPrompt || connectionLoading) return;
@@ -734,7 +768,7 @@
       <button class="mobile-chat-actions" aria-label={$t('mobile.chatActions')} aria-expanded={mobileActions} onclick={()=>mobileActions=!mobileActions}><Ellipsis size={20}/></button>
       <div class="header-actions">
         {#if unreadTotal}<button class="unread-total" onclick={showUnread} aria-label={`${$t('chat.90')}: ${unreadTotal}`}>{unreadTotal}</button>{/if}
-        <div class="connection-actions"><button disabled={busy || !selected || !(detail?.seed_auto || detail?.status === 'connected' || detail?.status === 'waiting')} onclick={requestDisconnect}>{$t('chat.disconnect')}</button><button class="connect-button" data-connection={chatConnectionTone(detail)} title={needsAi?$t('chat.connectHint'):undefined} disabled={busy || !folderId || detail?.closed || detail?.seed_auto || seedStartPending} onclick={openConnection}>{$t(detail?.seed_auto?'shell.seeds':mode==='group'?'chat.inviteGroup':'chat.connectWork')}</button></div>
+        <div class="connection-actions">{#if mode==='group'}<button disabled={busy || !selected || !(detail?.status === 'connected' || detail?.status === 'waiting')} onclick={requestDisconnect}>{$t('chat.disconnect')}</button><button class="connect-button" data-connection={chatConnectionTone(detail)} title={needsAi?$t('chat.connectHint'):undefined} disabled={busy || !folderId || detail?.closed} onclick={openConnection}>{$t('chat.inviteGroup')}</button>{:else}<button class="connect-button" data-connection={aiKind==='seed'?undefined:chatConnectionTone(detail)} title={aiKind==='none'&&needsAi?$t('chat.connectHint'):undefined} disabled={busy || !folderId || detail?.closed} onclick={aiKind==='direct'?requestDisconnect:switchToDirect}>{$t(aiKind==='direct'?'chat.disconnect':'chat.connectWork')}</button><button class="seed-button" data-connection={aiKind==='seed'?chatConnectionTone(detail):undefined} title={$t('seeds.pickerTitle')} disabled={busy || !folderId || detail?.closed} onclick={aiKind==='seed'?requestDisconnect:openSeedPicker}>{$t(aiKind==='seed'?'chat.disconnect':'shell.seeds')}</button>{/if}</div>
         {#if selected}<button title={$t('chat.36')} aria-label={$t('chat.36')} onclick={download}><Download size={16}/></button>{/if}
 
         {#if headerActions}{@render headerActions()}{/if}
@@ -742,6 +776,7 @@
     </header>
     {#if error}<div class="chat-error" role="alert">{error}<button onclick={() => error = ''} aria-label={$t("chat.38")}>×</button></div>{/if}
     {#if isNewConversation}<div class="mode-switch" aria-label={$t('chat.mode')}><button type="button" aria-pressed={mode==='group'} disabled={busy||memberBusy||detail?.closed||!workspaceId||!folderId} onclick={()=>changeMode('group')}>{$t('chat.group')}</button><button type="button" aria-pressed={mode==='work'} disabled={busy||memberBusy||detail?.closed} onclick={()=>changeMode('work')}>{$t('chat.work')}</button></div>{/if}
+    {#if standbyNotice}<p class="seed-pool-note" role="status">{standbyNotice}</p>{/if}
     {#if detail?.seed_auto&&detail.seed_filter}<p class="seed-pool-note">{$t('seeds.poolForChat')}: {detail.seed_filter.source||$t('seeds.allSources')} · {detail.seed_filter.prefix!==undefined?(detail.seed_filter.prefix||$t('seeds.unlabelled')):detail.seed_filter.keyword||$t('seeds.allPrefixes')}{#if detail.seed_filter.account} · {detail.seed_filter.account}{/if}</p>{/if}
     <div class="conversation-body">
     <div class="feed-frame">
@@ -791,8 +826,9 @@
   {:else}<div class="mobile-action-list">
     {#if mobileHeader}<button disabled={busy} onclick={()=>{mobileActions=false;void mobileHeader.newChat()}}><SquarePen size={18}/>{$t('shell.newChat')}</button>{/if}
     {#if detail}<button disabled={busy} onclick={()=>startRename(detail!)}><Pencil size={18}/>{$t('chat.85')}</button>{/if}
-    <button class="connect-button" data-connection={chatConnectionTone(detail)} disabled={busy||!folderId||detail?.closed} onclick={()=>{mobileActions=false;void openConnection()}}><Plus size={18}/>{$t(mode==='group'?'chat.inviteGroup':'chat.connectWork')}</button>
-    <button disabled={busy||!selected||!(detail?.status==='connected'||detail?.status==='waiting')} onclick={()=>{mobileActions=false;requestDisconnect()}}><X size={18}/>{$t('chat.disconnect')}</button>
+    {#if mode==='group'||aiKind!=='direct'}<button class="connect-button" data-connection={chatConnectionTone(detail)} disabled={busy||!folderId||detail?.closed} onclick={()=>{mobileActions=false;void (mode==='group'?openConnection():switchToDirect())}}><Plus size={18}/>{$t(mode==='group'?'chat.inviteGroup':'chat.connectWork')}</button>{/if}
+    {#if mode!=='group'&&aiKind!=='seed'}<button disabled={busy||!folderId||detail?.closed} onclick={()=>{mobileActions=false;openSeedPicker()}}><Plus size={18}/>{$t('shell.seeds')}</button>{/if}
+    <button disabled={busy||!selected||!(detail?.seed_auto||detail?.status==='connected'||detail?.status==='waiting')} onclick={()=>{mobileActions=false;requestDisconnect()}}><X size={18}/>{$t('chat.disconnect')}</button>
     {#if selected}<button onclick={()=>{mobileActions=false;download()}}><Download size={18}/>{$t('chat.36')}</button>{/if}
     {#if unreadTotal}<button onclick={()=>{mobileActions=false;showUnread()}}>{$t('chat.90')} ({unreadTotal})</button>{/if}
     {#if headerActions}<div class="mobile-extra-actions" role="presentation" onclick={event=>{if((event.target as Element).closest('button'))mobileActions=false}}>{@render headerActions()}</div>{/if}
@@ -830,6 +866,10 @@
 <dialog class="disconnect-dialog" bind:this={disconnectDialog} onclose={()=>disconnectAt=0}>
   <h2>{$t('chat.88')}</h2><p>{$t('shell.disconnectNotice')}</p>
   <div><button onclick={()=>disconnectDialog?.close()}>{$t('Cancel')}</button><button class="confirm-disconnect" disabled={disconnectSeconds>0 || busy} onclick={confirmDisconnect}>{$t('chat.88')}{disconnectSeconds>0 ? ` (${disconnectSeconds})` : ''}</button></div>
+</dialog>
+<dialog class="seed-picker" bind:this={seedPicker} aria-label={$t('seeds.pickerTitle')} onclose={()=>seedPickerOpen=false}>
+  <header><h2>{$t('seeds.pickerTitle')}</h2><button aria-label={$t('Close')} onclick={()=>seedPicker?.close()}><X size={18}/></button></header>
+  {#if seedPickerOpen&&workspaceId&&folderId}<SeedStart {workspaceId} {folderId} showManual={false} onChoose={chooseSeedPool}/>{/if}
 </dialog>
 {#snippet mentionOption(file:ChatFile,index:number)}
   <button type="button" role="option" aria-selected={index===mentionIndex} class:active={index===mentionIndex} onpointerdown={event=>event.preventDefault()} onclick={()=>insertMention(file)}><strong>@{file.label}</strong><span>{file.name}</span></button>
@@ -927,4 +967,5 @@
 .mention-choices[popover]{position:fixed;inset:auto;margin:0;z-index:auto;color:var(--color-text);}
 button.connect-button{--connection-color:214 111 120;background:rgb(var(--connection-color) / .18);color:color-mix(in srgb,rgb(var(--connection-color)) 65%,var(--color-text));font-weight:600;white-space:nowrap}button.connect-button:hover:enabled{background:rgb(var(--connection-color) / .26)}button.connect-button[data-connection=online]{--connection-color:66 166 119}button.connect-button[data-connection=stale]{--connection-color:195 153 61}
 form.file-drop-active{outline:2px dashed var(--primary);outline-offset:3px}.file-drop-hint{position:absolute;inset:4px;z-index:5;display:grid;place-items:center;pointer-events:none;border-radius:inherit;background:var(--surface-2);color:var(--color-text);font-size:14px;font-weight:600}
+.seed-picker{width:min(760px,calc(100vw - 28px));max-height:88dvh;overflow:auto;margin:auto;padding:22px;border:1px solid var(--color-border);border-radius:16px;background:var(--surface-2,var(--card-bg));color:var(--color-text)}.seed-picker::backdrop{background:#0009}.seed-picker>header{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}.seed-picker>header h2{font-size:17px;margin:0}.seed-picker>header button{display:grid;place-items:center;border:0;background:transparent;padding:6px;border-radius:6px}
 </style>

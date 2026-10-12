@@ -195,7 +195,9 @@
 - [x] B standby 欄位與過濾、`pool_groups`（含 0 可分配的池）
 - [x] C 斷開轉備用：`detach` 帶 `standby:true`；`release_to_standby` / `enroll_direct_standby`；
       記憶體 `STANDBY_HANDOFFS`，`chat_wait`（gateway 與 wait 迴圈）回傳 standby 指令。Rust `standby_tests` 4 項、Node 3 項通過。
-- [ ] D 前端按鈕與卡片
+- [x] D 前端：`SeedStart` 永遠顯示（0 可分配時卡片變灰）+「備用 AI」卡片；`ChatPanel` 右上角 [接入AI][種子庫]，
+      已接入的那個變 [斷開]，另一個切換；種子池選擇對話框（`seed_resume_chat` 帶 `seed_filter`）；斷開一律帶 `standby:true`。
+      svelte-check 0 錯誤 0 警告；前端測試 276 項通過。
 - [x] E 提示詞（seed-enrollment.ts、seed-connect SKILL.md、idle 指令 Rust/Node）
 - [x] F Node parity（含直接 AI 轉備用）
 - [ ] 測試、推送、更新 PR #2
