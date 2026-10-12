@@ -142,3 +142,59 @@
 - 使用者在對話中貼出了 GitHub Personal Access Token。這個 token 應該立即到
   https://github.com/settings/tokens 撤銷（revoke）並重新產生。本次修改沒有使用它，
   而是用機器上已設定的 git 憑證。**不要把任何 token 寫進這個倉庫。**
+
+---
+
+# 第二部分：種子庫分配（2026-10-12 使用者回報）
+
+## 使用者回報
+
+1. 種子庫裡看得到已入庫、有效的種子卡片，但新建對話（選好專案/工作目錄後）不再出現
+   「從哪裡分配」的三類卡片（帳號 / 來源 / 備註前綴）。舊版有。
+2. 對話右上角只有「接入AI」，沒有「種子庫」；新建對話沒有選擇種子庫分配的功能。
+3. 種子 AI 連上後，做兩次 `chat_wait` 都是 idle，就停下來問使用者「需要我繼續等待嗎？」，不再持續等待。
+4. 需求：右上角改成 [接入AI] [種子庫] 兩個按鈕。接入哪一種，那個按鈕變成 [斷開]；另一個按鈕用來切換。
+   斷開或切換時，原本的 AI 如果仍有效，就進入種子庫，歸類到「備用」卡片，成為可分配（自動或手動）的備用種子；
+   失效就直接斷開。新建對話「總是顯示選擇」；沒有可分配種子時卡片顯示 0 並變灰。
+5. 使用者要求繼續放在 PR #2。
+
+## 根本原因（已確認）
+
+- `SeedStart.svelte` 只有在種子庫設定 `enabled`（「新對話自動分配種子」開關）為 true 時才顯示分配卡片；
+  否則只顯示「请接入 AI」標題。
+- 後端 `chat.rs` 的 `create` 只有在 `seeds::enabled(root)` 為 true 時才把新對話設成 `seed_auto`，
+  `chat_seeds.rs::poll_at` 也只有 `data.enabled` 才分配。所以開關為 false 時，整條種子分配流程都消失，
+  右上角也只會顯示「接入AI」（只有 `detail.seed_auto` 時才顯示「種子庫」）。
+- 種子庫是「每個專案目錄」各自一份（`<專案目錄>/docs/chat-sessions/seed-library.seeds.json`）。
+  0.1.142 把多資料夾工作區拆成多個專案；新專案目錄的種子庫是新的，`enabled` 預設 false。
+- 斷開種子對話（`detach`）會讓種子在下次 poll 時被退役（`conversation_detached`），不會回到種子庫。
+- 種子 AI 停止等待：入庫提示詞與 idle 指令沒有明確說「不要詢問使用者、不要結束回合、無限期等待」。
+
+## 實作計畫（進度見下）
+
+- A. 使用者在新對話中「明確選擇」種子池時，不再受 `enabled` 開關限制：
+  `create` 帶 `seed_filter` 時設 `seed_auto=true`、`seed_explicit=true`；`poll_at` 對 `seed_explicit` 對話照常分配。
+  `enabled` 開關只控制「沒有選擇時是否自動分配」。
+- B. `Seed` 新增 `standby: bool`（serde default）。過濾條件 `{"standby":true}` 只匹配備用種子；
+  `ready_groups` 帶 `standby` 欄位；被重新分配時清除 `standby`。
+- C. 斷開/切換時（`detach` 帶 `standby:true`）：
+  - 種子對話：種子仍在線（未退役、`last_seen` 在 `SUSPECT_MS` 內、沒有未完成操作）→ 釋放回種子庫並標記 `standby`；否則照舊斷開。
+  - 直接接入的 AI：仍在線（lease 有效或正在等待）→ 建立一顆 `source=standby` 的手動種子，
+    在記憶體保存「舊 attachment → 種子 URL」；該 AI 下一次 `chat_wait` 收到 `status=standby`
+    與新的種子 URL 路徑（`/mcp/seeds/<folder>/<url_key>`），依指示改連種子 URL 並持續等待。失效就直接斷開。
+- D. 前端：`SeedStart` 永遠顯示三類卡片與「備用」卡片（0 時變灰）；右上角 [接入AI] [種子庫] 切換邏輯；
+  既有對話可從「種子庫」按鈕選擇種子池（`seed_resume_chat` 帶 `seed_filter`）。
+- E. 強化種子提示詞、`seed-connect` Skill、idle 指令：不要詢問是否繼續等待、不要結束回合。
+- F. Node Agent parity：A、B、C（種子部分）、E 同步到 `packages/node-agent`；
+  直接 AI 轉備用種子（C 的第二項）若未同步，要寫入 `docs/todo/node-agent-parity/manifest.json`。
+
+## 第二部分進度
+
+- [x] 找到根本原因。
+- [ ] A 後端明確選擇不受開關限制
+- [ ] B standby 欄位與過濾
+- [ ] C 斷開轉備用（種子 / 直接 AI）
+- [ ] D 前端按鈕與卡片
+- [ ] E 提示詞
+- [ ] F Node parity
+- [ ] 測試、推送、更新 PR #2
