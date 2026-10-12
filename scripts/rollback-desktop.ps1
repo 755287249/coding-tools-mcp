@@ -104,6 +104,14 @@ $info = [Diagnostics.FileVersionInfo]::GetVersionInfo($target)
 if ($info.ProductName -ne 'Coding Tools MCP') { throw "Not a Coding Tools MCP executable: $target" }
 Write-Output "Target: $target (version $($info.ProductVersion))"
 
+# Check the backup BEFORE stopping anything: machines migrated by 0.1.142
+# have no backup, and the running desktop must then be left alone.
+$plan = @()
+if ($RestorePreMigrationSettings) {
+    $backup = Join-Path $DataDir 'pre-global-connection'
+    $plan = @(Get-RestorePlan $backup $DataDir $SharedWorkspacesDir)
+}
+
 $sessionId = (Get-Process -Id $PID).SessionId
 $running = @(Get-RunningDesktops $sessionId)
 foreach ($desktop in $running) {
@@ -114,10 +122,11 @@ foreach ($desktop in $running) {
 if (-not (Wait-DesktopMutexReleased)) { throw 'A Coding Tools MCP desktop still holds the single-instance lock. Exit it from the tray and run this script again.' }
 
 if ($RestorePreMigrationSettings) {
-    $backup = Join-Path $DataDir 'pre-global-connection'
-    $plan = @(Get-RestorePlan $backup $DataDir $SharedWorkspacesDir)
     $keep = Join-Path $DataDir ("before-rollback-" + (Get-Date -Format 'yyyyMMdd-HHmmss'))
-    Invoke-RestorePlan $plan $keep
+    try { Invoke-RestorePlan $plan $keep }
+    catch {
+        throw "Restore failed: $($_.Exception.Message). The files that were replaced are kept in $keep (see index.txt). Nothing was started."
+    }
     Write-Output "Restored $($plan.Count) file(s) from $backup. The replaced files are kept in $keep."
 }
 

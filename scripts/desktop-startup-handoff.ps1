@@ -44,7 +44,7 @@ function Select-DowngradeTargets {
 function Get-DowngradePrompt {
     param([array]$Newer, [string]$TargetVersion)
     $running = (@($Newer | ForEach-Object { [string]$_.Version }) | Sort-Object -Unique) -join ', '
-    return "A newer Coding Tools MCP ($running) is running.`n`nClose it and switch to this older version ($TargetVersion)?`n`nNote: 0.1.142 and later migrate settings to a global MCP connection. An older version may need MCP and the tunnel enabled again. If data\profiles.pre-global-connection.json exists, scripts\rollback-desktop.ps1 can restore the earlier settings."
+    return "A newer Coding Tools MCP ($running) is running.`n`nClose it and switch to this older version ($TargetVersion)?`n`nNote: 0.1.142 and later migrate settings to a global MCP connection. An older version may need MCP and the tunnel enabled again. Settings saved before that migration (if any) are in data\pre-global-connection. See docs/handoff/2026-10-12-cloudflared-cwd-and-rollback.md in the source repository for restore steps."
 }
 
 function Confirm-Downgrade {

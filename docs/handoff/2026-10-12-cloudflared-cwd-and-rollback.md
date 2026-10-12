@@ -66,15 +66,21 @@
 ### 修正方式
 
 1. 新版（0.1.143 起）的 `desktop-startup-handoff.ps1`：沒有較舊實例、但有 **較新** 實例在執行時，
+   （注意：這段腳本編譯在「被開啟的 exe」裡，所以只有開啟 0.1.143 以後的版本才會出現確認視窗；
+   開啟 0.1.141 仍是舊行為，要先從系統匣結束新版。）
    彈出「是否切換到這個較舊版本」的確認視窗。使用者按「是」才會關閉較新版並啟動被開啟的版本。
    `-NoDialogs` 模式下不會自動降級（保持原來的安全行為）。
 2. 在第一次執行「全局連接遷移」之前（`DataStore::ensure_global_connection`），建立一次性備份資料夾
    `%APPDATA%\coding-tools-mcp-desktop\data\pre-global-connection\`：
-   - `profiles.json`：遷移前的桌面設定檔原樣複製。
+   - `profiles.json`：遷移前的桌面設定檔。注意它不是 0.1.141 寫的原始位元組，
+     而是 0.1.143 載入（正規化、共享鏡像同步）之後、全局連接遷移之前的狀態；舊版可以讀取。
    - `workspaces\<id>\workspace.json`、`secrets.json`：遷移前的共享工作區鏡像
      （位置 `%LOCALAPPDATA%\CodingToolsMCP\workspaces\<id>\`，遷移會改寫它們，
      舊版啟動時會用它們覆蓋 profile，所以也要備份）。
    - 只建立一次，之後不覆蓋。備份失敗只記錄錯誤，不會阻止啟動（fail-soft）。
+   - 限制：如果回退後在舊版用了一段時間再升級，備份仍是「最早」那份，期間的修改不在裡面
+     （還原時被替換的檔案會留在 `before-rollback-*`）。備份含 `secrets.json`，權限已限制為目前使用者，
+     不需要時可手動刪除整個 `pre-global-connection` 資料夾。
    - 程式：`src-tauri/src/data/migrate.rs` 的 `backup_before_global_connection_migration`。
    - 注意：已經升級到 0.1.142 的電腦，遷移已經發生過，沒有這個備份。
 3. 新增 `scripts/rollback-desktop.ps1`：
@@ -83,7 +89,9 @@
    # 若有 pre-global-connection 備份，也還原舊設定：
    powershell -ExecutionPolicy Bypass -File scripts\rollback-desktop.ps1 -TargetExe C:\path\ctmcp-0.1.141-win64.exe -RestorePreMigrationSettings
    ```
-   它會：結束本 Windows 工作階段中所有 Coding Tools MCP 桌面程序（含 cloudflared/frpc 子程序）→
+   這個腳本不在可攜版 ZIP 裡，請從原始碼倉庫下載。
+   它會：先檢查備份是否存在（不存在就直接停止，不會關閉正在執行的程式）→
+   結束本 Windows 工作階段中所有 Coding Tools MCP 桌面程序（含 cloudflared/frpc 子程序）→
    （可選）先把目前的檔案留存到 `data\before-rollback-<時間>\` 再還原備份 → 啟動指定的 exe。
 
 ### Node Agent parity 說明
@@ -124,7 +132,8 @@
 - [x] handoff 腳本支援確認後降級（`Select-DowngradeTargets`，`tests/desktop-startup-handoff.Tests.ps1` 新增 6 項）。
 - [x] 新增 `scripts/rollback-desktop.ps1` 與 `tests/rollback-desktop.Tests.ps1`（10 項，Linux pwsh 7.4 通過）。
 - [x] Linux：`cargo test --lib -- data:: tunnel::` 98 項通過；`version:check`、`node-agent:parity:check` 通過。
-- [ ] 推送、開 PR。
+- [x] 推送、開 PR：https://github.com/755287249/coding-tools-mcp/pull/2（base：`coderabbit/sandbox-mcp-setup/bf9588fc`）。
+- [x] 內部 review（風險 3/10）：已修正「還原前先檢查備份」、確認視窗中的備份路徑、測試版本號、還原失敗訊息。
 - [ ] 在 Windows CI 跑 `Manual source upgrade (Windows)`（Windows 專屬測試 + 可攜版 exe）。
 - [ ] 使用者在 Windows 實機驗證：全局連接 + Cloudflare 隧道可啟動。
 
