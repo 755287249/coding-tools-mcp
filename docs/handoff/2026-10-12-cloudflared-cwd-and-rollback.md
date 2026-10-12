@@ -68,12 +68,31 @@
 1. 新版（0.1.143 起）的 `desktop-startup-handoff.ps1`：沒有較舊實例、但有 **較新** 實例在執行時，
    彈出「是否切換到這個較舊版本」的確認視窗。使用者按「是」才會關閉較新版並啟動被開啟的版本。
    `-NoDialogs` 模式下不會自動降級（保持原來的安全行為）。
-2. 在第一次執行「全局連接遷移」之前，把原始 `data/profiles.json` 複製成
-   `data/profiles.pre-global-connection.json`（只建立一次，不覆蓋）。
-   以後要回退到 0.1.141 或更早版本時，可以用這個檔案還原舊設定。
-   注意：已經升級到 0.1.142 的電腦，遷移已經發生過，沒有這個備份。
-3. 新增 `scripts/rollback-desktop.ps1`：結束正在執行的 Coding Tools MCP，
-   可選擇還原遷移前的資料，然後啟動指定的舊版 exe。
+2. 在第一次執行「全局連接遷移」之前（`DataStore::ensure_global_connection`），建立一次性備份資料夾
+   `%APPDATA%\coding-tools-mcp-desktop\data\pre-global-connection\`：
+   - `profiles.json`：遷移前的桌面設定檔原樣複製。
+   - `workspaces\<id>\workspace.json`、`secrets.json`：遷移前的共享工作區鏡像
+     （位置 `%LOCALAPPDATA%\CodingToolsMCP\workspaces\<id>\`，遷移會改寫它們，
+     舊版啟動時會用它們覆蓋 profile，所以也要備份）。
+   - 只建立一次，之後不覆蓋。備份失敗只記錄錯誤，不會阻止啟動（fail-soft）。
+   - 程式：`src-tauri/src/data/migrate.rs` 的 `backup_before_global_connection_migration`。
+   - 注意：已經升級到 0.1.142 的電腦，遷移已經發生過，沒有這個備份。
+3. 新增 `scripts/rollback-desktop.ps1`：
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File scripts\rollback-desktop.ps1 -TargetExe C:\path\ctmcp-0.1.141-win64.exe
+   # 若有 pre-global-connection 備份，也還原舊設定：
+   powershell -ExecutionPolicy Bypass -File scripts\rollback-desktop.ps1 -TargetExe C:\path\ctmcp-0.1.141-win64.exe -RestorePreMigrationSettings
+   ```
+   它會：結束本 Windows 工作階段中所有 Coding Tools MCP 桌面程序（含 cloudflared/frpc 子程序）→
+   （可選）先把目前的檔案留存到 `data\before-rollback-<時間>\` 再還原備份 → 啟動指定的 exe。
+
+### Node Agent parity 說明
+
+- cloudflared / frpc 工作目錄修正：Node Agent 不啟動 cloudflared / frpc，不適用。
+- 遷移前備份：Node Agent 的遷移（`packages/node-agent/src/application.ts`）把新設定寫到
+  `global-model/` 並「保留舊設定檔不動」（Legacy files remain intact），本來就有回退來源。
+  桌面版原本沒有，所以這次只補桌面版。
+- 降級確認視窗：只屬於 Windows 桌面單一實例交接（ND-002 Tauri desktop shell，已排除於 parity）。
 
 ### 使用者現在可以做的事（不用等新版）
 
@@ -87,7 +106,11 @@
 
 - Linux 上：`cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib tunnel::`
   （新增 `process_working_dir` 的單元測試）。
-- `cargo test ... data::store` / `data::connection`（遷移前備份測試）。
+- `cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib pre_global_connection_backup`（遷移前備份測試）。
+- `pwsh -File tests/rollback-desktop.Tests.ps1`（Linux 也可跑）。
+- 已知：在 Linux 用 pwsh 跑 `tests/desktop-startup-handoff.Tests.ps1` 時，最後一段
+  `Replacement working directory must be preserved` 因路徑分隔符 `/` vs `\\` 失敗，
+  這是 Linux 平台差異，與本次修改無關；Windows 上應通過。
 - Windows 上（CI `Manual source upgrade (Windows)` workflow 或本機）：
   `./tests/desktop-startup-handoff.Tests.ps1`。
 - 手動：用全局連接 + Cloudflare Quick 隧道啟動 → 不再出現 os error 123。
@@ -96,11 +119,14 @@
 
 - [x] 找到 os error 123 的根本原因（全局連接 `path` 為空 → `current_dir("")`）。
 - [x] 找到無法回退的原因（handoff 只允許升級 + 單向資料遷移）。
-- [ ] 修正 cloudflared / frpc 工作目錄並加測試。
-- [ ] 遷移前備份 `profiles.pre-global-connection.json` 並加測試。
-- [ ] handoff 腳本支援確認後降級。
-- [ ] 新增 `scripts/rollback-desktop.ps1`。
-- [ ] 跑測試、推送、開 PR、在 Windows CI 跑 `Manual source upgrade (Windows)`。
+- [x] 修正 cloudflared / frpc 工作目錄並加測試（`tunnel::process_working_dir_tests`，4 項通過）。
+- [x] 遷移前備份 `data\pre-global-connection\` 並加測試（`data::migrate::pre_global_connection_backup_tests`）。
+- [x] handoff 腳本支援確認後降級（`Select-DowngradeTargets`，`tests/desktop-startup-handoff.Tests.ps1` 新增 6 項）。
+- [x] 新增 `scripts/rollback-desktop.ps1` 與 `tests/rollback-desktop.Tests.ps1`（10 項，Linux pwsh 7.4 通過）。
+- [x] Linux：`cargo test --lib -- data:: tunnel::` 98 項通過；`version:check`、`node-agent:parity:check` 通過。
+- [ ] 推送、開 PR。
+- [ ] 在 Windows CI 跑 `Manual source upgrade (Windows)`（Windows 專屬測試 + 可攜版 exe）。
+- [ ] 使用者在 Windows 實機驗證：全局連接 + Cloudflare 隧道可啟動。
 
 ## 7. 安全提醒
 

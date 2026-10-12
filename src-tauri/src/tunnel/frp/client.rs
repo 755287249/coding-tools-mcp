@@ -369,7 +369,16 @@ pub async fn spawn_frpc(
     cmd.args(["-c", config_path.to_string_lossy().as_ref()]);
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
-    cmd.current_dir(&first_profile.path);
+    // The global MCP connection has an empty `path`; an empty cwd makes
+    // Windows fail the spawn with os error 123. The log directory exists.
+    let log_dir = log_path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    cmd.current_dir(crate::tunnel::process_working_dir(
+        &first_profile.path,
+        &log_dir,
+    ));
 
     #[cfg(windows)]
     {

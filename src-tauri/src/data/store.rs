@@ -202,6 +202,29 @@ impl DataStore {
                     }
                 }
             }
+            // The migration is one-way. Keep the original file so an older
+            // desktop can be restored (fail-soft: never block startup).
+            let shared_mirrors: Vec<(String, Vec<PathBuf>)> = if shared_live_store_enabled() {
+                self.data
+                    .profiles
+                    .iter()
+                    .map(|profile| {
+                        let workspace = shared_workspace_file(&profile.id);
+                        let secrets = shared_secrets_file_next_to(&workspace);
+                        (profile.id.clone(), vec![workspace, secrets])
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            match super::migrate::backup_before_global_connection_migration(&shared_mirrors) {
+                Ok(Some(path)) => eprintln!(
+                    "Saved pre-migration settings for rollback: {}",
+                    path.display()
+                ),
+                Ok(None) => {}
+                Err(error) => eprintln!("Could not save pre-migration settings: {error}"),
+            }
             candidate.connection_migration_pending = true;
             save(&candidate)?;
             self.data = candidate;

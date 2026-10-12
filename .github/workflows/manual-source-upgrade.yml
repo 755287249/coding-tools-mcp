@@ -212,6 +212,7 @@ jobs:
         run: |
           ./tests/desktop-startup-handoff.Tests.ps1
           ./tests/desktop-startup-handoff.Integration.ps1
+          ./tests/rollback-desktop.Tests.ps1
       - name: Build embedded UI and Windows executable
         run: pnpm run desktop:portable
       - name: Verify release files and checksums
