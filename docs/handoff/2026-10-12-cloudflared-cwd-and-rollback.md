@@ -567,3 +567,31 @@ C. 添加種子頁面卡片化（build 子代理，分支 `vorflux/seed-add-card
 - 種子庫「添加種子」第三張卡：未添加插件時顯示虛線卡，點擊即添加並切換到插件。
 - 已在沙箱 Node Agent 用瀏覽器驗證：添加對話框、詳情頁、左側已配置。
 - [x] 發佈 **v0.1.148**（chat-beta 38272994484 成功；38272873413 為舊提交，已取消）。
+
+# 第十三部分：可獨立編譯的插件 + CodeRabbit 多帳號（進行中）
+
+## 需求
+- Rabbit 插件要能單獨編譯開發；也提供「自製插件」功能（匯入自己編譯的插件）。
+- CodeRabbit 插件加多帳號管理：文字框一行一個 `郵箱----取件網址`（例 `x@icloud.com----https://www.mailapi.pro/api/key=...`），自動生成帳號列；
+  手動填密碼；「登入」自動完成 GitHub 登入（郵件驗證碼由取件網址取得）並查詢 CodeRabbit 額度；排序：額度少的在前，0 墊底。
+
+## 調查結果（2026-10-12）
+- 取件網址 GET 直接回 JSON：`{success,email,code,type,subject,received_at,message_id}`（最新一封；GitHub "Please verify your device" 的 code）。
+- CodeRabbit GitHub 登入（純協議）：tRPC `accessToken.beginBrowserOAuth {provider:'github',redirectUri:'https://app.coderabbit.ai/login',sessionIntent:'sign_in'}` → `{state}`；
+  `https://github.com/login/oauth/authorize?client_id=45872a44c0e55c462eed&scope=user:email read:org&state=…&redirect_uri=https://app.coderabbit.ai/login`；
+  GitHub 表單登入 `/login` → `POST /session` → 可能 `/sessions/verified-device`（郵件 OTP）→ 可能授權頁 → 302 `…/login?code=&state=`；
+  tRPC `accessToken.exchangeBrowserOAuthCode {state,code}`。
+- 額度：網頁用 tRPC `onDemandProducts.access`（`agent.state`、`agent.remainingSeconds`、`security.remainingCents`）、`codingAgent.personalTrial`。實際欄位需登入後確認。
+
+## 設計
+- 插件包格式：單一檔案 `<id>.ctplugin.json` = `{format:1, manifest, code}`；manifest = `{id,name,version,description,permissions:{hosts:[...],seedLibrary,progress}}`。
+- 開發：`packages/plugin-sdk`（型別 + iframe 內的 RPC 客戶端 + cookie jar）；`plugins/coderabbit/`（manifest.json + src + build.mjs，用 vite 打包成單檔）；`plugins/template/` 範例；`docs/plugins.md` 開發指南。
+- 執行：插件在 sandbox iframe（只有 allow-scripts）內執行，透過 postMessage 呼叫宿主；宿主依 manifest 權限檢查：http 只能連 manifest.hosts、種子庫、進度條、插件自己的資料存儲。
+- 後端：通用 HTTPS 代理（拒絕 localhost/私有 IP，不跟隨轉址，回傳 location/set-cookie）、插件包安裝/移除、每插件資料檔（存在應用資料目錄 `plugins/`，不在專案目錄）。Node 與 Rust 都要做。
+- iframe 掛在 SimpleShell 的 PluginDock，離開頁面不銷毀（播種不中斷），頁面上用佔位框定位。
+
+## 進度
+- [ ] SDK + 打包腳本 + 範例插件 + 文件
+- [ ] 宿主：PluginDock/bridge/安裝匯入 UI
+- [ ] 後端：代理泛化 + 插件包與資料存儲（Node + Rust）
+- [ ] CodeRabbit 插件：搬到 plugins/coderabbit，多帳號、協議登入、郵件驗證碼、額度排序
