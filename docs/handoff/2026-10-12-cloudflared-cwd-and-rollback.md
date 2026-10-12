@@ -365,7 +365,8 @@ C. 添加種子頁面卡片化（build 子代理，分支 `vorflux/seed-add-card
       Release 指向 c9359d5；資產 `ctmcp-0.1.143-win64.exe`（SHA-256 `d571d0766d87f52296a911494f1fad8a08adaf93fbe0b87a609307740992634c`）
       + 沿用 1.3.2 的 `coderabbit-seeds.user.js`（外掛自 v0.1.142 未變）。發佈說明已用 API 補上中文更新內容。
       發佈流程備忘：`publish-chat-release.py` 只上傳一個 EXE，重跑時若已有其他資產會拒絕 → 種子腳本要在發佈完成後再上傳。
-      tag 推送會觸發 `Desktop Release`（release.yml），v0.1.142 時也是失敗，與發佈無關。
+      tag 推送會觸發 `Desktop Release`（release.yml，舊流程，v0.1.142 時在完整 cargo test 失敗）；v0.1.143 的這個 run（38244304260）已手動取消，
+      避免它成功時覆寫發佈說明或加入未驗證的 NSIS/DMG。
 - [x] CI 全綠：Rust tests 38235455838（6f947ec）成功；Windows 完整建置 + verify-repo 38235121224（be2e8e4）成功；Node 687/687。
 - [ ] 更新 PR #2 描述 — **被擋**：使用者給的 PAT 沒有 Pull requests / Issues 寫入權限（PATCH /pulls/2 與留言都回 403）。
       要貼上的段落內容與本節相同（Part 5 摘要 + 測試結果），需由擁有權限者手動貼到 PR 描述的 `## Risk Assessment` 之前。
