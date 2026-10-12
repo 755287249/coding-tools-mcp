@@ -556,3 +556,13 @@ C. 添加種子頁面卡片化（build 子代理，分支 `vorflux/seed-add-card
 - 語言與主題改用自訂彈出選單 `MenuSelect.svelte`（取代原生 select），`tests/i18n.test.mjs` 相應更新。
 - [x] 發佈 **v0.1.147**（`ctmcp-0.1.147-win64.exe` SHA-256 `fff4372de9b34e39bc20ebd8af88a644f8e22bf153b1522a395c4834d17a525e`，油猴 1.4.0）；Rust tests 38270671297、chat-beta 38270674233 成功；舊 Desktop Release run 已取消。
 - 待辦：CodeRabbit 插件 Windows 實機驗證（見第十部分）；匯入專案包時的路徑重疊檢查；連接狀態的「瀏覽器共享」按鈕只在桌面版出現。
+
+# 第十二部分：插件頁加入應用插件（0.1.148）
+
+- 使用者回報：插件頁的「添加」只有 MCP 配置範例，也找不到 CodeRabbit 插件。
+- `src/lib/plugins/registry.ts`：內建應用插件清單（目前只有 CodeRabbit）與已添加清單（localStorage `ctmcp-app-plugins-v1`，每台裝置各自保存）。
+- `FeatureCatalog.svelte`（自定義→插件）：新增「應用插件」區塊與卡片（+ 添加 / ✓ 已添加）；已添加的插件出現在左側「已配置」；
+  詳情頁 `?feature=app:coderabbit-seeds` 內嵌 `CodeRabbitPlugin`（登入/播種）與油猴腳本下載連結；「添加」對話框分「應用插件 / MCP 伺服器」兩頁。
+  `WorkspaceFeatureControls`/`SimpleShell` 多傳 `folderId`。
+- 種子庫「添加種子」第三張卡：未添加插件時顯示虛線卡，點擊即添加並切換到插件。
+- 已在沙箱 Node Agent 用瀏覽器驗證：添加對話框、詳情頁、左側已配置。

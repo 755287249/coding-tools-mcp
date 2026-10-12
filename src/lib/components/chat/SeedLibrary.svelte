@@ -24,6 +24,7 @@
   let motionMs=$state(0);
   onMount(()=>{const query=matchMedia('(prefers-reduced-motion: reduce)');const update=()=>motionMs=query.matches?0:140;update();query.addEventListener('change',update);return()=>query.removeEventListener('change',update);});
   import CodeRabbitPlugin from './CodeRabbitPlugin.svelte';
+  import {installedAppPlugins,setAppPlugin} from '$lib/plugins/registry';
   import Sprout from '@lucide/svelte/icons/sprout';
   import {pairingKey,pairingAddress,pairingWebhook,loadPairing,savePairing,newPairingToken} from '$lib/chat/seed-pairing';
   let {workspaceId,folderId,workspacePicker}:{workspaceId:string;folderId:string;workspacePicker?:Snippet}=$props();
@@ -120,10 +121,13 @@
       <span class="method-icon"><Puzzle size={20}/></span>
       <span class="method-text"><strong>{$t('seeds.browserPair')}<span class="pair-state" class:connected={inventory.pairing_enabled}>{$t(inventory.pairing_enabled?'seeds.pairEnabled':'seeds.pairDisabled')}</span></strong><small>{$t('seeds.methodPairDesc')}</small></span>
     </button>
-    <button role="tab" aria-selected={addMethod==='rabbit'} class:active={addMethod==='rabbit'} onclick={()=>addMethod='rabbit'}>
+    {#if $installedAppPlugins.includes('coderabbit-seeds')}<button role="tab" aria-selected={addMethod==='rabbit'} class:active={addMethod==='rabbit'} onclick={()=>addMethod='rabbit'}>
       <span class="method-icon"><Sprout size={20}/></span>
       <span class="method-text"><strong>{$t('rabbit.title')}</strong><small>{$t('rabbit.desc')}</small></span>
-    </button>
+    </button>{:else}<button role="tab" aria-selected="false" class="install-card" onclick={()=>{setAppPlugin('coderabbit-seeds',true);addMethod='rabbit';}}>
+      <span class="method-icon"><Sprout size={20}/></span>
+      <span class="method-text"><strong>{$t('rabbit.title')}</strong><small>{$t('plugins.installHere')}</small></span>
+    </button>{/if}
   </div>
   <div class="method-panel" role="tabpanel">
   {#if addMethod==='rabbit'}
@@ -253,4 +257,5 @@
 .row-facts{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px 20px;margin:0 0 12px}.row-facts div{min-width:0}.row-facts .wide{grid-column:1/-1}.row-facts dt{font-size:11px;color:var(--color-text-muted);margin-bottom:2px}.row-facts dd{margin:0;font-size:13px;overflow-wrap:anywhere}
 .row-more{margin-top:12px;border-top:1px solid var(--color-border);padding-top:10px}.row-more>summary{cursor:pointer;font-size:12px;color:var(--color-text-muted);width:max-content;list-style:none;display:inline-flex;gap:6px;align-items:center}.row-more>summary::-webkit-details-marker{display:none}.row-more>summary::before{content:'›';display:inline-block;transition:transform 120ms}.row-more[open]>summary::before{transform:rotate(90deg)}.row-more[open]>summary{margin-bottom:10px}.row-more .row-facts{margin:0}
 .install-link{display:inline-block;margin-top:10px;font-size:12px}
+.install-card{border-style:dashed!important;opacity:.85}
 </style>

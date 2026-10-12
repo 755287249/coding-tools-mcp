@@ -13,9 +13,10 @@
     catalog?: boolean;
     onCatalogTab?: (tab:FeatureTab)=>void;
     workspacePicker?: Snippet;
+    folderId?: string;
   }
 
-  let { workspaceId, initialTab = "skills", catalog=false, onCatalogTab, workspacePicker }: Props = $props();
+  let { workspaceId, initialTab = "skills", catalog=false, onCatalogTab, workspacePicker, folderId = "" }: Props = $props();
 
   const backend = getBackend().workspaceFeatures;
   let skills = $state<SkillInventoryPayload | null>(null);
@@ -141,7 +142,7 @@
 </script>
 
 {#if catalog}
-  <FeatureCatalog {workspaceId} {activeTab} {skills} {extensions} {loading} {error} {isBusy} {workspacePicker} onRefresh={()=>void refresh()} onTab={tab=>{activeTab=tab;onCatalogTab?.(tab)}} onSkill={toggleSkill} onExtension={toggleExtension} onSkillsActive={toggleSkillsActive} onExtensionActive={toggleExtensionActive}/>
+  <FeatureCatalog {workspaceId} {folderId} {activeTab} {skills} {extensions} {loading} {error} {isBusy} {workspacePicker} onRefresh={()=>void refresh()} onTab={tab=>{activeTab=tab;onCatalogTab?.(tab)}} onSkill={toggleSkill} onExtension={toggleExtension} onSkillsActive={toggleSkillsActive} onExtensionActive={toggleExtensionActive}/>
 {:else}
 <div class="grid gap-4">
   <div class="flex flex-wrap items-start justify-between gap-3">

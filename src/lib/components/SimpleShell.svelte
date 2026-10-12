@@ -178,7 +178,7 @@
   <main class="sx-main" use:conversationSwipe={beginConversationSwipe}>
   {#if error}<div class="shell-error" role="alert">{error}<button onclick={()=>error=''} aria-label={$t('Close')}>×</button></div>{/if}
   {#if customizing}
-    {#if group}<WorkspaceFeatureControls workspaceId={group.workspace.id} initialTab={panel==='skills'?'skills':$page.url.searchParams.get('featureTab')==='hooks'?'hooks':'mcp'} catalog onCatalogTab={openFeatureTab}>
+    {#if group}<WorkspaceFeatureControls workspaceId={group.workspace.id} folderId={group.folder.id} initialTab={panel==='skills'?'skills':$page.url.searchParams.get('featureTab')==='hooks'?'hooks':'mcp'} catalog onCatalogTab={openFeatureTab}>
       {#snippet workspacePicker()}<select aria-label={$t('chat.109')} value={group?.key??''} onchange={event=>selectGroup(event.currentTarget.value)}>{#each groups as g}<option value={g.key}>{g.workspace.name} · {g.folder.name}</option>{/each}</select>{/snippet}
     </WorkspaceFeatureControls>{:else}<section class="library-page"><h1>{$t('features.customize')}</h1><p>{$t('chat.110')}</p>{#if onAddWorkspace}<button onclick={onAddWorkspace}>{$t('chat.openWorkspace')}</button>{/if}</section>{/if}
   {:else if panel==='discussions'}
