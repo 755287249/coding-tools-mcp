@@ -515,4 +515,6 @@ C. 添加種子頁面卡片化（build 子代理，分支 `vorflux/seed-add-card
       手機寬度隱藏（手機原本就不顯示任務面板）。
 - [x] 驗證：沙箱 Node Agent + agent-browser（新對話兩張卡片、池子對話框、接入後斷開/輪換、輪換後種子 standby=true 並重新等待、右側把手開啟面板）；
       svelte-check 0 錯誤 0 警告；根目錄測試 278 通過；Node `test/projectGateway.test.mjs` 13 通過。版本 0.1.146。
-- [ ] 推送、CI、發佈 v0.1.146。
+- [x] 推送 dceb6c1；Rust tests 38263887940（1cb557e）、38264837174 成功；chat-beta 38264840587 成功。
+- [x] 發佈 **v0.1.146** 穩定版（`ctmcp-0.1.146-win64.exe`，SHA-256 `a230d8446d75bb8b924bf6d50301576fe427321a18aef9fa449c2cce8491b315`，種子腳本 1.3.2，中文說明）；舊 Desktop Release run 已取消。
+- [ ] 待辦：匯入專案包/共享專案時的路徑重疊檢查；輪換時池中沒有其他種子的提示。
