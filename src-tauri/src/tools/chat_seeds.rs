@@ -365,7 +365,10 @@ pub fn release_workspace(root: &Path) -> Result<()> {
                 .strip_suffix(".json")
                 .filter(|cid| id(&json!(cid)).is_ok())
             {
-                let mut chat = load(root, cid)?;
+                // One unreadable chat must not stop the workspace release.
+                let Ok(mut chat) = load(root, cid) else {
+                    continue;
+                };
                 if chat["seed_explicit"] == true {
                     chat["seed_explicit"] = json!(false);
                     save(root, &chat)?;

@@ -391,16 +391,17 @@ function chatUiUnlocked(root:string,args:Record<string,unknown>):Record<string,u
     else if (action === 'detach') {
       // standby=true: a still-valid AI goes to the seed library instead of being dropped.
       // Disconnect is a safety action: a standby failure falls back to a plain detach.
-      let moved:''|'seed'|'direct'='';const attachment=s.attachment_id,folder=typeof args.folder_id==='string'?args.folder_id:typeof args.workspace_folder_id==='string'?args.workspace_folder_id:'';
+      let moved:''|'seed'|'direct'='',standbyFailed=false;const attachment=s.attachment_id,folder=typeof args.folder_id==='string'?args.folder_id:typeof args.workspace_folder_id==='string'?args.workspace_folder_id:'';
       if(args.standby===true&&!group.grouped(s)&&attachment){
         try{
           if(s.seed_owner){if(seedReleaseToStandby(seedStore(root),s)){rememberStandby(attachment,'',folder);moved='seed';}}
           else if(waiters.has(key(root,s.id)+':'+attachment)||s.lease_until>Date.now()){rememberStandby(attachment,seedEnrollDirectStandby(seedStore(root),s.agent_name??'AI'),folder);moved='direct';}
-        }catch(error){console.error('standby skipped:',error instanceof Error?error.message:error);}
+        }catch(error){standbyFailed=true;console.error('standby skipped:',error instanceof Error?error.message:error);}
       }
       if(moved){s.seed_owner='';s.seed_pending=false;s.seed_generation=(s.seed_generation??0)+1;}
       s.seed_explicit=false;s.seed_auto=false; for(const m of group.members(s)){m.lease_until=0;m.paused=true;}s.attachment_id = ''; s.lease_until = 0; s.updated_at = Date.now(); save(root, s);
       if(moved)return {session:localView(root,s),standby:moved};
+      if(standbyFailed)return {session:localView(root,s),standby_failed:true};
     }
     else if (action === 'close') { recordTerminalAttachments(s); s.closed = true; s.attachment_id = ''; s.lease_until = 0; s.updated_at = Date.now(); save(root, s); }
     else if (action !== 'read') throw new Error('Unknown chat action');

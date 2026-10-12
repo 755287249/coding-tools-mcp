@@ -107,7 +107,7 @@ export function seedReleaseWorkspace(store:SeedStore):void {
     const data=readSeeds(store);data.seeds.forEach(ensureSettled);
     data.enabled=false;saveSeeds(store,data);
     // Explicit pool choices bypass `enabled`; withdraw them as well.
-    for(const id of store.ids()){const chat=store.read(id);if(chat.seed_explicit){chat.seed_explicit=false;store.save(chat);}}
+    for(const id of store.ids()){let chat;try{chat=store.read(id);}catch{continue;}if(chat.seed_explicit){chat.seed_explicit=false;store.save(chat);}}
     for(const seed of data.seeds)if(!seed.retired_at)releaseSeed(store,seed);
     saveSeeds(store,data);seedInvalidate(store);
   });

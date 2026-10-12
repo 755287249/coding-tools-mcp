@@ -175,6 +175,7 @@ export const MESSAGES = {
   "seeds.standbyHelp": ["AIs that left a conversation while still connected. They wait here and can be assigned again.", "離開對話時仍有效的 AI，會在這裡待命，可再次分配。", "离开对话时仍有效的 AI，会在这里待命，可再次分配。", "接続したまま会話を離れた AI です。ここで待機し、再び割り当てられます。"],
   "seeds.movedSeed": ["The previous AI returned to the seed library as standby.", "原本的 AI 已回到種子庫，歸類為備用。", "原来的 AI 已回到种子库，归类为备用。", "前の AI は待機としてシードライブラリに戻りました。"],
   "seeds.movedDirect": ["The previous AI was moved to the seed library as standby. It reconnects by itself.", "原本的 AI 已移到種子庫的備用分類，它會自行重新連線。", "原来的 AI 已移到种子库的备用分类，它会自行重新连接。", "前の AI は待機としてシードライブラリに移りました。自動で再接続します。"],
+  "seeds.standbyFailed": ["Disconnected. The AI could not be moved to the seed library.", "已斷開。無法把這個 AI 移到種子庫。", "已断开。无法把这个 AI 移到种子库。", "切断しました。AI をシードライブラリに移せませんでした。"],
   "seeds.pickerTitle": ["Choose a seed pool", "選擇種子池", "选择种子池", "シードプールを選択"],
   "seeds.ready": ["Ready", "可分配", "可分配", "待機中"],
   "seeds.assigned": ["Assigned", "已分配", "已分配", "割当済み"],

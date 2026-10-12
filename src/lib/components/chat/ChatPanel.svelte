@@ -689,7 +689,7 @@
       const result = await localChat(workspaceId, folderId, { action: 'detach', chat_id: target, standby: mode !== 'group' });
       if (gen === generation && target === selected) {
         readSequence++; detail = result.session ?? null; guide = false;
-        standbyNotice = result.standby === 'seed' ? $t('seeds.movedSeed') : result.standby === 'direct' ? $t('seeds.movedDirect') : '';
+        standbyNotice = result.standby === 'seed' ? $t('seeds.movedSeed') : result.standby === 'direct' ? $t('seeds.movedDirect') : result.standby_failed ? $t('seeds.standbyFailed') : '';
         return true;
       }
       return false;

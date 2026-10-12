@@ -1124,6 +1124,7 @@ fn ui_unlocked(root: &Path, args: &Value) -> Result<Value> {
             // Disconnect is a safety action: a standby failure falls back to
             // a plain detach instead of leaving the AI attached.
             let mut moved = "";
+            let mut standby_failed = false;
             let attachment = s["attachment_id"].as_str().unwrap_or("").to_owned();
             let folder = args["_folder_id"]
                 .as_str()
@@ -1138,7 +1139,10 @@ fn ui_unlocked(root: &Path, args: &Value) -> Result<Value> {
                             moved = "seed";
                         }
                         Ok(false) => {}
-                        Err(e) => eprintln!("seed standby skipped: {}", e.message()),
+                        Err(e) => {
+                            eprintln!("seed standby skipped: {}", e.message());
+                            standby_failed = true;
+                        }
                     }
                 } else {
                     let waiting = WAITERS
@@ -1153,7 +1157,10 @@ fn ui_unlocked(root: &Path, args: &Value) -> Result<Value> {
                                 remember_standby(&attachment, key, &folder);
                                 moved = "direct";
                             }
-                            Err(e) => eprintln!("direct AI standby skipped: {}", e.message()),
+                            Err(e) => {
+                                eprintln!("direct AI standby skipped: {}", e.message());
+                                standby_failed = true;
+                            }
                         }
                     }
                 }
@@ -1177,6 +1184,9 @@ fn ui_unlocked(root: &Path, args: &Value) -> Result<Value> {
             save(root, &s)?;
             if !moved.is_empty() {
                 return Ok(json!({"session":local_view(root,&s)?,"standby":moved}));
+            }
+            if standby_failed {
+                return Ok(json!({"session":local_view(root,&s)?,"standby_failed":true}));
             }
         }
         "close" => {
