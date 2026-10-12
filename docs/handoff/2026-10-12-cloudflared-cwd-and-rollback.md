@@ -554,3 +554,5 @@ C. 添加種子頁面卡片化（build 子代理，分支 `vorflux/seed-add-card
 - 全域連接頁（`routes/connection/+page.svelte`）：右上「快速設置/重新配置」（已有公開位址時顯示重新配置）+「簡潔/高級」藥丸切換；MCP/Actions 分頁只在高級模式顯示。
 - 側欄：有新版本時「關於」圖示換成藍色更新圖示（CircleArrowUp）；「更多」移除「新建項目」與「應用更新」；「通用」改名「代理設置」。
 - 語言與主題改用自訂彈出選單 `MenuSelect.svelte`（取代原生 select），`tests/i18n.test.mjs` 相應更新。
+- [x] 發佈 **v0.1.147**（`ctmcp-0.1.147-win64.exe` SHA-256 `fff4372de9b34e39bc20ebd8af88a644f8e22bf153b1522a395c4834d17a525e`，油猴 1.4.0）；Rust tests 38270671297、chat-beta 38270674233 成功；舊 Desktop Release run 已取消。
+- 待辦：CodeRabbit 插件 Windows 實機驗證（見第十部分）；匯入專案包時的路徑重疊檢查；連接狀態的「瀏覽器共享」按鈕只在桌面版出現。
