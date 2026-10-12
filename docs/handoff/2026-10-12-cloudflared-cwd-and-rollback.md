@@ -360,7 +360,9 @@ C. 添加種子頁面卡片化（build 子代理，分支 `vorflux/seed-add-card
       帳號留空時用來源名稱。新 i18n 鍵 `seeds.addIntro` 等 9 個（4 語）。svelte-check 0/0，前端測試 276 通過。
 - [x] B1 每個對話的授權模式（完全/一般/嚴格），兩個通道（接入AI、種子）都在種子閘道強制執行 — 設計與檔案見下方「B 設計」
 - [ ] B2 專案外路徑授權（延後，計畫見下方）
-- [ ] 更新 PR #2 描述
+- [x] CI 全綠：Rust tests 38235455838（6f947ec）成功；Windows 完整建置 + verify-repo 38235121224（be2e8e4）成功；Node 687/687。
+- [ ] 更新 PR #2 描述 — **被擋**：使用者給的 PAT 沒有 Pull requests / Issues 寫入權限（PATCH /pulls/2 與留言都回 403）。
+      要貼上的段落內容與本節相同（Part 5 摘要 + 測試結果），需由擁有權限者手動貼到 PR 描述的 `## Risk Assessment` 之前。
 
 ## B 設計（B1 已實作；B2 為計畫）
 
