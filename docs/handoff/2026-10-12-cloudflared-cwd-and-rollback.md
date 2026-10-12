@@ -607,3 +607,8 @@ C. 添加種子頁面卡片化（build 子代理，分支 `vorflux/seed-add-card
 - [x] 後端：Node/Rust HTTPS 公開主機代理（SSRF 檢查、不跟轉址、cookie/location/set-cookie）+ 應用資料目錄的插件包與每插件 data 安裝/list/remove/get/set。
 - [x] CodeRabbit 插件：已搬到 `plugins/coderabbit` 並產生 `static/plugins/coderabbit-seeds.ctplugin.json`；多帳號、密碼及 cookie 私有存儲、GitHub 表單/verified-device 郵件 OTP/CodeRabbit OAuth、額度查詢排序、播種及貼 session fallback。
 - [ ] 真實帳號 Windows 實機：純協議登入與額度查詢尚待以使用者帳號驗證；額度 0 帳號不得呼叫 enqueue（插件也只選正額度帳號）。
+
+- [x] 實測：插件 `auth.ts` 用 Node 代理實際登入測試帳號成功（GitHub 表單 + 郵件 OTP + CodeRabbit OAuth），額度 0 分鐘；修正 tRPC 查詢要用 GET（POST 會 405）、額度查詢要帶組織標頭、播種用 cookieHttp。
+  Node Agent UI 內實際操作（貼帳號行 → 生成 → 填密碼 → 登入）顯示「Logged in · 0 min」。沒有呼叫 enqueue。
+- [x] 發佈 **v0.1.149**（chat-beta 38293203781：Windows 測試 `concurrent_writers_preserve_messages_during_snapshot_reads` 第一次因鎖競爭失敗，與本次改動無關，重跑成功）。
+- 待辦：桌面版（Tauri）插件 iframe 未在 Windows 實機確認；有額度帳號的實際播種未測。
