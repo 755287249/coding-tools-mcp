@@ -314,3 +314,42 @@ C. 添加種子頁面卡片化（build 子代理，分支 `vorflux/seed-add-card
 - [ ] B 授權模式
 - [ ] C 添加種子介面
 - [ ] 合併、測試、更新 PR
+
+---
+
+# 第五部分：GET 相容強化、提示詞、授權模式、添加種子卡片（Arena Agent 接手，2026-10-12）
+
+> 接手者：從本節「第五部分進度」第一個未打勾項目繼續。分支仍是 `vorflux/fix-cloudflared-cwd-and-rollback`（PR #2）。
+> 本機環境（Arena 沙箱）沒有 Rust 工具鏈、記憶體 1GB，Rust 改動只能靠 Windows CI
+> `Manual source upgrade (Windows)`（workflow_dispatch，ref 選本分支）驗證。Node 端可本機測：
+> `cd packages/node-agent && pnpm run build:server:unlocked && node --import ./test/setup.mjs --test test/<file>.test.mjs`。
+
+## 使用者回報（仍存在）
+
+- 部分 AI 回覆：「我無法直接完成這個連接。我的工具裡沒有能調用 MCP 的客戶端，也沒有 seed_connect、chat_reply 這些方法。
+  我能做的只有普通的網頁讀取(GET)，它不能建立MCP會話。」
+- 希望接入AI / 接入種子兩通道一致、最大程度相容各家 AI；提示詞再優化；推進「專案完全存取」；添加種子頁面卡片化。
+
+## 分析（為什麼 GET 模式仍可能失敗）
+
+1. 提示詞只給了 MCP 基底網址，GET 入口 `/connect?n=` 要 AI 自己拼。很多網頁讀取工具（Claude web_fetch、ChatGPT 瀏覽等）
+   **只允許打開使用者訊息或先前結果中出現過的網址**，自己拼的網址會被拒絕 → AI 以為只能放棄。
+   修正：提示詞直接給出完整的「網頁入口」網址；之後每頁都附完整下一步網址（出現在結果中的網址可被打開）。
+2. 頁面先輸出最多 24000 字的 JSON、最後才是下一步網址；讀取工具常截斷長頁面 → 看不到下一步。
+   修正：下一步網址放在頁面最前面（JSON 後面再重複一次），JSON 縮短。
+3. GET 的 `/wait` 預設等 20 秒；很多讀取工具 10~15 秒逾時。修正：GET 預設等 8 秒（可用 `wait=` 調整，上限 25 秒）。
+4. 部分讀取工具會先查 `robots.txt`。修正：新增 `/robots.txt`（允許 `/mcp/seeds/`）。
+5. 瀏覽器型代理（會點連結、填表單）需要 HTML。修正：`Accept` 含 `text/html` 時回傳簡單 HTML（可點連結 + 回覆表單），
+   其他情況維持純文字。
+6. 無法解決的限制（如實告知使用者）：只允許打開「已出現網址」的讀取工具，無法把任意回覆文字放進網址 →
+   這類 AI 可以讀取/等待訊息，但 `reply` 需要自己拼網址，可能仍被工具拒絕。這是 AI 廠商工具的限制，伺服器端無法繞過。
+
+## 第五部分進度
+
+- [ ] P1 提示詞：直接給「網頁入口」完整網址 + MCP 地址；明確「不需要你自己有這些工具」。（`src/lib/chat/seed-enrollment.ts`）
+- [ ] P2 GET 頁面：下一步網址置頂、JSON 縮短、wait 預設 8 秒、HTML 版（Node `routes/seeds.ts`）
+- [ ] P3 同步 Rust（`src-tauri/src/mcp/listener/seeds.rs`、`routes.rs` robots.txt）
+- [ ] P4 Node 測試 + Rust 測試更新；Windows CI
+- [ ] C 添加種子頁面卡片化（`src/lib/components/chat/ManualSeed.svelte` 等）
+- [ ] B 授權模式（完全/一般/嚴格）— 見下方 B 設計
+- [ ] 更新 PR #2 描述
