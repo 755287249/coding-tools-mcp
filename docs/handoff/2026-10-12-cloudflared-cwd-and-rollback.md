@@ -346,10 +346,14 @@ C. 添加種子頁面卡片化（build 子代理，分支 `vorflux/seed-add-card
 
 ## 第五部分進度
 
-- [ ] P1 提示詞：直接給「網頁入口」完整網址 + MCP 地址；明確「不需要你自己有這些工具」。（`src/lib/chat/seed-enrollment.ts`）
-- [ ] P2 GET 頁面：下一步網址置頂、JSON 縮短、wait 預設 8 秒、HTML 版（Node `routes/seeds.ts`）
-- [ ] P3 同步 Rust（`src-tauri/src/mcp/listener/seeds.rs`、`routes.rs` robots.txt）
+- [x] P1 提示詞：直接給「網頁入口」完整網址（`<端點>/connect?n=<隨機>`）+ MCP 地址；明確「你不需要自己有 MCP 客戶端或這些工具」。（`src/lib/chat/seed-enrollment.ts`，測試 `tests/seed-enrollment.test.mjs`）
+- [x] P2 Node GET 頁面：下一步網址置頂（JSON 後再重複）、JSON 上限 6000 字、`/wait` 預設 8 秒、有用戶訊息時回覆網址自動帶 `to=<id>`（AI 只需在 `text=` 後附加文字）、
+      `Accept: text/html` 時回 HTML（可點連結 + 回覆表單，無 script）、`x-robots-tag: noindex`、`/robots.txt`（`server.ts`）。測試：`test/projectGateway.test.mjs`。
+- [x] P3 Rust 同步（`seeds.rs`：`page`/`html_page`/`linkify`/`summarize` 回傳 `(text, reply_to)`；`routes.rs` 加 `/robots.txt`）。
+      本機只有 rustfmt + 抽出純函式用獨立 crate 編譯測試通過（`get_page_tests` 2 項）；完整編譯待 CI。
 - [ ] P4 Node 測試 + Rust 測試更新；Windows CI
-- [ ] C 添加種子頁面卡片化（`src/lib/components/chat/ManualSeed.svelte` 等）
+- [x] C 添加種子對話框卡片化：兩張方式卡片（手動加入單個 AI〔推薦〕/ 瀏覽器腳本配對），手動方式改為步驟卡片
+      （來源快捷籤 arena/chatgpt/claude/gemini/grok/kimi/doubao/qwen/deepseek、命名、進階連接地址），結果卡片含複製與「再生成一個」。
+      帳號留空時用來源名稱。新 i18n 鍵 `seeds.addIntro` 等 9 個（4 語）。svelte-check 0/0，前端測試 276 通過。
 - [ ] B 授權模式（完全/一般/嚴格）— 見下方 B 設計
 - [ ] 更新 PR #2 描述

@@ -10,6 +10,8 @@ use super::{
 pub(super) fn build_router(state: ListenerState) -> Router {
     let public_prefix = configured_route_prefix(&state.configured_public_url);
     let mut router = service_routes_for_prefix("")
+        // Some web-fetch tools check robots.txt before opening a seed page.
+        .route("/robots.txt", get(super::seeds::robots))
         .route(
             "/.well-known/oauth-authorization-server",
             get(oauth_authorization_server_metadata),

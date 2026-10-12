@@ -129,6 +129,13 @@ test('global seed endpoint retains its project capability and isolated catalog',
  const guide=await page('');assert.match(guide,/\/connect\?n=/);assert.match(guide,/Streamable HTTP/);
  assert.match(await page('/tools?n=a'),/chat_reply/);
  const waited=await page('/wait?n=b&wait=0');assert.match(waited,/status: /);assert.match(waited,/\/wait\?n=/);
+ // Next-step URLs come before the (truncated) JSON so fetch tools that cut long pages still see them.
+ assert.ok(waited.indexOf('/wait?n=')<waited.indexOf('result:'),waited);
+ assert.match(guide,/不需要自己有 MCP 客户端/);
+ const html=await fetch(`${endpoint}/wait?n=h&wait=0`,{headers:{accept:'text/html,application/xhtml+xml'}});
+ assert.match(html.headers.get('content-type'),/text\/html/);const htmlText=await html.text();assert.match(htmlText,/<a href="http:\/\/127\.0\.0\.1:\d+\/mcp\/seeds\/a\/[a-f0-9]{64}\/wait\?n=[a-f0-9]{12}">/);
+ assert.ok(!/<script/i.test(htmlText));
+ const robots=await fetch(endpoint.replace(/\/mcp\/.*$/,'/robots.txt'));assert.equal(robots.status,200);assert.match(await robots.text(),/Allow: \//);
  assert.match(await page('/call?n=c&tool=list_workspace_folders'),/selected_folder_id/);
  registry.delete('a');assert.ok((await rpc('tools/list')).error);
 });

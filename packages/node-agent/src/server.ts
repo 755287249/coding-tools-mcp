@@ -3,7 +3,7 @@ import { GLOBAL_MCP_ID } from './projectIsolation.js';
 import { ProjectGateway, projectCatalog } from './server/projectGateway.js';
 import {enforceProjectConfiguration} from './projectIsolation.js';
 import {runSchedules} from './chat/store.js';
-import {handleSeedRoute} from './server/routes/seeds.js';
+import {handleSeedRoute,ROBOTS_TXT} from './server/routes/seeds.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import path from 'node:path';
@@ -147,6 +147,10 @@ export async function createAgentRuntime(config: AgentConfig, options: AgentRunt
       const prefix = routePrefix(config);
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? `${config.host}:${config.port}`}`);
       const pathname = localPath(url.pathname, prefix);
+      // Some web-fetch tools check robots.txt before opening a seed page.
+      if (url.pathname === '/robots.txt' && (req.method === 'GET' || req.method === 'HEAD')) {
+        res.writeHead(200,{'content-type':'text/plain; charset=utf-8','cache-control':'no-store'}).end(ROBOTS_TXT);return;
+      }
       // No auth/session/catalog work on this bounded status-only endpoint.
       if (pathname === '/mcp/pairing') {
         if (req.method !== 'POST') {res.setHeader('Allow','POST');sendJson(res,405,{error:'method_not_allowed'});return;}

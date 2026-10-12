@@ -58,7 +58,7 @@ export async function handleSeedRoute(req:IncomingMessage,res:ServerResponse,pat
   let seedId=match[2],token=String(req.headers.authorization??'').replace(/^Bearer /,'');
   if(req.method==='GET'){
     if(req.headers.accept==='text/event-stream'){res.setHeader('allow','POST');sendJson(res,405,{error:'SSE stream not provided; use POST'});return true;}
-    try{seedUrl(store,match[2]);if(!currentToolCatalog(context).names.includes('chat_open'))throw Error();res.setHeader('referrer-policy','no-referrer');if(String(req.headers.accept??'').includes('application/json'))sendJson(res,200,{name:'coding-tools-seed',transport:'streamable-http',instructions:seedConnectSkill.text});else sendPlain(res,guideText(baseUrl(req,pathname)));}
+    try{seedUrl(store,match[2]);if(!currentToolCatalog(context).names.includes('chat_open'))throw Error();res.setHeader('referrer-policy','no-referrer');if(String(req.headers.accept??'').includes('application/json'))sendJson(res,200,{name:'coding-tools-seed',transport:'streamable-http',instructions:seedConnectSkill.text});else sendPage(req,res,guideText(baseUrl(req,pathname)),baseUrl(req,pathname));}
     catch{sendJson(res,404,{error:'Seed unavailable'});}return true;
   }
   if(req.method!=='POST'){sendJson(res,405,{error:'POST required'});return true;}
@@ -143,8 +143,29 @@ export async function handleSeedRoute(req:IncomingMessage,res:ServerResponse,pat
 
 // GET compatibility mode: AIs that can only read web pages follow plain-text pages.
 // Every page lists the complete next URL with a fresh `n` so fetch caches never replay.
-function sendPlain(res:ServerResponse,text:string):void {
-  res.writeHead(200,{'content-type':'text/plain; charset=utf-8','cache-control':'no-store','referrer-policy':'no-referrer','x-content-type-options':'nosniff'}).end(text);
+// The next-step URLs come FIRST: fetch tools often truncate long pages.
+// Browsers and browser agents (Accept: text/html) get the same content as HTML
+// with clickable links and a reply form.
+export const GET_WAIT_DEFAULT_MS=8000;
+/** Seed URLs are capabilities, not public pages; fetch tools that honor robots.txt may open them. */
+export const ROBOTS_TXT='User-agent: *\nAllow: /\n';
+const PAGE_JSON_LIMIT=6000;
+function wantsHtml(req:IncomingMessage):boolean {
+  const accept=String(req.headers.accept??'');
+  return accept.includes('text/html')&&!accept.startsWith('text/plain');
+}
+const escapeHtml=(text:string)=>text.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c] as string));
+/** Linkify whole-token URLs only; templates that still contain <placeholders> stay text. */
+function linkify(text:string):string {
+  return text.split(/(\s+)/).map(token=>/^https?:\/\/[^\s<>"]+$/.test(token)?`<a href="${escapeHtml(token)}">${escapeHtml(token)}</a>`:escapeHtml(token)).join('');
+}
+export function htmlPage(text:string,base:string,replyTo?:string):string {
+  const form=replyTo?`<form method="get" action="${escapeHtml(base)}/reply"><input type="hidden" name="n" value="${nonce()}"><input type="hidden" name="to" value="${escapeHtml(replyTo)}"><input type="hidden" name="final" value="1"><textarea name="text" rows="6" cols="80" placeholder="回复 Reply"></textarea><br><button type="submit">发送回复 Send reply</button></form>`:'';
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="robots" content="noindex"><title>Coding Tools MCP</title></head><body><pre style="white-space:pre-wrap">${linkify(text)}</pre>${form}</body></html>`;
+}
+function sendPage(req:IncomingMessage,res:ServerResponse,text:string,base:string,replyTo?:string):void {
+  const html=wantsHtml(req);
+  res.writeHead(200,{'content-type':html?'text/html; charset=utf-8':'text/plain; charset=utf-8','cache-control':'no-store','referrer-policy':'no-referrer','x-content-type-options':'nosniff','x-robots-tag':'noindex, nofollow'}).end(html?htmlPage(text,base,replyTo):text);
 }
 const nonce=()=>randomUUID().replace(/-/g,'').slice(0,12);
 function baseUrl(req:IncomingMessage,path:string):string {
@@ -157,34 +178,41 @@ export function guideText(base:string):string {
   return `Coding Tools MCP — 用户本人的本机项目连接 (the user's own local coding tool)
 
 这个网址由用户在自己的 Coding Tools MCP 应用里生成，用来让你访问用户指定的项目并在应用的对话里和用户交流。
-消息都由用户本人在应用里发出；chat_wait / chat_reply 等工具在这个 MCP 服务器上，不在你的客户端里。
+你不需要自己有 MCP 客户端或 seed_connect / chat_wait / chat_reply 工具：它们都在这个服务器上。
+You do NOT need an MCP client or these tools yourself — they run on this server.
 
-选一种你能用的方式连接 (pick the first one you can use):
-1. MCP 客户端 MCP client: 把 ${base} 添加为 Streamable HTTP MCP 服务器（不需要额外认证），然后调用 seed_connect，再 chat_wait。
-2. HTTP POST (curl/python): POST JSON-RPC 到 ${base}，Content-Type: application/json，Accept: application/json, text/event-stream；
-   先 initialize {"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"ai","version":"1"}}，
-   再 notifications/initialized，之后请求加 MCP-Protocol-Version: 2025-03-26；tools/call seed_connect，然后 chat_wait {"timeout_ms":25000}。
-3. 只能读网页 (GET only): 打开 ${base}/connect?n=${nonce()}，之后每个页面都会给出下一步网址。
+最简单 Easiest (web page reading is enough): 打开 Open ${base}/connect?n=${nonce()}
+之后每个页面都会给出下一步的完整网址，照着打开即可。Each page gives the complete next URL.
+
+其他方式 Other ways:
+- MCP 客户端 MCP client: 把 ${base} 添加为 Streamable HTTP MCP 服务器（不需要额外认证），然后调用 seed_connect，再 chat_wait。
+- HTTP POST (curl/python): POST JSON-RPC 到 ${base}，Content-Type: application/json，Accept: application/json, text/event-stream；
+  先 initialize {"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"ai","version":"1"}}，
+  再 notifications/initialized，之后请求加 MCP-Protocol-Version: 2025-03-26；tools/call seed_connect，然后 chat_wait {"timeout_ms":25000}。
 
 收到消息后按说明完成工作并回复；回复后继续等待下一条消息。等待返回 idle 只表示用户还没发消息，再等一次即可。
 `;
 }
-function nextLinks(base:string):string {
-  const n=nonce();
-  return `下一步 / Next (open the URL with your web/fetch tool):
+export function nextLinks(base:string,replyTo?:string):string {
+  const n=nonce(),to=replyTo?encodeURIComponent(replyTo):'<message.id>';
+  return `下一步 / Next (open the complete URL with your web/fetch tool):
 - 等待用户消息 Wait for the next message: ${base}/wait?n=${n}
-- 回复用户 Reply: ${base}/reply?n=${n}&to=<message.id>&final=1&text=<URL-encoded reply>
-- 进度回复（未完成）Progress: same as Reply with final=0
-- 调用项目工具 Call a tool: ${base}/call?n=${n}&tool=<name>&args=<URL-encoded JSON>  (e.g. tool=read_file&args=%7B%22path%22%3A%22README.md%22%7D)
+- 回复用户 Reply (append your URL-encoded text): ${base}/reply?n=${n}&to=${to}&final=1&text=
+- 进度回复（未完成）Progress: same as Reply with final=0；长回复可分几次 final=0，最后一次 final=1
+- 调用项目工具 Call a tool: ${base}/call?n=${n}&tool=<name>&args=<URL-encoded JSON>  (e.g. ${base}/call?n=${n}&tool=read_file&args=%7B%22path%22%3A%22README.md%22%7D)
 - 工具列表 Tool list: ${base}/tools?n=${n}`;
 }
-function summarize(action:string,result:JsonObject):string {
+/** Returns the page text and, when the result carries a user message, its id. */
+export function summarize(action:string,result:JsonObject,base:string):{text:string,replyTo?:string} {
   const data=(result.structuredContent??result) as JsonObject;
   let out=`action: ${action}\nstatus: ${String(data.status??(data.ok===true?'ok':'-'))}\n`;
-  if(data.status==='message'){const m=(data.message??{}) as JsonObject;out+=`\n用户消息 User message (id=${String(m.id??'')}):\n${String(m.text??'')}\n`;}
+  let replyTo:string|undefined;
+  if(data.status==='message'){const m=(data.message??{}) as JsonObject;replyTo=String(m.id??'')||undefined;out+=`\n用户消息 User message (id=${String(m.id??'')}):\n${String(m.text??'')}\n`;}
   if(typeof data.instruction==='string')out+=`\ninstruction: ${data.instruction}\n`;
-  let body=JSON.stringify(data,null,2);if(body.length>24000)body=body.slice(0,24000)+'\n…(truncated)';
-  return out+`\nresult:\n${body}\n`;
+  if(data.status==='idle')out+='\n用户还没发新消息，打开下面的「等待」网址继续等。No new message yet — open the Wait URL again.\n';
+  const links=nextLinks(base,replyTo);
+  let body=JSON.stringify(data,null,2);if(body.length>PAGE_JSON_LIMIT)body=body.slice(0,PAGE_JSON_LIMIT)+'\n…(truncated; use /call for full tool output)';
+  return {text:`${out}\n${links}\n\nresult:\n${body}\n\n${links}\n`,replyTo};
 }
 /** Run one JSON-RPC request through the POST handler without a network round trip. */
 async function internalRpc(path:string,context:ToolContext,body:JsonObject):Promise<JsonObject|undefined> {
@@ -204,21 +232,26 @@ async function handleSeedGet(req:IncomingMessage,res:ServerResponse,pathname:str
   try{
     // Every page works as the first page: redeeming is idempotent.
     await internalRpc(seedPath,context,{jsonrpc:'2.0',id:'get-init',method:'initialize',params:{protocolVersion:'2025-03-26'}});
-    let text:string;
-    if(action==='connect')text=summarize(action,(await call('seed_connect',{}))??{});
-    else if(action==='wait'){const wait=Math.min(Number(query.get('wait')??20000)||0,25000);text=summarize(action,(await call('chat_wait',{timeout_ms:wait}))??{});}
+    let page:{text:string,replyTo?:string};
+    if(action==='connect')page=summarize(action,(await call('seed_connect',{}))??{},base);
+    else if(action==='wait'){
+      // Fetch tools usually time out after 10–30 s; keep GET waits short by default.
+      const requested=Number(query.get('wait')??GET_WAIT_DEFAULT_MS);
+      const wait=Math.min(Number.isFinite(requested)&&requested>=0?requested:GET_WAIT_DEFAULT_MS,25000);
+      page=summarize(action,(await call('chat_wait',{timeout_ms:wait}))??{},base);
+    }
     else if(action==='reply'){
       const to=query.get('to')??'',reply=query.get('text')??'';if(!n||!to||!reply.trim())throw Error('reply needs n, to and text');
       const message_id=`get-${createHash('sha256').update(`${n}\0${to}`).digest('hex').slice(0,24)}`;
-      text=summarize(action,(await call('chat_reply',{reply_to:to,message_id,text:reply,final:query.get('final')!=='0',...(query.get('ask')==='1'?{awaiting_user:true}:{})}))??{});
+      page=summarize(action,(await call('chat_reply',{reply_to:to,message_id,text:reply,final:query.get('final')!=='0',...(query.get('ask')==='1'?{awaiting_user:true}:{})}))??{},base);
     }else if(action==='call'){
       const tool=query.get('tool')??'';if(!tool)throw Error('call needs tool');
       const raw=query.get('args');let args:JsonObject={};if(raw&&raw.trim()){try{args=JSON.parse(raw) as JsonObject;}catch(e){throw Error(`args must be JSON: ${e instanceof Error?e.message:e}`);}}
-      text=summarize(action,(await call(tool,args))??{});
+      page=summarize(action,(await call(tool,args))??{},base);
     }else if(action==='tools'){
       const listed=(await internalRpc(seedPath,context,{jsonrpc:'2.0',id:'get-tools',method:'tools/list'}))??{};
-      text='tools:\n'+((listed.tools??[]) as JsonObject[]).map(t=>`- ${String(t.name)}: ${String(t.description??'').slice(0,160)}`).join('\n')+'\n';
+      page={text:`${nextLinks(base)}\n\ntools:\n`+((listed.tools??[]) as JsonObject[]).map(t=>`- ${String(t.name)}: ${String(t.description??'').slice(0,160)}`).join('\n')+'\n'};
     }else throw Error('Unknown action. Use connect, wait, reply, call or tools.');
-    sendPlain(res,`${text}\n${nextLinks(base)}`);
-  }catch(error){sendPlain(res,`error: ${error instanceof Error?error.message:'Seed request failed'}\n\n${nextLinks(base)}`);}
+    sendPage(req,res,page.text,base,page.replyTo);
+  }catch(error){sendPage(req,res,`error: ${error instanceof Error?error.message:'Seed request failed'}\n\n${nextLinks(base,query.get('to')??undefined)}`,base);}
 }

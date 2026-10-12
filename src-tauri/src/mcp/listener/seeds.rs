@@ -106,7 +106,10 @@ pub(super) async fn get(
         .is_some_and(|v| v.contains("application/json"));
     let mut response = match result {
         Ok(value) if wants_json => json_no_store(value),
-        Ok(_) => text_no_store(guide_text(&base_url(&headers, &uri, None))),
+        Ok(_) => {
+            let base = base_url(&headers, &uri, None);
+            page(&headers, guide_text(&base), &base, None)
+        }
         Err(_) => (
             StatusCode::NOT_FOUND,
             json_no_store(json!({"error":"Seed unavailable"})),
@@ -722,6 +725,35 @@ mod tests {
             waited.contains("status:") && waited.contains("/wait?n="),
             "{waited}"
         );
+        // Next-step URLs come before the truncated JSON: fetch tools often cut long pages.
+        assert!(
+            waited.find("/wait?n=").unwrap() < waited.find("result:").unwrap(),
+            "{waited}"
+        );
+        assert!(guide.contains("不需要自己有 MCP 客户端"), "{guide}");
+        let html = client
+            .get(format!("{url_endpoint}/wait?n=h&wait=0"))
+            .header("Accept", "text/html,application/xhtml+xml")
+            .send()
+            .await
+            .unwrap();
+        assert!(html.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with("text/html"));
+        let html = html.text().await.unwrap();
+        assert!(
+            html.contains(&format!("<a href=\"{url_endpoint}/wait?n="))
+                && !html.contains("<script"),
+            "{html}"
+        );
+        let robots = client
+            .get(format!("http://{address}/robots.txt"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(robots.status(), 200);
+        assert!(robots.text().await.unwrap().contains("Allow: /"));
         let folders = page("call?n=c&tool=list_workspace_folders")
             .await
             .unwrap()
@@ -972,19 +1004,128 @@ mod tests {
 // with a fresh `n` so fetch caches never replay an old answer. The URL key is
 // the credential, exactly as for JSON-RPC.
 // ---------------------------------------------------------------------------
-fn text_no_store(text: String) -> Response {
+/// Fetch tools usually time out after 10–30 s; keep GET waits short by default.
+const GET_WAIT_DEFAULT_MS: u64 = 8_000;
+const PAGE_JSON_LIMIT: usize = 6_000;
+/// Seed URLs are capabilities, not public pages; fetch tools that honor
+/// robots.txt may open them.
+pub(super) const ROBOTS_TXT: &str = "User-agent: *\nAllow: /\n";
+pub(super) async fn robots() -> Response {
     (
         [
             (CACHE_CONTROL, "no-store"),
             (CONTENT_TYPE, "text/plain; charset=utf-8"),
-            (axum::http::header::REFERRER_POLICY, "no-referrer"),
         ],
-        text,
+        ROBOTS_TXT,
     )
         .into_response()
 }
+fn page_headers(content_type: &'static str) -> [(axum::http::HeaderName, &'static str); 5] {
+    [
+        (CACHE_CONTROL, "no-store"),
+        (CONTENT_TYPE, content_type),
+        (axum::http::header::REFERRER_POLICY, "no-referrer"),
+        (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        (
+            axum::http::HeaderName::from_static("x-robots-tag"),
+            "noindex, nofollow",
+        ),
+    ]
+}
+fn text_no_store(text: String) -> Response {
+    (page_headers("text/plain; charset=utf-8"), text).into_response()
+}
+fn wants_html(headers: &HeaderMap) -> bool {
+    let accept = headers
+        .get("accept")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    accept.contains("text/html") && !accept.starts_with("text/plain")
+}
+fn escape_html(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+/// Linkify whole-token URLs only; templates with `<placeholders>` stay text.
+fn linkify(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 256);
+    let mut token = String::new();
+    let flush = |token: &mut String, out: &mut String| {
+        if token.is_empty() {
+            return;
+        }
+        let is_url = (token.starts_with("http://") || token.starts_with("https://"))
+            && !token.contains(['<', '>', '"']);
+        if is_url {
+            let escaped = escape_html(token);
+            out.push_str(&format!("<a href=\"{escaped}\">{escaped}</a>"));
+        } else {
+            out.push_str(&escape_html(token));
+        }
+        token.clear();
+    };
+    for c in text.chars() {
+        if c.is_whitespace() {
+            flush(&mut token, &mut out);
+            out.push(c);
+        } else {
+            token.push(c);
+        }
+    }
+    flush(&mut token, &mut out);
+    out
+}
+pub(super) fn html_page(text: &str, base: &str, reply_to: Option<&str>) -> String {
+    let form = reply_to
+        .map(|to| {
+            format!(
+                "<form method=\"get\" action=\"{base}/reply\"><input type=\"hidden\" name=\"n\" value=\"{n}\"><input type=\"hidden\" name=\"to\" value=\"{to}\"><input type=\"hidden\" name=\"final\" value=\"1\"><textarea name=\"text\" rows=\"6\" cols=\"80\" placeholder=\"回复 Reply\"></textarea><br><button type=\"submit\">发送回复 Send reply</button></form>",
+                base = escape_html(base),
+                n = nonce(),
+                to = escape_html(to)
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"robots\" content=\"noindex\"><title>Coding Tools MCP</title></head><body><pre style=\"white-space:pre-wrap\">{}</pre>{form}</body></html>",
+        linkify(text)
+    )
+}
+/// Plain text for fetch tools; HTML with links and a reply form for browsers.
+fn page(headers: &HeaderMap, text: String, base: &str, reply_to: Option<&str>) -> Response {
+    if wants_html(headers) {
+        (
+            page_headers("text/html; charset=utf-8"),
+            html_page(&text, base, reply_to),
+        )
+            .into_response()
+    } else {
+        text_no_store(text)
+    }
+}
 fn nonce() -> String {
     uuid::Uuid::new_v4().simple().to_string()[..12].to_owned()
+}
+fn percent_encode(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for b in text.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 /// Absolute URL of this seed endpoint as the AI reached it (tunnel or local).
 fn base_url(headers: &HeaderMap, uri: &axum::http::Uri, action: Option<&str>) -> String {
@@ -1007,14 +1148,17 @@ fn base_url(headers: &HeaderMap, uri: &axum::http::Uri, action: Option<&str>) ->
     }
     format!("{proto}://{host}{path}")
 }
-fn next_links(base: &str) -> String {
+pub(super) fn next_links(base: &str, reply_to: Option<&str>) -> String {
     let n = nonce();
+    let to = reply_to
+        .map(percent_encode)
+        .unwrap_or_else(|| "<message.id>".to_owned());
     format!(
-        "下一步 / Next (open the URL with your web/fetch tool):\n\
+        "下一步 / Next (open the complete URL with your web/fetch tool):\n\
          - 等待用户消息 Wait for the next message: {base}/wait?n={n}\n\
-         - 回复用户 Reply: {base}/reply?n={n}&to=<message.id>&final=1&text=<URL-encoded reply>\n\
-         - 进度回复（未完成）Progress: same as Reply with final=0\n\
-         - 调用项目工具 Call a tool: {base}/call?n={n}&tool=<name>&args=<URL-encoded JSON>  (e.g. tool=read_file&args=%7B%22path%22%3A%22README.md%22%7D)\n\
+         - 回复用户 Reply (append your URL-encoded text): {base}/reply?n={n}&to={to}&final=1&text=\n\
+         - 进度回复（未完成）Progress: same as Reply with final=0；长回复可分几次 final=0，最后一次 final=1\n\
+         - 调用项目工具 Call a tool: {base}/call?n={n}&tool=<name>&args=<URL-encoded JSON>  (e.g. {base}/call?n={n}&tool=read_file&args=%7B%22path%22%3A%22README.md%22%7D)\n\
          - 工具列表 Tool list: {base}/tools?n={n}"
     )
 }
@@ -1022,18 +1166,22 @@ pub(super) fn guide_text(base: &str) -> String {
     format!(
         "Coding Tools MCP — 用户本人的本机项目连接 (the user's own local coding tool)\n\n\
          这个网址由用户在自己的 Coding Tools MCP 应用里生成，用来让你访问用户指定的项目并在应用的对话里和用户交流。\n\
-         消息都由用户本人在应用里发出；chat_wait / chat_reply 等工具在这个 MCP 服务器上，不在你的客户端里。\n\n\
-         选一种你能用的方式连接 (pick the first one you can use):\n\
-         1. MCP 客户端 MCP client: 把 {base} 添加为 Streamable HTTP MCP 服务器（不需要额外认证），然后调用 seed_connect，再 chat_wait。\n\
-         2. HTTP POST (curl/python): POST JSON-RPC 到 {base}，Content-Type: application/json，Accept: application/json, text/event-stream；\n\
-            先 initialize {{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{{}},\"clientInfo\":{{\"name\":\"ai\",\"version\":\"1\"}}}}，\n\
-            再 notifications/initialized，之后请求加 MCP-Protocol-Version: 2025-03-26；tools/call seed_connect，然后 chat_wait {{\"timeout_ms\":25000}}。\n\
-         3. 只能读网页 (GET only): 打开 {base}/connect?n={n}，之后每个页面都会给出下一步网址。\n\n\
+         你不需要自己有 MCP 客户端或 seed_connect / chat_wait / chat_reply 工具：它们都在这个服务器上。\n\
+         You do NOT need an MCP client or these tools yourself — they run on this server.\n\n\
+         最简单 Easiest (web page reading is enough): 打开 Open {base}/connect?n={n}\n\
+         之后每个页面都会给出下一步的完整网址，照着打开即可。Each page gives the complete next URL.\n\n\
+         其他方式 Other ways:\n\
+         - MCP 客户端 MCP client: 把 {base} 添加为 Streamable HTTP MCP 服务器（不需要额外认证），然后调用 seed_connect，再 chat_wait。\n\
+         - HTTP POST (curl/python): POST JSON-RPC 到 {base}，Content-Type: application/json，Accept: application/json, text/event-stream；\n\
+           先 initialize {{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{{}},\"clientInfo\":{{\"name\":\"ai\",\"version\":\"1\"}}}}，\n\
+           再 notifications/initialized，之后请求加 MCP-Protocol-Version: 2025-03-26；tools/call seed_connect，然后 chat_wait {{\"timeout_ms\":25000}}。\n\n\
          收到消息后按说明完成工作并回复；回复后继续等待下一条消息。等待返回 idle 只表示用户还没发消息，再等一次即可。\n",
         n = nonce()
     )
 }
-fn summarize(action: &str, result: &Value) -> String {
+/// Page text plus the user message id when the result carries one. The
+/// next-step URLs come first: fetch tools often truncate long pages.
+pub(super) fn summarize(action: &str, result: &Value, base: &str) -> (String, Option<String>) {
     let data = if result["structuredContent"].is_null() {
         result.clone()
     } else {
@@ -1045,28 +1193,38 @@ fn summarize(action: &str, result: &Value) -> String {
             .as_str()
             .unwrap_or(if data["ok"] == true { "ok" } else { "-" })
     );
+    let mut reply_to = None;
     if data["status"] == "message" {
         let message = &data["message"];
+        let id = message["id"].as_str().unwrap_or("");
+        if !id.is_empty() {
+            reply_to = Some(id.to_owned());
+        }
         out.push_str(&format!(
-            "\n用户消息 User message (id={}):\n{}\n",
-            message["id"].as_str().unwrap_or(""),
+            "\n用户消息 User message (id={id}):\n{}\n",
             message["text"].as_str().unwrap_or("")
         ));
     }
     if let Some(instruction) = data["instruction"].as_str() {
         out.push_str(&format!("\ninstruction: {instruction}\n"));
     }
+    if data["status"] == "idle" {
+        out.push_str("\n用户还没发新消息，打开下面的「等待」网址继续等。No new message yet — open the Wait URL again.\n");
+    }
+    let links = next_links(base, reply_to.as_deref());
     let mut body = serde_json::to_string_pretty(&data).unwrap_or_default();
-    if body.len() > 24_000 {
-        let mut cut = 24_000;
+    if body.len() > PAGE_JSON_LIMIT {
+        let mut cut = PAGE_JSON_LIMIT;
         while !body.is_char_boundary(cut) {
             cut -= 1;
         }
         body.truncate(cut);
-        body.push_str("\n…(truncated)");
+        body.push_str("\n…(truncated; use /call for full tool output)");
     }
-    out.push_str(&format!("\nresult:\n{body}\n"));
-    out
+    (
+        format!("{out}\n{links}\n\nresult:\n{body}\n\n{links}\n"),
+        reply_to,
+    )
 }
 pub(super) async fn get_action(
     State(state): State<ListenerState>,
@@ -1102,7 +1260,7 @@ pub(super) async fn get_action(
                 execute(state.clone(), &folder_id, &key, &rpc_headers, call("seed_connect", json!({}))).await.map(|v| v.unwrap_or(Value::Null))
             }
             "wait" => {
-                let timeout = query.get("wait").and_then(|v| v.parse::<u64>().ok()).unwrap_or(20_000).min(25_000);
+                let timeout = query.get("wait").and_then(|v| v.parse::<u64>().ok()).unwrap_or(GET_WAIT_DEFAULT_MS).min(25_000);
                 execute(state.clone(), &folder_id, &key, &rpc_headers, call("chat_wait", json!({"timeout_ms":timeout}))).await.map(|v| v.unwrap_or(Value::Null))
             }
             "reply" => {
@@ -1141,13 +1299,58 @@ pub(super) async fn get_action(
     .await;
     match outcome {
         Ok(value) => {
-            let text = if action == "tools" {
-                format!("tools:\n{}\n", value["tools"].as_str().unwrap_or(""))
+            let (text, reply_to) = if action == "tools" {
+                (
+                    format!(
+                        "{}\n\ntools:\n{}\n",
+                        next_links(&base, None),
+                        value["tools"].as_str().unwrap_or("")
+                    ),
+                    None,
+                )
             } else {
-                summarize(&action, &value)
+                summarize(&action, &value, &base)
             };
-            text_no_store(format!("{text}\n{}", next_links(&base)))
+            page(&headers, text, &base, reply_to.as_deref())
         }
-        Err(message) => text_no_store(format!("error: {message}\n\n{}", next_links(&base))),
+        Err(message) => page(
+            &headers,
+            format!(
+                "error: {message}\n\n{}",
+                next_links(&base, query.get("to").map(String::as_str))
+            ),
+            &base,
+            None,
+        ),
+    }
+}
+
+#[cfg(test)]
+mod get_page_tests {
+    use super::*;
+
+    #[test]
+    fn links_come_first_and_reply_template_carries_message_id() {
+        let base = "https://example.test/mcp/seeds/a/key";
+        let result = json!({"structuredContent":{"status":"message","message":{"id":"m 1","text":"hi"},"blob":"x".repeat(20_000)}});
+        let (text, reply_to) = summarize("wait", &result, base);
+        assert_eq!(reply_to.as_deref(), Some("m 1"));
+        assert!(text.find("/wait?n=").unwrap() < text.find("result:").unwrap());
+        assert!(text.contains("&to=m%201&final=1&text="), "{text}");
+        assert!(text.len() < 12_000, "{}", text.len());
+    }
+
+    #[test]
+    fn html_page_escapes_and_links_only_complete_urls() {
+        let html = html_page(
+            "a <b> https://example.test/x?n=1 https://example.test/r?to=<message.id>",
+            "https://example.test",
+            Some("m\"1"),
+        );
+        assert!(html.contains("&lt;b&gt;"));
+        assert!(html.contains("<a href=\"https://example.test/x?n=1\">"));
+        assert!(!html.contains("<a href=\"https://example.test/r?to="));
+        assert!(html.contains("value=\"m&quot;1\""));
+        assert!(!html.contains("<script"));
     }
 }

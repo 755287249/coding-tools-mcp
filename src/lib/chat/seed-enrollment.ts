@@ -13,13 +13,24 @@ export function seedEnrollmentPrompt(address:string,folder:string,seed:SeedTicke
 
 /**
  * One prompt for both channels ([接入AI] and seeds); only the address and the
- * first step differ. Written for the widest range of AIs: MCP clients, AIs that
- * can run code (HTTP POST), and AIs that can only read web pages (GET mode).
+ * first step differ. Written for the widest range of AIs:
+ * - AIs that can only read web pages get a complete, ready-to-open web entry URL
+ *   (many fetch tools refuse URLs the AI builds itself, so we never ask it to);
+ * - MCP clients get the Streamable HTTP address;
+ * - AIs that can run code may POST JSON-RPC to the same address.
+ * It says explicitly that the tools live on the server, because some AIs
+ * otherwise answer "I have no MCP client / no seed_connect tool" and stop.
  */
 export function connectPrompt(endpoint:string,kind:'direct'|'seed'):string {
-  const after=kind==='direct'?'连上后 seed_connect，再 chat_wait 等我的消息':'连上后 seed_connect 入库，再 chat_wait 等分配到我的对话';
-  return `${endpoint}
-这是我电脑上 Coding Tools MCP 应用为我的项目生成的连接（已含认证，1 小时内首次连接）。请连上，在应用对话里和我协作：有 MCP 客户端就加为 Streamable HTTP 服务器；能运行代码就向它 POST JSON-RPC；只能读网页就直接打开它，按页面的下一步网址操作。seed_connect、chat_wait、chat_reply 和文件/命令工具都在这个服务器上，不在你的客户端里。${after}，完成后 chat_reply 回复并继续 chat_wait；idle 表示我还没发新消息。`;
+  const entry=`${endpoint}/connect?n=${Math.random().toString(36).slice(2,8)||'start'}`;
+  const after=kind==='direct'
+    ?'连上后等我的消息（chat_wait，或网页里的「等待」网址）'
+    :'连上后先入库（seed_connect，网页入口会自动完成），再等分配到我的对话';
+  return `请帮我连接我自己电脑上的 Coding Tools MCP 应用（这是我为自己的项目生成的连接，已含认证，1 小时内首次打开有效）。
+网页入口（只能读网页也可以用）：${entry}
+MCP 地址（Streamable HTTP，无需再认证）：${endpoint}
+你不需要自己有 MCP 客户端或 seed_connect、chat_wait、chat_reply 等工具——它们都在这个服务器上。能读网页就打开网页入口，按页面给出的下一步网址操作；有 MCP 客户端就添加 MCP 地址；能运行代码也可以向 MCP 地址 POST JSON-RPC。
+${after}。我在应用里给你发消息，你做完后回复，再继续等待；等待返回 idle 只表示我还没发新消息。`;
 }
 /** [接入AI] by URL: the address carries a credential bound to this chat. */
 export function directConnectPrompt(address:string,folder:string,seed:SeedTicket):string {
