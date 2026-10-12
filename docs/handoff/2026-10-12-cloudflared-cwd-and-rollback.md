@@ -213,6 +213,7 @@
       測試中發現：新對話按 [接入AI] 後導航到對話網址，舊的 ChatPanel 被卸載，接入指引沒有打開；
       已改為在網址加 `&connect=1`（`onNavigate(folder, chat, connect)`）。
 - [x] 推送、更新 PR #2 描述。
+- [x] Windows CI `Manual source upgrade (Windows)` 在 740ec0a 通過（run 38220031640，含可攜版 exe，Artifacts 保留 14 天）。
 
 ## 尚未處理（低優先，可後續）
 
