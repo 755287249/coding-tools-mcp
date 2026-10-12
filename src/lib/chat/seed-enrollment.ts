@@ -12,25 +12,14 @@ export function seedEnrollmentPrompt(address:string,folder:string,seed:SeedTicke
 }
 
 /**
- * One prompt for both channels ([接入AI] and seeds); only the address and the
- * first step differ. Written for the widest range of AIs:
- * - AIs that can only read web pages get a complete, ready-to-open web entry URL
- *   (many fetch tools refuse URLs the AI builds itself, so we never ask it to);
- * - MCP clients get the Streamable HTTP address;
- * - AIs that can run code may POST JSON-RPC to the same address.
- * It says explicitly that the tools live on the server, because some AIs
- * otherwise answer "I have no MCP client / no seed_connect tool" and stop.
+ * One short prompt for both channels ([接入AI] and seeds); only the address differs.
+ * It hands over just the MCP URL. Rules and tools are explained by the server itself:
+ * MCP clients get them from initialize/tools/list/skill.text, and a plain GET on the
+ * same URL returns a guide page whose complete next-step URLs fetch-only AIs can open.
+ * "The tools are inside the MCP, not your client" stops "I have no such tools" replies.
  */
-export function connectPrompt(endpoint:string,kind:'direct'|'seed'):string {
-  const entry=`${endpoint}/connect?n=${Math.random().toString(36).slice(2,8)||'start'}`;
-  const after=kind==='direct'
-    ?'连上后等我的消息（chat_wait，或网页里的「等待」网址）'
-    :'连上后先入库（seed_connect，网页入口会自动完成），再等分配到我的对话';
-  return `请帮我连接我自己电脑上的 Coding Tools MCP 应用（这是我为自己的项目生成的连接，已含认证，1 小时内首次打开有效）。
-网页入口（只能读网页也可以用）：${entry}
-MCP 地址（Streamable HTTP，无需再认证）：${endpoint}
-你不需要自己有 MCP 客户端或 seed_connect、chat_wait、chat_reply 等工具——它们都在这个服务器上。能读网页就打开网页入口，按页面给出的下一步网址操作；有 MCP 客户端就添加 MCP 地址；能运行代码也可以向 MCP 地址 POST JSON-RPC。
-${after}。我在应用里给你发消息，你做完后回复，再继续等待；等待返回 idle 只表示我还没发新消息。`;
+export function connectPrompt(endpoint:string,_kind:'direct'|'seed'):string {
+  return `请连接我的工具 ${endpoint} 。快速连接这个 sandbox 的 MCP（URL），明确使用规则，熟悉可用工具，做好处理接下来一系列操作的准备。工具在 MCP 内部，而非你的客户端内部，连上后使用，然后等待信息。`;
 }
 /** [接入AI] by URL: the address carries a credential bound to this chat. */
 export function directConnectPrompt(address:string,folder:string,seed:SeedTicket):string {

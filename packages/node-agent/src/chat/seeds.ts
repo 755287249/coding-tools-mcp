@@ -201,6 +201,15 @@ export function seedUi(store:SeedStore,args:Record<string,unknown>):Record<strin
     }
     if(args.action==='seed_purge')data.seeds=data.seeds.filter(s=>!selected.has(s.id));
     saveSeeds(store,data);seedInvalidate(store);return {...inventory(data,args,now),affected_count:selected.size};
+  } else if(args.action==='seed_delete_account') {
+    // One account card = every seed with that account label. Detach live chats first, then delete atomically.
+    const account=typeof args.account==='string'?args.account:'';
+    const targets=data.seeds.filter(s=>s.account===account);
+    if(!account||!targets.length)throw Error('Account not found');
+    for(const seed of targets)ensureSettled(seed);
+    for(const seed of targets)if(seed.chat_id)releaseSeed(store,seed);
+    data.seeds=data.seeds.filter(s=>s.account!==account);
+    saveSeeds(store,data);seedInvalidate(store);return {...inventory(data,{...args,account:''},now),affected_count:targets.length};
   } else if(args.action==='seed_reissue') {
     const seed=data.seeds.find(s=>s.id===uid(args.seed_id));if(!seed)throw Error('Seed not found');ensureSettled(seed);
     if(seed.retired_at||seed.redeemed_at||now<=seed.enrollment_until||seed.chat_id)throw Error('Only expired, unconnected seeds can be reissued');

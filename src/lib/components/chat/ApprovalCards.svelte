@@ -23,8 +23,8 @@
 .body{min-width:0;display:grid;gap:4px;font-size:12px}
 pre{margin:0;font:12px/1.6 var(--font-mono,monospace);white-space:pre-wrap;overflow-wrap:anywhere;max-height:96px;overflow:auto;color:var(--color-text-secondary,var(--color-text-muted))}
 .actions{display:flex;gap:6px;flex:none}
-button{padding:6px 12px;border:1px solid var(--color-border);border-radius:8px;font-size:12px;cursor:pointer;background:var(--surface-2);color:var(--color-text)}
+button{padding:6px 12px;border:1px solid var(--border-strong);border-radius:8px;font-size:12px;cursor:pointer;background:var(--surface-3);color:var(--color-text)}
 button:disabled{opacity:.5;cursor:wait}
-.allow{background:var(--primary,#2563eb);border-color:var(--primary,#2563eb);color:#fff}
+.allow{background:var(--action);border-color:var(--action-border);color:var(--action-text);font-weight:600}.allow:not(:disabled):hover{background:var(--action-hover)}
 .deny:hover{color:var(--danger)}
 </style>

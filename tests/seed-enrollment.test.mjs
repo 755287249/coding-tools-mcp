@@ -16,11 +16,10 @@ test('manual prompt enrolls only its seed and folder, exchanges credentials, and
 });
 test('URL-first manual prompt carries one capability URL, a ready web entry and the shared instruction',()=>{
  const url_key='b'.repeat(64),endpoint='https://example.test/clients/mine/mcp/seeds/folder/'+url_key,prompt=seedEnrollmentPrompt('https://example.test/clients/mine/mcp','folder',{...seed,url_key});
- assert.ok(prompt.includes('MCP 地址（Streamable HTTP，无需再认证）：'+endpoint+'\n'));
- // GET-only AIs must be handed a complete URL: many fetch tools refuse URLs the AI builds itself.
- const entry=prompt.split('\n').find(line=>line.startsWith('网页入口'));assert.ok(entry&&/：https:\/\/example\.test\/clients\/mine\/mcp\/seeds\/folder\/b{64}\/connect\?n=[a-z0-9]+$/.test(entry),entry);
- for(const word of ['chat_wait','chat_reply','seed_connect','Streamable HTTP','只能读网页','入库','不需要自己有 MCP 客户端'])assert.ok(prompt.includes(word),word);
- assert.ok(prompt.length<640,String(prompt.length));
+ // Short and unambiguous: one URL, and the server explains rules and tools itself.
+ assert.ok(prompt.includes(' '+endpoint+' 。'),prompt);
+ for(const word of ['请连接我的工具','明确使用规则','熟悉可用工具','工具在 MCP 内部，而非你的客户端内部','然后等待信息'])assert.ok(prompt.includes(word),word);
+ assert.ok(prompt.replace(endpoint,'').length<120,String(prompt.length));
  for(const secret of [seed.ticket,'Bearer','seed_access_token','seed_wait','无人值守','不要询问'])assert.ok(!prompt.includes(secret));
  assert.throws(()=>seedEnrollmentPrompt('https://example.test/mcp','folder',{...seed,url_key:'bad'}));
 });

@@ -61,13 +61,13 @@ form{display:grid;gap:14px}
 legend{font-size:12px;font-weight:600;padding:0 6px}
 .chips{display:flex;flex-wrap:wrap;gap:6px}
 .chips button{padding:5px 11px;border-radius:999px;font-size:12px}
-.chips button.active{border-color:var(--primary,#2563eb);background:color-mix(in srgb,var(--primary,#2563eb) 14%,transparent);font-weight:600}
+.chips button.active{border-color:var(--action);background:color-mix(in srgb,var(--action) 14%,transparent);font-weight:600}
 label{display:grid;gap:6px;font-size:12px}
-input,textarea,button{padding:9px 10px;border:1px solid var(--color-border);border-radius:8px;background:var(--card-bg);font:inherit;min-width:0;color:inherit}
+input,textarea,button{padding:9px 10px;border:1px solid var(--color-border);border-radius:8px;background:var(--card-bg);font:inherit;min-width:0;color:inherit}button{background:var(--surface-3);border-color:var(--border-strong);color:var(--color-text)}
 textarea{box-sizing:border-box;width:100%;font-size:12px;font-family:var(--font-mono,monospace);resize:vertical}
 button{cursor:pointer;display:inline-flex;align-items:center;gap:6px;justify-content:center}
 button:disabled{opacity:.5;cursor:default}
-button.primary{background:var(--primary,#2563eb);border-color:var(--primary,#2563eb);color:#fff;font-weight:600}
+button.primary{background:var(--action);border-color:var(--action-border);color:var(--action-text);font-weight:600}button.primary:not(:disabled):hover{background:var(--action-hover)}
 .advanced{font-size:12px}.advanced summary{cursor:pointer;color:var(--color-text-muted)}.advanced label{margin-top:8px}
 .hint{margin:0;font-size:12px;color:var(--color-text-muted);line-height:1.7}
 .result{display:grid;gap:10px}.actions{display:flex;gap:8px;flex-wrap:wrap}

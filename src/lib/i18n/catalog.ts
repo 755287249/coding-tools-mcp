@@ -170,6 +170,8 @@ export const MESSAGES = {
   "seeds.tokenUnsaved": ["New token generated. Save to activate it and revoke the previous token.", "新令牌已產生，儲存後生效並撤銷舊令牌。", "新令牌已生成，保存后生效并撤销旧令牌。", "新トークンを生成しました。保存すると旧トークンが無効になります。"],
   "seeds.search": ["Search account, repository or seed ID", "搜尋帳號、倉庫或種子 ID", "搜索账号、仓库或种子 ID", "アカウント・リポジトリ・IDを検索"],
   "seeds.allStates": ["All statuses", "所有狀態", "所有状态", "全状態"],
+  "seeds.deleteAccount": ["Delete card", "刪除卡片", "删除卡片", "カードを削除"],
+  "seeds.deleteAccountConfirm": ["Delete every seed of “{account}” and remove this card. Connected AIs are disconnected; saved chats remain. This cannot be undone.", "刪除「{account}」的所有種子並移除此卡片；已連線的 AI 會斷開，保留對話。此操作無法復原。", "删除“{account}”的所有种子并移除此卡片；已连接的 AI 会断开，保留对话。此操作无法撤销。", "「{account}」のすべてのシードを削除し、このカードを消します。接続中の AI は切断され、会話は保持されます。元に戻せません。"],
   "seeds.validTotal": ["Valid / total seeds", "有效／種子總數", "有效 / 种子总数", "有効 / 総シード数"],
   "seeds.validHelp": ["Valid includes ready, assigned and working seeds.", "有效包含可分配、已分配和工作中的種子。", "有效包含可分配、已分配和工作中的种子。", "待機中・割当済み・処理中のシードを含みます。"],
   "seeds.accountSummaryHelp": ["Account totals follow the filters and include every page.", "帳號統計依目前篩選，涵蓋所有分頁。", "账号统计按当前筛选，涵盖所有分页。", "アカウント集計はフィルターに従い全ページを含みます。"],

@@ -610,6 +610,31 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
             result["affected_count"] = json!(selected.len());
             return Ok(result);
         }
+        "seed_delete_account" => {
+            // One account card = every seed with that account label. Detach live chats first, then delete atomically.
+            let account = args["account"].as_str().unwrap_or("").to_owned();
+            if account.is_empty() || !data.seeds.iter().any(|s| s.account == account) {
+                return Err(err("Account not found"));
+            }
+            for seed in data.seeds.iter().filter(|s| s.account == account) {
+                ensure_settled(seed)?;
+            }
+            let mut affected = 0;
+            for seed in data.seeds.iter_mut().filter(|s| s.account == account) {
+                if !seed.chat_id.is_empty() {
+                    release_seed(root, seed)?;
+                }
+                affected += 1;
+            }
+            data.seeds.retain(|s| s.account != account);
+            write(root, &data)?;
+            invalidate(root);
+            let mut query = args.clone();
+            query["account"] = json!("");
+            let mut result = inventory(&data, &query, time);
+            result["affected_count"] = json!(affected);
+            return Ok(result);
+        }
         "seed_reissue" => {
             let sid = id(&args["seed_id"])?;
             let seed = data
@@ -1377,6 +1402,27 @@ mod tests {
             poll(root.path(), sid, &tokens[0]).unwrap()["chat_id"],
             next["id"]
         );
+    }
+
+    #[test]
+    fn deleting_an_account_card_removes_only_its_settled_seeds() {
+        let (root, _, _) = fixture();
+        let run = |args: Value| super::super::ui(root.path(), &args);
+        run(json!({"action":"seed_manual","account":"other","source":"arena"})).unwrap();
+        assert!(run(json!({"action":"seed_delete_account","account":"missing"})).is_err());
+        let mut data = read(root.path()).unwrap();
+        data.seeds[0].operations.push("running-operation".into());
+        write(root.path(), &data).unwrap();
+        assert!(run(json!({"action":"seed_delete_account","account":"test"})).is_err());
+        assert_eq!(read(root.path()).unwrap().seeds.len(), 4);
+        let mut data = read(root.path()).unwrap();
+        data.seeds[0].operations.clear();
+        write(root.path(), &data).unwrap();
+        let result = run(json!({"action":"seed_delete_account","account":"test"})).unwrap();
+        assert_eq!(result["affected_count"], 3);
+        let left = read(root.path()).unwrap().seeds;
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].account, "other");
     }
 
     #[test]

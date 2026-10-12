@@ -405,3 +405,28 @@ C. 添加種子頁面卡片化（build 子代理，分支 `vorflux/seed-add-card
 
 - 只有當 AI 的網頁讀取工具允許打開「提示詞/前一頁中出現過的網址」時才有效；讀取與等待可行，回覆需要在網址後附加文字（`text=`），
   部分廠商工具會拒絕被修改過的網址 → 這類 AI 只能讀不能回，伺服器端無法繞過。
+
+# 第六部分：0.1.144（極簡提示詞、深色按鈕、種子卡片刪除）
+
+## 使用者回報
+- 提示詞太長；希望接入AI／接入種子都像這樣簡短：「請連接我的工具 <URL> 。快速連接這個 sandbox 的 MCP(URL)，明確使用規則，熟悉可用工具，
+  做好處理接下來一系列操作的準備。工具在 mcp 內部，而非你的客戶端內部，連上後使用，然後等待信息。」細節交給 MCP 內部。
+- 深色模式很多按鈕看不清；重要按鈕用藍底白字；關閉放右邊做成 X；種子（帳號）卡片加刪除按鈕。
+
+## 原因與處理
+- [x] 提示詞（`src/lib/chat/seed-enrollment.ts` `connectPrompt`）：兩個通道同一句，只給 MCP 網址。規則與工具由伺服器說明：
+      MCP 客戶端看 initialize/tools/list/skill.text；只能 GET 的 AI 打開同一網址會拿到引導頁（`guideText`），頁面內有完整
+      `/connect?n=` 等下一步網址（出現在結果裡的網址讀取工具可以打開）。測試 `tests/seed-enrollment.test.mjs`。
+- [x] 深色按鈕看不清，兩個原因：(1) 深色主題 `--primary` 是淺白色，幾處「`var(--primary)` 背景 + 白字」= 白底白字
+      （ManualSeed 生成/複製、ApprovalCards 允許，第五部分 C/B1 引入的）；(2) Tailwind preflight 讓按鈕透明、邊框幾乎看不見。
+      新增全域 token `--action/--action-hover/--action-border/--action-text`（`src/app.css`，兩種主題都是藍底白字），
+      重要按鈕改用它：頂部「接入AI」（未連線時）、接入彈窗「複製接入指令」（放右側）、添加種子、生成/複製提示詞、允許一次。
+      次要按鈕加 `--surface-3` 底色與 `--border-strong` 邊框。
+- [x] 關閉：添加種子、重新簽發彈窗的文字「關閉」改成右上角 X（`.dialog-close`）。接入AI 彈窗原本就是 X。
+- [x] 帳號卡片刪除：新動作 `seed_delete_account {account}`（Node `chat/seeds.ts`、Rust `tools/chat_seeds.rs`）。
+      先檢查全部種子都沒有未完成操作（否則整體拒絕、不改檔），已分配的先 `release_seed` 斷開對話，再刪除該帳號全部種子；保留對話。
+      UI：卡片右上垃圾桶 → 確認框（紅色「刪除卡片」）。測試：Node `seeds.test.mjs`「deleting an account card…」、
+      Rust `deleting_an_account_card_removes_only_its_settled_seeds`（在 `tools::chat::seeds` 過濾下由 chat-beta Windows job 執行）。
+- [x] 預覽：在沙箱用 Node Agent + 真實 UI（`build:ui`）+ Playwright 截圖給使用者確認（不入庫）。
+- [x] 版本 0.1.144（`version:sync`；`docs/todo/node-agent-parity/manifest.json` baseline 同步，否則根測試失敗）。
+- [ ] 推送、CI、發佈 v0.1.144（同 v0.1.143 流程）。

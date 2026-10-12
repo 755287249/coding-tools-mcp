@@ -312,6 +312,21 @@ test('seed batch changes preflight all IDs and purge only settled retired record
  const purged=chatUi(root,{action:'seed_purge',seed_ids:ids.slice(0,2)});assert.equal(purged.affected_count,2);assert.equal(purged.total,1);assert.equal(purged.seeds[0].id,ids[2]);
 });
 
+test('deleting an account card detaches its chat and removes only that account',t=>{
+ const {root,batch,store,tokens}=fixture(t,2),file=path.join(root,'docs/chat-sessions/seed-library.seeds.json');
+ chatUi(root,{action:'seed_manual',account:'other',source:'arena'});
+ const chat=chatUi(root,{action:'create'}).session;
+ chatUi(root,{action:'send',chat_id:chat.id,message_id:'pending',text:'Continue my project'});
+ assert.equal(seedPoll(store,batch[0].seed_id,tokens[0]).chat_id,chat.id);
+ assert.throws(()=>chatUi(root,{action:'seed_delete_account',account:'missing'}),/not found/);
+ const data=JSON.parse(readFileSync(file));data.seeds[1].operations=['running-operation'];writeFileSync(file,JSON.stringify(data));
+ const before=readFileSync(file,'utf8');assert.throws(()=>chatUi(root,{action:'seed_delete_account',account:'test'}),/unresolved/);assert.equal(readFileSync(file,'utf8'),before);
+ data.seeds[1].operations=[];writeFileSync(file,JSON.stringify(data));
+ const result=chatUi(root,{action:'seed_delete_account',account:'test'});
+ assert.equal(result.affected_count,2);assert.deepEqual(result.seeds.map(s=>s.account),['other']);
+ const detached=JSON.parse(readFileSync(path.join(root,`docs/chat-sessions/${chat.id}.json`)));assert.equal(detached.attachment_id??'','');assert.equal(detached.seed_owner??'','');
+});
+
 test('reissue rotates only expired unconnected enrollment and rejects stale browser retries',t=>{
  const {root,store,batch}=fixture(t,1);
  assert.throws(()=>chatUi(root,{action:'seed_reissue',seed_id:batch[0].seed_id}),/Only expired/);
