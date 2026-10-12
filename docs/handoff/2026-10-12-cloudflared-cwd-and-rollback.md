@@ -496,7 +496,8 @@ C. 添加種子頁面卡片化（build 子代理，分支 `vorflux/seed-add-card
 5. 任務面板：右上角按鈕改成吸附在右邊緣的小把手（<），點擊展開。
 
 ## 處理（進行中，勾選表示已完成）
-- [ ] 1 種子詳情精簡
+- [x] 1 種子詳情精簡（`SeedLibrary.svelte`）：展開後只顯示狀態說明、最後活動、未解決操作；ID/來源/前綴/倉庫/分支/metadata/建立時間/宿主任務/對話/分配代次
+      放在「更多資訊」摺疊（`advanced()`）。滑鼠 hover 的 title 仍是完整資訊。
 - [x] 2 重複/巢狀路徑檢查：Rust `commands/workspace.rs` `ensure_unique_project_path`（create 與 add folder）、Node `application.ts` `addWorkspace` → `overlappingProject`。
       錯誤訊息「已有项目路径：…」。注意：`gateway.rs` 仍允許既有的重複/巢狀專案運作（舊資料），只是不能再新建。
       未處理：`import_workspace_pack`、`open_shared_workspace` 匯入時沒有做重疊檢查。
@@ -505,5 +506,13 @@ C. 添加種子頁面卡片化（build 子代理，分支 `vorflux/seed-add-card
       修正：若還有其他專案使用同一目錄就跳過釋放。另外：種子 URL 內含被刪專案的 folder_id，用那個 URL 的 AI 仍會得到
       `Project directory unavailable`（目錄身分已刪除，屬預期），需在剩下的專案重新產生種子。
       測試：Rust `commands::workspace::tests`（已加入 rust-tests.yml 篩選），Node `test/projectGateway.test.mjs`。
-- [ ] 4 新對話入口改版 + 斷開/輪換
-- [ ] 5 任務面板右側把手
+- [x] 4 新對話入口（`SeedStart.svelte`，`showManual=true` 時）：兩張卡片「直接接入 AI」「種子庫（N 可分配）」；種子庫卡片打開原本的池子對話框
+      （前綴/帳號/來源分類與備用池都移到對話框內）。已選對話但沒有 AI 時同樣顯示兩張卡片；有訊息時在輸入框上方顯示一行提示條。
+      `ChatPanel.svelte` 右上角：沒有 AI 時不顯示按鈕；接入後顯示「斷開」（原 detach，種子回種子庫）與「輪換」（`rotate()`：
+      種子 → detach 成備用 + `seed_resume_chat` 用同一個 seed_filter 再取一顆；直接接入 → detach 後重新產生連接提示詞）。
+      手機選單同步。已知限制：輪換時被換下的種子變成備用，不會被同一個普通池再選中，池中沒有其他可分配種子時對話會停在「載入中」。
+- [x] 5 任務面板：移除 `routes/workspace/[id]/+page.svelte` 右上角按鈕；`ChatPanel` 新增 `onOpenTasks`，面板關閉時在右邊緣顯示 `.task-edge-tab`（<）。
+      手機寬度隱藏（手機原本就不顯示任務面板）。
+- [x] 驗證：沙箱 Node Agent + agent-browser（新對話兩張卡片、池子對話框、接入後斷開/輪換、輪換後種子 standby=true 並重新等待、右側把手開啟面板）；
+      svelte-check 0 錯誤 0 警告；根目錄測試 278 通過；Node `test/projectGateway.test.mjs` 13 通過。版本 0.1.146。
+- [ ] 推送、CI、發佈 v0.1.146。

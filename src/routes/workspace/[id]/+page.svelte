@@ -55,7 +55,6 @@
   import { workspaceBlocked, workspaceEpoch } from "$lib/stores/workspace-lifecycle";
   import WorkspaceRemoveDialog from '$lib/components/WorkspaceRemoveDialog.svelte';
   let removingWorkspace = $state<{id:string;name:string}|null>(null);
-  import ListChecks from '@lucide/svelte/icons/list-checks';
   import { activityPanelExpanded, activityPanelOpen } from '$lib/stores/activity-panel';
   import ChatPanel from "$lib/components/chat/ChatPanel.svelte";
   import AutoWorkspaceView from "$lib/components/auto/AutoWorkspaceView.svelte";
@@ -681,9 +680,8 @@
 {#if profile && activeWorkspaceTab === "chat"}
   <div class="ad-host chat-workspace">
     <div class="chat-workspace-main">
-      <ChatPanel onPlugins={capabilities.workspaceFeatureControls?openChatPlugins:undefined} tasksOpen={$activityPanelOpen} tasksExpanded={$activityPanelExpanded} onCloseTasks={()=>activityPanelOpen.set(false)} onToggleTasksExpanded={()=>activityPanelExpanded.update(value=>!value)} externalNavigation connectRequested={$page.url.searchParams.get('connect') === '1'} requestedChatId={$page.url.searchParams.get('chat') ?? ''} requestedFolderId={$page.url.searchParams.get('folder') ?? ''} startNew={$page.url.searchParams.get('new') === '1'} onNavigate={(folder, chat, connect) => void goto(appUrl(chatLocation(profile!.id, folder, chat)+(connect&&chat?'&connect=1':'')), {noScroll:true})} workspaceId={profile.id} folders={workspaceFolders(profile)} activeFolderId={profile.active_folder_id} endpoint={mcpPublic || mcpLocal} auth={$mcpConnection?.auth??profile.auth} connectionId={$mcpConnection?.id}>
+      <ChatPanel onPlugins={capabilities.workspaceFeatureControls?openChatPlugins:undefined} tasksOpen={$activityPanelOpen} tasksExpanded={$activityPanelExpanded} onOpenTasks={()=>activityPanelOpen.set(true)} onCloseTasks={()=>activityPanelOpen.set(false)} onToggleTasksExpanded={()=>activityPanelExpanded.update(value=>!value)} externalNavigation connectRequested={$page.url.searchParams.get('connect') === '1'} requestedChatId={$page.url.searchParams.get('chat') ?? ''} requestedFolderId={$page.url.searchParams.get('folder') ?? ''} startNew={$page.url.searchParams.get('new') === '1'} onNavigate={(folder, chat, connect) => void goto(appUrl(chatLocation(profile!.id, folder, chat)+(connect&&chat?'&connect=1':'')), {noScroll:true})} workspaceId={profile.id} folders={workspaceFolders(profile)} activeFolderId={profile.active_folder_id} endpoint={mcpPublic || mcpLocal} auth={$mcpConnection?.auth??profile.auth} connectionId={$mcpConnection?.id}>
         {#snippet headerActions()}
-          <button class="workspace-icon" class:active={$activityPanelOpen} title={$t('Task panel')} aria-label={$t('Task panel')} aria-expanded={$activityPanelOpen} onclick={() => activityPanelOpen.update(value => !value)}><ListChecks size={17}/></button>
           <button class="workspace-icon" title={$t('chat.43')} aria-label={$t('chat.43')} onclick={() => navigateWorkspace('overview')}><Settings size={17}/></button>
         {/snippet}
       </ChatPanel>
@@ -867,5 +865,5 @@
 
 <style>
 .workspace-return{display:flex;align-items:center;gap:7px;flex:none}.workspace-delete{margin-top:28px;padding-top:20px;border-top:1px solid var(--color-border)}.workspace-delete button{display:flex;align-items:center;gap:8px;border:1px solid #d65b62;color:#e5787e;border-radius:8px;padding:10px 14px;font-size:13px;cursor:pointer}.workspace-delete button:hover{background:#d65b6218}
-.workspace-chat-bar{display:flex;align-items:center;justify-content:space-between;flex:none;gap:12px;border-bottom:1px solid var(--color-border);padding:8px 18px}.workspace-chat-tab{display:flex;gap:7px;align-items:center;padding:6px 9px;border-radius:7px;font-size:12px;color:var(--color-text-muted);cursor:pointer}.workspace-icon{display:grid;place-items:center;width:30px;height:30px;border-radius:7px;color:var(--color-text-muted);cursor:pointer}.workspace-icon:hover,.workspace-icon.active{background:var(--surface-hover);color:var(--color-text)}button:focus-visible{outline:2px solid var(--primary);outline-offset:2px}.chat-workspace-main{flex:1;min-width:0;min-height:0;padding:0}.chat-workspace :global(.ad-drawer){max-width:calc(100% - 20px)}@media(max-width:560px){.workspace-chat-bar{padding:6px 10px}.chat-workspace-main{padding:5px}}
+.workspace-chat-bar{display:flex;align-items:center;justify-content:space-between;flex:none;gap:12px;border-bottom:1px solid var(--color-border);padding:8px 18px}.workspace-chat-tab{display:flex;gap:7px;align-items:center;padding:6px 9px;border-radius:7px;font-size:12px;color:var(--color-text-muted);cursor:pointer}.workspace-icon{display:grid;place-items:center;width:30px;height:30px;border-radius:7px;color:var(--color-text-muted);cursor:pointer}.workspace-icon:hover{background:var(--surface-hover);color:var(--color-text)}button:focus-visible{outline:2px solid var(--primary);outline-offset:2px}.chat-workspace-main{flex:1;min-width:0;min-height:0;padding:0}.chat-workspace :global(.ad-drawer){max-width:calc(100% - 20px)}@media(max-width:560px){.workspace-chat-bar{padding:6px 10px}.chat-workspace-main{padding:5px}}
 </style>

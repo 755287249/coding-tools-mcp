@@ -64,6 +64,8 @@
   import Check from '@lucide/svelte/icons/check';
   import Pencil from '@lucide/svelte/icons/pencil';
   import X from '@lucide/svelte/icons/x';
+  import ChevronLeft from '@lucide/svelte/icons/chevron-left';
+  import RefreshCw from '@lucide/svelte/icons/refresh-cw';
   import ComposerTools from './ComposerTools.svelte';
   import AccessMode from './AccessMode.svelte';
   import ApprovalCards from './ApprovalCards.svelte';
@@ -91,7 +93,7 @@
   import { buildChatPrompt, pairingPrelude } from '$lib/connect/chat-prompt';
   import { pendingChatState, chatReplyState, chatUserState, USER_MESSAGE_STATUS_KEYS } from '$lib/chat/status';
   import type { AuthConfig, WorkspaceFolder } from '$lib/types';
-  let { onPlugins, tasksOpen=false, tasksExpanded=false, onCloseTasks=()=>{}, onToggleTasksExpanded=()=>{}, workspaceId, connectionId, folders, activeFolderId = '', endpoint = '', auth, externalNavigation = false, requestedChatId = '', requestedFolderId = '', startNew = false, connectRequested = false, workspacePicker, headerActions, onNavigate }: { onPlugins?:(folderId:string)=>void;tasksOpen?:boolean;tasksExpanded?:boolean;onCloseTasks?:()=>void;onToggleTasksExpanded?:()=>void; workspaceId: string; connectionId?:string; workspacePicker?: Snippet; folders: WorkspaceFolder[]; activeFolderId?: string; endpoint?: string; auth: AuthConfig; externalNavigation?: boolean; requestedChatId?: string; requestedFolderId?: string; startNew?: boolean; connectRequested?: boolean; headerActions?: Snippet; onNavigate?: (folderId: string, chatId: string, connect?: boolean) => void } = $props();
+  let { onPlugins, tasksOpen=false, tasksExpanded=false, onOpenTasks, onCloseTasks=()=>{}, onToggleTasksExpanded=()=>{}, workspaceId, connectionId, folders, activeFolderId = '', endpoint = '', auth, externalNavigation = false, requestedChatId = '', requestedFolderId = '', startNew = false, connectRequested = false, workspacePicker, headerActions, onNavigate }: { onPlugins?:(folderId:string)=>void;tasksOpen?:boolean;tasksExpanded?:boolean;onOpenTasks?:()=>void; onCloseTasks?:()=>void;onToggleTasksExpanded?:()=>void; workspaceId: string; connectionId?:string; workspacePicker?: Snippet; folders: WorkspaceFolder[]; activeFolderId?: string; endpoint?: string; auth: AuthConfig; externalNavigation?: boolean; requestedChatId?: string; requestedFolderId?: string; startNew?: boolean; connectRequested?: boolean; headerActions?: Snippet; onNavigate?: (folderId: string, chatId: string, connect?: boolean) => void } = $props();
   const mobileHeader=getContext<MobileHeaderContext|undefined>(MOBILE_CHAT_HEADER);
   const mobileHeaderOwner=Symbol('chat-header');
   let newMode=$state<'work'|'group'>('work');
@@ -781,6 +783,14 @@
       return true;
     } catch (e) { if (gen === generation) error = String(e); return false; } finally { busy = false; }
   }
+  /** Replace the current AI: a seed returns to the library as standby and the
+   * chat takes another ready seed from the same pool; a direct AI is
+   * disconnected and a new connection prompt opens. */
+  async function rotate() {
+    if (busy || !selected || detail?.closed) return;
+    if (aiKind === 'seed') { await chooseSeedPool((detail?.seed_filter ?? {source:'',keyword:''}) as SeedFilter); return; }
+    if (aiKind === 'direct' && await detach()) await openConnection();
+  }
   async function copyPrompt() {
     if (!connectionPrompt || connectionLoading) return;
     try { await copyText(connectionPrompt); copied = true; revealPrompt=false; }
@@ -832,7 +842,7 @@
       <button class="mobile-chat-actions" aria-label={$t('mobile.chatActions')} aria-expanded={mobileActions} onclick={()=>mobileActions=!mobileActions}><Ellipsis size={20}/></button>
       <div class="header-actions">
         {#if unreadTotal}<button class="unread-total" onclick={showUnread} aria-label={`${$t('chat.90')}: ${unreadTotal}`}>{unreadTotal}</button>{/if}
-        <div class="connection-actions">{#if mode==='group'}<button disabled={busy || !selected || !(detail?.status === 'connected' || detail?.status === 'waiting')} onclick={requestDisconnect}>{$t('chat.disconnect')}</button><button class="connect-button" data-connection={chatConnectionTone(detail)} title={needsAi?$t('chat.connectHint'):undefined} disabled={busy || !folderId || detail?.closed} onclick={openConnection}>{$t('chat.inviteGroup')}</button>{:else}<button class="connect-button" data-connection={aiKind==='seed'?undefined:chatConnectionTone(detail)} title={aiKind==='none'&&needsAi?$t('chat.connectHint'):undefined} disabled={busy || !folderId || detail?.closed} onclick={aiKind==='direct'?requestDisconnect:switchToDirect}>{$t(aiKind==='direct'?'chat.disconnect':'chat.connectWork')}</button><button class="seed-button" data-connection={aiKind==='seed'?chatConnectionTone(detail):undefined} title={$t('seeds.pickerTitle')} disabled={busy || !folderId || detail?.closed} onclick={aiKind==='seed'?requestDisconnect:openSeedPicker}>{$t(aiKind==='seed'?'chat.disconnect':'shell.seeds')}</button>{/if}</div>
+        <div class="connection-actions">{#if mode==='group'}<button disabled={busy || !selected || !(detail?.status === 'connected' || detail?.status === 'waiting')} onclick={requestDisconnect}>{$t('chat.disconnect')}</button><button class="connect-button" data-connection={chatConnectionTone(detail)} title={needsAi?$t('chat.connectHint'):undefined} disabled={busy || !folderId || detail?.closed} onclick={openConnection}>{$t('chat.inviteGroup')}</button>{:else if aiKind!=='none'}<button class="connect-button" data-connection={chatConnectionTone(detail)} title={$t('chat.disconnectHint')} disabled={busy || !folderId || detail?.closed} onclick={requestDisconnect}>{$t('chat.disconnect')}</button><button class="seed-button" title={$t('chat.rotateAiHint')} disabled={busy || !folderId || detail?.closed} onclick={rotate}>{$t('chat.rotateAi')}</button>{/if}</div>
         {#if selected}<button title={$t('chat.36')} aria-label={$t('chat.36')} onclick={download}><Download size={16}/></button>{/if}
 
         {#if headerActions}{@render headerActions()}{/if}
@@ -850,6 +860,8 @@
         {#if workspaceId&&folderId&&mode==='work'&&!selected&&startNew}
           <SeedStart {workspaceId} {folderId} onEnabled={value=>seedStartPending=value} onChoose={filter=>create(true,filter)}/>
         {:else if detail?.seed_auto&&!detail.seed_direct&&needsAi}<SeedLoading/>
+        {:else if workspaceId&&folderId&&mode==='work'&&selected&&aiKind==='none'&&!detail?.closed}
+          <SeedStart {workspaceId} {folderId} onChoose={chooseSeedPool}/>
         {:else}<h2>{$t(!workspaceId||!folderId?'chat.selectFolder':mode==='group'?'chat.inviteTitle':needsAi?'chat.connectTitle':'seeds.connectedReady')}</h2>{/if}
       </div>
       {:else}<div class="message-column" bind:this={column}>{#if historyStart}<button type="button" class="load-older" onclick={showOlder}>{$t('chat.loadOlder')}</button>{/if}{#each visibleFeedItems as item (item.id)}{#if item.kind === 'reply'}<ReplyGroup group={item} {workspaceId} {folderId} chatId={selected} copied={copiedMessage} disabled={busy||memberBusy||!!detail?.closed} onCopy={copyMessage} onShare={m=>shareMessage=m} onAnswer={(m,id,answers)=>memberAction({action:'answer_question',question_message_id:m.id,message_id:id,answers})}/>{:else}{@const m = item.message}<article data-user-message={m.role === 'user' ? m.id : undefined} tabindex="-1" class:user={m.role === 'user'} class:assistant={m.role === 'assistant'}><div class="message-meta">{m.role === 'user' ? $t('chat.26') : m.agent_name ?? detail?.agent_name ?? (m.final === false ? $t('chat.27') : 'AI')}<time>{new Date(m.created_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</time></div>{#if (m.attachments??[]).some(file=>file.mime.startsWith('image/'))}<div class="message-images"><div class="image-strip">{#each (m.attachments??[]).filter(file=>file.mime.startsWith('image/')) as file (workspaceId+":"+folderId+":"+selected+":"+file.id+":"+file.sha256)}<ChatAttachment {workspaceId} {folderId} chatId={selected} {file}/>{/each}</div></div>{/if}<div class="message-body" class:image-only={!m.text.trim()&&!(m.attachments??[]).some(file=>!file.mime.startsWith('image/'))}>{#if editingMessage===m.id}<MessageEditor text={m.text} hasAttachments={!!m.attachments?.length} onSend={(text:string,id:string)=>resendMessage(m,text,id)} onCancel={()=>editingMessage=''}/>{:else}<MessageText text={m.text} attachments={m.attachments ?? []} {workspaceId} {folderId} chatId={selected} collapsible={m.role==='user'}/>{/if}{#each (m.attachments??[]).filter(file=>!file.mime.startsWith('image/')) as file (workspaceId + ":" + folderId + ":" + selected + ":" + file.id)}<ChatAttachment {workspaceId} {folderId} chatId={selected} {file}/>{/each}{#if m.questions?.length}<QuestionCard message={m} disabled={busy||memberBusy||!!detail?.closed} onAnswer={(id,answers)=>memberAction({action:'answer_question',question_message_id:m.id,message_id:id,answers})}/>{/if}<ChatReplyState state={chatReplyState(detail,m.id)==='supplementing'?null:chatReplyState(detail,m.id)}/><ChatUserState state={chatUserState(detail, m.id)} hideProcessing/></div>{#if editingMessage!==m.id}<div class="message-actions"><button type="button" title={$t('chat.copyMessage')} aria-label={$t('chat.copyMessage')} onclick={()=>copyMessage(m)}>{#if copiedMessage===m.id}<Check size={15}/>{:else}<Copy size={15}/>{/if}</button>{#if m.role==='user'}<button type="button" title={$t('chat.editMessage')} aria-label={$t('chat.editMessage')} disabled={busy||!!detail?.closed} onclick={()=>editingMessage=m.id}><Pencil size={15}/></button>{:else}<button type="button" title={$t('chat.shareMessage')} aria-label={$t('chat.shareMessage')} onclick={()=>shareMessage=m}><Share2 size={15}/></button>{/if}</div>{/if}</article>{/if}{/each}{#if footerState}<div class="pending" role="status" aria-live="polite"><ChatStatusIcon state={footerState} label={footerLabel}/>{footerLabel}</div>{/if}</div>{/if}
@@ -857,6 +869,7 @@
     <ChatOutline {messages} activeId={activeMessage} onSelect={jumpToMessage}/>
     </div>
     <footer class="composer-area">
+      {#if mode==='work'&&selected&&messages.length&&aiKind==='none'&&!detail?.closed&&!(detail?.seed_auto&&!detail?.seed_direct)}<div class="connect-bar" role="status"><span>{$t('chat.noAiBar')}</span><button type="button" disabled={busy||!folderId} onclick={switchToDirect}>{$t('seeds.startDirect')}</button><button type="button" disabled={busy||!folderId} onclick={openSeedPicker}>{$t('shell.seeds')}</button></div>{/if}
       {#if detail?.pending_approvals?.length}<ApprovalCards approvals={detail.pending_approvals} busy={accessBusy} onResolve={resolveApproval}/>{/if}
       {#if queueNotice}<p class="queue-notice" role="status">{$t(queueNotice)}{#if detail?.queued_messages?.length} · {$t('chat.queuedRetained')}{/if}</p>{/if}
       {#if detail?.queued_messages?.length}<div class="outbox" class:expanded={queueExpanded} aria-label={$t('chat.outbox')}>
@@ -884,6 +897,7 @@
     </div>{#if mode==='group'}<ChatMembers members={detail?.members??[]} busy={busy||memberBusy||!!detail?.closed} onMention={mentionAgent} onConnect={openConnection} onChange={memberAction}/>{/if}{#if draftStorageError}<p class="draft-warning" role="status">{$t("chat.94")}</p>{/if}{#if messageBytes(draft)>32000}<p class="draft-warning" role="alert">{$t('chat.tooLong')} ({messageBytes(draft)} / 32000)</p>{/if}<div class="composer-hint">{$t("chat.18")} <span>{detail?.archive_path ?? $t('chat.34')}</span></div></footer>
     </div>
   </div>
+  {#if !tasksOpen&&onOpenTasks}<button type="button" class="task-edge-tab" title={$t('chat.openTasks')} aria-label={$t('chat.openTasks')} onclick={onOpenTasks}><ChevronLeft size={16}/></button>{/if}
   {#if tasksOpen}<ChatTaskPanel {workspaceId} bind:width={tasksWidth} session={detail} expanded={tasksExpanded} onClose={onCloseTasks} onToggleExpanded={onToggleTasksExpanded}/>{/if}
 </section>
 {#if mobileActions}<MobileSheet title={$t(renameId?'chat.85':'mobile.chatActions')} onClose={()=>{mobileActions=false;cancelRename()}}>
@@ -891,8 +905,9 @@
   {:else}<div class="mobile-action-list">
     {#if mobileHeader}<button disabled={busy} onclick={()=>{mobileActions=false;void mobileHeader.newChat()}}><SquarePen size={18}/>{$t('shell.newChat')}</button>{/if}
     {#if detail}<button disabled={busy} onclick={()=>startRename(detail!)}><Pencil size={18}/>{$t('chat.85')}</button>{/if}
-    {#if mode==='group'||aiKind!=='direct'}<button class="connect-button" data-connection={chatConnectionTone(detail)} disabled={busy||!folderId||detail?.closed} onclick={()=>{mobileActions=false;void (mode==='group'?openConnection():switchToDirect())}}><Plus size={18}/>{$t(mode==='group'?'chat.inviteGroup':'chat.connectWork')}</button>{/if}
-    {#if mode!=='group'&&aiKind!=='seed'}<button disabled={busy||!folderId||detail?.closed} onclick={()=>{mobileActions=false;openSeedPicker()}}><Plus size={18}/>{$t('shell.seeds')}</button>{/if}
+    {#if mode==='group'||aiKind==='none'}<button class="connect-button" data-connection={chatConnectionTone(detail)} disabled={busy||!folderId||detail?.closed} onclick={()=>{mobileActions=false;void (mode==='group'?openConnection():switchToDirect())}}><Plus size={18}/>{$t(mode==='group'?'chat.inviteGroup':'chat.connectWork')}</button>{/if}
+    {#if mode!=='group'&&aiKind==='none'}<button disabled={busy||!folderId||detail?.closed} onclick={()=>{mobileActions=false;openSeedPicker()}}><Plus size={18}/>{$t('shell.seeds')}</button>{/if}
+    {#if mode!=='group'&&aiKind!=='none'}<button disabled={busy||!folderId||detail?.closed} onclick={()=>{mobileActions=false;void rotate()}}><RefreshCw size={18}/>{$t('chat.rotateAi')}</button>{/if}
     <button disabled={busy||!selected||!(detail?.seed_auto||detail?.status==='connected'||detail?.status==='waiting')} onclick={()=>{mobileActions=false;requestDisconnect()}}><X size={18}/>{$t('chat.disconnect')}</button>
     {#if selected}<button onclick={()=>{mobileActions=false;download()}}><Download size={18}/>{$t('chat.36')}</button>{/if}
     {#if unreadTotal}<button onclick={()=>{mobileActions=false;showUnread()}}>{$t('chat.90')} ({unreadTotal})</button>{/if}
@@ -1034,4 +1049,7 @@
 button.connect-button{--connection-color:214 111 120;background:rgb(var(--connection-color) / .18);color:color-mix(in srgb,rgb(var(--connection-color)) 65%,var(--color-text));font-weight:600;white-space:nowrap}button.connect-button:hover:enabled{background:rgb(var(--connection-color) / .26)}button.connect-button[data-connection=online]{--connection-color:66 166 119}button.connect-button[data-connection=stale]{--connection-color:195 153 61}button.connect-button:not([data-connection=online]):not([data-connection=stale]):enabled{background:var(--action);color:var(--action-text)}button.connect-button:not([data-connection=online]):not([data-connection=stale]):hover:enabled{background:var(--action-hover)}.connection-actions button.seed-button{color:var(--color-text)}
 form.file-drop-active{outline:2px dashed var(--primary);outline-offset:3px}.file-drop-hint{position:absolute;inset:4px;z-index:5;display:grid;place-items:center;pointer-events:none;border-radius:inherit;background:var(--surface-2);color:var(--color-text);font-size:14px;font-weight:600}
 .seed-picker{width:min(760px,calc(100vw - 28px));max-height:88dvh;overflow:auto;margin:auto;padding:22px;border:1px solid var(--color-border);border-radius:16px;background:var(--surface-2,var(--card-bg));color:var(--color-text)}.seed-picker::backdrop{background:#0009}.seed-picker>header{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}.seed-picker>header h2{font-size:17px;margin:0}.seed-picker>header button{display:grid;place-items:center;border:0;background:transparent;padding:6px;border-radius:6px}
+.connect-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 auto 8px;max-width:var(--composer-max,760px);padding:8px 10px 8px 14px;border:1px dashed var(--color-border);border-radius:12px;font-size:12.5px;color:var(--color-text-muted)}.connect-bar span{flex:1;min-width:140px}.connect-bar button{padding:6px 12px;border:1px solid var(--color-border);border-radius:999px;background:var(--card-bg);color:var(--color-text);font-size:12.5px}.connect-bar button:first-of-type{background:var(--action,#2563eb);border-color:var(--action,#2563eb);color:#fff}
+.task-edge-tab{position:absolute;right:0;top:50%;z-index:5;display:grid;place-items:center;width:18px;height:56px;padding:0;transform:translateY(-50%);border:1px solid var(--color-border);border-right:0;border-radius:10px 0 0 10px;background:var(--card-bg);color:var(--color-text-muted);box-shadow:-2px 0 8px rgb(0 0 0 / .06);cursor:pointer;transition:width .15s,color .15s}.task-edge-tab:hover,.task-edge-tab:focus-visible{width:24px;color:var(--color-text)}
+@media(max-width:700px){.task-edge-tab{display:none}}
 </style>
