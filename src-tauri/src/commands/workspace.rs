@@ -355,7 +355,8 @@ fn folder_paths_overlap(left: &str, right: &str) -> bool {
                 && path_prefix_overlap(&left.linux_path, &right.linux_path, false)
         }
         (None, None) => {
-            let normalize = |path: &str| path.trim().trim_end_matches(['\\', '/']).replace('\\', "/");
+            let normalize =
+                |path: &str| path.trim().trim_end_matches(['\\', '/']).replace('\\', "/");
             path_prefix_overlap(&normalize(left), &normalize(right), cfg!(windows))
         }
         _ => false,
@@ -405,7 +406,10 @@ fn folder_shared_with_other_project(profiles: &[WorkspaceProfile], id: &str, pat
     profiles.iter().any(|profile| {
         profile.id != id
             && profile.id != crate::data::GLOBAL_MCP_ID
-            && profile.folders.iter().any(|folder| same_folder_path(&folder.path, path))
+            && profile
+                .folders
+                .iter()
+                .any(|folder| same_folder_path(&folder.path, path))
     })
 }
 
@@ -505,14 +509,19 @@ mod tests {
             r"\\wsl.localhost\Ubuntu\opt\src",
             r"\\wsl$\ubuntu\opt\src\app"
         ));
-        assert!(!folder_paths_overlap(r"\\wsl.localhost\Ubuntu\opt\src", "/opt/src"));
+        assert!(!folder_paths_overlap(
+            r"\\wsl.localhost\Ubuntu\opt\src",
+            "/opt/src"
+        ));
         let existing = WorkspaceProfile::new("/home/u/docs".into(), Some("Docs".into()));
         let profiles = vec![existing.clone()];
         assert!(ensure_unique_project_path(&profiles, "/home/u/docs", None).is_err());
         assert!(ensure_unique_project_path(&profiles, "/home/u/docs/app", None).is_err());
         assert!(ensure_unique_project_path(&profiles, "/home/u", None).is_err());
         assert!(ensure_unique_project_path(&profiles, "/home/u/other", None).is_ok());
-        assert!(ensure_unique_project_path(&profiles, "/home/u/docs/app", Some(&existing.id)).is_ok());
+        assert!(
+            ensure_unique_project_path(&profiles, "/home/u/docs/app", Some(&existing.id)).is_ok()
+        );
     }
 
     #[test]
@@ -520,8 +529,16 @@ mod tests {
         let first = WorkspaceProfile::new("/home/u/docs".into(), None);
         let second = WorkspaceProfile::new("/home/u/docs/".into(), None);
         let profiles = vec![first.clone(), second.clone()];
-        assert!(folder_shared_with_other_project(&profiles, &first.id, "/home/u/docs"));
-        assert!(!folder_shared_with_other_project(&[first.clone()], &first.id, "/home/u/docs"));
+        assert!(folder_shared_with_other_project(
+            &profiles,
+            &first.id,
+            "/home/u/docs"
+        ));
+        assert!(!folder_shared_with_other_project(
+            &[first.clone()],
+            &first.id,
+            "/home/u/docs"
+        ));
     }
 
     #[test]

@@ -26,7 +26,8 @@ const CAPTURE_HOST: &str = "ctmcp-capture.invalid";
 const LOGIN_LABEL: &str = "plugin-login";
 
 fn rules() -> &'static [(&'static str, regex::Regex)] {
-    static RULES: std::sync::OnceLock<Vec<(&'static str, regex::Regex)>> = std::sync::OnceLock::new();
+    static RULES: std::sync::OnceLock<Vec<(&'static str, regex::Regex)>> =
+        std::sync::OnceLock::new();
     RULES.get_or_init(|| {
         [
             ("GET", r"^https://app\.coderabbit\.ai/trpc/[A-Za-z][A-Za-z0-9.,]{0,200}\?batch=1(&input=[^#]*)?$"),
@@ -43,7 +44,10 @@ fn rules() -> &'static [(&'static str, regex::Regex)] {
 }
 
 pub(crate) fn plugin_request_allowed(method: &str, url: &str) -> bool {
-    !url.contains("..") && rules().iter().any(|(m, rule)| *m == method && rule.is_match(url))
+    !url.contains("..")
+        && rules()
+            .iter()
+            .any(|(m, rule)| *m == method && rule.is_match(url))
 }
 
 #[derive(Deserialize)]
@@ -84,9 +88,15 @@ pub async fn plugin_http(request: PluginHttpRequest) -> AppResult<Value> {
             builder = builder.body(body);
         }
     }
-    let response = builder.send().await.map_err(|e| AppError::Message(e.to_string()))?;
+    let response = builder
+        .send()
+        .await
+        .map_err(|e| AppError::Message(e.to_string()))?;
     let status = response.status().as_u16();
-    let bytes = response.bytes().await.map_err(|e| AppError::Message(e.to_string()))?;
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| AppError::Message(e.to_string()))?;
     if bytes.len() > MAX_RESPONSE {
         return Err(AppError::Message("Plugin response too large".into()));
     }
@@ -134,7 +144,9 @@ fn capture_script(auto: bool) -> String {
 
 fn decode_capture(url: &tauri::Url) -> Option<Value> {
     let data = url.query_pairs().find(|(k, _)| k == "d")?.1.to_string();
-    let bytes = base64::engine::general_purpose::STANDARD.decode(data).ok()?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .ok()?;
     let value: Value = serde_json::from_slice(&bytes).ok()?;
     value["accessToken"].as_str().filter(|s| !s.is_empty())?;
     Some(value)
@@ -145,7 +157,10 @@ fn login_url_allowed(url: &str) -> bool {
 }
 
 #[tauri::command(async)]
-pub async fn plugin_login_window(app: tauri::AppHandle, options: PluginLoginOptions) -> AppResult<Value> {
+pub async fn plugin_login_window(
+    app: tauri::AppHandle,
+    options: PluginLoginOptions,
+) -> AppResult<Value> {
     if !login_url_allowed(&options.url) {
         return Err(AppError::Message("Login page not allowed".into()));
     }
@@ -179,7 +194,9 @@ pub async fn plugin_login_window(app: tauri::AppHandle, options: PluginLoginOpti
     if options.capture {
         builder = builder.initialization_script(capture_script(options.auto));
     }
-    let window = builder.build().map_err(|e| AppError::Message(e.to_string()))?;
+    let window = builder
+        .build()
+        .map_err(|e| AppError::Message(e.to_string()))?;
     if !options.capture {
         return Ok(Value::Null);
     }
@@ -198,7 +215,9 @@ pub async fn plugin_login_window(app: tauri::AppHandle, options: PluginLoginOpti
     }
     match result {
         Ok(Ok(Some(value))) => Ok(value),
-        Ok(_) => Err(AppError::Message("Login window closed before CodeRabbit login finished".into())),
+        Ok(_) => Err(AppError::Message(
+            "Login window closed before CodeRabbit login finished".into(),
+        )),
         Err(_) => Err(AppError::Message("CodeRabbit login timed out".into())),
     }
 }
@@ -209,9 +228,18 @@ mod tests {
 
     #[test]
     fn plugin_proxy_allow_list_matches_node_agent() {
-        assert!(plugin_request_allowed("GET", "https://app.coderabbit.ai/trpc/repositories.getAllRepos?batch=1&input=%7B%7D"));
-        assert!(plugin_request_allowed("POST", "https://app.coderabbit.ai/trpc/codingAgent.enqueueCodingTask?batch=1"));
-        assert!(plugin_request_allowed("PUT", "https://api.github.com/repos/me/seed-1/contents/src/a.py"));
+        assert!(plugin_request_allowed(
+            "GET",
+            "https://app.coderabbit.ai/trpc/repositories.getAllRepos?batch=1&input=%7B%7D"
+        ));
+        assert!(plugin_request_allowed(
+            "POST",
+            "https://app.coderabbit.ai/trpc/codingAgent.enqueueCodingTask?batch=1"
+        ));
+        assert!(plugin_request_allowed(
+            "PUT",
+            "https://api.github.com/repos/me/seed-1/contents/src/a.py"
+        ));
         for (method, url) in [
             ("GET", "http://127.0.0.1:3789/admin/api/config"),
             ("POST", "https://app.coderabbit.ai.evil.test/trpc/x?batch=1"),

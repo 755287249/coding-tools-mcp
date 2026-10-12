@@ -654,7 +654,7 @@ mod tests {
         assert_eq!(
             client
                 .post(&legacy)
-                    .json(&json!({"action":"status"}))
+                .json(&json!({"action":"status"}))
                 .send()
                 .await
                 .unwrap()
@@ -681,7 +681,7 @@ mod tests {
             assert_eq!(
                 client
                     .post(&paired)
-                            .json(&json!({"action":action}))
+                    .json(&json!({"action":action}))
                     .send()
                     .await
                     .unwrap()
@@ -702,7 +702,7 @@ mod tests {
         assert_eq!(
             client
                 .post(&paired)
-                    .header("content-type", "application/json")
+                .header("content-type", "application/json")
                 .body("x".repeat(20000))
                 .send()
                 .await
@@ -713,7 +713,7 @@ mod tests {
         assert_eq!(
             client
                 .post(&base)
-                    .json(&json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}))
+                .json(&json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}))
                 .send()
                 .await
                 .unwrap()
