@@ -37,6 +37,7 @@ jobs:
           cargo test --lib --
           tunnel::cloudflare
           mcp::listener::tests
+          mcp::listener::seeds
           auth::
           mcp::server::tests
           tools::hub
