@@ -3,6 +3,30 @@ use super::*;
 use serde::{Deserialize, Serialize};
 static EXCHANGES: OnceLock<Mutex<std::collections::HashMap<String, (String, u64)>>> =
     OnceLock::new();
+/// Last authenticated request per seed, in memory only (the registry
+/// `last_seen` is written at most once a minute). A ready seed that has not
+/// waited or called a tool for ONLINE_MS is shown offline right away instead
+/// of looking assignable for the full SUSPECT_MS window.
+static PRESENCE: OnceLock<Mutex<std::collections::HashMap<String, u64>>> = OnceLock::new();
+pub const ONLINE_MS: u64 = 60_000;
+fn touch(sid: &str, time: u64) {
+    if let Ok(mut map) = PRESENCE.get_or_init(Default::default).lock() {
+        if map.len() > 8192 {
+            map.retain(|_, seen| time.saturating_sub(*seen) <= SUSPECT_MS);
+        }
+        let seen = map.entry(sid.to_owned()).or_insert(time);
+        *seen = (*seen).max(time);
+    }
+}
+fn seen(s: &Seed) -> u64 {
+    PRESENCE
+        .get_or_init(Default::default)
+        .lock()
+        .ok()
+        .and_then(|map| map.get(&s.id).copied())
+        .unwrap_or(0)
+        .max(s.last_seen)
+}
 static SCANS: OnceLock<Mutex<std::collections::HashMap<(PathBuf, String, String, String), u64>>> =
     OnceLock::new();
 const FILE: &str = "docs/chat-sessions/seed-library.seeds.json";
@@ -185,22 +209,26 @@ fn eligible(chat: &Value) -> bool {
         && !awaiting
 }
 fn public(s: &Seed, time: u64) -> Value {
+    let last_seen = seen(s);
     let status = if s.retired_at > 0 {
         "retired"
     } else if !s.inflight.is_empty() || !s.operations.is_empty() {
         "working"
     } else if s.redeemed_at == 0 {
         "preparing"
-    } else if time.saturating_sub(s.last_seen) > SUSPECT_MS {
+    } else if time.saturating_sub(last_seen) > SUSPECT_MS {
         "offline"
     } else if !s.chat_id.is_empty() {
         "assigned"
-    } else if s.ready {
+    } else if s.ready && time.saturating_sub(last_seen) <= ONLINE_MS {
         "ready"
+    } else if s.ready {
+        // Registered but no longer waiting (e.g. the host ended its turn).
+        "offline"
     } else {
         "preparing"
     };
-    json!({"enrollment_until":s.enrollment_until,"redeemed_at":s.redeemed_at,"access_until":s.access_until,"id":s.id,"source":s.source,"prefix":s.prefix,"manual":s.manual,"account":s.account,"repo_id":s.repo_id,"branch":s.branch,"metadata":s.metadata,"created_at":s.created_at,"last_seen":s.last_seen,"status":status,"reason":s.reason,"archived":s.archived,"retired_at":s.retired_at,"host_task_id":s.host_task_id,"chat_id":s.chat_id,"generation":s.generation,"unresolved_operations":s.inflight.len()+s.operations.len(),"standby":s.standby})
+    json!({"enrollment_until":s.enrollment_until,"redeemed_at":s.redeemed_at,"access_until":s.access_until,"id":s.id,"source":s.source,"prefix":s.prefix,"manual":s.manual,"account":s.account,"repo_id":s.repo_id,"branch":s.branch,"metadata":s.metadata,"created_at":s.created_at,"last_seen":last_seen,"status":status,"reason":s.reason,"archived":s.archived,"retired_at":s.retired_at,"host_task_id":s.host_task_id,"chat_id":s.chat_id,"generation":s.generation,"unresolved_operations":s.inflight.len()+s.operations.len(),"standby":s.standby})
 }
 fn inventory(data: &Library, args: &Value, time: u64) -> Value {
     let mut grouped = std::collections::BTreeMap::<(String, String), (usize, usize)>::new();
@@ -353,6 +381,9 @@ fn release_seed(root: &Path, seed: &mut Seed) -> Result<()> {
     seed.attachment_id.clear();
     seed.generation += 1;
     seed.last_seen = 0;
+    if let Ok(mut map) = PRESENCE.get_or_init(Default::default).lock() {
+        map.remove(&seed.id);
+    }
     seed.ready = false;
     seed.reason = "workspace_removed".into();
     Ok(())
@@ -1022,6 +1053,7 @@ fn authorized(data: &Library, sid: &str, token: &str, time: u64) -> Result<usize
     {
         return Err(err("Seed access expired, retired or invalid"));
     }
+    touch(sid, time);
     Ok(index)
 }
 pub fn authenticate(root: &Path, sid: &str, token: &str) -> Result<()> {
@@ -2341,6 +2373,59 @@ mod standby_tests {
         let again = poll_at(root.path(), sid, &tokens[0], now() + 6_000).unwrap();
         assert_eq!(again["chat_id"], next["id"]);
         assert_eq!(seed_row(root.path(), sid)["standby"], false);
+    }
+
+    #[test]
+    fn disconnected_direct_ai_is_assignable_while_waiting_and_offline_once_it_stops() {
+        let root = tempfile::tempdir().unwrap();
+        let chat = super::super::ui(root.path(), &json!({"action":"create","seed_manual":true}))
+            .unwrap()["session"]
+            .clone();
+        let issued = super::super::ui(
+            root.path(),
+            &json!({"action":"seed_direct","chat_id":chat["id"]}),
+        )
+        .unwrap();
+        let key = issued["seed"]["url_key"].as_str().unwrap().to_owned();
+        let sid = url(root.path(), &key, true).unwrap();
+        let assigned = poll(root.path(), &sid, &key).unwrap();
+        assert_eq!(assigned["chat_id"], chat["id"]);
+        super::super::tool(root.path(), "chat_open", &assigned).unwrap();
+        let card = |time: u64| {
+            let data = read(root.path()).unwrap();
+            inventory(&data, &json!({}), time)["account_summaries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|a| a["account"] == "direct")
+                .cloned()
+                .unwrap()
+        };
+        let start = now();
+        assert_eq!(card(start)["counts"], json!({"assigned":1}));
+        let detached = super::super::ui(
+            root.path(),
+            &json!({"action":"detach","chat_id":chat["id"],"standby":true}),
+        )
+        .unwrap();
+        assert_eq!(detached["standby"], "seed");
+        let start = now();
+        assert_eq!(card(start)["counts"], json!({"ready":1}));
+        assert_eq!(card(start + 50_000)["counts"], json!({"ready":1}));
+        // The host ended its turn: over a minute without a wait is offline, not valid.
+        let gone = card(start + 61_000);
+        assert_eq!(gone["counts"], json!({"offline":1}));
+        assert_eq!(gone["valid"], 0);
+        let data = read(root.path()).unwrap();
+        let pools = inventory(&data, &json!({}), start + 61_000)["pool_groups"].clone();
+        assert_eq!(pools[0]["standby"], true);
+        assert_eq!(pools[0]["ready"], 0);
+        // Waiting again brings it straight back.
+        assert_eq!(
+            poll_at(root.path(), &sid, &key, start + 61_000).unwrap()["status"],
+            "idle"
+        );
+        assert_eq!(card(start + 61_000)["counts"], json!({"ready":1}));
     }
 
     #[test]

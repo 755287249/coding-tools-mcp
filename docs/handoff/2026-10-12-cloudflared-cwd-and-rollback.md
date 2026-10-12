@@ -434,3 +434,21 @@ C. 添加種子頁面卡片化（build 子代理，分支 `vorflux/seed-add-card
       （SHA-256 `25482bca083fd8c8c0ad3e7c609ede2886e736d49b90e84ef6cf62ea25c329d6`）+ 種子腳本 1.3.2；中文發佈說明已補；
       tag 觸發的舊 `Desktop Release` run 38252191671 已取消（理由同 v0.1.143）。
 - [ ] Windows `Manual source upgrade` run 38251162121（verify-repo + 完整建置）發佈時仍在跑，接手者請確認結果。
+
+# 第七部分：斷開接入AI後種子庫狀態不即時（0.1.144 之後）
+
+## 使用者回報
+斷開「接入AI」後應變成可分配；AI 實際上已停止（宿主結束回合，回覆「需要我繼續等待的話，請告訴我」），種子庫卻沒有即時更新，仍顯示「有效」。
+
+## 調查
+- 後端流程正確：detach(standby) → `release_to_standby` 把該種子設為 standby/ready，AI 的下一次 chat_wait 拿到「returned to the seed library」並以無參數 chat_wait 待命（日誌與 Node 重現一致）。
+- 問題在狀態判斷：未分配種子的「離線」只看磁碟 `last_seen` 是否超過 `SUSPECT_MS`（10 分鐘），而 `last_seen` 每分鐘才寫一次。
+  AI 停止等待後，種子仍以「可分配／有效」顯示長達 10 分鐘，選擇器也把它當可用。
+
+## 處理
+- [x] 記憶體 presence（Rust `PRESENCE`／Node `presence`）：每次通過驗證的種子請求（等待輪詢每 ≤5 秒一次、工具呼叫）更新時間，不寫磁碟。
+- [x] `public()` / `publicSeed()`：已註冊但未分配的種子，超過 `ONLINE_MS`（60 秒）沒有等待或呼叫 → `offline`（不計入有效，也不算可分配）；再次等待立即回到可分配。
+      已分配／工作中的判斷不變（工作中可能長時間不輪詢）。釋放工作區時同步清除 presence。輸出的 `last_seen` 改為較新的 presence 時間。
+- [x] 測試：Node「a disconnected direct AI is assignable while it waits and offline as soon as it stops」、Rust
+      `disconnected_direct_ai_is_assignable_while_waiting_and_offline_once_it_stops`。
+- 備註：AI 自己結束回合屬宿主行為，服務端無法喚醒；使用者需在 AI 那邊讓它繼續等待，或重新簽發。

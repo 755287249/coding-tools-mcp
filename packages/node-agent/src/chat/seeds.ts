@@ -32,7 +32,12 @@ let urlRedeemedHook:((key:string)=>void)|undefined;
 export function onSeedUrlRedeemed(hook:(key:string)=>void):void {urlRedeemedHook=hook;}
 const scans=new Map<string,number>();
 export function seedInvalidate(store:SeedStore):void {const base=store.path(FILE)+'\0';for(const key of scans.keys())if(key.startsWith(base))scans.delete(key);}
-export const SEED_SUSPECT_MS=600_000, SEED_REPLACE_MS=720_000;
+export const SEED_SUSPECT_MS=600_000, SEED_REPLACE_MS=720_000, SEED_ONLINE_MS=60_000;
+/** Last authenticated request per seed, in memory only (the registry last_seen is written at most once a minute).
+ * A ready seed that has not waited or called a tool for SEED_ONLINE_MS is shown offline right away. */
+const presence=new Map<string,number>();
+function touch(id:string,now:number){if(presence.size>8192)for(const [key,seen] of presence)if(now-seen>SEED_SUSPECT_MS)presence.delete(key);presence.set(id,Math.max(presence.get(id)??0,now));}
+const seenAt=(s:Seed)=>Math.max(s.last_seen,presence.get(s.id)??0);
 const hash=(s:string)=>createHash('sha256').update(s).digest('hex');
 const uid=(s:unknown):string=>{if(typeof s!=='string'||! /^[a-zA-Z0-9_-]{1,80}$/.test(s))throw Error('Invalid seed ID');return s;};
 const label=(s:unknown,max=200):string=>{if(typeof s!=='string'||!s.trim()||Buffer.byteLength(s)>max)throw Error('Invalid seed field');return s.trim();};
@@ -66,8 +71,10 @@ function eligibleChat(chat:ChatSession):boolean {
   return chat.seed_auto===true&&!chat.closed&&!chat.archived&&chat.mode!=='group'&&!awaiting;
 }
 function publicSeed(s:Seed,now:number){
-  const state=s.retired_at?'retired':s.inflight.length||s.operations.length?'working':!s.redeemed_at?'preparing':now-s.last_seen>SEED_SUSPECT_MS?'offline':s.chat_id?'assigned':s.ready?'ready':'preparing';
-  return {enrollment_until:s.enrollment_until,redeemed_at:s.redeemed_at,access_until:s.access_until,id:s.id,source:sourceOf(s),prefix:s.prefix??'',manual:s.manual===true,account:s.account,repo_id:s.repo_id,branch:s.branch,metadata:s.metadata??{},created_at:s.created_at,last_seen:s.last_seen,status:state,reason:s.reason,archived:s.archived,retired_at:s.retired_at,host_task_id:s.host_task_id,chat_id:s.chat_id,generation:s.generation,unresolved_operations:s.inflight.length+s.operations.length,standby:s.standby===true};
+  const last_seen=seenAt(s);
+  // A registered seed that stopped waiting (e.g. its host ended the turn) is offline, not assignable.
+  const state=s.retired_at?'retired':s.inflight.length||s.operations.length?'working':!s.redeemed_at?'preparing':now-last_seen>SEED_SUSPECT_MS?'offline':s.chat_id?'assigned':s.ready?(now-last_seen<=SEED_ONLINE_MS?'ready':'offline'):'preparing';
+  return {enrollment_until:s.enrollment_until,redeemed_at:s.redeemed_at,access_until:s.access_until,id:s.id,source:sourceOf(s),prefix:s.prefix??'',manual:s.manual===true,account:s.account,repo_id:s.repo_id,branch:s.branch,metadata:s.metadata??{},created_at:s.created_at,last_seen,status:state,reason:s.reason,archived:s.archived,retired_at:s.retired_at,host_task_id:s.host_task_id,chat_id:s.chat_id,generation:s.generation,unresolved_operations:s.inflight.length+s.operations.length,standby:s.standby===true};
 }
 function inventory(data:Library,args:Record<string,unknown>,now:number){
   const groups=new Map<string,{source:string;prefix:string;total:number;ready:number}>();
@@ -102,7 +109,7 @@ function releaseSeed(store:SeedStore,seed:Seed):void {
       chat.seed_generation=(chat.seed_generation??0)+1;chat.updated_at=Date.now();store.save(chat);
     }
   }
-  seed.chat_id='';seed.attachment_id='';seed.generation++;seed.last_seen=0;seed.ready=false;seed.reason='workspace_removed';
+  seed.chat_id='';seed.attachment_id='';seed.generation++;seed.last_seen=0;seed.ready=false;seed.reason='workspace_removed';presence.delete(seed.id);
 }
 export function seedReleaseWorkspace(store:SeedStore):void {
   if(!existsSync(store.path(FILE)))return;
@@ -271,7 +278,7 @@ export function seedUrl(store:SeedStore,key:string,redeem=false,now=Date.now()):
 function authorized(data:Library,id:string,token:string,now:number):Seed {
   const s=data.seeds.find(s=>s.id===uid(id));
   if(!s||s.retired_at||!s.redeemed_at||!token||(hash(token)!==s.access_hash&&hash(token)!==s.url_hash)||now>s.access_until)throw Error('Seed access expired, retired or invalid');
-  return s;
+  touch(s.id,now);return s;
 }
 export function seedCreated(store:SeedStore,id:string,ticket:string,taskId:string):void {
   store.locked(()=>{const data=readSeeds(store),s=data.seeds.find(s=>s.id===uid(id));

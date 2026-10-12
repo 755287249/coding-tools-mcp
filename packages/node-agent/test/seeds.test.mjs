@@ -364,6 +364,23 @@ test('disconnecting a live seed returns it as an assignable standby seed',async 
  assert.equal(seedPoll(store,batch[1].seed_id,tokens[1],Date.now()+4000).status,'idle');
  assert.equal(seedPoll(store,batch[0].seed_id,tokens[0],Date.now()+6000).chat_id,next.id);assert.equal(row().standby,false);
 });
+test('a disconnected direct AI is assignable while it waits and offline as soon as it stops',async t=>{
+ const root=mkdtempSync(path.join(tmpdir(),'seeds-'));t.after(()=>rmSync(root,{recursive:true,force:true}));const {seedUrl}=await import('../dist/chat/seeds.js');const store=seedStore(root);
+ const chat=chatUi(root,{action:'create',seed_manual:true}).session;const issued=chatUi(root,{action:'seed_direct',chat_id:chat.id});const sid=seedUrl(store,issued.seed.url_key,true);
+ const assigned=seedPoll(store,sid,issued.seed.url_key);assert.equal(assigned.chat_id,chat.id);chatTool(root,'chat_open',assigned);
+ const card=()=>chatUi(root,{action:'seed_list'}).account_summaries.find(a=>a.account==='direct');
+ assert.deepEqual(card().counts,{assigned:1});
+ assert.equal(chatUi(root,{action:'detach',chat_id:chat.id,standby:true}).standby,'seed');
+ assert.deepEqual(card().counts,{ready:1});assert.equal(card().valid,1);
+ assert.deepEqual(chatUi(root,{action:'seed_list'}).pool_groups.map(g=>[g.standby,g.ready]),[[true,1]]);
+ const realNow=Date.now,start=realNow();t.after(()=>{Date.now=realNow;});
+ Date.now=()=>start+50_000;assert.deepEqual(card().counts,{ready:1});
+ // The host ended its turn: no wait for over a minute means offline, not "valid".
+ Date.now=()=>start+61_000;assert.deepEqual(card().counts,{offline:1});assert.equal(card().valid,0);
+ assert.deepEqual(chatUi(root,{action:'seed_list'}).pool_groups.map(g=>[g.standby,g.ready]),[[true,0]]);
+ // Waiting again brings it straight back.
+ assert.equal(seedPoll(store,sid,issued.seed.url_key,start+61_000).status,'idle');assert.deepEqual(card().counts,{ready:1});
+});
 test('disconnecting a live direct AI enrolls a standby seed and hands it the seed URL',async t=>{
  const root=mkdtempSync(path.join(tmpdir(),'seeds-'));t.after(()=>rmSync(root,{recursive:true,force:true}));const {standbyHandoff}=await import('../dist/chat/store.js');
  const chat=chatUi(root,{action:'create',seed_manual:true}).session;const opened=chatTool(root,'chat_open',{chat_id:chat.id,agent_name:'Claude'});
