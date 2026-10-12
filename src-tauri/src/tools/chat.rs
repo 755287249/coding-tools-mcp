@@ -1170,7 +1170,13 @@ fn ui_unlocked(root: &Path, args: &Value) -> Result<Value> {
                 s["seed_pending"] = json!(false);
                 s["seed_generation"] = json!(s["seed_generation"].as_u64().unwrap_or(0) + 1);
             }
+            if s["seed_direct"] == true {
+                if let Err(e) = seeds::retire_unused_direct(root, id(&s["id"])?) {
+                    eprintln!("direct URL cleanup skipped: {}", e.message());
+                }
+            }
             s["seed_explicit"] = json!(false);
+            s["seed_direct"] = json!(false);
             s["seed_auto"] = json!(false);
             if let Some(members) = s["members"].as_array_mut() {
                 for m in members {

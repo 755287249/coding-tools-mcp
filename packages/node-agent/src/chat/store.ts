@@ -1,6 +1,6 @@
 import { renameChatFileSync } from './rename.js';
 import { scheduleAction, tickSchedules } from './schedules.js';
-import {seedUi, readSeeds, seedInvalidate, parseSeedFilter, seedReleaseToStandby, seedEnrollDirectStandby, onSeedUrlRedeemed, type SeedFilter, type SeedStore} from './seeds.js';
+import {seedUi, readSeeds, seedInvalidate, parseSeedFilter, seedReleaseToStandby, seedEnrollDirectStandby, seedRetireUnusedDirect, onSeedUrlRedeemed, type SeedFilter, type SeedStore} from './seeds.js';
 import {parseQuestions,validateQuestionContext,answerQuestions,activeQuestionId,questionsMarkdown,type ChatQuestion,type QuestionResponse} from './questions.js';
 import {packHistory, unpackHistory, agentContext, HISTORY_PAGE_BYTES} from './history.js';
 import {visibleSession} from './collaboration.js';
@@ -22,7 +22,7 @@ import { resolveChatPath } from './reveal.js';
 export interface ChatFile { label?: string; local_reference?: boolean; id: string; name: string; path: string; mime: string; size: number; sha256: string }
 export interface ToolEvent { name: string; status: 'running' | 'completed' | 'failed'; input?: string; output?: string; output_truncated?: boolean }
 export interface ChatMessage { questions?:ChatQuestion[];question_answer?:QuestionResponse;question_response?:QuestionResponse;questions_active?:boolean; discussion?:{hidden?:boolean;id:string;post_id:string;source_chat_id:string;purpose:string}; received_by?:string[]; agent_id?:string;agent_name?:string;recipient_ids?:string[];agent_plans?:{agent_id:string;plan:ChatTaskPlan}[]; task_plan?:ChatTaskPlan; kind?: 'connection_request' | 'assignment'; awaiting_user?: boolean; received_at?: number; attachments?: ChatFile[]; tool_event?: ToolEvent; id: string; role: 'user' | 'assistant'; text: string; created_at: number; reply_to?: string; final?: boolean }
-export interface ChatSession {terminal_attachment_hashes?:string[];seed_filter?:SeedFilter;seed_auto?:boolean;seed_explicit?:boolean;seed_pending?:boolean;seed_owner?:string;seed_generation?:number;pending_pairing?:string; note?:string; title_agent_name?:string; work_member?:ChatMember; mode?:'work'|'group';members?:ChatMember[];agent_name?:string; pinned?: boolean; archived?: boolean; queue?: ChatMessage[]; queue_mode?: 'merge' | 'split'; queue_receipts?: Record<string,string>; title_custom?: boolean; files?: ChatFile[]; version: 1|2; id: string; title: string; created_at: number; updated_at: number; closed: boolean; messages: ChatMessage[]; attachment_id: string; lease_until: number }
+export interface ChatSession {terminal_attachment_hashes?:string[];seed_filter?:SeedFilter;seed_auto?:boolean;seed_explicit?:boolean;seed_direct?:boolean;seed_pending?:boolean;seed_owner?:string;seed_generation?:number;pending_pairing?:string; note?:string; title_agent_name?:string; work_member?:ChatMember; mode?:'work'|'group';members?:ChatMember[];agent_name?:string; pinned?: boolean; archived?: boolean; queue?: ChatMessage[]; queue_mode?: 'merge' | 'split'; queue_receipts?: Record<string,string>; title_custom?: boolean; files?: ChatFile[]; version: 1|2; id: string; title: string; created_at: number; updated_at: number; closed: boolean; messages: ChatMessage[]; attachment_id: string; lease_until: number }
 const DIR = 'docs/chat-sessions';
 const ASSET_DIR = 'mcp-assistant/chat-assets';
 const ARTIFACT_DIR = 'mcp-assistant/artifacts/';
@@ -169,7 +169,7 @@ function view(root: string, session: ChatSession) {
   const latestUser=s.messages.filter(m=>m.role==='user').at(-1);
   const awaiting_user=!message && !!latestUser && s.messages.some(m=>m.role==='assistant'&&m.reply_to===latestUser.id&&m.final&&m.awaiting_user);
   const last_message_at=s.messages.reduce((latest,m)=>Math.max(latest,m.created_at),s.created_at);
-  return { seed_filter:s.seed_filter,seed_auto:s.seed_auto,seed_owner:s.seed_owner,seed_generation:s.seed_generation,last_message_at, awaiting_user, mode:s.mode??'work',members,agent_name:s.agent_name, pinned:s.pinned===true, archived:s.archived===true, work_state, id: s.id, title: s.title, note:s.note??'', created_at: s.created_at, updated_at: s.updated_at, closed: s.closed, messages: s.messages, assistant_message_count: s.messages.filter(m => m.role === 'assistant').length,
+  return { seed_filter:s.seed_filter,seed_auto:s.seed_auto,seed_direct:s.seed_direct===true,seed_owner:s.seed_owner,seed_generation:s.seed_generation,last_message_at, awaiting_user, mode:s.mode??'work',members,agent_name:s.agent_name, pinned:s.pinned===true, archived:s.archived===true, work_state, id: s.id, title: s.title, note:s.note??'', created_at: s.created_at, updated_at: s.updated_at, closed: s.closed, messages: s.messages, assistant_message_count: s.messages.filter(m => m.role === 'assistant').length,
     status: s.closed ? 'closed' : group.grouped(s)?presence:waiters.has(key(root, s.id)+':'+s.attachment_id) ? 'waiting' : s.lease_until > Date.now() ? 'connected' : 'offline',
     archive_path: `${DIR}/${s.id}.md` };
 }
@@ -399,7 +399,8 @@ function chatUiUnlocked(root:string,args:Record<string,unknown>):Record<string,u
         }catch(error){standbyFailed=true;console.error('standby skipped:',error instanceof Error?error.message:error);}
       }
       if(moved){s.seed_owner='';s.seed_pending=false;s.seed_generation=(s.seed_generation??0)+1;}
-      s.seed_explicit=false;s.seed_auto=false; for(const m of group.members(s)){m.lease_until=0;m.paused=true;}s.attachment_id = ''; s.lease_until = 0; s.updated_at = Date.now(); save(root, s);
+      if(s.seed_direct){try{seedRetireUnusedDirect(seedStore(root),s.id);}catch(error){console.error('direct URL cleanup skipped:',error instanceof Error?error.message:error);}}
+      s.seed_explicit=false;s.seed_direct=false;s.seed_auto=false; for(const m of group.members(s)){m.lease_until=0;m.paused=true;}s.attachment_id = ''; s.lease_until = 0; s.updated_at = Date.now(); save(root, s);
       if(moved)return {session:localView(root,s),standby:moved};
       if(standbyFailed)return {session:localView(root,s),standby_failed:true};
     }

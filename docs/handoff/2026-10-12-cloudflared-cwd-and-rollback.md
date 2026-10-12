@@ -247,10 +247,12 @@
 
 ## 計畫與進度
 
-- [ ] A. 移除重疊拒絕（Rust + Node），保留其餘隔離（每個專案仍以自己的目錄為根）。
-- [ ] B. 接入AI 一次性網址：新的 `seed_direct` 動作替對話建立「綁定此對話」的手動種子
+- [x] A. 移除重疊拒絕（Rust + Node），保留其餘隔離（每個專案仍以自己的目錄為根）。測試 `nested_project_directories_can_both_connect`。
+- [x] B. 接入AI 一次性網址：新的 `seed_direct` 動作替對話建立「綁定此對話」的手動種子
       （`Seed.bound_chat`，對話 `seed_direct=true`、`seed_filter.seed_id`），提示詞只有網址＋一段話；
-      連接指引中可切換回 OAuth（偏好存在 localStorage）。Node 同步。
+      連接指引中可切換回 OAuth（偏好存在 localStorage `ctmcp-connect-oauth`）。Node 同步。
+      端點不是 https 或 loopback 時自動改用 OAuth 提示詞。斷開時未使用的一次性網址會退役。
+      綁定種子不出現在種子池分類中。測試：Rust `direct_url_is_bound_to_its_chat_only`、Node `direct connect URL is bound to its chat only`。
 - [ ] C.（下一步，較大）每個對話的授權模式（完全/一般/嚴格）與專案外路徑核准。
       現況：檔案工具的 `Workspace::resolve_*` 一律拒絕絕對路徑與越界路徑；專案隔離會清空
       `sandbox.external_paths`。需要：專案層級的「已核准外部路徑」清單（讀/寫），

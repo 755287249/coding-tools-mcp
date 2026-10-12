@@ -4,13 +4,20 @@
   import PresenceDot from './PresenceDot.svelte';
   import SeedStart from './SeedStart.svelte';
   import SeedLoading from './SeedLoading.svelte';
-  import {seedRequest,type SeedFilter} from '$lib/api/seeds';
+  import {seedRequest,type SeedFilter,type SeedTicket} from '$lib/api/seeds';
+  import {directConnectPrompt} from '$lib/chat/seed-enrollment';
+  import {pairingAddress} from '$lib/chat/seed-pairing';
   let seedStartPending=$state(false);
   // Seed library switch: the two header buttons are [接入AI] [种子库]; the one
   // that is connected becomes [断开] and the other switches to it.
   let seedPicker=$state<HTMLDialogElement>();
   let seedPickerOpen=$state(false);
   let standbyNotice=$state('');
+  // [接入AI] uses a one-time URL by default; OAuth is an opt-in for clients that need it.
+  const OAUTH_PREF='ctmcp-connect-oauth';
+  let connectWithOAuth=$state(typeof localStorage!=='undefined'&&localStorage.getItem(OAUTH_PREF)==='1');
+  let directPrompt=$state(false);
+  function setConnectWithOAuth(value:boolean){connectWithOAuth=value;try{localStorage.setItem(OAUTH_PREF,value?'1':'0');}catch{}void openConnection();}
   import { chatConnectionTone } from '$lib/chat/connection-tone';
   import { fileDrop } from '$lib/chat/file-drop';
   let dropActive=$state(false);
@@ -271,7 +278,7 @@
     if (busy || !folderId) return;
     // An explicit [接入AI] on a new chat creates a manual chat; create() then reopens this guide.
     if (!selected) { await create(true, null); return; }
-    if (!selected || detail?.closed || detail?.seed_auto) return;
+    if (!selected || detail?.closed || (detail?.seed_auto && !detail?.seed_direct)) return;
     onNavigate?.(folderId, selected);
     connectionMembers=(detail?.members??[]).map(m=>m.id);connectionScope = currentScope; connectionError = ''; connectionSending = false; copied = false; revealPrompt=false; pairingAttempt=randomId(); pairingExpires=0; guide = true;
     connectionRequest = detail?.messages?.find(m => m.kind === 'connection_request' && !detail?.messages?.some(r => r.role === 'assistant' && r.reply_to === m.id && r.final === true))?.id ?? '';
@@ -282,6 +289,22 @@
       const transport=await getMcpConnection();
       const transportStatus=await getRuntimeStatus(transport.id);
       const connectionEndpoint=transportStatus.publicEndpoint||transportStatus.localEndpoint;
+      // Default: a one-time URL that carries its own credential (short prompt).
+      // OAuth stays available for clients that require it (connectWithOAuth).
+      let urlReady = false; try { urlReady = !!connectionEndpoint && !!pairingAddress(connectionEndpoint, folder); } catch { urlReady = false; }
+      if (urlReady && mode !== 'group' && !connectWithOAuth) {
+        try {
+          const direct = await seedRequest<{seed:SeedTicket}>(ws, folder, { action: 'seed_direct', chat_id: chat });
+          if (request !== promptSequence || scope !== currentScope || !guide) return;
+          connectionPrompt = directConnectPrompt(connectionEndpoint, folder, direct.seed);
+          directPrompt = true;
+          const fresh = await localChat(ws, folder, { action: 'read', chat_id: chat });
+          if (request === promptSequence && scope === currentScope && selected === chat) { readSequence++; detail = fresh.session ?? detail; }
+          await prepareConnection(request);
+          return;
+        } catch { if (request !== promptSequence || scope !== currentScope || !guide) return; }
+      }
+      directPrompt = false;
       const loaded=connectionEndpoint?await loadMcpAuthSecrets(getBackend(),transport.id,transport.auth):null;
       if (request !== promptSequence || scope !== currentScope || !guide) return;
       const connection = loaded ? buildConnectionPrompt({ workspaceName: selectedFolder?.name ?? '', endpoint:connectionEndpoint, authType: transport.auth.type, clientId: loaded.oauth_client_id || transport.auth.oauth_client_id, password: loaded.oauth_password ?? '', bearerToken: loaded.bearer_token ?? '', folders: folders.map(f => f.path) }, $locale, true) : '';
@@ -698,7 +721,7 @@
       return false;
     } catch (e) { if (gen === generation) error = String(e); return false; } finally { busy = false; }
   }
-  const aiKind = $derived(!detail || detail.closed ? 'none' : detail.seed_auto ? 'seed' : (detail.status === 'connected' || detail.status === 'waiting') ? 'direct' : 'none');
+  const aiKind = $derived(!detail || detail.closed ? 'none' : detail.seed_direct ? (detail.seed_owner ? 'direct' : 'none') : detail.seed_auto ? 'seed' : (detail.status === 'connected' || detail.status === 'waiting') ? 'direct' : 'none');
   async function switchToDirect() {
     if (aiKind === 'seed' && !(await detach())) return;
     await openConnection();
@@ -860,6 +883,7 @@
   {/if}
   <button class="prompt-disclosure" type="button" aria-expanded={revealPrompt} onclick={()=>revealPrompt=!revealPrompt}>{$t(revealPrompt?'chat.hidePrompt':'chat.showPrompt')}</button>
   {#if revealPrompt}<textarea class="connection-prompt" readonly aria-label={$t('chat.9')} value={connectionLoading ? $t('Loading…') : connectionPrompt}></textarea>{/if}
+  {#if mode!=='group'}<button class="prompt-disclosure auth-switch" type="button" disabled={connectionLoading} title={$t('chat.authModeHelp')} onclick={()=>setConnectWithOAuth(!connectWithOAuth)}>{$t(connectWithOAuth?'chat.useDirectUrl':'chat.useOAuth')}</button>{/if}
   {#if intentExpired && !connectionPeer}<p class="pairing-hint">{$t('chat.intentExpired')}</p>{/if}
   {#if pairing === 'failed'}<p role="alert">{$t('chat.pairingFailed')}</p>{/if}
   <div class="connection-buttons">

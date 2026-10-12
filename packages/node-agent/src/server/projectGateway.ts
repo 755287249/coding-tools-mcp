@@ -53,13 +53,8 @@ export class ProjectGateway {
     if (matches.length !== 1) denied('Project directory is unavailable or ambiguous');
     const context = matches[0];
     if (!context || context.runtimeClosed || !context.projectIsolation || context.config.folders.length !== 1) denied('Project directory unavailable');
-    const root = await realpath(context.config.folders[0].path);
-    for (const other of contexts.filter(item => item !== context).flatMap(item => item.config.folders)) {
-      let otherRoot: string;
-      try { otherRoot = await realpath(other.path); } catch { continue; }
-      const overlaps = (a: string, b: string) => { const relative = path.relative(a, b); return !relative || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative)); };
-      if (overlaps(root, otherRoot) || overlaps(otherRoot, root)) denied('Project directories overlap. Use separate directory roots before enabling isolated access.');
-    }
+    // Nested or shared project directories are allowed: a parent project includes its children.
+    await realpath(context.config.folders[0].path).catch(() => denied('Project directory unavailable'));
     if (this.stopped || context.runtimeClosed || ![...this.contexts()].includes(context)) denied('Project connection is stopped');
     return context;
   }

@@ -49,6 +49,9 @@ pub struct Seed {
     /// now waits in the library as an assignable standby seed.
     #[serde(default)]
     pub standby: bool,
+    /// Direct-connect URL for one chat ([接入AI]): assigned only to that chat.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub bound_chat: String,
 }
 #[derive(Serialize, Deserialize)]
 struct Library {
@@ -87,6 +90,9 @@ pub fn parse_filter(value: &Value) -> Result<Value> {
     if value["standby"] == true {
         filter["standby"] = json!(true);
     }
+    if let Some(seed_id) = value["seed_id"].as_str().filter(|v| !v.is_empty()) {
+        filter["seed_id"] = json!(text(&json!(seed_id), 80)?);
+    }
     Ok(filter)
 }
 fn matches(seed: &Seed, filter: &Value) -> bool {
@@ -102,6 +108,9 @@ fn matches(seed: &Seed, filter: &Value) -> bool {
             .filter(|account| !account.is_empty())
             .is_none_or(|account| seed.account == account)
         && (filter["standby"] != true || seed.standby)
+        && filter["seed_id"]
+            .as_str()
+            .is_none_or(|seed_id| seed.id == seed_id)
 }
 fn read(root: &Path) -> Result<Library> {
     let target = safe(root, FILE)?;
@@ -224,7 +233,11 @@ fn inventory(data: &Library, args: &Value, time: u64) -> Value {
     // show the categories (with 0 ready) instead of hiding the choice.
     let mut pool_groups =
         std::collections::BTreeMap::<(String, String, String, bool), (usize, usize)>::new();
-    for seed in data.seeds.iter().filter(|s| s.retired_at == 0) {
+    for seed in data
+        .seeds
+        .iter()
+        .filter(|s| s.retired_at == 0 && s.bound_chat.is_empty())
+    {
         let entry = pool_groups
             .entry((
                 seed.source.clone(),
@@ -387,6 +400,9 @@ pub fn release_workspace(root: &Path) -> Result<()> {
 }
 
 pub fn ui(root: &Path, args: &Value) -> Result<Value> {
+    if args["action"] == "seed_direct" {
+        return direct_url(root, args);
+    }
     let mut data = read(root)?;
     let time = now();
     match args["action"].as_str().unwrap_or("") {
@@ -513,6 +529,7 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
                     inflight: vec![],
                     operations: vec![],
                     standby: args["_standby"] == true,
+                    bound_chat: args["_bound_chat"].as_str().unwrap_or("").to_owned(),
                 };
                 batch.push(json!({"seed_id":s.id,"ticket":ticket,"url_key":url_key,"source":source,"prefix":prefix,"manual":manual,"repo_id":repo_id,"branch":branch,"account":account,"expires_at":s.enrollment_until}));
                 data.seeds.push(s);
@@ -650,6 +667,7 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
             if args.get("seed_filter").is_some_and(Value::is_object) {
                 chat["seed_filter"] = parse_filter(&args["seed_filter"])?;
                 chat["seed_explicit"] = json!(true);
+                chat["seed_direct"] = json!(false);
             }
             chat["updated_at"] = json!(time);
             save(root, &chat)?;
@@ -688,11 +706,81 @@ pub(super) fn release_to_standby(root: &Path, chat: &Value) -> Result<bool> {
     seed.attachment_id.clear();
     seed.generation += 1;
     seed.standby = true;
+    seed.bound_chat.clear();
     seed.ready = true;
     seed.reason = "standby".into();
     write(root, &data)?;
     invalidate(root);
     Ok(true)
+}
+/// [接入AI] without OAuth: a one-hour URL that carries its own credential,
+/// like a manual seed, but bound to one chat. The chat waits for that seed
+/// only, even when automatic assignment is off.
+fn direct_url(root: &Path, args: &Value) -> Result<Value> {
+    let cid = id(&args["chat_id"])?.to_owned();
+    let mut chat = load(root, &cid)?;
+    if chat["closed"] == true || group::grouped(&chat) {
+        return Err(err("Only open work chats support direct connect URLs"));
+    }
+    if !chat["attachment_id"].as_str().unwrap_or("").is_empty() {
+        return Err(err(
+            "Disconnect the current AI before connecting another one",
+        ));
+    }
+    let time = now();
+    let mut data = read(root)?;
+    let mut changed = false;
+    // Re-issuing replaces an unused URL; a connected seed keeps working.
+    for seed in data
+        .seeds
+        .iter_mut()
+        .filter(|s| s.bound_chat == cid && s.retired_at == 0 && s.redeemed_at == 0)
+    {
+        retire(seed, "replaced", time);
+        changed = true;
+    }
+    if changed {
+        write(root, &data)?;
+    }
+    let created = ui(
+        root,
+        &json!({"action":"seed_manual","source":"direct","prefix":"接入AI","account":"direct","_bound_chat":cid}),
+    )?;
+    let ticket = created["batch"][0].clone();
+    let sid = ticket["seed_id"]
+        .as_str()
+        .ok_or_else(|| err("Direct connect URL failed"))?;
+    chat["seed_auto"] = json!(true);
+    chat["seed_explicit"] = json!(true);
+    chat["seed_direct"] = json!(true);
+    chat["seed_filter"] = json!({"source":"","keyword":"","seed_id":sid});
+    chat["updated_at"] = json!(time);
+    save(root, &chat)?;
+    invalidate(root);
+    Ok(json!({"ok":true,"seed":ticket}))
+}
+/// A direct-connect URL that was never used stops working when its chat is
+/// disconnected or switched.
+pub(super) fn retire_unused_direct(root: &Path, chat_id: &str) -> Result<()> {
+    if !safe(root, FILE)?.exists() {
+        return Ok(());
+    }
+    let mut data = read(root)?;
+    let time = now();
+    let mut changed = false;
+    for seed in data
+        .seeds
+        .iter_mut()
+        .filter(|s| s.bound_chat == chat_id && s.retired_at == 0 && s.redeemed_at == 0)
+    {
+        retire(seed, "conversation_detached", time);
+        changed = true;
+    }
+    if changed {
+        write(root, &data)?;
+        invalidate(root);
+    }
+    Ok(())
 }
 /// Enroll a directly connected AI that left a chat as a standby seed. Returns
 /// the one-hour URL key; the caller hands it to that AI's next chat_wait.
@@ -1028,6 +1116,11 @@ fn poll_at(root: &Path, sid: &str, token: &str, time: u64) -> Result<Value> {
             if !data.enabled && chat["seed_explicit"] != true {
                 continue;
             }
+            // A direct-connect seed serves only its own chat.
+            let bound = &data.seeds[index].bound_chat;
+            if !bound.is_empty() && chat["id"].as_str() != Some(bound.as_str()) {
+                continue;
+            }
             if !eligible(&chat)
                 || !matches(&data.seeds[index], &parse_filter(&chat["seed_filter"])?)
             {
@@ -1069,6 +1162,7 @@ fn poll_at(root: &Path, sid: &str, token: &str, time: u64) -> Result<Value> {
             s.attachment_id = attachment;
             s.generation = generation;
             s.standby = false;
+            s.reason.clear();
             dirty = true;
             invalidate(root);
             break;
@@ -2248,6 +2342,70 @@ mod standby_tests {
         let read =
             super::super::ui(root.path(), &json!({"action":"read","chat_id":chat["id"]})).unwrap();
         assert_eq!(read["session"]["seed_auto"], true);
+    }
+
+    #[test]
+    fn direct_url_is_bound_to_its_chat_only() {
+        let root = tempfile::tempdir().unwrap();
+        let other = super::super::ui(
+            root.path(),
+            &json!({"action":"create","seed_filter":{"source":"","keyword":""}}),
+        )
+        .unwrap()["session"]
+            .clone();
+        let chat = super::super::ui(root.path(), &json!({"action":"create","seed_manual":true}))
+            .unwrap()["session"]
+            .clone();
+        let first = super::super::ui(
+            root.path(),
+            &json!({"action":"seed_direct","chat_id":chat["id"]}),
+        )
+        .unwrap();
+        let issued = super::super::ui(
+            root.path(),
+            &json!({"action":"seed_direct","chat_id":chat["id"]}),
+        )
+        .unwrap();
+        // Re-issuing retires the unused URL.
+        assert!(url(
+            root.path(),
+            first["seed"]["url_key"].as_str().unwrap(),
+            false
+        )
+        .is_err());
+        let key = issued["seed"]["url_key"].as_str().unwrap();
+        let sid = url(root.path(), key, true).unwrap();
+        let read =
+            super::super::ui(root.path(), &json!({"action":"read","chat_id":chat["id"]})).unwrap();
+        assert_eq!(read["session"]["seed_direct"], true);
+        assert_eq!(read["session"]["seed_auto"], true);
+        let seed = seed_row(root.path(), &sid);
+        let assigned = poll(root.path(), &sid, key).unwrap();
+        // The older pool chat must not take the bound seed.
+        assert_eq!(assigned["chat_id"], chat["id"], "{seed}");
+        assert_ne!(assigned["chat_id"], other["id"]);
+        let inventory = super::super::ui(root.path(), &json!({"action":"seed_list"})).unwrap();
+        assert!(inventory["pool_groups"].as_array().unwrap().is_empty());
+        // Disconnecting before the URL is used retires it.
+        let pending = super::super::ui(root.path(), &json!({"action":"create","seed_manual":true}))
+            .unwrap()["session"]
+            .clone();
+        let unused = super::super::ui(
+            root.path(),
+            &json!({"action":"seed_direct","chat_id":pending["id"]}),
+        )
+        .unwrap();
+        super::super::ui(
+            root.path(),
+            &json!({"action":"detach","chat_id":pending["id"]}),
+        )
+        .unwrap();
+        assert!(url(
+            root.path(),
+            unused["seed"]["url_key"].as_str().unwrap(),
+            false
+        )
+        .is_err());
     }
 
     #[test]

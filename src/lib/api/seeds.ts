@@ -1,6 +1,6 @@
 import {getBackend} from '$lib/backend';
 import type {ChatAction} from './chat';
-export interface SeedFilter {source:string;keyword:string;prefix?:string;account?:string;standby?:boolean}
+export interface SeedFilter {source:string;keyword:string;prefix?:string;account?:string;standby?:boolean;seed_id?:string}
 export interface SeedGroup {source:string;prefix:string;total:number;ready:number}
 export interface SeedRow {enrollment_until?:number;redeemed_at?:number;access_until?:number;source:string;prefix:string;manual?:boolean;id:string;account:string;repo_id:string;branch:string;metadata?:Record<string,string>;created_at:number;last_seen:number;status:string;reason:string;archived:boolean;retired_at:number;host_task_id:string;chat_id:string;generation:number;unresolved_operations:number;standby?:boolean}
 export interface SeedAccountSummary {account:string;total:number;valid:number;counts:Record<string,number>}
