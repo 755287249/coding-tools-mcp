@@ -13,7 +13,9 @@ use crate::tunnel::drop_workspace as drop_tunnel_workspace;
 use crate::workspace::resources::{
     assign_free_workspace_ports, validate_workspace_resources_update,
 };
-use crate::workspace::{compare_wsl_paths, wsl_unc_path, WorkspaceFolder, WorkspaceProfile};
+use crate::workspace::{
+    compare_wsl_paths, parse_wsl_unc_path, wsl_unc_path, WorkspaceFolder, WorkspaceProfile,
+};
 use serde_json::Value;
 
 #[tauri::command]
@@ -78,6 +80,7 @@ fn create_workspace_inner(
     name: Option<String>,
 ) -> AppResult<WorkspaceProfile> {
     state.with_workspaces(|store| {
+        ensure_unique_project_path(store.list(), &path, None)?;
         let mut profile = WorkspaceProfile::new(path, name);
         // Create should not fail just because default ports are already claimed.
         // Pick free ports now; start/update still enforce conflict checks.
@@ -266,6 +269,7 @@ fn add_workspace_folder_inner(
         {
             return Err(AppError::Message("此資料夾已在工具區清單中。".into()));
         }
+        ensure_unique_project_path(store.list(), &path, Some(&id))?;
         profile.folders.push(WorkspaceFolder::new(path, name));
         profile.normalize_folders();
         store.update(profile.clone())?;
@@ -343,6 +347,68 @@ fn same_folder_path(left: &str, right: &str) -> bool {
     }
 }
 
+/// True when two folders are the same directory or one contains the other.
+fn folder_paths_overlap(left: &str, right: &str) -> bool {
+    match (parse_wsl_unc_path(left), parse_wsl_unc_path(right)) {
+        (Some(left), Some(right)) => {
+            left.distro.eq_ignore_ascii_case(&right.distro)
+                && path_prefix_overlap(&left.linux_path, &right.linux_path, false)
+        }
+        (None, None) => {
+            let normalize = |path: &str| path.trim().trim_end_matches(['\\', '/']).replace('\\', "/");
+            path_prefix_overlap(&normalize(left), &normalize(right), cfg!(windows))
+        }
+        _ => false,
+    }
+}
+
+fn path_prefix_overlap(left: &str, right: &str, ignore_case: bool) -> bool {
+    let (left, right) = if ignore_case {
+        (left.to_lowercase(), right.to_lowercase())
+    } else {
+        (left.to_string(), right.to_string())
+    };
+    let left = left.trim_end_matches('/');
+    let right = right.trim_end_matches('/');
+    left == right
+        || right.starts_with(&format!("{left}/"))
+        || left.starts_with(&format!("{right}/"))
+}
+
+/// Rejects a project directory equal to, inside, or containing another
+/// project's directory. Shared directories share one seed library and chat
+/// store, so deleting one project used to disconnect the other's seeds.
+fn ensure_unique_project_path(
+    profiles: &[WorkspaceProfile],
+    path: &str,
+    except: Option<&str>,
+) -> AppResult<()> {
+    for profile in profiles {
+        if profile.id == crate::data::GLOBAL_MCP_ID || Some(profile.id.as_str()) == except {
+            continue;
+        }
+        if let Some(folder) = profile
+            .folders
+            .iter()
+            .find(|folder| folder_paths_overlap(&folder.path, path))
+        {
+            return Err(AppError::Message(format!(
+                "已有项目路径：{}（项目「{}」）。项目目录不能相同，也不能是其他项目的上级或下级目录。",
+                folder.path, profile.name
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn folder_shared_with_other_project(profiles: &[WorkspaceProfile], id: &str, path: &str) -> bool {
+    profiles.iter().any(|profile| {
+        profile.id != id
+            && profile.id != crate::data::GLOBAL_MCP_ID
+            && profile.folders.iter().any(|folder| same_folder_path(&folder.path, path))
+    })
+}
+
 #[tauri::command(async)]
 pub fn open_workspace_directory(path: String) -> AppResult<()> {
     let path = PathBuf::from(path.trim());
@@ -390,7 +456,14 @@ pub async fn delete_workspace(state: State<'_, AppState>, id: String) -> AppResu
     })?;
     let result = async {
         drop_tunnel_workspace(&id).await?;
+        let others = state.with_workspaces(|store| Ok(store.list().to_vec()))?;
         for folder in &profile.folders {
+            // The seed library lives inside the folder. Another project with
+            // the same directory shares it, so releasing it would disconnect
+            // every seed of the remaining project.
+            if folder_shared_with_other_project(&others, &id, &folder.path) {
+                continue;
+            }
             crate::tools::chat::seeds::release_workspace(std::path::Path::new(&folder.path))
                 .map_err(|e| AppError::Message(format!("Services stopped; seed release failed for {}: {}. Retry deletion after resolving the error.", folder.name, e)))?;
         }
@@ -416,7 +489,40 @@ pub async fn delete_workspace(state: State<'_, AppState>, id: String) -> AppResu
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_wsl_output, same_folder_path, validate_wsl_location};
+    use super::{
+        decode_wsl_output, ensure_unique_project_path, folder_paths_overlap,
+        folder_shared_with_other_project, same_folder_path, validate_wsl_location,
+    };
+    use crate::workspace::WorkspaceProfile;
+
+    #[test]
+    fn project_paths_must_not_be_equal_or_nested() {
+        assert!(folder_paths_overlap("/home/u/docs", "/home/u/docs/"));
+        assert!(folder_paths_overlap("/home/u/docs", "/home/u/docs/app"));
+        assert!(folder_paths_overlap("/home/u/docs/app", "/home/u/docs"));
+        assert!(!folder_paths_overlap("/home/u/docs", "/home/u/docs2"));
+        assert!(folder_paths_overlap(
+            r"\\wsl.localhost\Ubuntu\opt\src",
+            r"\\wsl$\ubuntu\opt\src\app"
+        ));
+        assert!(!folder_paths_overlap(r"\\wsl.localhost\Ubuntu\opt\src", "/opt/src"));
+        let existing = WorkspaceProfile::new("/home/u/docs".into(), Some("Docs".into()));
+        let profiles = vec![existing.clone()];
+        assert!(ensure_unique_project_path(&profiles, "/home/u/docs", None).is_err());
+        assert!(ensure_unique_project_path(&profiles, "/home/u/docs/app", None).is_err());
+        assert!(ensure_unique_project_path(&profiles, "/home/u", None).is_err());
+        assert!(ensure_unique_project_path(&profiles, "/home/u/other", None).is_ok());
+        assert!(ensure_unique_project_path(&profiles, "/home/u/docs/app", Some(&existing.id)).is_ok());
+    }
+
+    #[test]
+    fn deleting_a_duplicate_project_keeps_the_shared_seed_library() {
+        let first = WorkspaceProfile::new("/home/u/docs".into(), None);
+        let second = WorkspaceProfile::new("/home/u/docs/".into(), None);
+        let profiles = vec![first.clone(), second.clone()];
+        assert!(folder_shared_with_other_project(&profiles, &first.id, "/home/u/docs"));
+        assert!(!folder_shared_with_other_project(&[first.clone()], &first.id, "/home/u/docs"));
+    }
 
     #[test]
     fn decodes_utf8_and_utf16_wsl_output() {

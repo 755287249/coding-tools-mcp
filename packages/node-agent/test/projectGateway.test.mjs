@@ -189,3 +189,19 @@ test('new projects receive distinct directory identities; ambiguous legacy ident
  const create=await fixture(t),one=await create('one'),two=await create('two');two.context.config.folders[0].id='one';
  await assert.rejects(new ProjectGateway(()=>[one.context,two.context]).contextFor('one'),/ambiguous/);
 });
+
+test('project directories cannot repeat or nest; deleting a duplicate keeps the shared seed library',async t=>{
+ const base=await mkdtemp(path.join(os.tmpdir(),'global-overlap-'));t.after(()=>rm(base,{recursive:true,force:true}));
+ const app=await loadApplication(path.join(base,'agent.json')),store=new ApplicationConfigStore(app);
+ const docs=path.join(base,'docs'),child=path.join(docs,'app'),sibling=path.join(base,'docs2');
+ await mkdir(child,{recursive:true});await mkdir(sibling);
+ const first=await store.addWorkspace(docs,'Docs');
+ await assert.rejects(store.addWorkspace(docs+path.sep),/已有项目路径/);
+ await assert.rejects(store.addWorkspace(child),/已有项目路径/);
+ await assert.rejects(store.addWorkspace(base),/已有项目路径/);
+ await store.addWorkspace(sibling);
+ // Legacy registries may already hold two projects with one directory.
+ const {projectPathsOverlap,sameProjectPath}=await import('../dist/application.js');
+ assert.ok(sameProjectPath(docs,docs+path.sep));assert.ok(projectPathsOverlap(child,docs));assert.ok(!projectPathsOverlap(docs,sibling));
+ assert.ok(first.id);
+});

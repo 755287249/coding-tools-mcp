@@ -299,6 +299,15 @@ export class ApplicationConfigStore {
     }
   }
 
+  /** A registered project folder equal to, inside, or containing `folder`. */
+  overlappingProject(folder: string): { path: string; name: string } | undefined {
+    for (const entry of this.entries()) {
+      const match = entry.store.current.folders.find(item => projectPathsOverlap(item.path, folder));
+      if (match) return { path: match.path, name: entry.name };
+    }
+    return undefined;
+  }
+
   entries(): Array<{ id: string; name: string; store: ConfigStore }> {
     return this.registry.workspaces.map(entry => {
       const workspace = this.workspaces.get(entry.id);
@@ -332,6 +341,8 @@ export class ApplicationConfigStore {
     if (this.registry.workspaces.length >= 100) {
       throw new Error('Workspace registry must contain 1 to 100 workspaces');
     }
+    const clash = this.overlappingProject(folder);
+    if (clash) throw new Error(`已有项目路径：${clash.path}（项目「${clash.name}」）。项目目录不能相同，也不能是其他项目的上级或下级目录。`);
     const id = workspaceId();
     const workspaceName = (name?.trim() || path.basename(folder) || 'Workspace').slice(0, 128);
     const usedPorts = new Set(this.entries().map(item => item.store.current.port));
@@ -516,7 +527,12 @@ export class ApplicationConfigStore {
     this.deleting.add(id);
     try {
       await this.beforeDelete?.(id);
-      for (const folder of this.workspace(id).store.current.folders) seedReleaseWorkspace(seedStore(folder.path));
+      for (const folder of this.workspace(id).store.current.folders) {
+        // Another project with the same directory shares this seed library;
+        // releasing it would disconnect every seed of that project.
+        if (this.entries().some(other => other.id !== id && other.store.current.folders.some(item => sameProjectPath(item.path, folder.path)))) continue;
+        seedReleaseWorkspace(seedStore(folder.path));
+      }
       const next = { ...this.registry, workspaces: this.registry.workspaces.filter(item => item.id !== id) };
       await writeRegistry(this.registryPath, next);
       this.registry = next;
@@ -653,4 +669,19 @@ export class ApplicationConfigStore {
   applyResolvedBuiltinTunnel(id: string, publicUrl: string, enrollmentCompleted: boolean): Promise<void> {
     return this.workspace(id).store.applyResolvedBuiltinTunnel(publicUrl, enrollmentCompleted);
   }
+}
+
+function comparablePath(value: string): string {
+  const resolved = path.resolve(value).replace(/\\/g, '/').replace(/\/+$/, '');
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+export function sameProjectPath(left: string, right: string): boolean {
+  return comparablePath(left) === comparablePath(right);
+}
+
+/** True when two project folders are the same directory or one contains the other. */
+export function projectPathsOverlap(left: string, right: string): boolean {
+  const a = comparablePath(left), b = comparablePath(right);
+  return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
 }

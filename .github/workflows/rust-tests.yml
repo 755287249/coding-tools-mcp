@@ -47,4 +47,5 @@ jobs:
           health::
           mcp::activity::
           commands::activity::
+          commands::workspace::
           tools::patch::

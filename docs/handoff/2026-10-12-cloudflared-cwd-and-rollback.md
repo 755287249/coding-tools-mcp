@@ -497,7 +497,13 @@ C. 添加種子頁面卡片化（build 子代理，分支 `vorflux/seed-add-card
 
 ## 處理（進行中，勾選表示已完成）
 - [ ] 1 種子詳情精簡
-- [ ] 2 重複/巢狀路徑檢查（Node + Rust）
-- [ ] 3 刪除工作區斷聯（調查中）
+- [x] 2 重複/巢狀路徑檢查：Rust `commands/workspace.rs` `ensure_unique_project_path`（create 與 add folder）、Node `application.ts` `addWorkspace` → `overlappingProject`。
+      錯誤訊息「已有项目路径：…」。注意：`gateway.rs` 仍允許既有的重複/巢狀專案運作（舊資料），只是不能再新建。
+      未處理：`import_workspace_pack`、`open_shared_workspace` 匯入時沒有做重疊檢查。
+- [x] 3 刪除工作區斷聯。根因：種子庫存在目錄內 `docs/chat-sessions/seed-library.seeds.json`，兩個專案同路徑時共用同一個種子庫；
+      `delete_workspace`（Rust）/`deleteWorkspace`（Node）對被刪專案的目錄呼叫 `release_workspace`，把共用種子庫整個釋放 → 另一個專案的種子全部斷線。
+      修正：若還有其他專案使用同一目錄就跳過釋放。另外：種子 URL 內含被刪專案的 folder_id，用那個 URL 的 AI 仍會得到
+      `Project directory unavailable`（目錄身分已刪除，屬預期），需在剩下的專案重新產生種子。
+      測試：Rust `commands::workspace::tests`（已加入 rust-tests.yml 篩選），Node `test/projectGateway.test.mjs`。
 - [ ] 4 新對話入口改版 + 斷開/輪換
 - [ ] 5 任務面板右側把手
