@@ -5,6 +5,8 @@ mod health;
 mod history;
 pub use chat::{local_chat, start_schedule_worker};
 mod logs;
+mod plugins;
+pub use plugins::{plugin_http, plugin_login_window};
 mod runtime;
 mod sandbox;
 mod secrets;

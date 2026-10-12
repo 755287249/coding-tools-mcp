@@ -115,6 +115,11 @@ export function createTauriBackend(deps: TauriBackendDeps): FrontendBackend {
 
     chat: { request: (workspaceId, folderId, args) => invoke("local_chat", { id: workspaceId, folderId, args }) },
 
+    plugins: {
+      http: (request) => invoke("plugin_http", { request }),
+      loginWindow: (options) => invoke("plugin_login_window", { options }),
+    },
+
     history: {
       list: (workspaceId, folderId) =>
         invoke("list_history_sessions", { id: workspaceId, folderId }),

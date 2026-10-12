@@ -408,7 +408,16 @@ export interface ChatBackend {
   request(workspaceId: string, folderId: string, args: import("../api/chat").ChatAction): Promise<import("../api/chat").ChatResult>;
 }
 
+export interface PluginLoginOptions { url: string; capture: boolean; auto?: boolean; hidden?: boolean }
+export interface PluginsBackend {
+  /** Allow-listed HTTPS proxy for plugins (CodeRabbit tRPC, GitHub device flow and repository API). */
+  http(request: import("../plugins/coderabbit/engine").PluginHttpRequest): Promise<import("../plugins/coderabbit/engine").PluginHttpResponse>;
+  /** Desktop only: open a login window; with `capture` resolve with the CodeRabbit web storage after login. */
+  loginWindow?(options: PluginLoginOptions): Promise<import("../plugins/coderabbit/engine").CapturedStorage | null>;
+}
+
 export interface FrontendBackend {
+  readonly plugins: PluginsBackend;
   readonly chat: ChatBackend;
   readonly capabilities: FrontendCapabilities;
   readonly native: NativeUi;

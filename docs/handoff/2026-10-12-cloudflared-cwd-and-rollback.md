@@ -529,7 +529,17 @@ C. 添加種子頁面卡片化（build 子代理，分支 `vorflux/seed-add-card
 - 測試帳號由使用者在對話中提供（不寫入倉庫）；該帳號不能建立 coding task，只需驗證到 enqueue 介面。
 
 ## 進度（勾選表示已完成）
-- [ ] 調查 CodeRabbit 登入/令牌刷新/倉庫列表/enqueue 協議
-- [ ] webhook URL（Node + Rust + UI + 油猴腳本）
-- [ ] 應用內 CodeRabbit 插件（登入視窗、會話保存、30 顆播種、進度條）
+- [x] 調查（2026-10-12）：GitHub 登入走 `accessToken.beginBrowserOAuth` → GitHub OAuth（scope user:email read:org）→ `/login?code` → `accessToken.exchangeBrowserOAuthCode`，
+      結果存 `sessionStorage.accessToken` 與 `sessionStorage.user`（含 currentOrganization）。沒有 refresh 端點，401 時重新登入（GitHub cookie 在 webview 內，可自動點「GitHub Cloud」靜默完成）。
+      倉庫：`repositories.getAllRepos`（加 `repoSort:'activity'` 取最新）、`codingAgent.getRepositoryDefaultBranch {repoId}`、建立任務 `codingAgent.enqueueCodingTask`（同油猴腳本）。
+      使用者提供的測試帳號密碼在 GitHub 登入失敗（"Incorrect username or password"，密碼中的 ** 可能是遮罩），尚未實機驗證。CodeRabbit 的 OAuth 無法建倉庫，
+      所以無倉庫時改用 GitHub device flow（`src/lib/plugins/coderabbit/github.ts`，用 gh CLI 公開 client_id）取得 repo 權限後用 REST API 建私有倉庫並放隨機 Python 檔。
+- [x] webhook URL：`/mcp/seed-library/{folder}/{64-hex token}`（Node `server/routes/seeds.ts`、Rust `routes.rs`+`listener/seeds.rs::provision`），舊路徑回 410。
+      UI（`SeedLibrary.svelte`）只剩 Webhook 欄位 + 複製 + 刷新（刷新=產生新 token 並立即生效）。油猴 1.4.0：單一 Webhook 欄位，預設 30 顆，連線儲存鍵改 v3。
+      新 UI action `seed_created`（Node/Rust，持有票據的應用內插件用來登記 host task；注意 seedUi 在 chat 鎖內，用 `createdUnlocked`/`created_unlocked`）。
+- [ ] 應用內 CodeRabbit 插件（進行中）
+  - [x] 引擎 `src/lib/plugins/coderabbit/engine.ts`（parseSession、CodeRabbitClient、runSeeding：每批 10、遇 401 重新登入一次、結果不明即停止）、`store.ts`（seedingJob、記憶體內 session）。
+  - [x] 後端代理（白名單）：Node `management/pluginHttp.ts`（`/admin/api/plugins/http`，測試 `test/pluginHttp.test.mjs`）、Rust `commands/plugins.rs::plugin_http`。
+  - [x] 桌面登入視窗 `plugin_login_window`：初始化腳本在 app.coderabbit.ai 讀取 session，導向保留主機 `ctmcp-capture.invalid` 由 on_navigation 攔截；`auto` 會自動點 GitHub Cloud（靜默續期）。Node Agent 無視窗→貼上 `SESSION_SNIPPET` 產生的 JSON。
+  - [ ] UI：新增種子對話框第三張卡「CodeRabbit 插件」、頂部可最小化進度條（SimpleShell）、引擎單元測試。
 - [ ] 無倉庫時自動建立 GitHub 倉庫

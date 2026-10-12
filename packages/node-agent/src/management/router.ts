@@ -1,5 +1,6 @@
 import { connectionHealth } from './connectionHealth.js';
 import { handleChatRoute } from '../chat/management.js';
+import { handlePluginRoute } from './pluginHttp.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { handleManagementUiRequest, isManagementUiPath } from '../managementUi.js';
 import { sendJson } from '../oauth.js';
@@ -47,6 +48,7 @@ export async function handleManagementRequest(
     return true;
   }
   if (await handleChatRoute(req, res, pathname, options)) return true;
+  if (await handlePluginRoute(req, res, pathname)) return true;
   if (await handleManagementObservabilityRoute(req, res, pathname, options)) return true;
   if (await handleManagementConfigurationRoute(req, res, pathname, options)) return true;
   sendJson(res, 405, {

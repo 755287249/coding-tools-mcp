@@ -456,6 +456,8 @@ export function createNodeBackend(deps: NodeBackendDeps = {}): FrontendBackend {
 
     chat: { request: (workspaceId, folderId, args) => request(`${workspaceRoute(workspaceId, "chat")}`, { method: "POST", body: JSON.stringify({ ...args, folder_id: folderId }) }) },
 
+    plugins: { http: (pluginRequest) => request("/admin/api/plugins/http", { method: "POST", body: JSON.stringify(pluginRequest) }) },
+
     history: {
       async list(workspaceId, folderId, signal) {
         if (!folderId) throw new Error("history.list requires folderId on the Node backend");
