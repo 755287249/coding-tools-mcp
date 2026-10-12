@@ -566,3 +566,4 @@ C. 添加種子頁面卡片化（build 子代理，分支 `vorflux/seed-add-card
   `WorkspaceFeatureControls`/`SimpleShell` 多傳 `folderId`。
 - 種子庫「添加種子」第三張卡：未添加插件時顯示虛線卡，點擊即添加並切換到插件。
 - 已在沙箱 Node Agent 用瀏覽器驗證：添加對話框、詳情頁、左側已配置。
+- [x] 發佈 **v0.1.148**（chat-beta 38272994484 成功；38272873413 為舊提交，已取消）。
