@@ -561,6 +561,14 @@ pub async fn spawn_cloudflare_tunnel(
     if let Some(parent) = log_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    // Defense in depth: an empty or missing cwd makes Windows fail the spawn
+    // with os error 123. Fall back to the (now existing) log directory.
+    let log_dir = log_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let cwd = super::process_working_dir(&cwd.to_string_lossy(), &log_dir);
+    let cwd = cwd.as_path();
 
     if let Some(note) = &update_note {
         append_log_line(log_path, &format!("[coding-tools] {note}"));

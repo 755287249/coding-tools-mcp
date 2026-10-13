@@ -4,8 +4,11 @@
   import { MOBILE_CHAT_HEADER, type MobileChatHeader } from '$lib/chat/mobile-header';
   import DiscussionGroups from '$lib/components/chat/DiscussionGroups.svelte';
   import BrowserShareDialog from './BrowserShareDialog.svelte';
+  import CircleArrowUp from '@lucide/svelte/icons/circle-arrow-up';
   import Info from '@lucide/svelte/icons/info';
   import AboutDialog from './AboutDialog.svelte';
+  import SeedingProgressBar from './SeedingProgressBar.svelte';
+  import PluginDock from './plugins/PluginDock.svelte';
   import {appUpdate,checkAppUpdate,loadInstallOutcome} from '$lib/stores/app-updates';
   import McpConnectionStatus from './McpConnectionStatus.svelte';
   import {localDesktop} from '$lib/api/distribution';
@@ -33,7 +36,6 @@
   import Blocks from '@lucide/svelte/icons/blocks';
   import Ellipsis from '@lucide/svelte/icons/ellipsis';
   import WandSparkles from '@lucide/svelte/icons/wand-sparkles';
-  import FolderPlus from '@lucide/svelte/icons/folder-plus';
   import ConversationSwitcher from '$lib/components/chat/ConversationSwitcher.svelte';
   import ProjectNavigator from '$lib/components/chat/ProjectNavigator.svelte';
   import ConversationSearch from '$lib/components/chat/ConversationSearch.svelte';
@@ -127,6 +129,8 @@
   function shortcuts(event:KeyboardEvent){if(!event.ctrlKey||event.altKey||event.isComposing)return;const key=event.key.toLowerCase();if(key==='['){event.preventDefault();history.back()}else if(key===']'){event.preventDefault();history.forward()}else if(key==='s'&&event.shiftKey){event.preventDefault();pin()}else if(key==='n'&&!event.shiftKey){event.preventDefault();void newChat()}else if(key==='k'){event.preventDefault();searchOpen=!searchOpen}}
 </script>
 {#if aboutOpen}<AboutDialog onClose={()=>aboutOpen=false}/>{/if}
+<SeedingProgressBar/>
+<PluginDock/>
 {#if shareOpen}<BrowserShareDialog onClose={()=>shareOpen=false}/>{/if}
 {#if searchOpen}<ConversationSearch onClose={()=>searchOpen=false} onNewChat={async()=>{await newChat()}} onOpenWorkspace={onAddWorkspace} canSearchFiles={!!group} onSearchFiles={()=>{assetSearchRequest++;openPanel('assets')}}/>{/if}
 <svelte:window onkeydown={shortcuts} onresize={()=>{if(innerWidth<700){pinned=false;hovered=false}}}/>
@@ -140,7 +144,7 @@
       <button onclick={()=>{mobileNav=false;void newChat()}}><SquarePen size={19}/>{$t('shell.newChat')}</button>
       {#each entries.filter(entry=>entry.id!=='skills') as entry}<button onclick={()=>{mobileNav=false;openPanel(entry.id)}}><entry.icon size={19}/>{$t(entry.id==='plugins'?'features.customize':`shell.${entry.id}` as MessageKey)}</button>{/each}
       <button onclick={()=>{mobileNav=false;settingsOpen=true}}><Settings size={19}/>{$t('Settings')}</button>
-      <button onclick={()=>{mobileNav=false;aboutOpen=true}}><Info size={19}/>{$t('shell.about')}{#if $appUpdate.release?.available}<i class="update-dot"></i>{/if}</button>
+      <button class:update-ready={$appUpdate.release?.available} onclick={()=>{mobileNav=false;aboutOpen=true}}>{#if $appUpdate.release?.available}<CircleArrowUp size={19}/>{$t('updates.title')}{:else}<Info size={19}/>{$t('shell.about')}{/if}</button>
     </div>{/if}
   </nav>
   <div class="mobile-projects" role="presentation" ontouchmove={()=>mobileNavMore=false} onwheel={()=>mobileNavMore=false} onscrollcapture={()=>mobileNavMore=false}><ProjectNavigator {onAddWorkspace} {recent} onSearch={()=>{mobileNav=false;searchOpen=true}}/></div>
@@ -164,7 +168,8 @@
       {#each entries.filter(entry=>entry.id!=='skills') as entry}<button class:active={panel===entry.id||(entry.id==='plugins'&&panel==='skills')} title={$t(entry.id==='plugins'?'features.customize':`shell.${entry.id}` as MessageKey)} aria-label={$t(entry.id==='plugins'?'features.customize':`shell.${entry.id}` as MessageKey)} onclick={()=>openPanel(entry.id)}><entry.icon size={18}/></button>{/each}
       <button title={$t('shell.more')} aria-label={$t('shell.more')} aria-expanded={settingsOpen} onclick={()=>settingsOpen=!settingsOpen}><Ellipsis size={19}/></button>
       {#if onQuickSetup}<button class="quick-setup-button" title={$t("Quick setup")} aria-label={$t("Quick setup")} onclick={onQuickSetup}><WandSparkles size={20}/></button>{/if}
-      <button class="about-button" title={$t('shell.about')} aria-label={$t('shell.about')} onclick={()=>aboutOpen=true}><Info size={20}/>{#if $appUpdate.release?.available}<i class="update-dot" aria-label={$t('updates.available')}></i>{/if}</button>
+      {#if $appUpdate.release?.available}<button class="about-button update-ready" title={$t('updates.title')} aria-label={`${$t('updates.title')}: ${$t('updates.available')}`} onclick={()=>aboutOpen=true}><CircleArrowUp size={20}/></button>
+      {:else}<button class="about-button" title={$t('shell.about')} aria-label={$t('shell.about')} onclick={()=>aboutOpen=true}><Info size={20}/></button>{/if}
       <McpConnectionStatus onSharing={localDesktop()?()=>shareOpen=true:undefined}/>
     </nav>
     {#if !customizing&&!mobileScreen}<aside class="project-sidebar" inert={!pinned&&!hovered}>
@@ -175,7 +180,7 @@
   <main class="sx-main" use:conversationSwipe={beginConversationSwipe}>
   {#if error}<div class="shell-error" role="alert">{error}<button onclick={()=>error=''} aria-label={$t('Close')}>×</button></div>{/if}
   {#if customizing}
-    {#if group}<WorkspaceFeatureControls workspaceId={group.workspace.id} initialTab={panel==='skills'?'skills':$page.url.searchParams.get('featureTab')==='hooks'?'hooks':'mcp'} catalog onCatalogTab={openFeatureTab}>
+    {#if group}<WorkspaceFeatureControls workspaceId={group.workspace.id} folderId={group.folder.id} initialTab={panel==='skills'?'skills':$page.url.searchParams.get('featureTab')==='hooks'?'hooks':'mcp'} catalog onCatalogTab={openFeatureTab}>
       {#snippet workspacePicker()}<select aria-label={$t('chat.109')} value={group?.key??''} onchange={event=>selectGroup(event.currentTarget.value)}>{#each groups as g}<option value={g.key}>{g.workspace.name} · {g.folder.name}</option>{/each}</select>{/snippet}
     </WorkspaceFeatureControls>{:else}<section class="library-page"><h1>{$t('features.customize')}</h1><p>{$t('chat.110')}</p>{#if onAddWorkspace}<button onclick={onAddWorkspace}>{$t('chat.openWorkspace')}</button>{/if}</section>{/if}
   {:else if panel==='discussions'}
@@ -190,7 +195,6 @@
       <div class="settings-heading"><strong>{$t('shell.more')}</strong><button type="button" onclick={()=>settingsOpen=false} aria-label={$t('Close')}>×</button></div>
       <div class="settings-items">
 
-        {#if onAddWorkspace}<button type="button" class="tx-settings-link" onclick={onAddWorkspace}><FolderPlus size={15} aria-hidden="true"/><span class="tx-sidebar-text">{$t('connection.newProject')}</span></button>{/if}
         {#if settingsNav}{@render settingsNav()}{/if}
       </div>
       <div class="appearance"><LanguageSelect/><ThemeToggle/></div>
@@ -199,10 +203,10 @@
 </div>
 </div>
 <style>
-.app-rail .quick-setup-button{margin-top:auto}.app-rail .about-button{position:relative}.update-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#e4b641}.about-button .update-dot{position:absolute;right:3px;top:3px}.nav-essentials{display:flex;align-items:center;justify-content:space-between;gap:5px}.nav-essentials button{min-height:40px;padding:8px}.compact-nav{flex:none;padding:0 12px 8px}.nav-more{display:grid;grid-template-columns:1fr 1fr;max-height:35dvh;overflow:auto}.nav-more button{font-size:12px;gap:7px;padding:8px;min-height:38px}
+.app-rail .quick-setup-button{margin-top:auto}.app-rail .about-button{position:relative}.update-ready{color:#2563eb!important}.update-ready:hover{background:color-mix(in srgb,#2563eb 12%,transparent)!important}.nav-essentials{display:flex;align-items:center;justify-content:space-between;gap:5px}.nav-essentials button{min-height:40px;padding:8px}.compact-nav{flex:none;padding:0 12px 8px}.nav-more{display:grid;grid-template-columns:1fr 1fr;max-height:35dvh;overflow:auto}.nav-more button{font-size:12px;gap:7px;padding:8px;min-height:38px}
 .shell-frame{display:flex;flex-direction:column;min-height:0;height:100%;width:100%}.shell-topbar{height:38px;flex:none;display:flex;align-items:center;gap:2px;border-bottom:1px solid var(--color-border);padding-left:8px;background:var(--sidebar-bg);user-select:none}.shell-topbar>button{display:grid;place-items:center;min-width:28px;height:28px;border-radius:5px;color:var(--color-text-muted);cursor:pointer}.shell-topbar .menu-trigger{padding:0 9px;font-size:12px}.shell-topbar button:hover{background:var(--surface-hover);color:var(--color-text)}.title-space{flex:1;display:flex;justify-content:center;align-items:center;gap:7px;font-size:11px;color:var(--color-text-muted);min-width:0;overflow:hidden;white-space:nowrap}
 .menu-popup{margin:0;position:fixed;width:240px;padding:5px;border:1px solid var(--color-border);border-radius:9px;background:var(--color-bg);color:var(--color-text);box-shadow:0 12px 35px #0005}.menu-popup button{display:flex;justify-content:space-between;align-items:center;width:100%;padding:7px 10px;border-radius:5px;font-size:12px;cursor:pointer}.menu-popup button:hover,.menu-popup button:focus-visible{background:var(--surface-hover);outline:none}.menu-popup button:disabled{opacity:.4;cursor:default}.menu-popup kbd{font-size:10px;color:var(--color-text-muted)}.menu-popup hr{border:0;border-top:1px solid var(--color-border);margin:5px}
-.unified-shell{position:relative;background:transparent;flex:1;min-height:0;height:auto}.navigation-area{position:relative;flex:none;width:48px;display:flex;z-index:40}.navigation-area.pinned{width:calc(48px + var(--nav-width))}.app-rail{width:48px;flex:none;display:flex;flex-direction:column;align-items:center;gap:8px;padding:12px 5px;background:var(--sidebar-bg);border-right:1px solid var(--color-border)}.app-rail button{display:grid;place-items:center;width:34px;height:34px;border-radius:9px;color:var(--color-text-muted);cursor:pointer}.app-rail button:hover,.app-rail button.active{background:var(--surface-hover);color:var(--color-text)}.app-rail button:focus-visible{outline:2px solid var(--primary)}.project-sidebar{position:absolute;left:48px;top:0;bottom:0;width:var(--nav-width);background:var(--sidebar-bg);border-right:1px solid var(--color-border);transform:translateX(-12px);opacity:0;visibility:hidden;transition:transform .16s,opacity .16s}.pinned .project-sidebar,.peek .project-sidebar{transform:none;opacity:1;visibility:visible}.peek:not(.pinned) .project-sidebar{box-shadow:16px 0 32px #0004;background:var(--color-bg)}.resize-handle{position:absolute;top:0;right:-3px;bottom:0;width:6px;cursor:col-resize;touch-action:none;z-index:2}.resize-handle:hover,.resize-handle:focus-visible{background:var(--color-border);outline:none}.sx-main{background:transparent;min-width:0}.shell-settings{position:absolute;left:12px;top:255px;z-index:80;max-height:calc(100% - 270px);overflow:auto;min-width:240px;padding:12px;border:1px solid var(--color-border);border-radius:12px;background:var(--color-bg);box-shadow:0 10px 30px #0005}.settings-heading{display:flex;justify-content:space-between;margin-bottom:12px;font-size:13px}.settings-heading button{cursor:pointer}.appearance{display:flex;gap:8px;margin-top:12px;border-top:1px solid var(--color-border);padding-top:12px}.library-page{height:100%;overflow:auto;padding:28px}.library-page>header{display:flex;gap:16px;align-items:center;justify-content:space-between;margin-bottom:28px}.library-page h1{font-size:24px;font-weight:600}.library-page select{min-width:0;max-width:60%;padding:8px;border:1px solid var(--color-border);border-radius:7px;background:var(--card-bg);font-size:12px}.shell-error{padding:10px;display:flex;justify-content:space-between;color:var(--danger);font-size:12px;overflow-wrap:anywhere}
+.unified-shell{position:relative;background:transparent;flex:1;min-height:0;height:auto}.navigation-area{position:relative;flex:none;width:48px;display:flex;z-index:40}.navigation-area.pinned{width:calc(48px + var(--nav-width))}.app-rail{width:48px;flex:none;display:flex;flex-direction:column;align-items:center;gap:8px;padding:12px 5px;background:var(--sidebar-bg);border-right:1px solid var(--color-border)}.app-rail button{display:grid;place-items:center;width:34px;height:34px;border-radius:9px;color:var(--color-text-muted);cursor:pointer}.app-rail button:hover,.app-rail button.active{background:var(--surface-hover);color:var(--color-text)}.app-rail button:focus-visible{outline:2px solid var(--primary)}.project-sidebar{position:absolute;left:48px;top:0;bottom:0;width:var(--nav-width);background:var(--sidebar-bg);border-right:1px solid var(--color-border);transform:translateX(-12px);opacity:0;visibility:hidden;transition:transform .16s,opacity .16s}.pinned .project-sidebar,.peek .project-sidebar{transform:none;opacity:1;visibility:visible}.peek:not(.pinned) .project-sidebar{box-shadow:16px 0 32px #0004;background:var(--color-bg)}.resize-handle{position:absolute;top:0;right:-3px;bottom:0;width:6px;cursor:col-resize;touch-action:none;z-index:2}.resize-handle:hover,.resize-handle:focus-visible{background:var(--color-border);outline:none}.sx-main{background:transparent;min-width:0}.shell-settings{position:absolute;left:12px;top:255px;z-index:80;max-height:calc(100% - 270px);overflow:auto;min-width:240px;padding:12px;border:1px solid var(--color-border);border-radius:12px;background:var(--color-bg);box-shadow:0 10px 30px #0005}.settings-heading{display:flex;justify-content:space-between;margin-bottom:12px;font-size:13px}.settings-heading button{cursor:pointer}.appearance{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px;border-top:1px solid var(--color-border);padding-top:12px}.appearance :global(.menu-select){width:100%}.library-page{height:100%;overflow:auto;padding:28px}.library-page>header{display:flex;gap:16px;align-items:center;justify-content:space-between;margin-bottom:28px}.library-page h1{font-size:24px;font-weight:600}.library-page select{min-width:0;max-width:60%;padding:8px;border:1px solid var(--color-border);border-radius:7px;background:var(--card-bg);font-size:12px}.shell-error{padding:10px;display:flex;justify-content:space-between;color:var(--danger);font-size:12px;overflow-wrap:anywhere}
 @media(max-width:700px){.navigation-area.pinned{width:48px}.project-sidebar{width:min(var(--nav-width),calc(100vw - 70px));box-shadow:16px 0 32px #0004}.title-space{display:none}.shell-topbar .menu-trigger{padding:0 5px}.library-page{padding:18px}.library-page>header{align-items:flex-start;flex-direction:column}.library-page select{max-width:100%}.shell-settings{top:12px;max-height:calc(100% - 24px)}}@media(prefers-reduced-motion:reduce){.project-sidebar{transition:none}}
 
   .shell-settings{width:272px;min-width:0;max-width:calc(100vw - 24px);color:var(--color-text);font-size:13px;line-height:20px}

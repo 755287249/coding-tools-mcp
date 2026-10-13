@@ -24,3 +24,10 @@ test('modal source/search filters carry into exact pool selection including empt
  assert.deepEqual(availablePools(groups,'source','custom')[0].filter,{source:'custom',keyword:''});
  assert.deepEqual(availablePools(groups,'prefix','missing'),[]);
 });
+test('includeEmpty keeps zero-ready pools for a greyed chooser and standby sums only standby seeds',async()=>{
+ const {standbyPool}=await import('../src/lib/chat/seed-pools.ts');
+ const all=[{source:'coderabbit',prefix:'offline',account:'four',ready:0,total:3,standby:false},{source:'standby',prefix:'Claude',account:'Claude',ready:1,total:2,standby:true},{source:'coderabbit',prefix:'Sol',account:'one',ready:2,total:2,standby:false}];
+ assert.deepEqual(availablePools(all,'prefix').map(p=>p.label),['Sol','Claude']);
+ const shown=availablePools(all,'prefix','','',true);assert.deepEqual(shown.map(p=>[p.label,p.ready,p.total]),[['Sol',2,2],['Claude',1,2],['offline',0,3]]);
+ assert.deepEqual(standbyPool(all),{ready:1,total:2,filter:{source:'',keyword:'',standby:true}});
+});

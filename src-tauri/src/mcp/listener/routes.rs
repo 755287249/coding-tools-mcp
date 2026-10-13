@@ -10,6 +10,8 @@ use super::{
 pub(super) fn build_router(state: ListenerState) -> Router {
     let public_prefix = configured_route_prefix(&state.configured_public_url);
     let mut router = service_routes_for_prefix("")
+        // Some web-fetch tools check robots.txt before opening a seed page.
+        .route("/robots.txt", get(super::seeds::robots))
         .route(
             "/.well-known/oauth-authorization-server",
             get(oauth_authorization_server_metadata),
@@ -58,7 +60,15 @@ fn service_routes_for_prefix(prefix: &str) -> Router<ListenerState> {
             post(super::seeds::post).get(super::seeds::get),
         )
         .route(
+            &prefixed_route(prefix, "/mcp/seeds/{folder_id}/{seed_id}/{action}"),
+            get(super::seeds::get_action),
+        )
+        .route(
             &prefixed_route(prefix, "/mcp/seed-library/{folder_id}"),
+            post(super::seeds::provision_removed),
+        )
+        .route(
+            &prefixed_route(prefix, "/mcp/seed-library/{folder_id}/{token}"),
             post(super::seeds::provision).layer(axum::extract::DefaultBodyLimit::max(16384)),
         )
         .route(

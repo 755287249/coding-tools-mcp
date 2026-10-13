@@ -298,11 +298,14 @@ impl TunnelSupervisor {
                 }
             };
         let use_proxy = tunnel_use_proxy(profile, kind);
-        let log_path = log_dir_for_profile(&profile.id).join(log_name);
+        let log_dir = log_dir_for_profile(&profile.id);
+        let log_path = log_dir.join(log_name);
+        // The global MCP connection has an empty `path`; never pass it as cwd.
+        let cwd = super::process_working_dir(&profile.path, &log_dir);
         let handle = cloudflare::spawn_cloudflare_tunnel(
             port,
             bind_address,
-            std::path::Path::new(&profile.path),
+            &cwd,
             &log_path,
             mode,
             &token,

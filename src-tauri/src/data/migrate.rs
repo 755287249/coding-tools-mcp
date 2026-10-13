@@ -291,6 +291,86 @@ fn restrict_data_file(path: &Path) -> AppResult<()> {
     Ok(())
 }
 
+/// Folder (next to `data/profiles.json`) that keeps a one-time copy of the
+/// settings as they were right before the one-way global MCP connection
+/// migration introduced in 0.1.142:
+///
+/// - `profiles.json`: the original desktop data file.
+/// - `workspaces/<id>/workspace.json` and `secrets.json`: the original shared
+///   workspace mirrors that the migration rewrites.
+///
+/// Restoring these lets an older desktop (0.1.141 and earlier) read its
+/// original settings again. See `scripts/rollback-desktop.ps1`.
+pub const PRE_GLOBAL_CONNECTION_BACKUP_DIR: &str = "pre-global-connection";
+
+/// Copy the current settings once, before the global connection migration
+/// rewrites them. `shared_mirrors` lists `(workspace id, files)` to keep.
+/// Returns the backup folder when a new copy was written. An existing backup
+/// is never overwritten, so it always holds the oldest pre-migration state.
+pub fn backup_before_global_connection_migration(
+    shared_mirrors: &[(String, Vec<PathBuf>)],
+) -> AppResult<Option<PathBuf>> {
+    backup_before_global_connection_migration_at(&data_file_path()?, shared_mirrors)
+}
+
+pub(super) fn backup_before_global_connection_migration_at(
+    path: &Path,
+    shared_mirrors: &[(String, Vec<PathBuf>)],
+) -> AppResult<Option<PathBuf>> {
+    let Some(parent) = path.parent() else {
+        return Ok(None);
+    };
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let backup = parent.join(PRE_GLOBAL_CONNECTION_BACKUP_DIR);
+    if backup.exists() {
+        return Ok(None);
+    }
+    let temp = parent.join(format!(
+        "{PRE_GLOBAL_CONNECTION_BACKUP_DIR}.tmp-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let result = (|| -> AppResult<()> {
+        fs::create_dir_all(&temp)?;
+        restrict_data_directory(&temp)?;
+        let copy = |source: &Path, destination: &Path| -> AppResult<()> {
+            fs::copy(source, destination)?;
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(destination)?
+                .sync_all()?;
+            restrict_data_file(destination)
+        };
+        copy(path, &temp.join("profiles.json"))?;
+        for (id, files) in shared_mirrors {
+            let safe_id = !id.is_empty()
+                && id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+            if !safe_id {
+                continue;
+            }
+            let target_dir = temp.join("workspaces").join(id);
+            for file in files.iter().filter(|file| file.is_file()) {
+                let Some(name) = file.file_name() else {
+                    continue;
+                };
+                fs::create_dir_all(&target_dir)?;
+                copy(file, &target_dir.join(name))?;
+            }
+        }
+        fs::rename(&temp, &backup)?;
+        sync_parent(&backup)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&temp);
+    }
+    result.map(|()| Some(backup))
+}
+
 pub fn maybe_backup_legacy_files(path: &Path) -> AppResult<()> {
     if !path.exists() {
         return Ok(());
@@ -465,6 +545,82 @@ mod tests {
             );
             fs::write(format!("{dump}/phase4-bak.txt"), listing).expect("dump bak");
         }
+    }
+}
+
+#[cfg(test)]
+mod pre_global_connection_backup_tests {
+    use super::*;
+
+    #[test]
+    fn backup_keeps_original_settings_once_and_never_overwrites() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+        let path = data_dir.join("profiles.json");
+        assert!(backup_before_global_connection_migration_at(&path, &[])
+            .unwrap()
+            .is_none());
+
+        let shared = temp.path().join("shared").join("abc123");
+        fs::create_dir_all(&shared).unwrap();
+        fs::write(shared.join("workspace.json"), b"original-workspace").unwrap();
+        fs::write(shared.join("secrets.json"), b"original-secrets").unwrap();
+        let mirrors = vec![
+            (
+                "abc123".to_string(),
+                vec![
+                    shared.join("workspace.json"),
+                    shared.join("secrets.json"),
+                    shared.join("missing.json"),
+                ],
+            ),
+            ("../escape".to_string(), vec![shared.join("workspace.json")]),
+        ];
+
+        fs::write(&path, b"old-profiles").unwrap();
+        let backup = backup_before_global_connection_migration_at(&path, &mirrors)
+            .unwrap()
+            .expect("first call writes a backup");
+        assert_eq!(backup, data_dir.join(PRE_GLOBAL_CONNECTION_BACKUP_DIR));
+        assert_eq!(
+            fs::read(backup.join("profiles.json")).unwrap(),
+            b"old-profiles"
+        );
+        let kept = backup.join("workspaces").join("abc123");
+        assert_eq!(
+            fs::read(kept.join("workspace.json")).unwrap(),
+            b"original-workspace"
+        );
+        assert_eq!(
+            fs::read(kept.join("secrets.json")).unwrap(),
+            b"original-secrets"
+        );
+        assert!(!kept.join("missing.json").exists());
+        assert!(!temp.path().join("escape").exists());
+        assert!(!backup.join("escape").exists());
+
+        fs::write(&path, b"migrated-profiles").unwrap();
+        fs::write(shared.join("workspace.json"), b"migrated-workspace").unwrap();
+        assert!(
+            backup_before_global_connection_migration_at(&path, &mirrors)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            fs::read(backup.join("profiles.json")).unwrap(),
+            b"old-profiles"
+        );
+        assert_eq!(
+            fs::read(kept.join("workspace.json")).unwrap(),
+            b"original-workspace"
+        );
+        let leftovers = fs::read_dir(&data_dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
+            .count();
+        assert_eq!(leftovers, 0);
     }
 }
 

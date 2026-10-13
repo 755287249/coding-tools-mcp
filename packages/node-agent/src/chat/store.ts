@@ -1,6 +1,7 @@
 import { renameChatFileSync } from './rename.js';
+import {type AccessState,type AccessMode,type PendingApproval,accessMode,setAccessMode,requestApproval,consumeApproval,resolveApproval,pendingApprovals} from './access.js';
 import { scheduleAction, tickSchedules } from './schedules.js';
-import {seedUi, readSeeds, seedInvalidate, parseSeedFilter, type SeedFilter, type SeedStore} from './seeds.js';
+import {seedUi, readSeeds, seedInvalidate, parseSeedFilter, seedReleaseToStandby, seedEnrollDirectStandby, seedRetireUnusedDirect, onSeedUrlRedeemed, type SeedFilter, type SeedStore} from './seeds.js';
 import {parseQuestions,validateQuestionContext,answerQuestions,activeQuestionId,questionsMarkdown,type ChatQuestion,type QuestionResponse} from './questions.js';
 import {packHistory, unpackHistory, agentContext, HISTORY_PAGE_BYTES} from './history.js';
 import {visibleSession} from './collaboration.js';
@@ -22,13 +23,31 @@ import { resolveChatPath } from './reveal.js';
 export interface ChatFile { label?: string; local_reference?: boolean; id: string; name: string; path: string; mime: string; size: number; sha256: string }
 export interface ToolEvent { name: string; status: 'running' | 'completed' | 'failed'; input?: string; output?: string; output_truncated?: boolean }
 export interface ChatMessage { questions?:ChatQuestion[];question_answer?:QuestionResponse;question_response?:QuestionResponse;questions_active?:boolean; discussion?:{hidden?:boolean;id:string;post_id:string;source_chat_id:string;purpose:string}; received_by?:string[]; agent_id?:string;agent_name?:string;recipient_ids?:string[];agent_plans?:{agent_id:string;plan:ChatTaskPlan}[]; task_plan?:ChatTaskPlan; kind?: 'connection_request' | 'assignment'; awaiting_user?: boolean; received_at?: number; attachments?: ChatFile[]; tool_event?: ToolEvent; id: string; role: 'user' | 'assistant'; text: string; created_at: number; reply_to?: string; final?: boolean }
-export interface ChatSession {terminal_attachment_hashes?:string[];seed_filter?:SeedFilter;seed_auto?:boolean;seed_pending?:boolean;seed_owner?:string;seed_generation?:number;pending_pairing?:string; note?:string; title_agent_name?:string; work_member?:ChatMember; mode?:'work'|'group';members?:ChatMember[];agent_name?:string; pinned?: boolean; archived?: boolean; queue?: ChatMessage[]; queue_mode?: 'merge' | 'split'; queue_receipts?: Record<string,string>; title_custom?: boolean; files?: ChatFile[]; version: 1|2; id: string; title: string; created_at: number; updated_at: number; closed: boolean; messages: ChatMessage[]; attachment_id: string; lease_until: number }
+export interface ChatSession extends AccessState {terminal_attachment_hashes?:string[];seed_filter?:SeedFilter;seed_auto?:boolean;seed_explicit?:boolean;seed_direct?:boolean;seed_pending?:boolean;seed_owner?:string;seed_generation?:number;pending_pairing?:string; note?:string; title_agent_name?:string; work_member?:ChatMember; mode?:'work'|'group';members?:ChatMember[];agent_name?:string; pinned?: boolean; archived?: boolean; queue?: ChatMessage[]; queue_mode?: 'merge' | 'split'; queue_receipts?: Record<string,string>; title_custom?: boolean; files?: ChatFile[]; version: 1|2; id: string; title: string; created_at: number; updated_at: number; closed: boolean; messages: ChatMessage[]; attachment_id: string; lease_until: number }
 const DIR = 'docs/chat-sessions';
 const ASSET_DIR = 'mcp-assistant/chat-assets';
 const ARTIFACT_DIR = 'mcp-assistant/artifacts/';
 const MAX_BYTES = 2 * 1024 * 1024;
 const LEASE_MS = 10 * 60_000;
 const waiters = new Set<string>();
+/** Attachments moved to the seed library on disconnect/switch (memory only; the URL key is a credential). */
+const standbyHandoffs = new Map<string,{urlKey:string;folder:string;until:number}>();
+onSeedUrlRedeemed(key=>{for(const [k,v] of standbyHandoffs)if(v.urlKey===key)standbyHandoffs.delete(k);});
+const STANDBY_HANDOFF_MS = 3_600_000;
+function rememberStandby(attachment:string,urlKey:string,folder:string):void {
+  if(!attachment)return;const now=Date.now();for(const [k,v] of standbyHandoffs)if(v.until<=now)standbyHandoffs.delete(k);
+  standbyHandoffs.set(createHash('sha256').update(attachment).digest('hex'),{urlKey,folder,until:now+STANDBY_HANDOFF_MS});
+}
+/** chat_wait answer for an attachment that was moved to the seed library. */
+export function standbyHandoff(args:Record<string,unknown>):Record<string,unknown>|undefined {
+  if(typeof args.attachment_id!=='string'||!args.attachment_id)return undefined;
+  const entry=standbyHandoffs.get(createHash('sha256').update(args.attachment_id).digest('hex'));
+  if(!entry||entry.until<=Date.now())return undefined;
+  if(!entry.urlKey)return {ok:true,status:'idle',standby:true,instruction:'You left this conversation and returned to the seed library as a standby seed. Do not reply to it again. Immediately make one new independent chat_wait(timeout_ms:25000) and keep waiting for a new assignment. Omit chat_id and attachment_id from now on. The user writes in the app at any time.'};
+  const folder=entry.folder||(typeof args.workspace_folder_id==='string'?args.workspace_folder_id:'');if(!folder)return undefined;
+  const suffix=`/seeds/${folder}/${entry.urlKey}`;
+  return {ok:true,status:'standby',seed_url_suffix:suffix,instruction:`The user moved you out of this conversation into the project's seed library as a standby AI. Stop using this chat_id/attachment_id. Build the new MCP URL by appending ${suffix} to your current MCP URL (the one ending in /mcp). Keep it only in client memory; never write it to files, logs or replies. POST JSON-RPC initialize to that URL (no other authorization), send notifications/initialized, call seed_connect, read skill.text, then call chat_wait(timeout_ms:25000) again and again until you are assigned. Idle only means the user has not written yet; just wait again. The URL must be connected within one hour.`};
+}
 const validId = (id: unknown): string => { if (typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(id)) throw new Error('Invalid chat/message ID'); return id; };
 function text(value: unknown, max = 32000, preserve = false): string {
   if (typeof value !== 'string' || !value.trim() || Buffer.byteLength(value) > max) throw new Error(`Text must contain 1–${max} bytes`);
@@ -151,7 +170,7 @@ function view(root: string, session: ChatSession) {
   const latestUser=s.messages.filter(m=>m.role==='user').at(-1);
   const awaiting_user=!message && !!latestUser && s.messages.some(m=>m.role==='assistant'&&m.reply_to===latestUser.id&&m.final&&m.awaiting_user);
   const last_message_at=s.messages.reduce((latest,m)=>Math.max(latest,m.created_at),s.created_at);
-  return { seed_filter:s.seed_filter,seed_auto:s.seed_auto,seed_owner:s.seed_owner,seed_generation:s.seed_generation,last_message_at, awaiting_user, mode:s.mode??'work',members,agent_name:s.agent_name, pinned:s.pinned===true, archived:s.archived===true, work_state, id: s.id, title: s.title, note:s.note??'', created_at: s.created_at, updated_at: s.updated_at, closed: s.closed, messages: s.messages, assistant_message_count: s.messages.filter(m => m.role === 'assistant').length,
+  return { seed_filter:s.seed_filter,seed_auto:s.seed_auto,seed_direct:s.seed_direct===true,seed_owner:s.seed_owner,seed_generation:s.seed_generation,last_message_at, awaiting_user, mode:s.mode??'work',members,agent_name:s.agent_name, pinned:s.pinned===true, archived:s.archived===true, work_state, id: s.id, title: s.title, note:s.note??'', created_at: s.created_at, updated_at: s.updated_at, closed: s.closed, messages: s.messages, assistant_message_count: s.messages.filter(m => m.role === 'assistant').length,
     status: s.closed ? 'closed' : group.grouped(s)?presence:waiters.has(key(root, s.id)+':'+s.attachment_id) ? 'waiting' : s.lease_until > Date.now() ? 'connected' : 'offline',
     archive_path: `${DIR}/${s.id}.md` };
 }
@@ -301,7 +320,9 @@ function chatUiUnlocked(root:string,args:Record<string,unknown>):Record<string,u
     if (action === 'create') {
       const now = Date.now(); const s: ChatSession = { version: 1, id: randomUUID(), title: text(args.title ?? '新对话', 240), created_at: now, updated_at: now, closed: false, messages: [], attachment_id: '', lease_until: 0 };
       if(args.mode!==undefined)group.setMode(s,args.mode);
-      if(s.mode!=='group'&&args.seed_manual!==true&&readSeeds(seedStore(root)).enabled){s.seed_auto=true;s.seed_filter=parseSeedFilter(args.seed_filter);}
+      // An explicitly chosen pool is always served; the library switch only covers chats without a choice.
+      const explicit=!!args.seed_filter&&typeof args.seed_filter==='object'&&!Array.isArray(args.seed_filter);
+      if(s.mode!=='group'&&args.seed_manual!==true&&(explicit||readSeeds(seedStore(root)).enabled)){s.seed_auto=true;s.seed_filter=parseSeedFilter(args.seed_filter);if(explicit)s.seed_explicit=true;}
       save(root, s); return { session: localView(root, s) };
     }
     const groupFiles=typeof args.chat_id==='string'&&args.chat_id.startsWith('discussion:')?discussionAttachmentStore(discussionStore(root),args):undefined;
@@ -357,7 +378,9 @@ function chatUiUnlocked(root:string,args:Record<string,unknown>):Record<string,u
         Object.defineProperty(s.queue_receipts??={},id,{value:queuedFingerprint(message.text,message.attachments??[]),enumerable:true,writable:true,configurable:true});
         s.queue!.splice(index,1);s.updated_at=Date.now();save(root,s);
       }
-    } else if(action==='set_queue_mode'){if(args.mode!=='merge'&&args.mode!=='split')throw new Error('Invalid queue mode');s.queue_mode=args.mode;save(root,s);}
+    } else if(action==='set_access_mode'){setAccessMode(s,args.mode);s.updated_at=Date.now();save(root,s);}
+    else if(action==='resolve_approval'){resolveApproval(s,args.approval_id,args.approve);save(root,s);}
+    else if(action==='set_queue_mode'){if(args.mode!=='merge'&&args.mode!=='split')throw new Error('Invalid queue mode');s.queue_mode=args.mode;save(root,s);}
     else if(action==='pin'){if(typeof args.pinned!=='boolean')throw new Error('pinned must be a boolean');s.pinned=args.pinned;save(root,s);}
     else if(action==='archive'){if(typeof args.archived!=='boolean')throw new Error('archived must be a boolean');s.archived=args.archived;save(root,s);}
     else if(action==='delete'){
@@ -368,7 +391,22 @@ function chatUiUnlocked(root:string,args:Record<string,unknown>):Record<string,u
     }
     else if (action === 'set_note') { if(typeof args.note!=='string'||Buffer.byteLength(args.note)>1000)throw new Error('Note must be a string of at most 1000 bytes'); s.note=args.note.trim()?text(args.note,1000).replace(/\s+/gu,' '):'';s.updated_at=Date.now();save(root,s); }
     else if (action === 'rename') { s.title = text(args.title, 240).replace(/\s+/gu, ' '); s.title_custom = true; s.updated_at = Date.now(); save(root, s); }
-    else if (action === 'detach') { s.seed_auto=false; for(const m of group.members(s)){m.lease_until=0;m.paused=true;}s.attachment_id = ''; s.lease_until = 0; s.updated_at = Date.now(); save(root, s); }
+    else if (action === 'detach') {
+      // standby=true: a still-valid AI goes to the seed library instead of being dropped.
+      // Disconnect is a safety action: a standby failure falls back to a plain detach.
+      let moved:''|'seed'|'direct'='',standbyFailed=false;const attachment=s.attachment_id,folder=typeof args.folder_id==='string'?args.folder_id:typeof args.workspace_folder_id==='string'?args.workspace_folder_id:'';
+      if(args.standby===true&&!group.grouped(s)&&attachment){
+        try{
+          if(s.seed_owner){if(seedReleaseToStandby(seedStore(root),s)){rememberStandby(attachment,'',folder);moved='seed';}}
+          else if(waiters.has(key(root,s.id)+':'+attachment)||s.lease_until>Date.now()){rememberStandby(attachment,seedEnrollDirectStandby(seedStore(root),s.agent_name??'AI'),folder);moved='direct';}
+        }catch(error){standbyFailed=true;console.error('standby skipped:',error instanceof Error?error.message:error);}
+      }
+      if(moved){s.seed_owner='';s.seed_pending=false;s.seed_generation=(s.seed_generation??0)+1;}
+      if(s.seed_direct){try{seedRetireUnusedDirect(seedStore(root),s.id);}catch(error){console.error('direct URL cleanup skipped:',error instanceof Error?error.message:error);}}
+      s.seed_explicit=false;s.seed_direct=false;s.seed_auto=false; for(const m of group.members(s)){m.lease_until=0;m.paused=true;}s.attachment_id = ''; s.lease_until = 0; s.updated_at = Date.now(); save(root, s);
+      if(moved)return {session:localView(root,s),standby:moved};
+      if(standbyFailed)return {session:localView(root,s),standby_failed:true};
+    }
     else if (action === 'close') { recordTerminalAttachments(s); s.closed = true; s.attachment_id = ''; s.lease_until = 0; s.updated_at = Date.now(); save(root, s); }
     else if (action !== 'read') throw new Error('Unknown chat action');
     return { session: localView(root, s) };
@@ -423,7 +461,7 @@ function assignAgentTitle(root:string,s:ChatSession,name:string|undefined):void 
 }
 const CHAT_OPEN_INSTRUCTION = "Read the complete skill.text and follow it for this session. Save the returned attachment_id; use the same chat_id, workspace_folder_id and attachment_id. Call chat_wait(timeout_ms:25000) now, shorter if the host requires. Reply only to delivered message IDs.";
 const CHAT_MESSAGE_INSTRUCTION = "Process the delivered message; use message.id as reply_to. Follow skill.text, check existing replies before repeating work, and require chat_reply persisted=true. Progress uses final=false; after a final reply start another independent chat_wait(timeout_ms:25000), within host limits.";
-const CHAT_IDLE_INSTRUCTION = "No message. Immediately make one new independent chat_wait(timeout_ms:25000), shorter if the host requires, with the same session and attachment. Idle is not an exit; do not batch waits in a polling script.";
+const CHAT_IDLE_INSTRUCTION = "No message. Immediately make one new independent chat_wait(timeout_ms:25000), shorter if the host requires, with the same session and attachment. Idle only means the user has not written yet; it is not an exit. Do not batch waits in a polling script.";
 const CHAT_PROGRESS_INSTRUCTION = "Progress reply persisted. Continue the current task under skill.text; send a final chat_reply when complete or when user input is needed. Require persisted=true before advancing.";
 const CHAT_FINAL_INSTRUCTION = "Final reply persisted; this acknowledges the message and does not close the chat. Immediately make one independent chat_wait(timeout_ms:25000) with the same session and attachment, shorter if the host requires, including when awaiting user input.";
 const CHAT_CLOSED_INSTRUCTION = "Conversation is closed. Stop waiting; do not retry chat_wait or create a new attachment for this closed session.";
@@ -500,6 +538,8 @@ export function chatTool(root: string, name: string, args: Record<string, unknow
 export async function chatWait(root: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
   const timeout = args.timeout_ms ?? 120000;
   if (typeof timeout !== 'number' || !Number.isInteger(timeout) || timeout < 0 || timeout > 180000) throw new Error('timeout_ms must be 0–180000');
+  const handoff = standbyHandoff(args);
+  if (handoff) return handoff;
   const initial = chatTool(root, 'chat_wait', args);
   if (initial.status !== 'idle') return initial;
   const id = validId(args.chat_id); const k = key(root, id)+':'+String(args.attachment_id);
@@ -511,6 +551,8 @@ export async function chatWait(root: string, args: Record<string, unknown>, sign
       signal?.throwIfAborted();
       const s = load(root, id);
       if (s.closed) return { ok: true, status: 'closed', instruction: CHAT_CLOSED_INSTRUCTION };
+      const moved = standbyHandoff(args);
+      if (moved) return moved;
       owned(s, args.attachment_id);
       const message = pending(s,args.attachment_id,true);
       if (message || (s.queue?.length && !pending(s) && !awaitingConfirmation(s))) return chatTool(root, 'chat_wait', args);
@@ -605,7 +647,7 @@ function awaitingConfirmation(session: ChatSession): boolean {
 function queuedFingerprint(content: string, attachments: ChatFile[]): string {
   return createHash('sha256').update(JSON.stringify([content,attachments.map(f=>f.id)])).digest('hex');
 }
-function localView(root: string, session: ChatSession) {const s=visibleSession(session);const ops=readChatOperations(root,s.id);const visibleIds=new Set(s.messages.map(m=>m.id));ops.operations=ops.operations?.filter(op=>visibleIds.has(op.reply_to));const activeQuestion=activeQuestionId(s);return {...view(root,s),messages:s.messages.map(m=>m.questions?{...m,questions_active:m.id===activeQuestion}:m),pairing:pairingStatus(root,s.id),connection_id:s.attachment_id?createHash('sha256').update(s.attachment_id).digest('hex').slice(0,12):undefined,...ops,queued_messages:s.queue ?? [],queue_mode:s.queue_mode ?? (group.grouped(s)?'split':'merge')};}
+function localView(root: string, session: ChatSession) {const s=visibleSession(session);const ops=readChatOperations(root,s.id);const visibleIds=new Set(s.messages.map(m=>m.id));ops.operations=ops.operations?.filter(op=>visibleIds.has(op.reply_to));const activeQuestion=activeQuestionId(s);return {...view(root,s),messages:s.messages.map(m=>m.questions?{...m,questions_active:m.id===activeQuestion}:m),pairing:pairingStatus(root,s.id),connection_id:s.attachment_id?createHash('sha256').update(s.attachment_id).digest('hex').slice(0,12):undefined,...ops,queued_messages:s.queue ?? [],queue_mode:s.queue_mode ?? (group.grouped(s)?'split':'merge'),access_mode:accessMode(s),pending_approvals:pendingApprovals(s)};}
 function publishQueued(s: ChatSession): void {
   if(pending(s)||awaitingConfirmation(s)||!s.queue?.length)return;
   const boundary=s.queue.findIndex(m=>!!m.discussion);
@@ -671,4 +713,29 @@ export function writeChatOperation(root:string,chatId:string,event:ChatOperation
 
 export function seedStore(root:string):SeedStore {
   return {path:relative=>safe(root,relative),read:id=>load(root,id),save:chat=>save(root,chat),ids:()=>readdirSync(safe(root,DIR)).filter(n=>/^[a-zA-Z0-9_-]{1,80}\.json$/.test(n)).map(n=>n.slice(0,-5)),locked:run=>locked(root,run)};
+}
+
+export type AccessGate={kind:'run';args:Record<string,unknown>}|{kind:'blocked';result:Record<string,unknown>}|{kind:'wait';approval:PendingApproval};
+/**
+ * Applies the chat's authorization mode to one project tool call from the seed
+ * gateway. full: adds confirm=true where the tool accepts it. strict: tools that
+ * are not read-only need an approval the user grants in the app.
+ */
+export function chatAccessGate(root:string,chatId:string,tool:string,args:Record<string,unknown>,readOnly:boolean,acceptsConfirm:boolean):AccessGate {
+  return locked(root,()=>{
+    let s:ChatSession;try{s=load(root,validId(chatId));}catch{return {kind:'run',args};}
+    const mode:AccessMode=accessMode(s);
+    const next={...args};delete next.approval_id;
+    if(mode==='full'){if(acceptsConfirm)next.confirm=true;return {kind:'run',args:next};}
+    if(mode==='normal'||readOnly)return {kind:'run',args:next};
+    const approval=requestApproval(s,tool,args);
+    if(approval.status==='approved'){consumeApproval(s,approval.id);save(root,s);if(acceptsConfirm)next.confirm=true;return {kind:'run',args:next};}
+    save(root,s);
+    if(approval.status==='denied'){consumeApproval(s,approval.id);save(root,s);return {kind:'blocked',result:{ok:false,error:{code:'APPROVAL_DENIED',message:'用户拒绝了这个操作（严格授权）。不要重试同一操作；用 chat_reply 说明情况或询问用户下一步。The user denied this operation.',category:'permission',retryable:false},approval_id:approval.id}};}
+    return {kind:'wait',approval};
+  });
+}
+/** Re-reads one approval while the gateway waits for the user's decision. */
+export function approvalStatus(root:string,chatId:string,id:string):PendingApproval['status']|'missing' {
+  try{return load(root,validId(chatId)).approvals?.find(a=>a.id===id)?.status??'missing';}catch{return 'missing';}
 }

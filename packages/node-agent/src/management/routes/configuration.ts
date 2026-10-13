@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { sendJson } from '../../oauth.js';
 import { readManagementBody, sendManagementError } from '../http.js';
 import { runtimeRecord } from '../runtime.js';
+import { mergeMcpJson } from '../mcpJson.js';
 import type { ManagementOptions } from '../types.js';
 
 async function workspaceSkillsPayload(options: ManagementOptions, workspaceId: string) {
@@ -248,6 +249,26 @@ export async function handleManagementConfigurationRoute(
             policyRevision: status?.policyRevision ?? null,
             lastError: status?.lastError ?? null
           });
+    } catch (error) {
+      sendManagementError(res, error);
+    }
+    return true;
+  }
+
+  const addMcpRoute = pathname.match(/^\/admin\/api\/workspaces\/([A-Za-z0-9._-]{1,128})\/extensions\/mcp$/);
+  if (addMcpRoute && req.method === 'POST') {
+    const workspaceId = addMcpRoute[1]!;
+    try {
+      const body = await readManagementBody(req);
+      if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('MCP add request must be an object');
+      const input = body as Record<string, unknown>;
+      const selected = runtimeRecord(options, workspaceId);
+      if (!selected) throw new Error(`Workspace runtime is unavailable: ${workspaceId}`);
+      const folderId = String(input.folderId ?? '').trim();
+      const folder = selected.context.config.folders.find(item => !folderId || item.id === folderId);
+      if (!folder) throw new Error('Add a project folder to this workspace first.');
+      const names = await mergeMcpJson(folder.path, input.servers);
+      sendJson(res, 200, { ok: true, workspaceId, folderId: folder.id, path: '.mcp.json', names });
     } catch (error) {
       sendManagementError(res, error);
     }

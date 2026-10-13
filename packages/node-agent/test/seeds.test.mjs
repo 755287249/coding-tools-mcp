@@ -131,15 +131,25 @@ test('600 records paginate, filter and summarize; 500 warm standby polls share o
  assert.equal(chatUi(root,{action:'seed_list',limit:1000}).seeds.length,200);
  const chat=chatUi(root,{action:'create'}).session;assert.equal(seedPoll(counted,'load-0',tokens[0],now).chat_id,chat.id);assert.equal(scans,3);
 });
-test('paired HTTP endpoint is exact, folder scoped, no-store and cannot authenticate ordinary MCP',async t=>{
- const f=await createMcpFixture(t),token='d'.repeat(64),endpoint=f.endpoint+'/seed-library/repo';chatUi(f.root,{action:'seed_pairing',token});
- const post=async(url,args,secret=token)=>fetch(url,{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+secret},body:JSON.stringify(args)});
+test('seed webhook URL is exact, folder scoped, no-store and cannot authenticate ordinary MCP',async t=>{
+ const f=await createMcpFixture(t),token='d'.repeat(64),legacy=f.endpoint+'/seed-library/repo',endpoint=legacy+'/'+token;chatUi(f.root,{action:'seed_pairing',token});
+ const post=async(url,args)=>fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(args)});
  const state=await post(endpoint,{action:'status'});assert.equal(state.status,200);assert.equal(state.headers.get('cache-control'),'no-store');assert.equal((await state.json()).workspace_folder_id,'repo');
- assert.equal((await post(endpoint,{action:'status'},'e'.repeat(64))).status,400);assert.equal((await post(endpoint,{action:'read_file'})).status,400);
- assert.equal((await post(f.endpoint+'/seed-library/other',{action:'status'})).status,404);
+ // The removed address + Bearer token form answers 410 even with the right token.
+ assert.equal((await fetch(legacy,{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+token},body:'{"action":"status"}'})).status,410);
+ assert.equal((await post(legacy+'/'+'e'.repeat(64),{action:'status'})).status,400);assert.equal((await post(endpoint,{action:'read_file'})).status,400);
+ assert.equal((await post(f.endpoint+'/seed-library/other/'+token,{action:'status'})).status,404);
  assert.equal((await post(f.endpoint,{jsonrpc:'2.0',id:1,method:'tools/list'})).status,401);
  assert.equal(tunnelPathAllowed(f.config,new URL(endpoint).pathname),true);assert.equal(tunnelPathAllowed(f.config,new URL(endpoint).pathname+'/extra'),false);
  assert.equal((await fetch(endpoint)).status,405);
+});
+
+test('seed_created UI action registers the host task with the batch ticket',t=>{
+ const {root}=fixture(t,1);const [seed]=chatUi(root,{action:'seed_batch',count:1,account:'a',repo_id:'r',branch:'main'}).batch;
+ const task='11111111-2222-3333-4444-555555555555';
+ assert.throws(()=>chatUi(root,{action:'seed_created',seed_id:seed.seed_id,ticket:'f'.repeat(64),task_id:task}));
+ assert.deepEqual(chatUi(root,{action:'seed_created',seed_id:seed.seed_id,ticket:seed.ticket,task_id:task}),{ok:true});
+ assert.equal(JSON.parse(readFileSync(path.join(root,'docs/chat-sessions/seed-library.seeds.json'))).seeds.find(s=>s.id===seed.seed_id).host_task_id,task);
 });
 
 test('source and prefix route initial and replacement owners; another warm pool cannot suppress matching scans',t=>{
@@ -227,7 +237,7 @@ test('URL-only HTTP onboarding discovers rules, registers, waits, opens and repl
  const seed=chatUi(f.root,{action:'seed_manual',account:'url-fixture'}).batch[0],endpoint=`${f.endpoint}/seeds/repo/${seed.url_key}`;let seq=0;
  const rpc=async(method,params={},target=endpoint,notification=false)=>{const r=await fetch(target,{method:'POST',headers:{'content-type':'application/json','MCP-Protocol-Version':'2025-03-26'},body:JSON.stringify({jsonrpc:'2.0',...(!notification?{id:++seq}:{}),method,params})});return r.status===202?{accepted:true}:r.json();};
  const call=(name,args={})=>rpc('tools/call',{name,arguments:args});
- const intro=await fetch(endpoint);assert.equal(intro.status,200);assert.equal(intro.headers.get('cache-control'),'no-store');assert.match((await intro.json()).instructions,/seed_connect/);
+ const intro=await fetch(endpoint,{headers:{accept:'application/json'}});assert.equal(intro.status,200);assert.equal(intro.headers.get('cache-control'),'no-store');assert.match((await intro.json()).instructions,/seed_connect/);
  assert.equal(chatUi(f.root,{action:'seed_list'}).seeds[0].status,'preparing');
  assert.ok((await call('seed_connect')).error,'GET did not redeem');
  assert.ok((await rpc('initialize',{},`${f.endpoint}/seeds/repo/${seed.seed_id}`)).error,'public ID is not a capability');
@@ -312,6 +322,21 @@ test('seed batch changes preflight all IDs and purge only settled retired record
  const purged=chatUi(root,{action:'seed_purge',seed_ids:ids.slice(0,2)});assert.equal(purged.affected_count,2);assert.equal(purged.total,1);assert.equal(purged.seeds[0].id,ids[2]);
 });
 
+test('deleting an account card detaches its chat and removes only that account',t=>{
+ const {root,batch,store,tokens}=fixture(t,2),file=path.join(root,'docs/chat-sessions/seed-library.seeds.json');
+ chatUi(root,{action:'seed_manual',account:'other',source:'arena'});
+ const chat=chatUi(root,{action:'create'}).session;
+ chatUi(root,{action:'send',chat_id:chat.id,message_id:'pending',text:'Continue my project'});
+ assert.equal(seedPoll(store,batch[0].seed_id,tokens[0]).chat_id,chat.id);
+ assert.throws(()=>chatUi(root,{action:'seed_delete_account',account:'missing'}),/not found/);
+ const data=JSON.parse(readFileSync(file));data.seeds[1].operations=['running-operation'];writeFileSync(file,JSON.stringify(data));
+ const before=readFileSync(file,'utf8');assert.throws(()=>chatUi(root,{action:'seed_delete_account',account:'test'}),/unresolved/);assert.equal(readFileSync(file,'utf8'),before);
+ data.seeds[1].operations=[];writeFileSync(file,JSON.stringify(data));
+ const result=chatUi(root,{action:'seed_delete_account',account:'test'});
+ assert.equal(result.affected_count,2);assert.deepEqual(result.seeds.map(s=>s.account),['other']);
+ const detached=JSON.parse(readFileSync(path.join(root,`docs/chat-sessions/${chat.id}.json`)));assert.equal(detached.attachment_id??'','');assert.equal(detached.seed_owner??'','');
+});
+
 test('reissue rotates only expired unconnected enrollment and rejects stale browser retries',t=>{
  const {root,store,batch}=fixture(t,1);
  assert.throws(()=>chatUi(root,{action:'seed_reissue',seed_id:batch[0].seed_id}),/Only expired/);
@@ -327,4 +352,71 @@ test('reissue rotates only expired unconnected enrollment and rejects stale brow
  assert.doesNotThrow(()=>seedInitialize(store,fresh.seed_id,fresh.ticket));
  assert.equal(chatUi(root,{action:'seed_list'}).total,2);
  const persisted=readFileSync(file,'utf8');assert.ok(!persisted.includes(fresh.ticket));assert.ok(!persisted.includes(fresh.url_key));
+});
+test('explicit pools are served while automatic assignment is off',t=>{
+ const root=mkdtempSync(path.join(tmpdir(),'seeds-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
+ const batch=chatUi(root,{action:'seed_batch',count:2,account:'acct',prefix:'p',repo_id:'r',branch:'main'}).batch;const store=seedStore(root);
+ const tokens=batch.map(s=>seedInitialize(store,s.seed_id,s.ticket));
+ assert.notEqual(chatUi(root,{action:'create'}).session.seed_auto,true);
+ const chosen=chatUi(root,{action:'create',seed_filter:{source:'',keyword:'',account:'acct'}}).session;assert.equal(chosen.seed_auto,true);
+ assert.equal(seedPoll(store,batch[0].seed_id,tokens[0]).chat_id,chosen.id);
+ assert.ok(chatUi(root,{action:'seed_list'}).pool_groups.some(g=>g.account==='acct'&&g.total===2));
+});
+test('disconnecting a live seed returns it as an assignable standby seed',async t=>{
+ const {root,batch,store,tokens}=fixture(t,2);const {standbyHandoff}=await import('../dist/chat/store.js');
+ const chat=chatUi(root,{action:'create'}).session;const assigned=seedPoll(store,batch[0].seed_id,tokens[0]);chatTool(root,'chat_open',assigned);
+ assert.equal(chatUi(root,{action:'detach',chat_id:chat.id,standby:true}).standby,'seed');
+ assert.equal(standbyHandoff(assigned).status,'idle');
+ const row=()=>chatUi(root,{action:'seed_list'}).seeds.find(s=>s.id===batch[0].seed_id);
+ assert.equal(row().standby,true);assert.equal(row().retired_at,0);
+ assert.equal(seedPoll(store,batch[0].seed_id,tokens[0],Date.now()+2000).status,'idle');
+ const next=chatUi(root,{action:'create',seed_filter:{source:'',keyword:'',standby:true}}).session;
+ assert.equal(seedPoll(store,batch[1].seed_id,tokens[1],Date.now()+4000).status,'idle');
+ assert.equal(seedPoll(store,batch[0].seed_id,tokens[0],Date.now()+6000).chat_id,next.id);assert.equal(row().standby,false);
+});
+test('a disconnected direct AI is assignable while it waits and offline as soon as it stops',async t=>{
+ const root=mkdtempSync(path.join(tmpdir(),'seeds-'));t.after(()=>rmSync(root,{recursive:true,force:true}));const {seedUrl}=await import('../dist/chat/seeds.js');const store=seedStore(root);
+ const chat=chatUi(root,{action:'create',seed_manual:true}).session;const issued=chatUi(root,{action:'seed_direct',chat_id:chat.id});const sid=seedUrl(store,issued.seed.url_key,true);
+ const assigned=seedPoll(store,sid,issued.seed.url_key);assert.equal(assigned.chat_id,chat.id);chatTool(root,'chat_open',assigned);
+ const card=()=>chatUi(root,{action:'seed_list'}).account_summaries.find(a=>a.account==='direct');
+ assert.deepEqual(card().counts,{assigned:1});
+ assert.equal(chatUi(root,{action:'detach',chat_id:chat.id,standby:true}).standby,'seed');
+ assert.deepEqual(card().counts,{ready:1});assert.equal(card().valid,1);
+ assert.deepEqual(chatUi(root,{action:'seed_list'}).pool_groups.map(g=>[g.standby,g.ready]),[[true,1]]);
+ const realNow=Date.now,start=realNow();t.after(()=>{Date.now=realNow;});
+ Date.now=()=>start+50_000;assert.deepEqual(card().counts,{ready:1});
+ // The host ended its turn: no wait for over a minute means offline, not "valid".
+ Date.now=()=>start+61_000;assert.deepEqual(card().counts,{offline:1});assert.equal(card().valid,0);
+ assert.deepEqual(chatUi(root,{action:'seed_list'}).pool_groups.map(g=>[g.standby,g.ready]),[[true,0]]);
+ // Waiting again brings it straight back.
+ assert.equal(seedPoll(store,sid,issued.seed.url_key,start+61_000).status,'idle');assert.deepEqual(card().counts,{ready:1});
+});
+test('disconnecting a live direct AI enrolls a standby seed and hands it the seed URL',async t=>{
+ const root=mkdtempSync(path.join(tmpdir(),'seeds-'));t.after(()=>rmSync(root,{recursive:true,force:true}));const {standbyHandoff}=await import('../dist/chat/store.js');
+ const chat=chatUi(root,{action:'create',seed_manual:true}).session;const opened=chatTool(root,'chat_open',{chat_id:chat.id,agent_name:'Claude'});
+ const detached=chatUi(root,{action:'detach',chat_id:chat.id,standby:true});assert.equal(detached.standby,'direct');
+ const handoff=standbyHandoff({attachment_id:opened.attachment_id,workspace_folder_id:'folder1'});assert.equal(handoff.status,'standby');
+ const key=handoff.seed_url_suffix.replace('/seeds/folder1/','');assert.match(key,/^[a-f0-9]{64}$/);
+ const seed=chatUi(root,{action:'seed_list'}).seeds[0];assert.equal(seed.source,'standby');assert.equal(seed.standby,true);
+ assert.equal(chatUi(root,{action:'detach',chat_id:chat.id,standby:true}).standby,undefined);
+ const {seedUrl}=await import('../dist/chat/seeds.js');assert.equal(typeof seedUrl(seedStore(root),key,true),'string');
+ assert.equal(standbyHandoff({attachment_id:opened.attachment_id,workspace_folder_id:'folder1'}),undefined);
+});
+test('choosing a pool after a stale seed owner is allowed',t=>{
+ const root=mkdtempSync(path.join(tmpdir(),'seeds-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
+ const batch=chatUi(root,{action:'seed_batch',count:1,account:'acct',repo_id:'r',branch:'main'}).batch;const store=seedStore(root);const token=seedInitialize(store,batch[0].seed_id,batch[0].ticket);
+ const chat=chatUi(root,{action:'create',seed_filter:{source:'',keyword:''}}).session;assert.equal(seedPoll(store,batch[0].seed_id,token).chat_id,chat.id);
+ chatUi(root,{action:'detach',chat_id:chat.id});chatUi(root,{action:'seed_resume_chat',chat_id:chat.id,seed_filter:{source:'',keyword:'',account:'acct'}});
+ assert.equal(chatUi(root,{action:'read',chat_id:chat.id}).session.seed_auto,true);
+});
+test('direct connect URL is bound to its chat only',async t=>{
+ const root=mkdtempSync(path.join(tmpdir(),'seeds-'));t.after(()=>rmSync(root,{recursive:true,force:true}));const {seedUrl}=await import('../dist/chat/seeds.js');const store=seedStore(root);
+ const other=chatUi(root,{action:'create',seed_filter:{source:'',keyword:''}}).session;const chat=chatUi(root,{action:'create',seed_manual:true}).session;
+ const first=chatUi(root,{action:'seed_direct',chat_id:chat.id});const firstSid=seedUrl(store,first.seed.url_key,true);const issued=chatUi(root,{action:'seed_direct',chat_id:chat.id});assert.throws(()=>seedPoll(store,firstSid,first.seed.url_key));
+ assert.throws(()=>seedUrl(store,first.seed.url_key));
+ const sid=seedUrl(store,issued.seed.url_key,true);const read=chatUi(root,{action:'read',chat_id:chat.id}).session;assert.equal(read.seed_direct,true);
+ const assigned=seedPoll(store,sid,issued.seed.url_key);assert.equal(assigned.chat_id,chat.id);assert.notEqual(assigned.chat_id,other.id);
+ assert.deepEqual(chatUi(root,{action:'seed_list'}).pool_groups,[]);
+ const pending=chatUi(root,{action:'create',seed_manual:true}).session;const unused=chatUi(root,{action:'seed_direct',chat_id:pending.id});
+ chatUi(root,{action:'detach',chat_id:pending.id});assert.throws(()=>seedUrl(store,unused.seed.url_key));
 });

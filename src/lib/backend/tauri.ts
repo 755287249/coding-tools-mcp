@@ -115,6 +115,16 @@ export function createTauriBackend(deps: TauriBackendDeps): FrontendBackend {
 
     chat: { request: (workspaceId, folderId, args) => invoke("local_chat", { id: workspaceId, folderId, args }) },
 
+    plugins: {
+      http: (request) => invoke("plugin_http", { request }),
+      list: () => invoke("plugin_list"),
+      install: (plugin) => invoke("plugin_install", { package: plugin }),
+      remove: (id) => invoke("plugin_remove", { id }),
+      dataGet: (id) => invoke("plugin_data_get", { id }),
+      dataSet: (id, data) => invoke("plugin_data_set", { id, data }),
+      loginWindow: (options) => invoke("plugin_login_window", { options }),
+    },
+
     history: {
       list: (workspaceId, folderId) =>
         invoke("list_history_sessions", { id: workspaceId, folderId }),
@@ -187,6 +197,8 @@ export function createTauriBackend(deps: TauriBackendDeps): FrontendBackend {
           extensionKey,
           enabled,
         }),
+      addMcpServers: (workspaceId, folderId, servers) =>
+        invoke("add_workspace_mcp_servers", { workspaceId, folderId, servers }),
     },
   };
 }

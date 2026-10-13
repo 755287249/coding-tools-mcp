@@ -128,21 +128,12 @@ fn project_context_for_epoch(
     if profile.folders.len() != 1 {
         return Err("Migrate this project to one fixed directory before connecting".into());
     }
+    // Nested or shared project directories are allowed: a parent project
+    // includes its children, a child never sees its parent. Each project is
+    // still rooted at its own directory.
     let root = std::path::Path::new(&profile.folders[0].path)
         .canonicalize()
         .map_err(|_| "Project directory unavailable")?;
-    // A parent directory grant cannot securely exclude a nested project on every backend.
-    for other in profiles
-        .iter()
-        .filter(|p| p.id != profile.id)
-        .flat_map(|p| p.folders.iter())
-    {
-        if let Ok(path) = std::path::Path::new(&other.path).canonicalize() {
-            if path.starts_with(&root) || root.starts_with(path) {
-                return Err("Project directories overlap. Use separate directory roots before enabling isolated access.".into());
-            }
-        }
-    }
 
     let fingerprint = format!(
         "{}:{}",
@@ -283,6 +274,14 @@ async fn post_with_projects(
         Ok(v) => v,
         Err(e) => return fail(id, e),
     };
+    if attached && method == "tools/call" && name == "chat_wait" {
+        // An AI moved to the seed library gets its standby hand-off instead of
+        // an "attachment expired" error, so it keeps waiting.
+        if let Some(handoff) = crate::tools::chat::standby_handoff(&scope) {
+            return json_no_store(json!({"jsonrpc":"2.0","id":id,
+                "result":crate::tools::wrap_mcp_tool_result(&name,&scope,handoff)}));
+        }
+    }
     if attached {
         if let Err(error) = crate::tools::chat::authorize_project_attachment(
             routed.mcp.workspace.root(),
@@ -345,6 +344,23 @@ async fn post_with_projects(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn nested_project_directories_can_both_connect() {
+        let parent = tempfile::tempdir().unwrap();
+        let child = parent.path().join("child");
+        std::fs::create_dir_all(&child).unwrap();
+        let profiles = vec![
+            WorkspaceProfile::new(parent.path().to_string_lossy().into(), None),
+            WorkspaceProfile::new(child.to_string_lossy().into(), None),
+        ];
+        for profile in &profiles {
+            assert!(
+                project_context_from_profiles(&profile.active_folder_id, &profiles).is_ok(),
+                "{}",
+                profile.path
+            );
+        }
+    }
     fn state(root: &std::path::Path) -> ListenerState {
         let mut profile = WorkspaceProfile::new(root.to_string_lossy().into(), None);
         profile.id = crate::data::GLOBAL_MCP_ID.into();

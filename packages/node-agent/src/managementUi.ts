@@ -173,6 +173,20 @@ export async function handleManagementUiRequest(
     } catch { res.writeHead(404).end(); }
     return true;
   }
+  if (pathname === "/ui/plugin-frame.html") {
+    try {
+      const runner = await readFile(path.join(assetRoot, "plugin-frame.html"));
+      res.writeHead(200, {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-store",
+        "x-content-type-options": "nosniff",
+        "referrer-policy": "no-referrer",
+        "permissions-policy": "camera=(), microphone=(), geolocation=()",
+        "content-security-policy": "sandbox allow-scripts; default-src 'none'; script-src 'self' blob:; style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src 'none'; frame-src 'none'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'",
+      }).end(runner);
+    } catch { res.writeHead(404).end(); }
+    return true;
+  }
   if (pathname === "/" ) {
     res.writeHead(302, { location: "/ui/", ...securityHeaders() }).end();
     return true;

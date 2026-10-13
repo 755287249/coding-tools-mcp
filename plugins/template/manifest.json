@@ -1,0 +1,7 @@
+{
+  "id": "hello-plugin",
+  "name": "Hello plugin",
+  "version": "1.0.0",
+  "description": "Minimal Coding Tools MCP plugin example",
+  "permissions": { "hosts": ["api.example.com"], "storage": true }
+}

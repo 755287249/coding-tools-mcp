@@ -1,6 +1,6 @@
 {
   "name": "coding-tools-mcp-desktop",
-  "version": "0.1.143",
+  "version": "0.1.152",
   "description": "Coding Tools MCP desktop client",
   "type": "module",
   "packageManager": "pnpm@12.0.0",
@@ -58,7 +58,8 @@
     "version:check": "node scripts/sync-version.mjs --check",
     "version:patch": "pnpm version patch --no-git-tag-version && pnpm run version:sync",
     "pretauri": "pnpm run version:sync",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "plugins:build": "pnpm --dir plugins/coderabbit run build && node -e \"require('fs').copyFileSync('plugins/coderabbit/dist/coderabbit-seeds.ctplugin.json','static/plugins/coderabbit-seeds.ctplugin.json')\""
   },
   "license": "Apache-2.0",
   "dependencies": {

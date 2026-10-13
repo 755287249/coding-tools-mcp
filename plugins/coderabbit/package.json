@@ -1,0 +1,6 @@
+{
+  "private": true,
+  "type": "module",
+  "scripts": { "build": "node ../../packages/plugin-sdk/build.mjs ." },
+  "dependencies": { "@coding-tools/plugin-sdk": "workspace:*" }
+}

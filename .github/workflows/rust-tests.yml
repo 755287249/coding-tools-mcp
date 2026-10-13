@@ -37,6 +37,9 @@ jobs:
           cargo test --lib --
           tunnel::cloudflare
           mcp::listener::tests
+          mcp::listener::seeds
+          tools::chat::access
+          tools::chat::seeds
           auth::
           mcp::server::tests
           tools::hub
@@ -44,4 +47,6 @@ jobs:
           health::
           mcp::activity::
           commands::activity::
+          commands::workspace::
+          commands::plugins::
           tools::patch::

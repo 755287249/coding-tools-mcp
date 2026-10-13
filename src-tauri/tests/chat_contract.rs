@@ -78,7 +78,7 @@ async fn chat_guidance_distinguishes_progress_final_idle_and_closed() {
         assert_eq!(resumed["attachment_id"], opened["attachment_id"]);
         assert_eq!(guidance("chat_open", &args, resumed), open_text);
         let idle_text = guidance("chat_wait", &args, chat::tool(root, "chat_wait", &args).unwrap());
-        assert!(idle_text.contains("Idle is not an exit"));
+        assert!(idle_text.contains("it is not an exit"));
         for timeout in [0, 1] {
             let mut wait_args = args.clone(); wait_args["timeout_ms"] = json!(timeout);
             assert_eq!(guidance("chat_wait", &wait_args, chat::wait(root, &wait_args).await.unwrap()), idle_text);

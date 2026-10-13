@@ -35,7 +35,13 @@ function translateFor(
   values?: Record<string, string | number>,
 ): string {
   const localeIndex = SUPPORTED_LOCALES.indexOf(activeLocale);
-  return interpolate(MESSAGES[key][localeIndex] ?? MESSAGES[key][0], values);
+  // Keys built from server values (seed reasons, statuses) can be unknown to an
+  // older catalog; show the raw key instead of throwing and breaking the render.
+  const messages: readonly string[] | undefined = Object.prototype.hasOwnProperty.call(MESSAGES, key)
+    ? (MESSAGES as Record<string, readonly string[]>)[key]
+    : undefined;
+  if (!messages) return interpolate(String(key), values);
+  return interpolate(messages[localeIndex] ?? messages[0], values);
 }
 
 const systemLocale = writable<Locale>(initialLocale());

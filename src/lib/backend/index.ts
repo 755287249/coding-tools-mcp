@@ -15,6 +15,7 @@ export type {
   ExtensionProvider,
   ExtensionScope,
   ExtensionToggleResult,
+  McpServersAddResult,
   FrontendBackend,
   FrontendCapabilities,
   FrontendHost,

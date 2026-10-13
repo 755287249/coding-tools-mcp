@@ -36,6 +36,15 @@ Assert-Equal (Test-DesktopName 'ctmcp (2).exe') $true 'Browser numbered download
 Assert-Equal (Test-DesktopName 'ctmcp-random.exe') $false 'Unrelated filename must not be accepted'
 Assert-Equal @(Select-UpgradeTargets @((Candidate 10 3 'ctmcp-0.1.66-win64.exe' 'Coding Tools MCP' '0.1.66' 'C:\old\ctmcp-0.1.66-win64.exe')) 'C:\new\ctmcp-0.1.67-win64.exe' ([version]'0.1.67') 3 9).Count 1 'Versioned old build must be selectable'
 Write-Output 'PASS: version/product/session/PID/path selection and canonical/legacy runtime snapshots (14 assertions). No processes were started or stopped.'
+$downgrade = @(Select-DowngradeTargets $candidates 'C:\new\ctmcp.exe' ([version]'0.1.66') 3 9)
+Assert-Equal $downgrade.Count 1 'Only the identified newer instance may be offered for downgrade'
+Assert-Equal $downgrade[0].ProcessId 5 'Wrong newer process selected'
+Assert-Equal @(Select-DowngradeTargets $candidates 'C:\newer\ctmcp.exe' ([version]'0.2.0') 3 9).Count 0 'Same path/version must not be offered for downgrade'
+Assert-Equal @(Select-DowngradeTargets @((Candidate 11 3 'ctmcp-0.1.150-win64.exe' 'Coding Tools MCP' '0.1.150' 'C:\dl\ctmcp-0.1.150-win64.exe')) 'C:\dl\ctmcp-0.1.143-win64.exe' ([version]'0.1.143') 3 9).Count 1 'A 0.1.143+ build must be able to offer replacing a newer running build'
+Assert-Equal @(Select-DowngradeTargets @((Candidate 12 4 'ctmcp.exe' 'Coding Tools MCP' '0.1.142' 'C:\x\ctmcp.exe')) 'C:\dl\ctmcp.exe' ([version]'0.1.141') 3 9).Count 0 'Another Windows session must never be offered'
+$prompt = Get-DowngradePrompt @((Candidate 11 3 'ctmcp.exe' 'Coding Tools MCP' '0.1.150' 'C:\dl\ctmcp.exe')) '0.1.143'
+Assert-Equal ($prompt.Contains('0.1.150') -and $prompt.Contains('0.1.143') -and $prompt.Contains('data\pre-global-connection')) $true 'Downgrade prompt must name both versions and the real backup folder'
+Write-Output 'PASS: downgrade selection is limited to identified newer instances in the same session (6 assertions). No processes were started or stopped.'
 
 # Pure doubles: no production process is stopped or launched by these checks.
 $stamp=[DateTime]::new(638960000000000000,[DateTimeKind]::Utc)

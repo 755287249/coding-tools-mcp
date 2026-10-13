@@ -579,6 +579,18 @@ pub async fn list_external_tools(workspace_id: &str) -> Vec<ExternalTool> {
     tools
 }
 
+/// Connects every enabled server of a running workspace so the settings page shows
+/// real status (connected / tool count / error) instead of waiting for the first
+/// MCP client `tools/list`. Connections are cached, so already-connected servers
+/// return immediately. Returns `false` when the workspace runtime is not running.
+pub async fn connect_enabled(workspace_id: &str, limit: Duration) -> bool {
+    if runtime(workspace_id).is_none() {
+        return false;
+    }
+    let _ = tokio::time::timeout(limit, list_external_tools(workspace_id)).await;
+    true
+}
+
 pub async fn call_external_tool(
     workspace_id: &str,
     tool: &ExternalTool,

@@ -1,3 +1,4 @@
+pub mod mcp_json;
 mod discovery;
 mod evolved_skills;
 mod external_mcp;
@@ -302,6 +303,10 @@ pub fn skill_inventory(
     }
 }
 
+/// Shown for enabled MCP servers while the workspace MCP service is stopped; the UI
+/// replaces this exact text with a translated hint.
+pub const NOT_RUNNING: &str = "workspace-not-running";
+
 pub async fn extension_inventory(
     workspace_id: &str,
     folders: &[WorkspaceFolder],
@@ -346,10 +351,21 @@ pub async fn extension_inventory(
             }
         })
         .collect();
+    let wants_connection = extensions.mcp.active
+        && discovered.mcp_servers.iter().any(|server| {
+            enabled_mcp.contains(&server.key) && server.source_enabled && server.supported
+        });
+    let running = !wants_connection
+        || external_mcp::connect_enabled(workspace_id, std::time::Duration::from_secs(25)).await;
     let mut mcp_servers = Vec::new();
     for server in discovered.mcp_servers {
         let selected = enabled_mcp.contains(&server.key);
-        let (connected, tool_count, error) = external_mcp::status(workspace_id, &server.key).await;
+        let active = extensions.mcp.active && selected && server.source_enabled && server.supported;
+        let (connected, tool_count, mut error) =
+            external_mcp::status(workspace_id, &server.key).await;
+        if active && !running && error.is_none() {
+            error = Some(NOT_RUNNING.into());
+        }
         mcp_servers.push(McpServerInventoryItem {
             key: server.key,
             provider: server.provider,

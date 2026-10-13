@@ -1,4 +1,6 @@
 //! Local chat. JSON manifests and immutable pages are authoritative; Markdown is a projection.
+#[path = "chat_access.rs"]
+pub(crate) mod access;
 #[path = "chat_collaboration.rs"]
 mod collaboration;
 #[path = "chat_discussion.rs"]
@@ -55,6 +57,61 @@ const ARTIFACT_DIR: &str = "mcp-assistant/artifacts/";
 const MAX_BYTES: u64 = 2 * 1024 * 1024;
 const LEASE_MS: u64 = 600_000;
 static WAITERS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+/// Attachments that left a chat while still valid and were moved to the seed
+/// library (disconnect/switch). Keyed by attachment digest; value is the
+/// optional standby seed URL key for a direct AI and an expiry. Memory only:
+/// the URL key is a credential and never touches disk in plain text.
+type StandbyHandoff = (String, String, u64);
+static STANDBY_HANDOFFS: OnceLock<Mutex<std::collections::HashMap<String, StandbyHandoff>>> =
+    OnceLock::new();
+const STANDBY_HANDOFF_MS: u64 = 3_600_000;
+fn remember_standby(attachment: &str, url_key: String, folder: &str) {
+    if attachment.is_empty() {
+        return;
+    }
+    if let Ok(mut map) = STANDBY_HANDOFFS.get_or_init(Default::default).lock() {
+        let time = now();
+        map.retain(|_, (_, _, until)| *until > time);
+        map.insert(
+            digest(attachment.as_bytes()),
+            (url_key, folder.to_owned(), time + STANDBY_HANDOFF_MS),
+        );
+    }
+}
+/// A redeemed standby URL is a 7-day credential: stop handing it out.
+pub(super) fn forget_standby_url(url_key: &str) {
+    if let Ok(mut map) = STANDBY_HANDOFFS.get_or_init(Default::default).lock() {
+        map.retain(|_, (key, _, _)| key != url_key);
+    }
+}
+/// Answer for a chat_wait from an attachment that was moved to the seed
+/// library. Seeds keep waiting as standby; a direct AI is told to reconnect
+/// through its new standby seed URL.
+pub(crate) fn standby_handoff(args: &Value) -> Option<Value> {
+    let attachment = args["attachment_id"].as_str().filter(|a| !a.is_empty())?;
+    let map = STANDBY_HANDOFFS.get_or_init(Default::default).lock().ok()?;
+    let (url_key, stored_folder, until) = map.get(&digest(attachment.as_bytes()))?;
+    if *until <= now() {
+        return None;
+    }
+    if url_key.is_empty() {
+        return Some(json!({"ok":true,"status":"idle","standby":true,
+            "instruction":"You left this conversation and returned to the seed library as a standby seed. Do not reply to it again. Immediately make one new independent chat_wait(timeout_ms:25000) and keep waiting for a new assignment. Omit chat_id and attachment_id from now on. The user writes in the app at any time."}));
+    }
+    let folder = if stored_folder.is_empty() {
+        args["workspace_folder_id"].as_str().unwrap_or("")
+    } else {
+        stored_folder.as_str()
+    };
+    if folder.is_empty() {
+        return None;
+    }
+    let suffix = format!("/seeds/{folder}/{url_key}");
+    Some(
+        json!({"ok":true,"status":"standby","seed_url_suffix":suffix,
+        "instruction":format!("The user moved you out of this conversation into the project's seed library as a standby AI. Stop using this chat_id/attachment_id. Build the new MCP URL by appending {suffix} to your current MCP URL (the one ending in /mcp). Keep it only in client memory; never write it to files, logs or replies. POST JSON-RPC initialize to that URL (no other authorization), send notifications/initialized, call seed_connect, read skill.text, then call chat_wait(timeout_ms:25000) again and again until you are assigned. Idle only means the user has not written yet; just wait again. The URL must be connected within one hour.")}),
+    )
+}
 type Result<T> = std::result::Result<T, WorkspaceError>;
 fn err(message: impl Into<String>) -> WorkspaceError {
     WorkspaceError::invalid_argument(message)
@@ -543,6 +600,10 @@ fn file_path(s: &Value, f: &Value) -> Result<String> {
         _ => Err(err("Invalid attachment path")),
     }
 }
+/// Stable hex digest used for idempotent IDs derived outside this module.
+pub(crate) fn digest_text(text: &str) -> String {
+    digest(text.as_bytes())
+}
 fn digest(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     format!("{:x}", Sha256::digest(bytes))
@@ -796,9 +857,16 @@ fn ui_unlocked(root: &Path, args: &Value) -> Result<Value> {
         if let Some(mode) = args.get("mode") {
             group::set_mode(&mut s, mode)?;
         }
-        if !group::grouped(&s) && args["seed_manual"] != true && seeds::enabled(root)? {
+        // An explicitly chosen pool is always served; the library switch only
+        // decides whether chats without a choice are assigned automatically.
+        let explicit = args.get("seed_filter").is_some_and(Value::is_object);
+        if !group::grouped(&s) && args["seed_manual"] != true && (explicit || seeds::enabled(root)?)
+        {
             s["seed_auto"] = json!(true);
             s["seed_filter"] = seeds::parse_filter(&args["seed_filter"])?;
+            if explicit {
+                s["seed_explicit"] = json!(true);
+            }
         }
         save(root, &s)?;
         return Ok(json!({"session":local_view(root,&s)?}));
@@ -1001,6 +1069,15 @@ fn ui_unlocked(root: &Path, args: &Value) -> Result<Value> {
                 save(root, &s)?;
             }
         }
+        "set_access_mode" => {
+            access::set_mode(&mut s, &args["mode"])?;
+            s["updated_at"] = json!(now());
+            save(root, &s)?;
+        }
+        "resolve_approval" => {
+            access::resolve(&mut s, args)?;
+            save(root, &s)?;
+        }
         "set_queue_mode" => {
             if args["mode"] != "merge" && args["mode"] != "split" {
                 return Err(err("Invalid queue mode"));
@@ -1056,6 +1133,65 @@ fn ui_unlocked(root: &Path, args: &Value) -> Result<Value> {
             save(root, &s)?;
         }
         "detach" => {
+            // standby=true: a still-valid AI goes to the seed library instead
+            // of being dropped. Seeds return as standby; a direct AI is
+            // enrolled as a new standby seed. Invalid AIs are just detached.
+            // Disconnect is a safety action: a standby failure falls back to
+            // a plain detach instead of leaving the AI attached.
+            let mut moved = "";
+            let mut standby_failed = false;
+            let attachment = s["attachment_id"].as_str().unwrap_or("").to_owned();
+            let folder = args["_folder_id"]
+                .as_str()
+                .or(args["workspace_folder_id"].as_str())
+                .unwrap_or("")
+                .to_owned();
+            if args["standby"] == true && !group::grouped(&s) && !attachment.is_empty() {
+                if !s["seed_owner"].as_str().unwrap_or("").is_empty() {
+                    match seeds::release_to_standby(root, &s) {
+                        Ok(true) => {
+                            remember_standby(&attachment, String::new(), &folder);
+                            moved = "seed";
+                        }
+                        Ok(false) => {}
+                        Err(e) => {
+                            eprintln!("seed standby skipped: {}", e.message());
+                            standby_failed = true;
+                        }
+                    }
+                } else {
+                    let waiting = WAITERS
+                        .get_or_init(Default::default)
+                        .lock()
+                        .unwrap()
+                        .contains(&wait_key(root, &s, &json!({"attachment_id":attachment}))?);
+                    if waiting || s["lease_until"].as_u64().unwrap_or(0) > now() {
+                        let name = s["agent_name"].as_str().unwrap_or("AI").to_owned();
+                        match seeds::enroll_direct_standby(root, &name) {
+                            Ok(key) => {
+                                remember_standby(&attachment, key, &folder);
+                                moved = "direct";
+                            }
+                            Err(e) => {
+                                eprintln!("direct AI standby skipped: {}", e.message());
+                                standby_failed = true;
+                            }
+                        }
+                    }
+                }
+            }
+            if !moved.is_empty() {
+                s["seed_owner"] = json!("");
+                s["seed_pending"] = json!(false);
+                s["seed_generation"] = json!(s["seed_generation"].as_u64().unwrap_or(0) + 1);
+            }
+            if s["seed_direct"] == true {
+                if let Err(e) = seeds::retire_unused_direct(root, id(&s["id"])?) {
+                    eprintln!("direct URL cleanup skipped: {}", e.message());
+                }
+            }
+            s["seed_explicit"] = json!(false);
+            s["seed_direct"] = json!(false);
             s["seed_auto"] = json!(false);
             if let Some(members) = s["members"].as_array_mut() {
                 for m in members {
@@ -1067,6 +1203,12 @@ fn ui_unlocked(root: &Path, args: &Value) -> Result<Value> {
             s["lease_until"] = json!(0);
             s["updated_at"] = json!(now());
             save(root, &s)?;
+            if !moved.is_empty() {
+                return Ok(json!({"session":local_view(root,&s)?,"standby":moved}));
+            }
+            if standby_failed {
+                return Ok(json!({"session":local_view(root,&s)?,"standby_failed":true}));
+            }
         }
         "close" => {
             record_terminal_attachments(&mut s);
@@ -1207,7 +1349,7 @@ fn assign_agent_title(root: &Path, s: &mut Value, name: &str) -> Result<()> {
 }
 const CHAT_OPEN_INSTRUCTION: &str = "Read the complete skill.text and follow it for this session. Save the returned attachment_id; use the same chat_id, workspace_folder_id and attachment_id. Call chat_wait(timeout_ms:25000) now, shorter if the host requires. Reply only to delivered message IDs.";
 const CHAT_MESSAGE_INSTRUCTION: &str = "Process the delivered message; use message.id as reply_to. Follow skill.text, check existing replies before repeating work, and require chat_reply persisted=true. Progress uses final=false; after a final reply start another independent chat_wait(timeout_ms:25000), within host limits.";
-const CHAT_IDLE_INSTRUCTION: &str = "No message. Immediately make one new independent chat_wait(timeout_ms:25000), shorter if the host requires, with the same session and attachment. Idle is not an exit; do not batch waits in a polling script.";
+const CHAT_IDLE_INSTRUCTION: &str = "No message. Immediately make one new independent chat_wait(timeout_ms:25000), shorter if the host requires, with the same session and attachment. Idle only means the user has not written yet; it is not an exit. Do not batch waits in a polling script.";
 const CHAT_PROGRESS_INSTRUCTION: &str = "Progress reply persisted. Continue the current task under skill.text; send a final chat_reply when complete or when user input is needed. Require persisted=true before advancing.";
 const CHAT_FINAL_INSTRUCTION: &str = "Final reply persisted; this acknowledges the message and does not close the chat. Immediately make one independent chat_wait(timeout_ms:25000) with the same session and attachment, shorter if the host requires, including when awaiting user input.";
 const CHAT_CLOSED_INSTRUCTION: &str = "Conversation is closed. Stop waiting; do not retry chat_wait or create a new attachment for this closed session.";
@@ -1458,6 +1600,9 @@ pub async fn wait(root: &Path, args: &Value) -> Result<Value> {
             .ok_or_else(|| err("timeout_ms must be 0–180000"))?,
         None => 120000,
     };
+    if let Some(handoff) = standby_handoff(args) {
+        return Ok(handoff);
+    }
     let initial = tool(root, "chat_wait", args)?;
     if initial["status"] != "idle" {
         return Ok(initial);
@@ -1478,6 +1623,9 @@ pub async fn wait(root: &Path, args: &Value) -> Result<Value> {
         let s = load(root, chat_id)?;
         if s["closed"] == true {
             return Ok(json!({"ok":true,"status":"closed","instruction":CHAT_CLOSED_INSTRUCTION}));
+        }
+        if let Some(handoff) = standby_handoff(args) {
+            return Ok(handoff);
         }
         owned(&s, args)?;
         if delivery(&s, args, true)?.is_some()
@@ -1774,6 +1922,8 @@ fn local_view(root: &Path, s: &Value) -> Result<Value> {
         .get("queue_mode")
         .cloned()
         .unwrap_or_else(|| json!(if group::grouped(s) { "split" } else { "merge" }));
+    result["access_mode"] = json!(access::mode(s));
+    result["pending_approvals"] = access::pending(s);
     Ok(result)
 }
 fn publish_queued(s: &mut Value) {

@@ -1,6 +1,6 @@
 [package]
 name = "coding-tools-mcp-desktop"
-version = "0.1.143"
+version = "0.1.152"
 description = "Coding Tools MCP desktop client"
 authors = ["Coding Tools MCP Contributors"]
 edition = "2021"
@@ -39,7 +39,7 @@ dirs = "6"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "process", "io-util", "fs", "time"] }
 axum = { version = "0.8", features = ["form"] }
 tower-http = { version = "0.6", features = ["cors"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "system-proxy"] }
 walkdir = "2"
 ignore = "0.4"
 regex = "1"

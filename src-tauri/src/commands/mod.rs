@@ -5,6 +5,11 @@ mod health;
 mod history;
 pub use chat::{local_chat, start_schedule_worker};
 mod logs;
+mod plugins;
+pub use plugins::{
+    plugin_data_get, plugin_data_set, plugin_http, plugin_install, plugin_list,
+    plugin_login_window, plugin_remove,
+};
 mod runtime;
 mod sandbox;
 mod secrets;
@@ -46,6 +51,7 @@ pub use workspace::{
     open_shared_workspace, open_workspace_directory, remove_workspace_folder, update_workspace,
 };
 pub use workspace_features::{
-    get_workspace_extensions, get_workspace_skills, set_workspace_extension_active,
-    set_workspace_extension_enabled, set_workspace_skill_enabled, set_workspace_skills_active,
+    add_workspace_mcp_servers, get_workspace_extensions, get_workspace_skills,
+    set_workspace_extension_active, set_workspace_extension_enabled, set_workspace_skill_enabled,
+    set_workspace_skills_active,
 };

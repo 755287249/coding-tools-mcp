@@ -63,6 +63,14 @@
   --warning: #d6a651;
   --danger: #e2666b;
 
+  /* Action — blue with white text for the important button in a view (both themes).
+     --primary is soft white in dark mode, so never pair it with white text. */
+  --action: #2563eb;
+  --action-hover: #1d4ed8;
+  --action-border: #3b82f6;
+  --action-text: #ffffff;
+  --action-soft: rgba(37, 99, 235, 0.16);
+
   --border: rgba(255, 255, 255, 0.075);
   --border-strong: rgba(255, 255, 255, 0.14);
   --border-light: rgba(255, 255, 255, 0.05);

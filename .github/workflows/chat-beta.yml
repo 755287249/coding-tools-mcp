@@ -55,6 +55,9 @@ jobs:
       - name: Test desktop upgrade selection and runtime snapshot
         shell: powershell
         run: ./tests/desktop-startup-handoff.Tests.ps1
+      - name: Test desktop rollback restore plan
+        shell: powershell
+        run: ./tests/rollback-desktop.Tests.ps1
       - name: Exercise upgrade and rollback with isolated dummy executables
         shell: powershell
         run: ./tests/desktop-startup-handoff.Integration.ps1

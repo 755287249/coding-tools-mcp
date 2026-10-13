@@ -29,7 +29,8 @@ test("quick setup is an independent four-step global route reachable from the ap
   assert.match(layout, /setupPrompt/);
   assert.match(layout, /onQuickSetup=\{capabilities\.guidedSetup \? openQuickSetup : undefined\}/);
   assert.match(shell, /\$t\("Quick setup"\)/);
-  assert.match(shell, /\$t\('connection\.newProject'\)/, "the original add-workspace entry remains available");
+  // New project lives next to "Projects" in the navigator; the More menu no longer repeats it.
+  assert.match(shell, /<ProjectNavigator \{onAddWorkspace\}/, "the add-workspace entry remains available");
 });
 
 test("the first step keeps all providers for desktop and gates unsupported Node providers", async () => {

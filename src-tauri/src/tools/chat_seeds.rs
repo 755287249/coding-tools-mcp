@@ -3,6 +3,30 @@ use super::*;
 use serde::{Deserialize, Serialize};
 static EXCHANGES: OnceLock<Mutex<std::collections::HashMap<String, (String, u64)>>> =
     OnceLock::new();
+/// Last authenticated request per seed, in memory only (the registry
+/// `last_seen` is written at most once a minute). A ready seed that has not
+/// waited or called a tool for ONLINE_MS is shown offline right away instead
+/// of looking assignable for the full SUSPECT_MS window.
+static PRESENCE: OnceLock<Mutex<std::collections::HashMap<String, u64>>> = OnceLock::new();
+pub const ONLINE_MS: u64 = 60_000;
+fn touch(sid: &str, time: u64) {
+    if let Ok(mut map) = PRESENCE.get_or_init(Default::default).lock() {
+        if map.len() > 8192 {
+            map.retain(|_, seen| time.saturating_sub(*seen) <= SUSPECT_MS);
+        }
+        let seen = map.entry(sid.to_owned()).or_insert(time);
+        *seen = (*seen).max(time);
+    }
+}
+fn seen(s: &Seed) -> u64 {
+    PRESENCE
+        .get_or_init(Default::default)
+        .lock()
+        .ok()
+        .and_then(|map| map.get(&s.id).copied())
+        .unwrap_or(0)
+        .max(s.last_seen)
+}
 static SCANS: OnceLock<Mutex<std::collections::HashMap<(PathBuf, String, String, String), u64>>> =
     OnceLock::new();
 const FILE: &str = "docs/chat-sessions/seed-library.seeds.json";
@@ -45,6 +69,13 @@ pub struct Seed {
     pub generation: u64,
     pub inflight: Vec<String>,
     pub operations: Vec<String>,
+    /// A still-valid AI that left a conversation (disconnect or switch) and
+    /// now waits in the library as an assignable standby seed.
+    #[serde(default)]
+    pub standby: bool,
+    /// Direct-connect URL for one chat ([接入AI]): assigned only to that chat.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub bound_chat: String,
 }
 #[derive(Serialize, Deserialize)]
 struct Library {
@@ -80,6 +111,12 @@ pub fn parse_filter(value: &Value) -> Result<Value> {
             filter[field] = json!(optional_label(&value[field])?);
         }
     }
+    if value["standby"] == true {
+        filter["standby"] = json!(true);
+    }
+    if let Some(seed_id) = value["seed_id"].as_str().filter(|v| !v.is_empty()) {
+        filter["seed_id"] = json!(text(&json!(seed_id), 80)?);
+    }
     Ok(filter)
 }
 fn matches(seed: &Seed, filter: &Value) -> bool {
@@ -94,6 +131,10 @@ fn matches(seed: &Seed, filter: &Value) -> bool {
             .as_str()
             .filter(|account| !account.is_empty())
             .is_none_or(|account| seed.account == account)
+        && (filter["standby"] != true || seed.standby)
+        && filter["seed_id"]
+            .as_str()
+            .is_none_or(|seed_id| seed.id == seed_id)
 }
 fn read(root: &Path) -> Result<Library> {
     let target = safe(root, FILE)?;
@@ -168,22 +209,26 @@ fn eligible(chat: &Value) -> bool {
         && !awaiting
 }
 fn public(s: &Seed, time: u64) -> Value {
+    let last_seen = seen(s);
     let status = if s.retired_at > 0 {
         "retired"
     } else if !s.inflight.is_empty() || !s.operations.is_empty() {
         "working"
     } else if s.redeemed_at == 0 {
         "preparing"
-    } else if time.saturating_sub(s.last_seen) > SUSPECT_MS {
+    } else if time.saturating_sub(last_seen) > SUSPECT_MS {
         "offline"
     } else if !s.chat_id.is_empty() {
         "assigned"
-    } else if s.ready {
+    } else if s.ready && time.saturating_sub(last_seen) <= ONLINE_MS {
         "ready"
+    } else if s.ready {
+        // Registered but no longer waiting (e.g. the host ended its turn).
+        "offline"
     } else {
         "preparing"
     };
-    json!({"enrollment_until":s.enrollment_until,"redeemed_at":s.redeemed_at,"access_until":s.access_until,"id":s.id,"source":s.source,"prefix":s.prefix,"manual":s.manual,"account":s.account,"repo_id":s.repo_id,"branch":s.branch,"metadata":s.metadata,"created_at":s.created_at,"last_seen":s.last_seen,"status":status,"reason":s.reason,"archived":s.archived,"retired_at":s.retired_at,"host_task_id":s.host_task_id,"chat_id":s.chat_id,"generation":s.generation,"unresolved_operations":s.inflight.len()+s.operations.len()})
+    json!({"enrollment_until":s.enrollment_until,"redeemed_at":s.redeemed_at,"access_until":s.access_until,"id":s.id,"source":s.source,"prefix":s.prefix,"manual":s.manual,"account":s.account,"repo_id":s.repo_id,"branch":s.branch,"metadata":s.metadata,"created_at":s.created_at,"last_seen":last_seen,"status":status,"reason":s.reason,"archived":s.archived,"retired_at":s.retired_at,"host_task_id":s.host_task_id,"chat_id":s.chat_id,"generation":s.generation,"unresolved_operations":s.inflight.len()+s.operations.len(),"standby":s.standby})
 }
 fn inventory(data: &Library, args: &Value, time: u64) -> Value {
     let mut grouped = std::collections::BTreeMap::<(String, String), (usize, usize)>::new();
@@ -212,6 +257,29 @@ fn inventory(data: &Library, args: &Value, time: u64) -> Value {
         }
     }
     let ready_groups: Vec<_> = ready_groups.into_iter().map(|((source,prefix,account),ready)|json!({"source":source,"prefix":prefix,"account":account,"ready":ready})).collect();
+    // Every non-retired pool, including empty ones, so a new chat can always
+    // show the categories (with 0 ready) instead of hiding the choice.
+    let mut pool_groups =
+        std::collections::BTreeMap::<(String, String, String, bool), (usize, usize)>::new();
+    for seed in data
+        .seeds
+        .iter()
+        .filter(|s| s.retired_at == 0 && s.bound_chat.is_empty())
+    {
+        let entry = pool_groups
+            .entry((
+                seed.source.clone(),
+                seed.prefix.clone(),
+                seed.account.clone(),
+                seed.standby,
+            ))
+            .or_default();
+        entry.0 += 1;
+        if public(seed, time)["status"] == "ready" {
+            entry.1 += 1;
+        }
+    }
+    let pool_groups: Vec<_> = pool_groups.into_iter().map(|((source,prefix,account,standby),(total,ready))|json!({"source":source,"prefix":prefix,"account":account,"standby":standby,"total":total,"ready":ready})).collect();
     let source = args["source"].as_str().unwrap_or("").trim().to_lowercase();
     let keyword = args["keyword"].as_str().unwrap_or("").trim().to_lowercase();
     let all: Vec<_> = data.seeds.iter().map(|s| public(s, time)).collect();
@@ -283,7 +351,7 @@ fn inventory(data: &Library, args: &Value, time: u64) -> Value {
         .as_u64()
         .map(|v| v.clamp(1, 200) as usize)
         .unwrap_or(all.len());
-    json!({"ready_groups":ready_groups,"account_summaries":account_summaries,"groups":groups,"sources":sources,"enabled":data.enabled,"seeds":filtered.iter().skip(offset).take(limit).collect::<Vec<_>>(),"retired_count":counts.get("retired").copied().unwrap_or(0),"total":all.len(),"filtered_total":filtered.len(),"offset":offset,"limit":limit,"counts":counts,"accounts":accounts,"pairing_enabled":!data.pairing_hash.is_empty(),"capacity":LIBRARY_LIMIT})
+    json!({"pool_groups":pool_groups,"ready_groups":ready_groups,"account_summaries":account_summaries,"groups":groups,"sources":sources,"enabled":data.enabled,"seeds":filtered.iter().skip(offset).take(limit).collect::<Vec<_>>(),"retired_count":counts.get("retired").copied().unwrap_or(0),"total":all.len(),"filtered_total":filtered.len(),"offset":offset,"limit":limit,"counts":counts,"accounts":accounts,"pairing_enabled":!data.pairing_hash.is_empty(),"capacity":LIBRARY_LIMIT})
 }
 /// Caller owns the chat lock; no nested locking.
 fn ensure_settled(seed: &Seed) -> Result<()> {
@@ -313,6 +381,9 @@ fn release_seed(root: &Path, seed: &mut Seed) -> Result<()> {
     seed.attachment_id.clear();
     seed.generation += 1;
     seed.last_seen = 0;
+    if let Ok(mut map) = PRESENCE.get_or_init(Default::default).lock() {
+        map.remove(&seed.id);
+    }
     seed.ready = false;
     seed.reason = "workspace_removed".into();
     Ok(())
@@ -330,6 +401,39 @@ pub fn release_workspace(root: &Path) -> Result<()> {
     // Durable pause first: partial storage failures cannot reassign another chat.
     data.enabled = false;
     write(root, &data)?;
+    // Explicit pool choices bypass `enabled`; withdraw them as well.
+    if safe(root, DIR)?.is_dir() {
+        for entry in fs::read_dir(safe(root, DIR)?).map_err(io)? {
+            let filename = entry.map_err(io)?.file_name().to_string_lossy().to_string();
+            if let Some(cid) = filename
+                .strip_suffix(".json")
+                .filter(|cid| id(&json!(cid)).is_ok())
+            {
+                // One unreadable chat must not stop the workspace release.
+                let Ok(mut chat) = load(root, cid) else {
+                    continue;
+                };
+                if chat["seed_explicit"] == true || chat["seed_direct"] == true {
+                    // A pending direct URL does not survive a release: the
+                    // chat returns to a plain [接入AI] state.
+                    if chat["seed_direct"] == true
+                        && chat["seed_owner"].as_str().unwrap_or("").is_empty()
+                    {
+                        chat["seed_auto"] = json!(false);
+                        chat["seed_direct"] = json!(false);
+                    }
+                    chat["seed_explicit"] = json!(false);
+                    save(root, &chat)?;
+                }
+            }
+        }
+    }
+    let time = now();
+    for seed in &mut data.seeds {
+        if seed.retired_at == 0 && !seed.bound_chat.is_empty() && seed.chat_id.is_empty() {
+            retire(seed, "workspace_released", time);
+        }
+    }
     for seed in &mut data.seeds {
         if seed.retired_at == 0 {
             release_seed(root, seed)?;
@@ -341,6 +445,20 @@ pub fn release_workspace(root: &Path) -> Result<()> {
 }
 
 pub fn ui(root: &Path, args: &Value) -> Result<Value> {
+    if args["action"] == "seed_direct" {
+        return direct_url(root, args);
+    }
+    if args["action"] == "seed_created" {
+        // In-app plugins keep the batch tickets; register the host task the
+        // same way the seed endpoint's seed/created method does.
+        created_unlocked(
+            root,
+            args["seed_id"].as_str().unwrap_or(""),
+            args["ticket"].as_str().unwrap_or(""),
+            args["task_id"].as_str().unwrap_or(""),
+        )?;
+        return Ok(json!({"ok":true}));
+    }
     let mut data = read(root)?;
     let time = now();
     match args["action"].as_str().unwrap_or("") {
@@ -466,6 +584,8 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
                     generation: 0,
                     inflight: vec![],
                     operations: vec![],
+                    standby: args["_standby"] == true,
+                    bound_chat: args["_bound_chat"].as_str().unwrap_or("").to_owned(),
                 };
                 batch.push(json!({"seed_id":s.id,"ticket":ticket,"url_key":url_key,"source":source,"prefix":prefix,"manual":manual,"repo_id":repo_id,"branch":branch,"account":account,"expires_at":s.enrollment_until}));
                 data.seeds.push(s);
@@ -532,6 +652,31 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
             result["affected_count"] = json!(selected.len());
             return Ok(result);
         }
+        "seed_delete_account" => {
+            // One account card = every seed with that account label. Detach live chats first, then delete atomically.
+            let account = args["account"].as_str().unwrap_or("").to_owned();
+            if account.is_empty() || !data.seeds.iter().any(|s| s.account == account) {
+                return Err(err("Account not found"));
+            }
+            for seed in data.seeds.iter().filter(|s| s.account == account) {
+                ensure_settled(seed)?;
+            }
+            let mut affected = 0;
+            for seed in data.seeds.iter_mut().filter(|s| s.account == account) {
+                if !seed.chat_id.is_empty() {
+                    release_seed(root, seed)?;
+                }
+                affected += 1;
+            }
+            data.seeds.retain(|s| s.account != account);
+            write(root, &data)?;
+            invalidate(root);
+            let mut query = args.clone();
+            query["account"] = json!("");
+            let mut result = inventory(&data, &query, time);
+            result["affected_count"] = json!(affected);
+            return Ok(result);
+        }
         "seed_reissue" => {
             let sid = id(&args["seed_id"])?;
             let seed = data
@@ -590,8 +735,24 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
             if chat["closed"] == true || group::grouped(&chat) {
                 return Err(err("Only open work chats support seeds"));
             }
+            // A stale seed_owner without an attachment is replaced by
+            // poll_at once that seed is gone; only a live attachment blocks.
+            if !chat["attachment_id"].as_str().unwrap_or("").is_empty() {
+                // Explicit pool choice for a chat that still has an AI attached
+                // must go through detach first (the UI does this on switch).
+                if args.get("seed_filter").is_some_and(Value::is_object) {
+                    return Err(err("Disconnect the current AI before choosing a seed pool"));
+                }
+            }
             chat["seed_auto"] = json!(true);
+            if args.get("seed_filter").is_some_and(Value::is_object) {
+                chat["seed_filter"] = parse_filter(&args["seed_filter"])?;
+                chat["seed_explicit"] = json!(true);
+                chat["seed_direct"] = json!(false);
+            }
+            chat["updated_at"] = json!(time);
             save(root, &chat)?;
+            invalidate(root);
         }
         "seed_list" => (),
         _ => return Err(err("Unknown seed action")),
@@ -599,6 +760,160 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
     Ok(inventory(&data, args, time))
 }
 /// Browser pairing is folder-scoped and only grants status/provisioning access.
+/// Return a still-valid seed that owns `chat` to the library as standby.
+/// Caller holds the chat lock and detaches the chat afterwards. Returns false
+/// when the seed is gone, offline or busy; it is then retired as before.
+pub(super) fn release_to_standby(root: &Path, chat: &Value) -> Result<bool> {
+    let owner = chat["seed_owner"].as_str().unwrap_or("");
+    if owner.is_empty() || !safe(root, FILE)?.exists() {
+        return Ok(false);
+    }
+    let mut data = read(root)?;
+    let time = now();
+    let Some(seed) = data.seeds.iter_mut().find(|s| s.id == owner) else {
+        return Ok(false);
+    };
+    let live = seed.retired_at == 0
+        && seed.redeemed_at > 0
+        && seed.chat_id == chat["id"].as_str().unwrap_or("")
+        && seed.attachment_id == chat["attachment_id"].as_str().unwrap_or("")
+        && seed.inflight.is_empty()
+        && seed.operations.is_empty()
+        && time.saturating_sub(seed.last_seen) <= SUSPECT_MS;
+    if !live {
+        return Ok(false);
+    }
+    seed.chat_id.clear();
+    seed.attachment_id.clear();
+    seed.generation += 1;
+    seed.standby = true;
+    seed.bound_chat.clear();
+    seed.ready = true;
+    seed.reason = "standby".into();
+    write(root, &data)?;
+    invalidate(root);
+    Ok(true)
+}
+/// [接入AI] without OAuth: a one-hour URL that carries its own credential,
+/// like a manual seed, but bound to one chat. The chat waits for that seed
+/// only, even when automatic assignment is off.
+fn direct_url(root: &Path, args: &Value) -> Result<Value> {
+    let cid = id(&args["chat_id"])?.to_owned();
+    let mut chat = load(root, &cid)?;
+    if chat["closed"] == true || group::grouped(&chat) {
+        return Err(err("Only open work chats support direct connect URLs"));
+    }
+    if !chat["attachment_id"].as_str().unwrap_or("").is_empty() {
+        return Err(err(
+            "Disconnect the current AI before connecting another one",
+        ));
+    }
+    let time = now();
+    let mut data = read(root)?;
+    let mut changed = false;
+    // Re-issuing replaces every URL of this chat that is not serving it, used
+    // or not, so no AI is left waiting on a credential that can never match.
+    // Never-used rows are dropped so retired URLs do not pile up.
+    let before = data.seeds.len();
+    data.seeds
+        .retain(|s| !(s.bound_chat == cid && s.redeemed_at == 0));
+    changed |= data.seeds.len() != before;
+    for seed in data
+        .seeds
+        .iter_mut()
+        .filter(|s| s.bound_chat == cid && s.retired_at == 0 && s.chat_id.is_empty())
+    {
+        retire(seed, "replaced", time);
+        changed = true;
+    }
+    if changed {
+        write(root, &data)?;
+    }
+    let created = ui(
+        root,
+        &json!({"action":"seed_manual","source":"direct","prefix":"接入AI","account":"direct","_bound_chat":cid}),
+    )?;
+    let ticket = created["batch"][0].clone();
+    let sid = ticket["seed_id"]
+        .as_str()
+        .ok_or_else(|| err("Direct connect URL failed"))?;
+    // A stale owner (e.g. a busy seed that was plainly detached) would block
+    // the bound seed until the replacement timeout.
+    if !chat["seed_owner"].as_str().unwrap_or("").is_empty() {
+        chat["seed_owner"] = json!("");
+        chat["seed_pending"] = json!(false);
+        chat["seed_generation"] = json!(chat["seed_generation"].as_u64().unwrap_or(0) + 1);
+    }
+    chat["seed_auto"] = json!(true);
+    chat["seed_explicit"] = json!(true);
+    chat["seed_direct"] = json!(true);
+    chat["seed_filter"] = json!({"source":"","keyword":"","seed_id":sid});
+    chat["updated_at"] = json!(time);
+    save(root, &chat)?;
+    invalidate(root);
+    Ok(json!({"ok":true,"seed":ticket}))
+}
+/// A direct-connect URL that was never used stops working when its chat is
+/// disconnected or switched.
+pub(super) fn retire_unused_direct(root: &Path, chat_id: &str) -> Result<()> {
+    if !safe(root, FILE)?.exists() {
+        return Ok(());
+    }
+    let mut data = read(root)?;
+    let time = now();
+    let mut changed = false;
+    for seed in data
+        .seeds
+        .iter_mut()
+        .filter(|s| s.bound_chat == chat_id && s.retired_at == 0 && s.chat_id.is_empty())
+    {
+        retire(seed, "conversation_detached", time);
+        changed = true;
+    }
+    if changed {
+        write(root, &data)?;
+        invalidate(root);
+    }
+    Ok(())
+}
+/// Enroll a directly connected AI that left a chat as a standby seed. Returns
+/// the one-hour URL key; the caller hands it to that AI's next chat_wait.
+pub(super) fn enroll_direct_standby(root: &Path, agent_name: &str) -> Result<String> {
+    let label: String = agent_name
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(60)
+        .collect::<String>()
+        .trim()
+        .to_owned();
+    let label = if label.is_empty() {
+        "AI".to_owned()
+    } else {
+        label
+    };
+    // Standby URLs that were never connected expire after an hour; retire
+    // them so the standby card does not fill with dead entries.
+    let mut data = read(root)?;
+    let time = now();
+    let mut changed = false;
+    for seed in data.seeds.iter_mut().filter(|s| {
+        s.standby && s.retired_at == 0 && s.redeemed_at == 0 && time > s.enrollment_until
+    }) {
+        retire(seed, "inactive", time);
+        changed = true;
+    }
+    if changed {
+        write(root, &data)?;
+    }
+    let created = ui(
+        root,
+        &json!({"action":"seed_manual","source":"standby","prefix":label,"account":label,"_standby":true}),
+    )?;
+    created["batch"][0]["url_key"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| err("Standby enrollment failed"))
+}
 pub fn provision(root: &Path, token: &str, args: &Value) -> Result<Value> {
     let _lock = lock(root)?;
     let data = read(root)?;
@@ -727,6 +1042,7 @@ pub fn url(root: &Path, key: &str, redeem: bool) -> Result<String> {
         s.access_until = time + 7 * 86400_000;
         s.last_seen = time;
         write(root, &data)?;
+        super::forget_standby_url(key);
     }
     Ok(sid)
 }
@@ -748,6 +1064,7 @@ fn authorized(data: &Library, sid: &str, token: &str, time: u64) -> Result<usize
     {
         return Err(err("Seed access expired, retired or invalid"));
     }
+    touch(sid, time);
     Ok(index)
 }
 pub fn authenticate(root: &Path, sid: &str, token: &str) -> Result<()> {
@@ -756,8 +1073,12 @@ pub fn authenticate(root: &Path, sid: &str, token: &str) -> Result<()> {
     Ok(())
 }
 pub fn created(root: &Path, sid: &str, ticket: &str, task: &str) -> Result<()> {
-    id(&json!(task))?;
     let _lock = lock(root)?;
+    created_unlocked(root, sid, ticket, task)
+}
+/// Caller holds the chat store lock (`ui` runs inside `chat::ui`'s lock).
+fn created_unlocked(root: &Path, sid: &str, ticket: &str, task: &str) -> Result<()> {
+    id(&json!(task))?;
     let mut data = read(root)?;
     let s = data
         .seeds
@@ -810,7 +1131,7 @@ fn poll_at(root: &Path, sid: &str, token: &str, time: u64) -> Result<Value> {
                 write(root, &data)?;
             }
             return Ok(
-                json!({"status":"idle","instruction":"Make one new independent seed_wait(timeout_ms:25000). Idle is normal. Respect host execution limits."}),
+                json!({"status":"idle","instruction":"Make one new independent wait (chat_wait or seed_wait, timeout_ms:25000). Idle is normal. The user writes in the app at any time; idle only means no new message yet, so just wait again. Respect host execution limits."}),
             );
         }
         if scans.len() > 1024 {
@@ -886,9 +1207,19 @@ fn poll_at(root: &Path, sid: &str, token: &str, time: u64) -> Result<Value> {
             return Ok(json!({"status":"retired"}));
         }
     }
-    if data.enabled && data.seeds[index].chat_id.is_empty() {
+    if data.seeds[index].chat_id.is_empty() {
         chats.sort_by_key(|chat| chat["created_at"].as_u64().unwrap_or(0));
         for mut chat in chats {
+            // The library switch only governs automatic assignment. A pool the
+            // user explicitly chose for a chat is always served.
+            if !data.enabled && chat["seed_explicit"] != true {
+                continue;
+            }
+            // A direct-connect seed serves only its own chat.
+            let bound = &data.seeds[index].bound_chat;
+            if !bound.is_empty() && chat["id"].as_str() != Some(bound.as_str()) {
+                continue;
+            }
             if !eligible(&chat)
                 || !matches(&data.seeds[index], &parse_filter(&chat["seed_filter"])?)
             {
@@ -929,6 +1260,8 @@ fn poll_at(root: &Path, sid: &str, token: &str, time: u64) -> Result<Value> {
             s.chat_id = id(&chat["id"])?.into();
             s.attachment_id = attachment;
             s.generation = generation;
+            s.standby = false;
+            s.reason.clear();
             dirty = true;
             invalidate(root);
             break;
@@ -939,7 +1272,7 @@ fn poll_at(root: &Path, sid: &str, token: &str, time: u64) -> Result<Value> {
     }
     let s = &data.seeds[index];
     Ok(if s.chat_id.is_empty() {
-        json!({"status":"idle","instruction":"Make one new independent seed_wait(timeout_ms:25000). Idle is normal. Respect host execution limits."})
+        json!({"status":"idle","instruction":"Make one new independent wait (chat_wait or seed_wait, timeout_ms:25000). Idle is normal. The user writes in the app at any time; idle only means no new message yet, so just wait again. Respect host execution limits."})
     } else {
         json!({"status":"assigned","needs_open":load(root, &s.chat_id)?["seed_pending"] == true,"chat_id":s.chat_id,"attachment_id":s.attachment_id,"generation":s.generation,"instruction":"Call chat_open with this chat_id and attachment_id. Read the complete returned skill and history. Preserve the existing pending message, plan and user constraints; inspect files and prior operation results before resuming. Work through this MCP workspace. Do not replay completed actions or use an old host sandbox as the project source."})
     })
@@ -1116,6 +1449,27 @@ mod tests {
             poll(root.path(), sid, &tokens[0]).unwrap()["chat_id"],
             next["id"]
         );
+    }
+
+    #[test]
+    fn deleting_an_account_card_removes_only_its_settled_seeds() {
+        let (root, _, _) = fixture();
+        let run = |args: Value| super::super::ui(root.path(), &args);
+        run(json!({"action":"seed_manual","account":"other","source":"arena"})).unwrap();
+        assert!(run(json!({"action":"seed_delete_account","account":"missing"})).is_err());
+        let mut data = read(root.path()).unwrap();
+        data.seeds[0].operations.push("running-operation".into());
+        write(root.path(), &data).unwrap();
+        assert!(run(json!({"action":"seed_delete_account","account":"test"})).is_err());
+        assert_eq!(read(root.path()).unwrap().seeds.len(), 4);
+        let mut data = read(root.path()).unwrap();
+        data.seeds[0].operations.clear();
+        write(root.path(), &data).unwrap();
+        let result = run(json!({"action":"seed_delete_account","account":"test"})).unwrap();
+        assert_eq!(result["affected_count"], 3);
+        let left = read(root.path()).unwrap().seeds;
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].account, "other");
     }
 
     #[test]
@@ -1927,4 +2281,325 @@ pub fn process_settled(root: &Path, sid: &str, session: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod standby_tests {
+    use super::*;
+    fn library(enabled: bool) -> (tempfile::TempDir, Vec<Value>, Vec<String>) {
+        let root = tempfile::tempdir().unwrap();
+        super::super::ui(
+            root.path(),
+            &json!({"action":"seed_settings","enabled":enabled}),
+        )
+        .unwrap();
+        let batch = super::super::ui(root.path(), &json!({"action":"seed_batch","count":2,"account":"acct","prefix":"p","repo_id":"r","branch":"main"})).unwrap()["batch"].as_array().unwrap().clone();
+        let tokens = batch
+            .iter()
+            .map(|s| {
+                initialize(
+                    root.path(),
+                    s["seed_id"].as_str().unwrap(),
+                    s["ticket"].as_str().unwrap(),
+                )
+                .unwrap()
+            })
+            .collect();
+        (root, batch, tokens)
+    }
+    fn seed_row(root: &Path, sid: &str) -> Value {
+        super::super::ui(root, &json!({"action":"seed_list"})).unwrap()["seeds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == sid)
+            .cloned()
+            .unwrap()
+    }
+
+    #[test]
+    fn explicit_pool_is_served_while_automatic_assignment_is_off() {
+        let (root, batch, tokens) = library(false);
+        let sid = batch[0]["seed_id"].as_str().unwrap();
+        let plain =
+            super::super::ui(root.path(), &json!({"action":"create"})).unwrap()["session"].clone();
+        assert_ne!(plain["seed_auto"], true);
+        let chosen = super::super::ui(
+            root.path(),
+            &json!({"action":"create","seed_filter":{"source":"","keyword":"","account":"acct"}}),
+        )
+        .unwrap()["session"]
+            .clone();
+        assert_eq!(chosen["seed_auto"], true);
+        let assigned = poll(root.path(), sid, &tokens[0]).unwrap();
+        assert_eq!(assigned["status"], "assigned");
+        assert_eq!(assigned["chat_id"], chosen["id"]);
+        let inventory = super::super::ui(root.path(), &json!({"action":"seed_list"})).unwrap();
+        assert!(inventory["pool_groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g["account"] == "acct" && g["total"] == 2));
+    }
+
+    #[test]
+    fn disconnecting_a_live_seed_returns_it_as_assignable_standby() {
+        let (root, batch, tokens) = library(true);
+        let sid = batch[0]["seed_id"].as_str().unwrap();
+        let chat =
+            super::super::ui(root.path(), &json!({"action":"create"})).unwrap()["session"].clone();
+        let assigned = poll(root.path(), sid, &tokens[0]).unwrap();
+        assert_eq!(assigned["chat_id"], chat["id"]);
+        super::super::tool(root.path(), "chat_open", &assigned).unwrap();
+        let detached = super::super::ui(
+            root.path(),
+            &json!({"action":"detach","chat_id":chat["id"],"standby":true}),
+        )
+        .unwrap();
+        assert_eq!(detached["standby"], "seed");
+        let handoff = super::super::standby_handoff(&assigned).unwrap();
+        assert_eq!(handoff["status"], "idle");
+        assert_eq!(handoff["standby"], true);
+        let row = seed_row(root.path(), sid);
+        assert_eq!(row["standby"], true);
+        assert_eq!(row["retired_at"], 0);
+        assert_eq!(
+            poll_at(root.path(), sid, &tokens[0], now() + 2_000).unwrap()["status"],
+            "idle"
+        );
+        assert_eq!(seed_row(root.path(), sid)["status"], "ready");
+        let next = super::super::ui(
+            root.path(),
+            &json!({"action":"create","seed_filter":{"source":"","keyword":"","standby":true}}),
+        )
+        .unwrap()["session"]
+            .clone();
+        // The other (non-standby) seed must not match a standby-only pool.
+        assert_eq!(
+            poll_at(
+                root.path(),
+                batch[1]["seed_id"].as_str().unwrap(),
+                &tokens[1],
+                now() + 4_000
+            )
+            .unwrap()["status"],
+            "idle"
+        );
+        let again = poll_at(root.path(), sid, &tokens[0], now() + 6_000).unwrap();
+        assert_eq!(again["chat_id"], next["id"]);
+        assert_eq!(seed_row(root.path(), sid)["standby"], false);
+    }
+
+    #[test]
+    fn disconnected_direct_ai_is_assignable_while_waiting_and_offline_once_it_stops() {
+        let root = tempfile::tempdir().unwrap();
+        let chat = super::super::ui(root.path(), &json!({"action":"create","seed_manual":true}))
+            .unwrap()["session"]
+            .clone();
+        let issued = super::super::ui(
+            root.path(),
+            &json!({"action":"seed_direct","chat_id":chat["id"]}),
+        )
+        .unwrap();
+        let key = issued["seed"]["url_key"].as_str().unwrap().to_owned();
+        let sid = url(root.path(), &key, true).unwrap();
+        let assigned = poll(root.path(), &sid, &key).unwrap();
+        assert_eq!(assigned["chat_id"], chat["id"]);
+        super::super::tool(root.path(), "chat_open", &assigned).unwrap();
+        let card = |time: u64| {
+            let data = read(root.path()).unwrap();
+            inventory(&data, &json!({}), time)["account_summaries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|a| a["account"] == "direct")
+                .cloned()
+                .unwrap()
+        };
+        let start = now();
+        assert_eq!(card(start)["counts"], json!({"assigned":1}));
+        let detached = super::super::ui(
+            root.path(),
+            &json!({"action":"detach","chat_id":chat["id"],"standby":true}),
+        )
+        .unwrap();
+        assert_eq!(detached["standby"], "seed");
+        let start = now();
+        assert_eq!(card(start)["counts"], json!({"ready":1}));
+        assert_eq!(card(start + 50_000)["counts"], json!({"ready":1}));
+        // The host ended its turn: over a minute without a wait is offline, not valid.
+        let gone = card(start + 61_000);
+        assert_eq!(gone["counts"], json!({"offline":1}));
+        assert_eq!(gone["valid"], 0);
+        let data = read(root.path()).unwrap();
+        let pools = inventory(&data, &json!({}), start + 61_000)["pool_groups"].clone();
+        assert_eq!(pools[0]["standby"], true);
+        assert_eq!(pools[0]["ready"], 0);
+        // Waiting again brings it straight back.
+        assert_eq!(
+            poll_at(root.path(), &sid, &key, start + 61_000).unwrap()["status"],
+            "idle"
+        );
+        assert_eq!(card(start + 61_000)["counts"], json!({"ready":1}));
+    }
+
+    #[test]
+    fn disconnecting_a_live_direct_ai_enrolls_a_standby_seed() {
+        let root = tempfile::tempdir().unwrap();
+        let chat = super::super::ui(root.path(), &json!({"action":"create","seed_manual":true}))
+            .unwrap()["session"]
+            .clone();
+        let opened = super::super::tool(
+            root.path(),
+            "chat_open",
+            &json!({"chat_id":chat["id"],"agent_name":"Claude"}),
+        )
+        .unwrap();
+        let attachment = opened["attachment_id"].as_str().unwrap().to_owned();
+        let detached = super::super::ui(
+            root.path(),
+            &json!({"action":"detach","chat_id":chat["id"],"standby":true}),
+        )
+        .unwrap();
+        assert_eq!(detached["standby"], "direct");
+        assert_eq!(detached["session"]["seed_auto"], false);
+        let handoff = super::super::standby_handoff(
+            &json!({"attachment_id":attachment,"workspace_folder_id":"folder1"}),
+        )
+        .unwrap();
+        assert_eq!(handoff["status"], "standby");
+        let suffix = handoff["seed_url_suffix"].as_str().unwrap();
+        let key = suffix.strip_prefix("/seeds/folder1/").unwrap();
+        assert_eq!(key.len(), 64);
+        let sid = url(root.path(), key, true).unwrap();
+        // Once redeemed, the URL is no longer handed out again.
+        assert!(super::super::standby_handoff(
+            &json!({"attachment_id":attachment,"workspace_folder_id":"folder1"})
+        )
+        .is_none());
+        let row = seed_row(root.path(), &sid);
+        assert_eq!(row["source"], "standby");
+        assert_eq!(row["standby"], true);
+        // The old attachment can no longer act on the chat.
+        assert!(super::super::authorize_project_attachment(
+            root.path(),
+            &json!({"chat_id":chat["id"],"attachment_id":attachment}),
+            true
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn choosing_a_pool_after_a_stale_seed_owner_is_allowed() {
+        let (root, batch, tokens) = library(false);
+        let sid = batch[0]["seed_id"].as_str().unwrap();
+        let chat = super::super::ui(
+            root.path(),
+            &json!({"action":"create","seed_filter":{"source":"","keyword":""}}),
+        )
+        .unwrap()["session"]
+            .clone();
+        let assigned = poll(root.path(), sid, &tokens[0]).unwrap();
+        assert_eq!(assigned["chat_id"], chat["id"]);
+        // Plain detach (e.g. the seed was offline) keeps seed_owner set.
+        super::super::ui(
+            root.path(),
+            &json!({"action":"detach","chat_id":chat["id"]}),
+        )
+        .unwrap();
+        super::super::ui(
+            root.path(),
+            &json!({"action":"seed_resume_chat","chat_id":chat["id"],"seed_filter":{"source":"","keyword":"","account":"acct"}}),
+        )
+        .unwrap();
+        let read =
+            super::super::ui(root.path(), &json!({"action":"read","chat_id":chat["id"]})).unwrap();
+        assert_eq!(read["session"]["seed_auto"], true);
+    }
+
+    #[test]
+    fn direct_url_is_bound_to_its_chat_only() {
+        let root = tempfile::tempdir().unwrap();
+        let other = super::super::ui(
+            root.path(),
+            &json!({"action":"create","seed_filter":{"source":"","keyword":""}}),
+        )
+        .unwrap()["session"]
+            .clone();
+        let chat = super::super::ui(root.path(), &json!({"action":"create","seed_manual":true}))
+            .unwrap()["session"]
+            .clone();
+        let first = super::super::ui(
+            root.path(),
+            &json!({"action":"seed_direct","chat_id":chat["id"]}),
+        )
+        .unwrap();
+        // The first URL is used but not yet assigned when the guide reissues.
+        let first_key = first["seed"]["url_key"].as_str().unwrap().to_owned();
+        let first_sid = url(root.path(), &first_key, true).unwrap();
+        let issued = super::super::ui(
+            root.path(),
+            &json!({"action":"seed_direct","chat_id":chat["id"]}),
+        )
+        .unwrap();
+        // Its AI is told to stop instead of waiting forever.
+        assert!(poll(root.path(), &first_sid, &first_key).is_err());
+        // Re-issuing retires the unused URL.
+        assert!(url(
+            root.path(),
+            first["seed"]["url_key"].as_str().unwrap(),
+            false
+        )
+        .is_err());
+        let key = issued["seed"]["url_key"].as_str().unwrap();
+        let sid = url(root.path(), key, true).unwrap();
+        let read =
+            super::super::ui(root.path(), &json!({"action":"read","chat_id":chat["id"]})).unwrap();
+        assert_eq!(read["session"]["seed_direct"], true);
+        assert_eq!(read["session"]["seed_auto"], true);
+        let seed = seed_row(root.path(), &sid);
+        let assigned = poll(root.path(), &sid, key).unwrap();
+        // The older pool chat must not take the bound seed.
+        assert_eq!(assigned["chat_id"], chat["id"], "{seed}");
+        assert_ne!(assigned["chat_id"], other["id"]);
+        let inventory = super::super::ui(root.path(), &json!({"action":"seed_list"})).unwrap();
+        assert!(inventory["pool_groups"].as_array().unwrap().is_empty());
+        // Disconnecting before the URL is used retires it.
+        let pending = super::super::ui(root.path(), &json!({"action":"create","seed_manual":true}))
+            .unwrap()["session"]
+            .clone();
+        let unused = super::super::ui(
+            root.path(),
+            &json!({"action":"seed_direct","chat_id":pending["id"]}),
+        )
+        .unwrap();
+        super::super::ui(
+            root.path(),
+            &json!({"action":"detach","chat_id":pending["id"]}),
+        )
+        .unwrap();
+        assert!(url(
+            root.path(),
+            unused["seed"]["url_key"].as_str().unwrap(),
+            false
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn plain_detach_keeps_previous_behaviour() {
+        let root = tempfile::tempdir().unwrap();
+        let chat = super::super::ui(root.path(), &json!({"action":"create","seed_manual":true}))
+            .unwrap()["session"]
+            .clone();
+        super::super::tool(root.path(), "chat_open", &json!({"chat_id":chat["id"]})).unwrap();
+        let detached = super::super::ui(
+            root.path(),
+            &json!({"action":"detach","chat_id":chat["id"]}),
+        )
+        .unwrap();
+        assert!(detached["standby"].is_null());
+        let inventory = super::super::ui(root.path(), &json!({"action":"seed_list"})).unwrap();
+        assert_eq!(inventory["total"], 0);
+    }
 }

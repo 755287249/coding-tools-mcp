@@ -14,10 +14,12 @@ test('manual prompt enrolls only its seed and folder, exchanges credentials, and
  assert.throws(()=>seedEnrollmentPrompt('http://elsewhere.test/mcp','folder',seed));
  assert.throws(()=>seedEnrollmentPrompt('https://example.test/mcp','folder',{...seed,expires_at:0}));
 });
-test('URL-first manual prompt carries one capability URL and the requested concise instruction',()=>{
- const url_key='b'.repeat(64),prompt=seedEnrollmentPrompt('https://example.test/clients/mine/mcp','folder',{...seed,url_key});
- assert.ok(prompt.startsWith('https://example.test/clients/mine/mcp/seeds/folder/'+url_key+' '));
- assert.ok(prompt.includes('chat_wait/chat_reply'));assert.ok(prompt.length<350);
- for(const secret of [seed.ticket,'Bearer','seed_access_token','seed_wait','initialize'])assert.ok(!prompt.includes(secret));
+test('URL-first manual prompt carries one capability URL, a ready web entry and the shared instruction',()=>{
+ const url_key='b'.repeat(64),endpoint='https://example.test/clients/mine/mcp/seeds/folder/'+url_key,prompt=seedEnrollmentPrompt('https://example.test/clients/mine/mcp','folder',{...seed,url_key});
+ // Short and unambiguous: one URL, and the server explains rules and tools itself.
+ assert.ok(prompt.includes(' '+endpoint+' 。'),prompt);
+ for(const word of ['请连接我的工具','明确使用规则','熟悉可用工具','工具在 MCP 内部，而非你的客户端内部','然后等待信息'])assert.ok(prompt.includes(word),word);
+ assert.ok(prompt.replace(endpoint,'').length<120,String(prompt.length));
+ for(const secret of [seed.ticket,'Bearer','seed_access_token','seed_wait','无人值守','不要询问'])assert.ok(!prompt.includes(secret));
  assert.throws(()=>seedEnrollmentPrompt('https://example.test/mcp','folder',{...seed,url_key:'bad'}));
 });

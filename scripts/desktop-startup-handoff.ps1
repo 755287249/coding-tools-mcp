@@ -25,6 +25,35 @@ function Select-UpgradeTargets {
     }
 }
 
+# Same identity rules as Select-UpgradeTargets, but selects strictly NEWER
+# builds. Used only after the user explicitly confirms a downgrade (for
+# example opening 0.1.141 while 0.1.142 keeps running in the tray).
+function Select-DowngradeTargets {
+    param([array]$Candidates, [string]$TargetPath, [version]$TargetVersion, [int]$SessionId, [int]$ExcludePid)
+    foreach ($candidate in $Candidates) {
+        if ($candidate.ProcessId -eq $ExcludePid -or $candidate.SessionId -ne $SessionId) { continue }
+        if (-not (Test-DesktopName $candidate.Name)) { continue }
+        if ($candidate.ProductName -ne 'Coding Tools MCP' -or [string]::IsNullOrWhiteSpace($candidate.ExecutablePath)) { continue }
+        if ([string]::Equals($candidate.ExecutablePath, $TargetPath, [StringComparison]::OrdinalIgnoreCase)) { continue }
+        $version = $null
+        if (-not [version]::TryParse([string]$candidate.Version, [ref]$version)) { continue }
+        if ($version -gt $TargetVersion) { $candidate }
+    }
+}
+
+function Get-DowngradePrompt {
+    param([array]$Newer, [string]$TargetVersion)
+    $running = (@($Newer | ForEach-Object { [string]$_.Version }) | Sort-Object -Unique) -join ', '
+    return "A newer Coding Tools MCP ($running) is running.`n`nClose it and switch to this older version ($TargetVersion)?`n`nNote: 0.1.142 and later migrate settings to a global MCP connection. An older version may need MCP and the tunnel enabled again. Settings saved before that migration (if any) are in data\pre-global-connection. See docs/handoff/2026-10-12-cloudflared-cwd-and-rollback.md in the source repository for restore steps."
+}
+
+function Confirm-Downgrade {
+    param([array]$Newer, [string]$TargetVersion)
+    Add-Type -AssemblyName System.Windows.Forms
+    $answer = [System.Windows.Forms.MessageBox]::Show((Get-DowngradePrompt $Newer $TargetVersion), 'Coding Tools MCP', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning, [System.Windows.Forms.MessageBoxDefaultButton]::Button2)
+    return $answer -eq [System.Windows.Forms.DialogResult]::Yes
+}
+
 function Test-DesktopName([string]$Name) {
     return $Name -match '^(ctmcp(?:-\d+\.\d+\.\d+-win64)?(?: \(\d+\))?|Coding Tools MCP|coding-tools-mcp-desktop)\.exe$'
 }
@@ -246,7 +275,18 @@ try {
     if ($info.ProductName -ne 'Coding Tools MCP' -or [version]$info.ProductVersion -ne $targetVersion) { throw 'The new executable has invalid product/version metadata.' }
     $sessionId = (Get-Process -Id $PID).SessionId
     Start-Sleep -Milliseconds 400
-    $old = @(Select-UpgradeTargets @(Get-DesktopCandidates) $target $targetVersion $sessionId $LauncherPid)
+    $running = @(Get-DesktopCandidates)
+    $old = @(Select-UpgradeTargets $running $target $targetVersion $sessionId $LauncherPid)
+    $downgrade = $false
+    if ($old.Count -eq 0 -and -not $NoDialogs) {
+        # Rolling back: only after an explicit Yes; default button is No.
+        $newer = @(Select-DowngradeTargets $running $target $targetVersion $sessionId $LauncherPid)
+        if ($newer.Count -gt 0) {
+            if (-not (Confirm-Downgrade $newer $NewVersion)) { return }
+            $old = $newer
+            $downgrade = $true
+        }
+    }
     if ($old.Count -eq 0) { throw 'An equal/newer instance is already running, or the running application could not be safely identified. Exit it from the tray before opening this copy.' }
     $dataDir = Split-Path -Parent $DataFile
     New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
@@ -256,11 +296,13 @@ try {
     } else { $data = [pscustomobject]@{profiles=@();mcp_enabled_workspace_ids=@();actions_enabled_workspace_ids=@()} }
     $snapshot = Get-UpgradeSnapshot $data
     $requiredEndpoints = @()
-    foreach ($endpoint in @($snapshot.endpoints)) {
+    # An older build may not understand settings migrated by the newer build,
+    # so a downgrade requires only a running desktop, not restored services.
+    foreach ($endpoint in @($(if ($downgrade) { @() } else { $snapshot.endpoints }))) {
         if ((Get-EndpointHealth $endpoint).healthy) { $requiredEndpoints += $endpoint }
         else { Write-UpgradeLog "Already unavailable before upgrade: $($endpoint.kind) port=$(([uri]$endpoint.url).Port)" }
     }
-    Write-UpgradeLog "Preparing $NewVersion; previously healthy services=$($requiredEndpoints.Count)"
+    Write-UpgradeLog "Preparing $NewVersion; downgrade=$downgrade; previously healthy services=$($requiredEndpoints.Count)"
     $handoff = Join-Path $dataDir 'runtime-handoff.json'
     if (Test-Path -LiteralPath $handoff) { throw 'A previous runtime handoff is pending. Restart the existing application first.' }
     $json = @{mcpWorkspaceIds=@($snapshot.mcpWorkspaceIds);actionsWorkspaceIds=@($snapshot.actionsWorkspaceIds)} | ConvertTo-Json -Depth 4

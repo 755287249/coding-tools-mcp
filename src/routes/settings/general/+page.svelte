@@ -41,7 +41,7 @@
 <section class="page-scroll">
   <header class="page-header">
     <p class="page-kicker">{$t("Global settings")}</p>
-    <h2 class="page-title">{$t("General")}</h2>
+    <h2 class="page-title">{$t("settings.proxy")}</h2>
     <p class="mt-2 max-w-2xl text-sm text-[var(--color-text-muted)]">
       {$t(
         "Configure the global network proxy. It applies to Cloudflare tunnel connections but not software downloads.",

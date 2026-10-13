@@ -43,6 +43,12 @@ const TOOLS: &[&str] = &[
     "git_diff",
     "git_log",
 ];
+/// Same tool set as an OAuth project connection: both channels are equal.
+fn seed_tool_allowed(name: &str) -> bool {
+    name != "switch_workspace_folder"
+        && (TOOLS.contains(&name) || crate::tools::project_scope::allowed(name))
+}
+const SUPPORTED_PROTOCOLS: &[&str] = &["2024-11-05", "2025-03-26", "2025-06-18"];
 fn wrapped(value: Value) -> Value {
     json!({"content":[{"type":"text","text":value.to_string()}],"structuredContent":value,"isError":false})
 }
@@ -70,6 +76,7 @@ fn scoped_tool(mut tool: Value) -> Value {
 pub(super) async fn get(
     State(state): State<ListenerState>,
     Path((folder_id, key)): Path<(String, String)>,
+    axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
     headers: HeaderMap,
 ) -> Response {
     if headers.get("accept").and_then(|v| v.to_str().ok()) == Some("text/event-stream") {
@@ -93,8 +100,16 @@ pub(super) async fn get(
             json!({"name":"coding-tools-seed","transport":"streamable-http","instructions":seeds::skill()["text"]}),
         )
     })();
+    let wants_json = headers
+        .get("accept")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.contains("application/json"));
     let mut response = match result {
-        Ok(value) => json_no_store(value),
+        Ok(value) if wants_json => json_no_store(value),
+        Ok(_) => {
+            let base = base_url(&headers, &uri, None);
+            page(&headers, guide_text(&base), &base, None)
+        }
         Err(_) => (
             StatusCode::NOT_FOUND,
             json_no_store(json!({"error":"Seed unavailable"})),
@@ -108,10 +123,18 @@ pub(super) async fn get(
     response
 }
 struct WaitGuard(String);
+/// The Bearer-header pairing form was removed in 0.1.147: the token is now the
+/// last segment of one webhook URL.
+pub(super) async fn provision_removed() -> Response {
+    (
+        StatusCode::GONE,
+        json_no_store(json!({"error":"Use the seed webhook URL from the app (address and token are now one URL)"})),
+    )
+        .into_response()
+}
 pub(super) async fn provision(
     State(state): State<ListenerState>,
-    Path(folder_id): Path<String>,
-    headers: HeaderMap,
+    Path((folder_id, token)): Path<(String, String)>,
     Json(body): Json<Value>,
 ) -> Response {
     let result = (|| -> Result<Value, String> {
@@ -131,12 +154,7 @@ pub(super) async fn provision(
             .ok_or("Seed library unavailable")?;
         let root =
             std::path::PathBuf::from(folder["path"].as_str().ok_or("Seed library unavailable")?);
-        let token = headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .unwrap_or("");
-        let mut result = seeds::provision(&root, token, &body).map_err(|e| e.message())?;
+        let mut result = seeds::provision(&root, &token, &body).map_err(|e| e.message())?;
         result["workspace_folder_id"] = json!(folder_id);
         Ok(result)
     })();
@@ -198,9 +216,15 @@ async fn execute(
     let protocol = headers
         .get("mcp-protocol-version")
         .and_then(|h| h.to_str().ok());
-    if method != "initialize" && protocol != Some("2025-03-26") {
-        return Err("MCP-Protocol-Version must match negotiated 2025-03-26".into());
+    // Accept a missing header (curl users, older clients) and every
+    // published revision; the seed protocol surface is identical for them.
+    if method != "initialize" && protocol.is_some_and(|p| !SUPPORTED_PROTOCOLS.contains(&p)) {
+        return Err("Unsupported MCP-Protocol-Version".into());
     }
+    let negotiated = params["protocolVersion"]
+        .as_str()
+        .filter(|v| SUPPORTED_PROTOCOLS.contains(v))
+        .unwrap_or("2025-03-26");
     if !crate::tools::registry::exposed_tool_names(&state.mcp.runtime_config().tool_profile)
         .contains(&"chat_open")
     {
@@ -220,12 +244,12 @@ async fn execute(
     if method == "initialize" {
         if url_mode {
             return Ok(Some(
-                json!({"protocolVersion":"2025-03-26","capabilities":{"tools":{},"resources":{}},"serverInfo":{"name":"coding-tools-seed","version":"1"},"instructions":seeds::skill()["text"]}),
+                json!({"protocolVersion":negotiated,"capabilities":{"tools":{},"resources":{}},"serverInfo":{"name":"coding-tools-seed","version":"1"},"instructions":seeds::skill()["text"]}),
             ));
         }
         let access = seeds::initialize(&root, seed_id, token).map_err(|e| e.message())?;
         return Ok(Some(
-            json!({"protocolVersion":"2025-03-26","capabilities":{"tools":{},"resources":{}},"serverInfo":{"name":"coding-tools-seed","version":"1"},"instructions":seeds::skill()["text"],"_meta":{"seed_access_token":access}}),
+            json!({"protocolVersion":negotiated,"capabilities":{"tools":{},"resources":{}},"serverInfo":{"name":"coding-tools-seed","version":"1"},"instructions":seeds::skill()["text"],"_meta":{"seed_access_token":access}}),
         ));
     }
     if method == "seed/created" {
@@ -262,7 +286,7 @@ async fn execute(
                     .as_array()
                     .into_iter()
                     .flatten()
-                    .filter(|t| t["name"].as_str().is_some_and(|name| TOOLS.contains(&name)))
+                    .filter(|t| t["name"].as_str().is_some_and(seed_tool_allowed))
                     .cloned()
                     .map(scoped_tool),
             );
@@ -296,7 +320,7 @@ async fn execute(
                 status["workspace"] = folder.clone();
                 status["skill"] = seeds::skill();
                 status["instruction"] =
-                    json!("Read skill.text, then immediately chat_wait(timeout_ms:25000).");
+                    json!("Read skill.text, then immediately chat_wait(timeout_ms:25000). Keep calling chat_wait one at a time until assigned. The user writes in the app at any time; idle only means no new message yet, so just wait again.");
                 return Ok(Some(wrapped(status)));
             }
             let chat_wait = name == "chat_wait";
@@ -324,6 +348,14 @@ async fn execute(
                     return Ok(Some(wrapped(
                         json!({"status":"retired","registered":false,"instruction":"Seed retired. Stop waiting and do not switch identities."}),
                     )));
+                }
+                if crate::tools::chat::standby_handoff(&args).is_some() {
+                    // Returned to standby: the old chat IDs no longer apply, even when this
+                    // same poll already assigned the seed to another chat.
+                    if let Some(map) = args.as_object_mut() {
+                        map.remove("chat_id");
+                        map.remove("attachment_id");
+                    }
                 }
                 if args.get("chat_id").is_some() && args["chat_id"] != status["chat_id"] {
                     return Err("Seed may only access its assigned chat".into());
@@ -422,7 +454,7 @@ async fn execute(
                             result["instruction"] = json!(if result["status"] == "retired" {
                                 "Seed retired. Stop waiting and do not switch identities."
                             } else {
-                                "Immediately call chat_wait(timeout_ms:25000) again. Idle is normal."
+                                "Immediately call chat_wait(timeout_ms:25000) again. Idle is normal. The user writes in the app at any time; idle only means no new message yet, so just wait again."
                             });
                         }
                         break wrapped(result);
@@ -434,7 +466,7 @@ async fn execute(
                     .await;
                 }
             } else {
-                if !TOOLS.contains(&name) {
+                if !seed_tool_allowed(name) {
                     return Err("Tool not available to seeds".into());
                 }
                 if args.get("workspace_folder_id").is_some()
@@ -469,6 +501,31 @@ async fn execute(
                             .collect::<String>()
                     ));
                 }
+                // The chat's authorization mode (完全/一般/严格) applies to project tools.
+                if !name.starts_with("chat_")
+                    && !matches!(name, "set_todos" | "update_plan" | "report_progress")
+                {
+                    if let Some(chat_id) = binding["chat_id"]
+                        .as_str()
+                        .filter(|c| !c.is_empty())
+                        .map(str::to_owned)
+                    {
+                        match apply_access_mode(&root, &chat_id, name, &args).await {
+                            Ok(next) => args = next,
+                            Err(blocked) => {
+                                seeds::finish(
+                                    &root,
+                                    seed_id,
+                                    binding["call_id"].as_str().unwrap_or(""),
+                                    &args,
+                                    &blocked,
+                                )
+                                .map_err(|e| e.message())?;
+                                return Ok(Some(wrapped(blocked)));
+                            }
+                        }
+                    }
+                }
                 let response=handle_request_async(state.mcp,json!({"jsonrpc":"2.0","id":body["id"],"method":"tools/call","params":{"name":name,"arguments":args,"_meta":{"openai/session":format!("seed:{seed_id}")}}})).await;
                 let actual = response["result"]["structuredContent"].clone();
                 seeds::finish(
@@ -499,6 +556,52 @@ async fn execute(
         _ => return Err("Method not available to seeds".into()),
     };
     Ok(Some(result))
+}
+
+/// Strict mode waits this long per call for the user's decision; the AI then
+/// retries with `approval_id`. `CTMCP_APPROVAL_WAIT_MS` overrides it (tests).
+const APPROVAL_WAIT_MS: u64 = 20_000;
+async fn apply_access_mode(
+    root: &std::path::Path,
+    chat_id: &str,
+    name: &str,
+    args: &Value,
+) -> std::result::Result<Value, Value> {
+    use crate::tools::chat::access::{self, Gate};
+    let read_only = coding_tools_tunnel_protocol::is_retry_safe_tool_name(name);
+    let accepts_confirm = crate::tools::registry::input_schema(name)["properties"]
+        .get("confirm")
+        .is_some();
+    let wait_ms = std::env::var("CTMCP_APPROVAL_WAIT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(APPROVAL_WAIT_MS);
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(wait_ms);
+    let mut current = args.clone();
+    loop {
+        let gate = access::gate(root, chat_id, name, &current, read_only, accepts_confirm)
+            .map_err(|e| json!({"ok":false,"error":{"code":"ACCESS_CHECK_FAILED","category":"permission","retryable":true,"message":e.message()}}))?;
+        match gate {
+            Gate::Run(next) => return Ok(next),
+            Gate::Blocked(result) => return Err(result),
+            Gate::Wait(id) => {
+                current["approval_id"] = json!(id);
+                while tokio::time::Instant::now() < deadline
+                    && access::status(root, chat_id, &id) == "pending"
+                {
+                    tokio::time::sleep(
+                        Duration::from_secs(1)
+                            .min(deadline.saturating_duration_since(tokio::time::Instant::now())),
+                    )
+                    .await;
+                }
+                if access::status(root, chat_id, &id) != "pending" {
+                    continue;
+                }
+                return Err(access::required_result(name, &id));
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -546,10 +649,21 @@ mod tests {
         let base = format!("http://{address}/clients/seed/mcp");
         let pairing = "d".repeat(64);
         ui(json!({"action":"seed_pairing","token":pairing}));
-        let paired = format!("{base}/seed-library/legacy");
+        let legacy = format!("{base}/seed-library/legacy");
+        // The removed Bearer form now answers 410 Gone, even with a valid token.
+        assert_eq!(
+            client
+                .post(&legacy)
+                .json(&json!({"action":"status"}))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::GONE
+        );
+        let paired = format!("{legacy}/{pairing}");
         let state = client
             .post(&paired)
-            .bearer_auth(&pairing)
             .json(&json!({"action":"status"}))
             .send()
             .await
@@ -567,7 +681,6 @@ mod tests {
             assert_eq!(
                 client
                     .post(&paired)
-                    .bearer_auth(&pairing)
                     .json(&json!({"action":action}))
                     .send()
                     .await
@@ -578,8 +691,7 @@ mod tests {
         }
         assert_eq!(
             client
-                .post(&paired)
-                .bearer_auth("wrong")
+                .post(format!("{legacy}/{}", "e".repeat(64)))
                 .json(&json!({"action":"status"}))
                 .send()
                 .await
@@ -590,7 +702,6 @@ mod tests {
         assert_eq!(
             client
                 .post(&paired)
-                .bearer_auth(&pairing)
                 .header("content-type", "application/json")
                 .body("x".repeat(20000))
                 .send()
@@ -602,7 +713,6 @@ mod tests {
         assert_eq!(
             client
                 .post(&base)
-                .bearer_auth(&pairing)
                 .json(&json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}))
                 .send()
                 .await
@@ -612,7 +722,6 @@ mod tests {
         );
         assert!(!client
             .post(format!("{paired}/extra"))
-            .bearer_auth(&pairing)
             .json(&json!({"action":"status"}))
             .send()
             .await
@@ -633,7 +742,22 @@ mod tests {
                 .json(&json!({"jsonrpc":"2.0","id":"url-test","method":method,"params":params}))
                 .send()
         };
-        let landing = client.get(&url_endpoint).send().await.unwrap();
+        let guide = client.get(&url_endpoint).send().await.unwrap();
+        assert!(guide.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with("text/plain"));
+        let guide = guide.text().await.unwrap();
+        assert!(
+            guide.contains("/connect?n=") && guide.contains("Streamable HTTP"),
+            "{guide}"
+        );
+        let landing = client
+            .get(&url_endpoint)
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .unwrap();
         assert_eq!(landing.status(), 200);
         assert_eq!(landing.headers()["referrer-policy"], "no-referrer");
         assert!(landing.json::<Value>().await.unwrap()["instructions"]
@@ -669,6 +793,54 @@ mod tests {
             connected["result"]["structuredContent"]["registered"], true,
             "{connected}"
         );
+        // GET-only compatibility mode reaches the same seed with plain text.
+        let page = |path: &str| client.get(format!("{url_endpoint}/{path}")).send();
+        let tools = page("tools?n=a").await.unwrap().text().await.unwrap();
+        assert!(
+            tools.contains("chat_reply") && tools.contains("exec_command"),
+            "{tools}"
+        );
+        let waited = page("wait?n=b&wait=0").await.unwrap().text().await.unwrap();
+        assert!(
+            waited.contains("status:") && waited.contains("/wait?n="),
+            "{waited}"
+        );
+        // Next-step URLs come before the truncated JSON: fetch tools often cut long pages.
+        assert!(
+            waited.find("/wait?n=").unwrap() < waited.find("result:").unwrap(),
+            "{waited}"
+        );
+        assert!(guide.contains("不需要自己有 MCP 客户端"), "{guide}");
+        let html = client
+            .get(format!("{url_endpoint}/wait?n=h&wait=0"))
+            .header("Accept", "text/html,application/xhtml+xml")
+            .send()
+            .await
+            .unwrap();
+        assert!(html.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with("text/html"));
+        let html = html.text().await.unwrap();
+        assert!(
+            html.contains(&format!("<a href=\"{url_endpoint}/wait?n="))
+                && !html.contains("<script"),
+            "{html}"
+        );
+        let robots = client
+            .get(format!("http://{address}/robots.txt"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(robots.status(), 200);
+        assert!(robots.text().await.unwrap().contains("Allow: /"));
+        let folders = page("call?n=c&tool=list_workspace_folders")
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(folders.contains("selected_folder_id"), "{folders}");
         let idle = url_rpc(
             "tools/call",
             json!({"name":"chat_wait","arguments":{"timeout_ms":0}}),
@@ -718,6 +890,34 @@ mod tests {
         assert_eq!(
             replied["result"]["structuredContent"]["persisted"], true,
             "{replied}"
+        );
+        // Disconnect sends the live seed back as standby. Its next wait with
+        // the old IDs keeps waiting instead of failing, and it can be
+        // assigned again through the standby pool.
+        let old_attachment = opened["result"]["structuredContent"]["attachment_id"].clone();
+        let moved = ui(json!({"action":"detach","chat_id":url_chat["id"],"standby":true}));
+        assert_eq!(moved["standby"], "seed", "{moved}");
+        let standby = url_rpc("tools/call",json!({"name":"chat_wait","arguments":{"timeout_ms":0,"chat_id":url_chat["id"],"attachment_id":old_attachment}})).await.unwrap().json::<Value>().await.unwrap();
+        assert_eq!(
+            standby["result"]["structuredContent"]["status"], "idle",
+            "{standby}"
+        );
+        let standby_chat =
+            ui(json!({"action":"create","seed_filter":{"source":"","keyword":"","standby":true}}))
+                ["session"]
+                .clone();
+        let reassigned = url_rpc(
+            "tools/call",
+            json!({"name":"chat_wait","arguments":{"timeout_ms":3000}}),
+        )
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+        assert_eq!(
+            reassigned["result"]["structuredContent"]["chat_id"], standby_chat["id"],
+            "{reassigned}"
         );
         assert!(url_rpc("initialize", json!({}))
             .await
@@ -875,5 +1075,362 @@ mod tests {
         .unwrap();
         assert!(denied.get("error").is_some());
         server.abort();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GET compatibility mode: AIs that can only read web pages (no MCP client, no
+// HTTP POST) follow plain-text pages. Every page lists the complete next URL
+// with a fresh `n` so fetch caches never replay an old answer. The URL key is
+// the credential, exactly as for JSON-RPC.
+// ---------------------------------------------------------------------------
+/// Fetch tools usually time out after 10–30 s; keep GET waits short by default.
+const GET_WAIT_DEFAULT_MS: u64 = 8_000;
+const PAGE_JSON_LIMIT: usize = 6_000;
+/// Seed URLs are capabilities, not public pages; fetch tools that honor
+/// robots.txt may open them.
+pub(super) const ROBOTS_TXT: &str = "User-agent: *\nAllow: /\n";
+pub(super) async fn robots() -> Response {
+    (
+        [
+            (CACHE_CONTROL, "no-store"),
+            (CONTENT_TYPE, "text/plain; charset=utf-8"),
+        ],
+        ROBOTS_TXT,
+    )
+        .into_response()
+}
+fn page_headers(content_type: &'static str) -> [(axum::http::HeaderName, &'static str); 5] {
+    [
+        (CACHE_CONTROL, "no-store"),
+        (CONTENT_TYPE, content_type),
+        (axum::http::header::REFERRER_POLICY, "no-referrer"),
+        (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        (
+            axum::http::HeaderName::from_static("x-robots-tag"),
+            "noindex, nofollow",
+        ),
+    ]
+}
+fn text_no_store(text: String) -> Response {
+    (page_headers("text/plain; charset=utf-8"), text).into_response()
+}
+fn wants_html(headers: &HeaderMap) -> bool {
+    let accept = headers
+        .get("accept")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    accept.contains("text/html") && !accept.starts_with("text/plain")
+}
+fn escape_html(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+/// Linkify whole-token URLs only; templates with `<placeholders>` stay text.
+fn linkify(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 256);
+    let mut token = String::new();
+    let flush = |token: &mut String, out: &mut String| {
+        if token.is_empty() {
+            return;
+        }
+        let is_url = (token.starts_with("http://") || token.starts_with("https://"))
+            && !token.contains(['<', '>', '"']);
+        if is_url {
+            let escaped = escape_html(token);
+            out.push_str(&format!("<a href=\"{escaped}\">{escaped}</a>"));
+        } else {
+            out.push_str(&escape_html(token));
+        }
+        token.clear();
+    };
+    for c in text.chars() {
+        if c.is_whitespace() {
+            flush(&mut token, &mut out);
+            out.push(c);
+        } else {
+            token.push(c);
+        }
+    }
+    flush(&mut token, &mut out);
+    out
+}
+pub(super) fn html_page(text: &str, base: &str, reply_to: Option<&str>) -> String {
+    let form = reply_to
+        .map(|to| {
+            format!(
+                "<form method=\"get\" action=\"{base}/reply\"><input type=\"hidden\" name=\"n\" value=\"{n}\"><input type=\"hidden\" name=\"to\" value=\"{to}\"><input type=\"hidden\" name=\"final\" value=\"1\"><textarea name=\"text\" rows=\"6\" cols=\"80\" placeholder=\"回复 Reply\"></textarea><br><button type=\"submit\">发送回复 Send reply</button></form>",
+                base = escape_html(base),
+                n = nonce(),
+                to = escape_html(to)
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"robots\" content=\"noindex\"><title>Coding Tools MCP</title></head><body><pre style=\"white-space:pre-wrap\">{}</pre>{form}</body></html>",
+        linkify(text)
+    )
+}
+/// Plain text for fetch tools; HTML with links and a reply form for browsers.
+fn page(headers: &HeaderMap, text: String, base: &str, reply_to: Option<&str>) -> Response {
+    if wants_html(headers) {
+        (
+            page_headers("text/html; charset=utf-8"),
+            html_page(&text, base, reply_to),
+        )
+            .into_response()
+    } else {
+        text_no_store(text)
+    }
+}
+fn nonce() -> String {
+    uuid::Uuid::new_v4().simple().to_string()[..12].to_owned()
+}
+fn percent_encode(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for b in text.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+/// Absolute URL of this seed endpoint as the AI reached it (tunnel or local).
+fn base_url(headers: &HeaderMap, uri: &axum::http::Uri, action: Option<&str>) -> String {
+    let host = headers
+        .get("x-forwarded-host")
+        .or_else(|| headers.get("host"))
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("127.0.0.1");
+    let loopback =
+        host.starts_with("127.") || host.starts_with("localhost") || host.starts_with("[::1]");
+    let proto = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or(if loopback { "http" } else { "https" });
+    let mut path = uri.path().trim_end_matches('/').to_owned();
+    if let Some(action) = action {
+        if let Some(stripped) = path.strip_suffix(&format!("/{action}")) {
+            path = stripped.to_owned();
+        }
+    }
+    format!("{proto}://{host}{path}")
+}
+pub(super) fn next_links(base: &str, reply_to: Option<&str>) -> String {
+    let n = nonce();
+    let to = reply_to
+        .map(percent_encode)
+        .unwrap_or_else(|| "<message.id>".to_owned());
+    format!(
+        "下一步 / Next (open the complete URL with your web/fetch tool):\n\
+         - 等待用户消息 Wait for the next message: {base}/wait?n={n}\n\
+         - 回复用户 Reply (append your URL-encoded text): {base}/reply?n={n}&to={to}&final=1&text=\n\
+         - 进度回复（未完成）Progress: same as Reply with final=0；长回复可分几次 final=0，最后一次 final=1\n\
+         - 调用项目工具 Call a tool: {base}/call?n={n}&tool=<name>&args=<URL-encoded JSON>  (e.g. {base}/call?n={n}&tool=read_file&args=%7B%22path%22%3A%22README.md%22%7D)\n\
+         - 工具列表 Tool list: {base}/tools?n={n}"
+    )
+}
+pub(super) fn guide_text(base: &str) -> String {
+    format!(
+        "Coding Tools MCP — 用户本人的本机项目连接 (the user's own local coding tool)\n\n\
+         这个网址由用户在自己的 Coding Tools MCP 应用里生成，用来让你访问用户指定的项目并在应用的对话里和用户交流。\n\
+         你不需要自己有 MCP 客户端或 seed_connect / chat_wait / chat_reply 工具：它们都在这个服务器上。\n\
+         You do NOT need an MCP client or these tools yourself — they run on this server.\n\n\
+         最简单 Easiest (web page reading is enough): 打开 Open {base}/connect?n={n}\n\
+         之后每个页面都会给出下一步的完整网址，照着打开即可。Each page gives the complete next URL.\n\n\
+         其他方式 Other ways:\n\
+         - MCP 客户端 MCP client: 把 {base} 添加为 Streamable HTTP MCP 服务器（不需要额外认证），然后调用 seed_connect，再 chat_wait。\n\
+         - HTTP POST (curl/python): POST JSON-RPC 到 {base}，Content-Type: application/json，Accept: application/json, text/event-stream；\n\
+           先 initialize {{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{{}},\"clientInfo\":{{\"name\":\"ai\",\"version\":\"1\"}}}}，\n\
+           再 notifications/initialized，之后请求加 MCP-Protocol-Version: 2025-03-26；tools/call seed_connect，然后 chat_wait {{\"timeout_ms\":25000}}。\n\n\
+         收到消息后按说明完成工作并回复；回复后继续等待下一条消息。等待返回 idle 只表示用户还没发消息，再等一次即可。\n",
+        n = nonce()
+    )
+}
+/// Page text plus the user message id when the result carries one. The
+/// next-step URLs come first: fetch tools often truncate long pages.
+pub(super) fn summarize(action: &str, result: &Value, base: &str) -> (String, Option<String>) {
+    let data = if result["structuredContent"].is_null() {
+        result.clone()
+    } else {
+        result["structuredContent"].clone()
+    };
+    let mut out = format!(
+        "action: {action}\nstatus: {}\n",
+        data["status"]
+            .as_str()
+            .unwrap_or(if data["ok"] == true { "ok" } else { "-" })
+    );
+    let mut reply_to = None;
+    if data["status"] == "message" {
+        let message = &data["message"];
+        let id = message["id"].as_str().unwrap_or("");
+        if !id.is_empty() {
+            reply_to = Some(id.to_owned());
+        }
+        out.push_str(&format!(
+            "\n用户消息 User message (id={id}):\n{}\n",
+            message["text"].as_str().unwrap_or("")
+        ));
+    }
+    if let Some(instruction) = data["instruction"].as_str() {
+        out.push_str(&format!("\ninstruction: {instruction}\n"));
+    }
+    if data["status"] == "idle" {
+        out.push_str("\n用户还没发新消息，打开下面的「等待」网址继续等。No new message yet — open the Wait URL again.\n");
+    }
+    let links = next_links(base, reply_to.as_deref());
+    let mut body = serde_json::to_string_pretty(&data).unwrap_or_default();
+    if body.len() > PAGE_JSON_LIMIT {
+        let mut cut = PAGE_JSON_LIMIT;
+        while !body.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        body.truncate(cut);
+        body.push_str("\n…(truncated; use /call for full tool output)");
+    }
+    (
+        format!("{out}\n{links}\n\nresult:\n{body}\n\n{links}\n"),
+        reply_to,
+    )
+}
+pub(super) async fn get_action(
+    State(state): State<ListenerState>,
+    Path((folder_id, key, action)): Path<(String, String, String)>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+    axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
+    headers: HeaderMap,
+) -> Response {
+    let base = base_url(&headers, &uri, Some(&action));
+    let url_mode = key.len() == 64
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase());
+    if !url_mode {
+        return (
+            StatusCode::NOT_FOUND,
+            text_no_store("Seed unavailable".into()),
+        )
+            .into_response();
+    }
+    let mut rpc_headers = HeaderMap::new();
+    rpc_headers.insert(
+        "mcp-protocol-version",
+        axum::http::HeaderValue::from_static("2025-03-26"),
+    );
+    let n = query.get("n").cloned().unwrap_or_default();
+    let call = |name: &str, args: Value| json!({"jsonrpc":"2.0","id":format!("get-{n}"),"method":"tools/call","params":{"name":name,"arguments":args}});
+    let outcome: Result<Value, String> = async {
+        // Every page works as the first page: redeeming is idempotent.
+        execute(state.clone(), &folder_id, &key, &rpc_headers, json!({"jsonrpc":"2.0","id":"get-init","method":"initialize","params":{"protocolVersion":"2025-03-26"}})).await?;
+        match action.as_str() {
+            "connect" => {
+                execute(state.clone(), &folder_id, &key, &rpc_headers, call("seed_connect", json!({}))).await.map(|v| v.unwrap_or(Value::Null))
+            }
+            "wait" => {
+                let timeout = query.get("wait").and_then(|v| v.parse::<u64>().ok()).unwrap_or(GET_WAIT_DEFAULT_MS).min(25_000);
+                execute(state.clone(), &folder_id, &key, &rpc_headers, call("chat_wait", json!({"timeout_ms":timeout}))).await.map(|v| v.unwrap_or(Value::Null))
+            }
+            "reply" => {
+                let to = query.get("to").cloned().unwrap_or_default();
+                let text = query.get("text").cloned().unwrap_or_default();
+                if n.is_empty() || to.is_empty() || text.trim().is_empty() {
+                    return Err("reply needs n, to and text".into());
+                }
+                let message_id = format!("get-{}", &crate::tools::chat::digest_text(&format!("{n}\0{to}"))[..24]);
+                let final_reply = query.get("final").is_none_or(|v| v != "0");
+                let mut args = json!({"reply_to":to,"message_id":message_id,"text":text,"final":final_reply});
+                if query.get("ask").is_some_and(|v| v == "1") {
+                    args["awaiting_user"] = json!(true);
+                }
+                execute(state.clone(), &folder_id, &key, &rpc_headers, call("chat_reply", args)).await.map(|v| v.unwrap_or(Value::Null))
+            }
+            "call" => {
+                let tool = query.get("tool").cloned().unwrap_or_default();
+                if tool.is_empty() {
+                    return Err("call needs tool".into());
+                }
+                let args: Value = match query.get("args") {
+                    Some(raw) if !raw.trim().is_empty() => serde_json::from_str(raw).map_err(|e| format!("args must be JSON: {e}"))?,
+                    _ => json!({}),
+                };
+                execute(state.clone(), &folder_id, &key, &rpc_headers, call(&tool, args)).await.map(|v| v.unwrap_or(Value::Null))
+            }
+            "tools" => {
+                let listed = execute(state.clone(), &folder_id, &key, &rpc_headers, json!({"jsonrpc":"2.0","id":"get-tools","method":"tools/list"})).await?.unwrap_or(Value::Null);
+                let names: Vec<_> = listed["tools"].as_array().into_iter().flatten().map(|t| format!("- {}: {}", t["name"].as_str().unwrap_or(""), t["description"].as_str().unwrap_or("").chars().take(160).collect::<String>())).collect();
+                Ok(json!({"ok":true,"status":"tools","tools":names.join("\n")}))
+            }
+            _ => Err("Unknown action. Use connect, wait, reply, call or tools.".into()),
+        }
+    }
+    .await;
+    match outcome {
+        Ok(value) => {
+            let (text, reply_to) = if action == "tools" {
+                (
+                    format!(
+                        "{}\n\ntools:\n{}\n",
+                        next_links(&base, None),
+                        value["tools"].as_str().unwrap_or("")
+                    ),
+                    None,
+                )
+            } else {
+                summarize(&action, &value, &base)
+            };
+            page(&headers, text, &base, reply_to.as_deref())
+        }
+        Err(message) => page(
+            &headers,
+            format!(
+                "error: {message}\n\n{}",
+                next_links(&base, query.get("to").map(String::as_str))
+            ),
+            &base,
+            None,
+        ),
+    }
+}
+
+#[cfg(test)]
+mod get_page_tests {
+    use super::*;
+
+    #[test]
+    fn links_come_first_and_reply_template_carries_message_id() {
+        let base = "https://example.test/mcp/seeds/a/key";
+        let result = json!({"structuredContent":{"status":"message","message":{"id":"m 1","text":"hi"},"blob":"x".repeat(20_000)}});
+        let (text, reply_to) = summarize("wait", &result, base);
+        assert_eq!(reply_to.as_deref(), Some("m 1"));
+        assert!(text.find("/wait?n=").unwrap() < text.find("result:").unwrap());
+        assert!(text.contains("&to=m%201&final=1&text="), "{text}");
+        assert!(text.len() < 12_000, "{}", text.len());
+    }
+
+    #[test]
+    fn html_page_escapes_and_links_only_complete_urls() {
+        let html = html_page(
+            "a <b> https://example.test/x?n=1 https://example.test/r?to=<message.id>",
+            "https://example.test",
+            Some("m\"1"),
+        );
+        assert!(html.contains("&lt;b&gt;"));
+        assert!(html.contains("<a href=\"https://example.test/x?n=1\">"));
+        assert!(!html.contains("<a href=\"https://example.test/r?to="));
+        assert!(html.contains("value=\"m&quot;1\""));
+        assert!(!html.contains("<script"));
     }
 }

@@ -5,7 +5,7 @@
   import { appUrl } from '$lib/app-path';
   import { distributionCall, localDesktop, type ShareStatus } from '$lib/api/distribution';
   import { listWorkspaces, getRuntimeStatus, startRuntime, restartRuntime, updateWorkspace } from '$lib/api/workspaces';
-  import { restoreSharingSettings } from '$lib/sharing-settings';
+  import { restoreSharingSettings, preferredSharingProfile, refreshedOrigins } from '$lib/sharing-settings';
   import { prepareSharingRuntime } from '$lib/sharing-runtime';
   import { startTunnel } from '$lib/api/tunnel';
   import type { WorkspaceProfile } from '$lib/types';
@@ -14,10 +14,13 @@
   let loaded=$state(false), loading=$state(true), password=$state(''), reveal=$state(false);
   let profiles=$state<WorkspaceProfile[]>([]), id=$state(''), publicUrl=$state(''), lan=$state(false), busy=$state(false), error=$state(''), copied=$state('');
   const profile=$derived(profiles.find(p=>p.id===id));
+  async function currentPublicOrigin(): Promise<string> {
+    if(!id)return '';
+    const url=(await getRuntimeStatus(id)).publicEndpoint;
+    return url ? new URL(url).origin : '';
+  }
   async function inspect() {
-    if(!id)return;
-    try { const runtime=await getRuntimeStatus(id); const url=runtime.publicEndpoint;
-      publicUrl=url ? new URL(url).origin : ''; }catch(e){error=String(e)}
+    try { publicUrl=await currentPublicOrigin(); }catch(e){error=String(e)}
   }
   async function load() {
     loading=true;error='';
@@ -26,8 +29,14 @@
       password=status.password??'';
       profiles=await listWorkspaces();
       const restored=restoreSharingSettings(status,profiles);
-      id=restored.id;lan=restored.lan;publicUrl=restored.publicUrl;
+      id=preferredSharingProfile(profiles,restored.id);lan=restored.lan;publicUrl=restored.publicUrl;
       if(!status.enabled)await inspect();
+      else {
+        // Follow a temporary tunnel whose address changed since sharing was saved.
+        const current=await currentPublicOrigin().catch(()=>'');
+        const origins=refreshedOrigins(status.origins,restored.publicUrl,current);
+        if(origins){status=await distributionCall('configure_browser_sharing',{enabled:true,origins});password=status.password??'';publicUrl=current;}
+      }
       loaded=true;
     }catch(e){error=String(e)}finally{loading=false}
   }
