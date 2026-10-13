@@ -131,6 +131,27 @@
     }
   }
 
+  /** Writes servers to the project .mcp.json, then enables them (and the MCP master switch) so they connect right away. */
+  async function addMcpServers(servers: Record<string, Record<string, unknown>>): Promise<string[]> {
+    const id = workspaceId;
+    setBusy("mcp:add", true, id);
+    try {
+      const result = await backend.addMcpServers(id, folderId, servers);
+      const inventory = await backend.extensions(id);
+      if (!inventory.mcpActive) { await backend.setExtensionActive(id, "mcp", true); }
+      const added = new Set(result.names);
+      for (const server of inventory.mcpServers) {
+        if (server.provider === "claude" && server.scope === "workspace" && server.folderId === result.folderId && added.has(server.name) && !server.selected && server.supported && server.sourceEnabled) {
+          await backend.setExtensionEnabled(id, "mcp", server.key, true);
+        }
+      }
+      await refresh(id);
+      return result.names;
+    } finally {
+      setBusy("mcp:add", false, id);
+    }
+  }
+
   $effect(() => {
     const id = workspaceId;
     skills=null;extensions=null;busy=new Set();error="";
@@ -142,7 +163,7 @@
 </script>
 
 {#if catalog}
-  <FeatureCatalog {workspaceId} {folderId} {activeTab} {skills} {extensions} {loading} {error} {isBusy} {workspacePicker} onRefresh={()=>void refresh()} onTab={tab=>{activeTab=tab;onCatalogTab?.(tab)}} onSkill={toggleSkill} onExtension={toggleExtension} onSkillsActive={toggleSkillsActive} onExtensionActive={toggleExtensionActive}/>
+  <FeatureCatalog {workspaceId} {folderId} {activeTab} {skills} {extensions} {loading} {error} {isBusy} {workspacePicker} onRefresh={()=>void refresh()} onTab={tab=>{activeTab=tab;onCatalogTab?.(tab)}} onSkill={toggleSkill} onExtension={toggleExtension} onSkillsActive={toggleSkillsActive} onExtensionActive={toggleExtensionActive} onAddMcp={addMcpServers}/>
 {:else}
 <div class="grid gap-4">
   <div class="flex flex-wrap items-start justify-between gap-3">

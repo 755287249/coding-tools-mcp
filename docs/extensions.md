@@ -68,6 +68,12 @@ Node Agent currently proxies:
 
 Legacy SSE and WebSocket entries may be discovered but are currently marked unsupported.
 
+### Adding MCP servers from the UI
+
+Customize → Plugins → Add → "MCP servers" accepts pasted JSON or a picked file in any of these shapes: `{"mcpServers":{...}}` (Claude/Cursor), `{"servers":{...}}` (VS Code), `{"mcp":{"servers":{...}}}`, a bare `{"name":{"command"|"url"...}}` map, or one server object `{"command"|"url"...}` (a name field appears for this case). The servers are merged into the selected project folder's `.mcp.json` (`mcpServers`; other entries are kept, an invalid existing file is never overwritten), then the MCP master switch and the new servers are enabled automatically.
+
+Backends: desktop `add_workspace_mcp_servers` (Tauri command) and Node Agent `POST /admin/api/workspaces/{id}/extensions/mcp` with `{folderId, servers}`. The desktop inventory now connects enabled servers (up to 25 s) before reporting status, so connection errors and tool counts appear in the detail view; when the workspace MCP service is stopped the server shows a "start the workspace" hint.
+
 When an MCP server is enabled, Node Agent initializes it, reads `tools/list`, and merges those tools into the Agent's MCP `tools/list`. Proxy tool names are namespaced by provider, folder/scope, server, and tool name. The Agent toolset revision changes when the enabled external tool catalog changes, so clients can refresh their catalog.
 
 External MCP tools are conservatively disabled in Node Agent `read-only` permission mode. Enabling a server is an explicit trust decision for other modes; Hooks still run around proxied tool calls.

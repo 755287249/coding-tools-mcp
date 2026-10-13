@@ -18,6 +18,7 @@ import type {
   ExtensionKind,
   ExtensionMasterToggleResult,
   ExtensionToggleResult,
+  McpServersAddResult,
   FrontendBackend,
   HealthItem,
   HistorySessionDetail,
@@ -645,6 +646,12 @@ export function createNodeBackend(deps: NodeBackendDeps = {}): FrontendBackend {
         return request<ExtensionToggleResult>(workspaceRoute(workspaceId, "extensions"), {
           method: "PUT",
           body: JSON.stringify({ kind, key, enabled }),
+        });
+      },
+      addMcpServers(workspaceId, folderId, servers) {
+        return request<McpServersAddResult>(`${workspaceRoute(workspaceId, "extensions")}/mcp`, {
+          method: "POST",
+          body: JSON.stringify({ folderId, servers }),
         });
       },
     },

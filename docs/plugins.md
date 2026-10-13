@@ -11,7 +11,7 @@ pnpm install
 pnpm --dir plugins/template build
 ```
 
-產物是 `plugins/template/dist/hello-plugin.ctplugin.json`。在「自定義 → 插件 → 添加 → 匯入插件檔案」選取它即可。插件 ID 只能使用小寫字母、數字與連字號。
+產物是 `plugins/template/dist/hello-plugin.ctplugin.json`。在「自定義 → 插件 → 添加 → 匯入插件檔案」選取它即可。匯入成功後插件會自動添加並開啟詳情；失敗原因會直接顯示在對話框裡。若選到的是 MCP 設定 JSON（`{"mcpServers":{...}}`、`{"servers":{...}}` 或單一 `{"command"|"url"}`），會自動改成「添加 MCP 伺服器」流程，寫入目前專案的 `.mcp.json` 並啟用。插件 ID 只能使用小寫字母、數字與連字號。
 
 ```json
 {

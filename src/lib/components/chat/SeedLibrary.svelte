@@ -31,7 +31,7 @@
   const empty=():SeedInventory=>({enabled:false,seeds:[],retired_count:0});
   let inventory=$state<SeedInventory>(empty()),address=$state(''),token=$state('');
   let busy=$state(false),error=$state(''),notice=$state(''),history=$state(false),filter=$state(''),status=$state(''),search=$state(''),page=$state(0),sourceFilter=$state(''),keyword=$state('');
-  let addMethod=$state<'manual'|'pair'|'rabbit'>('manual'),view=$state<'accounts'|'seeds'>('accounts'),loading=$state(true);
+  let addMethod=$state<'manual'|'pair'>('manual'),view=$state<'accounts'|'seeds'>('accounts'),loading=$state(true);
   let addOpen=$state(false),pluginOpen=$state(false),refreshing=$state(false),updatedAt=$state(0),refreshKey=$state(0),debouncedSearch=$state(''),debouncedKeyword=$state('');
   let refreshingAccount=$state('');
   function refreshAccount(account:string){if(busy||refreshing)return;refreshingAccount=account;refreshKey++;}
@@ -121,18 +121,16 @@
       <span class="method-icon"><Puzzle size={20}/></span>
       <span class="method-text"><strong>{$t('seeds.browserPair')}<span class="pair-state" class:connected={inventory.pairing_enabled}>{$t(inventory.pairing_enabled?'seeds.pairEnabled':'seeds.pairDisabled')}</span></strong><small>{$t('seeds.methodPairDesc')}</small></span>
     </button>
-    {#if $installedAppPlugins.includes('coderabbit-seeds')}<button role="tab" aria-selected={addMethod==='rabbit'} class:active={addMethod==='rabbit'} onclick={()=>{addMethod='rabbit';addOpen=false;pluginOpen=true}}>
+    {#if $installedAppPlugins.includes('coderabbit-seeds')}<button role="tab" aria-selected={pluginOpen} class:active={pluginOpen} onclick={()=>{addOpen=false;pluginOpen=true}}>
       <span class="method-icon"><Sprout size={20}/></span>
       <span class="method-text"><strong>{$t('rabbit.title')}</strong><small>{$t('rabbit.desc')}</small></span>
-    </button>{:else}<button role="tab" aria-selected="false" class="install-card" onclick={()=>{setAppPlugin('coderabbit-seeds',true);addMethod='rabbit';addOpen=false;pluginOpen=true}}>
+    </button>{:else}<button role="tab" aria-selected="false" class="install-card" onclick={()=>{setAppPlugin('coderabbit-seeds',true);addOpen=false;pluginOpen=true}}>
       <span class="method-icon"><Sprout size={20}/></span>
       <span class="method-text"><strong>{$t('rabbit.title')}</strong><small>{$t('plugins.installHere')}</small></span>
     </button>{/if}
   </div>
   <div class="method-panel" role="tabpanel">
-  {#if addMethod==='rabbit'}
-  <PluginSlot id="coderabbit-seeds" {workspaceId} {folderId}/>
-  {:else if addMethod==='manual'}
+  {#if addMethod==='manual'}
   <ManualSeed {workspaceId} {folderId} {address} onCreated={()=>refreshKey++}/>
   {:else}
   <div class="pairing">

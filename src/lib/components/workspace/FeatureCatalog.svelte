@@ -16,18 +16,18 @@
   import Copy from '@lucide/svelte/icons/copy';
   import X from '@lucide/svelte/icons/x';
   import { featureRows, filterFeatureRows, type FeatureRow } from '$lib/workspace/feature-catalog';
-  import { APP_PLUGINS, APP_PLUGIN_PREFIX, installedAppPlugins, setAppPlugin, importPlugin, removeAppPlugin } from '$lib/plugins/registry';
-  import type { PluginPackage } from '$lib/plugins/types';
+  import { APP_PLUGINS, APP_PLUGIN_PREFIX, installedAppPlugins, setAppPlugin, importPlugin, removeAppPlugin, pluginError } from '$lib/plugins/registry';
+  import { detectImport, serverProblems, type McpServerConfig } from '$lib/plugins/mcp-import';
   import { APP_VERSION } from '$lib/app-version';
   import type { MessageKey } from '$lib/i18n/catalog';
   import Rabbit from '@lucide/svelte/icons/rabbit';
   import Download from '@lucide/svelte/icons/download';
   import PluginSlot from '$lib/components/plugins/PluginSlot.svelte';
-  let { workspaceId, activeTab, skills, extensions, loading, error, isBusy, onRefresh, onTab, onSkill, onExtension, onSkillsActive, onExtensionActive, workspacePicker, folderId='' }: {
+  let { workspaceId, activeTab, skills, extensions, loading, error, isBusy, onRefresh, onTab, onSkill, onExtension, onSkillsActive, onExtensionActive, onAddMcp, workspacePicker, folderId='' }: {
     workspaceId:string;activeTab:'skills'|'hooks'|'mcp';skills:SkillInventoryPayload|null;extensions:ExtensionInventoryPayload|null;loading:boolean;error:string;
     isBusy:(key:string)=>boolean;onRefresh:()=>void;onTab:(tab:'skills'|'hooks'|'mcp')=>void;
     onSkill:(key:string,enabled:boolean)=>void;onExtension:(kind:ExtensionKind,key:string,enabled:boolean)=>void;
-    onSkillsActive:(active:boolean)=>void;onExtensionActive:(kind:ExtensionKind,active:boolean)=>void;workspacePicker?:Snippet;folderId?:string;
+    onSkillsActive:(active:boolean)=>void;onExtensionActive:(kind:ExtensionKind,active:boolean)=>void;onAddMcp?:(servers:Record<string,McpServerConfig>)=>Promise<string[]>;workspacePicker?:Snippet;folderId?:string;
   }=$props();
   let query=$state(''), scope=$state<'all'|'workspace'|'user'>('all');
   let settingsDialog:HTMLDialogElement, addDialog:HTMLDialogElement;
@@ -47,13 +47,38 @@
   const appRows=$derived(activeTab==='mcp'&&scope!=='workspace'?$APP_PLUGINS.filter(p=>!appQuery||p.name.toLowerCase().includes(appQuery)||p.summary.toLowerCase().includes(appQuery)):[]);
   const userscriptUrl=(file:string)=>`https://github.com/755287249/coding-tools-mcp/releases/download/v${APP_VERSION}/${file}`;
   let addTab=$state<'app'|'config'>('app');
-  function openAdd(){addTab=activeTab==='mcp'?'app':'config';addDialog.showModal();}
+  function openAdd(){addTab=activeTab==='mcp'?'app':'config';say('');addDialog.showModal();}
   $effect(()=>{const id=workspaceId,tab=activeTab;query='';scope='all';feedback='';settingsDialog?.close();addDialog?.close();});
   function detail(key?:string){const url=new URL($page.url);if(key)url.searchParams.set('feature',key);else url.searchParams.delete('feature');void goto(url.pathname+url.search,{noScroll:true});}
   function toggle(row:FeatureRow){if(row.kind==='skill')onSkill(row.key,!row.selected);else onExtension(row.kind,row.key,!row.selected);}
   function disabled(row:FeatureRow){return loading||!master||!row.supported||!row.sourceEnabled||isBusy(`${row.kind}:${row.key}`);}
   async function copy(value:string){try{await copyText(value);feedback=$t('Copied')}catch(e){feedback=String(e)}}
-  async function importFile(event:Event){const input=event.currentTarget as HTMLInputElement,file=input.files?.[0];if(!file)return;try{const plugin=JSON.parse(await file.text()) as PluginPackage;await importPlugin(plugin);addDialog.close();detail(APP_PLUGIN_PREFIX+plugin.manifest.id);}catch(e){feedback=String(e)}finally{input.value=''}}
+  // "Add" dialog state. dialogMessage is shown inside the dialog (the page feedback line is hidden behind the modal).
+  let dialogMessage=$state(''),dialogError=$state(false),dialogBusy=$state(false),mcpText=$state(''),mcpName=$state('');
+  const mcpDetected=$derived.by(()=>{if(!mcpText.trim())return null;try{return detectImport(JSON.parse(mcpText));}catch{return null}});
+  function say(message:string,error=false){dialogMessage=message;dialogError=error;}
+  function errorText(e:unknown){return e instanceof Error?e.message:String(e)}
+  function readJson(text:string):unknown{try{return JSON.parse(text)}catch(e){throw new Error($t('plugins.errJson',{error:errorText(e)}))}}
+  /** Saves MCP servers (from paste or file) to the project and enables them. */
+  async function saveMcp(servers:Record<string,McpServerConfig>){
+    if(!onAddMcp)throw new Error('MCP add is not available');
+    const problems=serverProblems(servers);
+    if(!Object.keys(servers).length)throw new Error($t('mcp.errEmpty'));
+    if(problems.invalidNames.length)throw new Error($t('mcp.errName'));
+    if(problems.missingTarget.length)throw new Error($t('mcp.errServer',{name:problems.missingTarget[0]}));
+    const names=await onAddMcp(servers);
+    say($t('mcp.added',{count:names.length,names:names.join(', ')}));mcpText='';mcpName='';
+  }
+  function singleName(fallback:string){const name=(mcpName.trim()||fallback).replace(/\.(json|ctplugin)$/i,'').replace(/[^A-Za-z0-9._ -]/g,'-').replace(/^[^A-Za-z0-9]+/,'').slice(0,64);if(!name)throw new Error($t('mcp.errName'));return name;}
+  async function importValue(value:unknown,fileName=''){
+    const found=detectImport(value);
+    if(found.kind==='plugin'){const plugin=await importPlugin(found.value);addDialog.close();detail(APP_PLUGIN_PREFIX+plugin.manifest.id);feedback=$t('plugins.imported',{name:plugin.manifest.name});return}
+    if(found.kind==='mcp'){addTab='config';await saveMcp(found.servers);return}
+    if(found.kind==='mcp-single'){addTab='config';await saveMcp({[singleName(fileName)]:found.server});return}
+    throw new Error($t('plugins.errNotPackage'));
+  }
+  async function importFile(event:Event){const input=event.currentTarget as HTMLInputElement,file=input.files?.[0];if(!file)return;dialogBusy=true;say('');try{await importValue(readJson(await file.text()),file.name)}catch(e){say(errorText(e),true)}finally{input.value='';dialogBusy=false}}
+  async function submitMcp(){dialogBusy=true;say('');try{const found=detectImport(readJson(mcpText));if(found.kind==='mcp')await saveMcp(found.servers);else if(found.kind==='mcp-single')await saveMcp({[singleName('')]:found.server});else if(found.kind==='plugin')await importValue(found.value);else throw new Error($t('mcp.errEmpty'))}catch(e){say(errorText(e),true)}finally{dialogBusy=false}}
   function sidePlugin(key:string){const url=new URL($page.url);url.searchParams.delete('featureTab');url.searchParams.set('panel','plugins');url.searchParams.set('feature',key);void goto(url.pathname+url.search,{noScroll:true});}
   const sample=$derived(activeTab==='skills'?'---\nname: my-skill\ndescription: Describe when to use this skill.\n---\n\n# My skill\n\nWrite the steps the assistant should follow.\n':activeTab==='hooks'?'~/.claude/settings.json\n.codex/hooks.json':'{\n  "mcpServers": {\n    "my-server": {\n      "type": "http",\n      "url": "https://example.com/mcp"\n    }\n  }\n}');
 </script>
@@ -85,11 +110,11 @@
         <span class="feature-icon large" class:skill={selected.kind==='skill'}>{#if selected.kind==='skill'}<BookOpen size={30}/>{:else}<Puzzle size={30}/>{/if}</span>
         <header class="detail-heading"><div><h1>{selected.name}</h1><p>{selected.description||description}</p></div><div class="detail-actions"><button class="secondary" onclick={()=>copy($page.url.href)}><Copy size={14}/>{$t('features.copyLink')}</button><button class="primary" disabled={disabled(selected)} onclick={()=>toggle(selected)}>{#if selected.selected}<Check size={15}/>{/if}{$t(selected.selected?'features.disable':'features.enable')}</button></div></header>
         <div class="feature-hero"><span class="hero-icon">{#if selected.kind==='skill'}<BookOpen size={58}/>{:else}<Puzzle size={58}/>{/if}</span><div><strong>{selected.name}</strong><p>{selected.kind==='mcp'?$t('{count} tools',{count:selected.toolCount}):selected.description||description}</p><span>{$t(selected.enabled?'features.active':selected.selected?'features.selectedInactive':'features.available')}</span></div></div>
-        {#if selected.error}<p class="catalog-error" role="alert">{selected.error}</p>{/if}
+        {#if selected.error}<p class="catalog-error" role="alert">{selected.error==='workspace-not-running'?$t('mcp.notRunning'):selected.error}</p>{/if}
         {#if !master}<p class="catalog-notice">{$t('features.masterOff')} <button onclick={()=>settingsDialog.showModal()}>{$t('Settings')}</button></p>{/if}
         <h3>{$t('features.information')}</h3>
         <dl><div><dt>{$t('features.source')}</dt><dd>{selected.provider}</dd></div><div><dt>{$t('features.scope')}</dt><dd>{$t(selected.scope==='user'?'features.personal':'features.project')}</dd></div><div><dt>{$t('features.location')}</dt><dd><code>{selected.path}</code><button aria-label={$t('Copy')} onclick={()=>copy(selected.path)}><Copy size={14}/></button></dd></div>
-        {#if selected.kind==='mcp'}<div><dt>{$t('features.connection')}</dt><dd>{selected.transport} · {$t(selected.connected?'Connected':'features.disconnected')}</dd></div><div><dt>{$t('features.tools')}</dt><dd>{selected.toolCount}</dd></div>{/if}
+        {#if selected.kind==='mcp'}<div><dt>{$t('features.connection')}</dt><dd>{selected.transport} · {$t(selected.connected?'Connected':'features.disconnected')}{#if selected.selected&&!selected.connected}<button class="secondary" disabled={loading} onclick={onRefresh}><RefreshCw size={13}/>{$t('mcp.reconnect')}</button>{/if}</dd></div><div><dt>{$t('features.tools')}</dt><dd>{selected.toolCount}</dd></div>{/if}
         {#if selected.version}<div><dt>{$t('features.version')}</dt><dd>{selected.version}</dd></div>{/if}
         <div><dt>{$t('Status')}</dt><dd>{$t(!selected.supported?'Unsupported':!selected.sourceEnabled?'Source disabled':selected.enabled?'features.active':selected.selected?'features.selectedInactive':'features.available')}</dd></div></dl>
         <button class="secondary" onclick={()=>detail()}>{$t('features.backToList')}</button>
@@ -109,6 +134,7 @@
       </section>
     {/if}
     {#if error}<p class="catalog-error" role="alert">{error}<button onclick={onRefresh}>{$t('Try again')}</button></p>{/if}
+    {#if $pluginError&&activeTab==='mcp'}<p class="catalog-error" role="alert">{$pluginError}</p>{/if}
     {#if feedback}<p class="catalog-feedback" role="status">{feedback}</p>{/if}
   </main>
 </div>
@@ -140,11 +166,20 @@
   {#if activeTab==='mcp'}<div class="add-tabs" role="tablist"><button role="tab" aria-selected={addTab==='app'} class:active={addTab==='app'} onclick={()=>addTab='app'}>{$t('plugins.appPlugins')}</button><button role="tab" aria-selected={addTab==='config'} class:active={addTab==='config'} onclick={()=>addTab='config'}>{$t('plugins.mcpServer')}</button></div>{/if}
   {#if activeTab==='mcp'&&addTab==='app'}
     <p>{$t('plugins.addHelp')}</p>
-    <label class="secondary import-plugin">{$t('plugins.importFile')}<input type="file" accept=".json,.ctplugin.json" onchange={importFile}/></label>
+    <p class="catalog-notice">{$t('plugins.importAny')}</p>
+    <label class="secondary import-plugin" class:busy={dialogBusy}>{$t('plugins.importFile')}<input type="file" accept=".json,application/json" disabled={dialogBusy} onchange={importFile}/></label>
+    {#if dialogMessage}<p class="dialog-message" class:error={dialogError} role={dialogError?'alert':'status'}>{dialogMessage}</p>{/if}
     <div class="add-list">{#each $APP_PLUGINS as plugin (plugin.id)}{@const installed=$installedAppPlugins.includes(plugin.id)}
       <div class="add-row"><span class="feature-icon app"><Rabbit size={22}/></span><div><strong>{plugin.name}</strong><small>{plugin.summary}</small></div>
         {#if installed}<button class="secondary" onclick={()=>{addDialog.close();detail(APP_PLUGIN_PREFIX+plugin.id);}}>{$t('plugins.open')}</button>{:else}<button class="primary" onclick={()=>{setAppPlugin(plugin.id,true);addDialog.close();detail(APP_PLUGIN_PREFIX+plugin.id);}}><Plus size={14}/>{$t('plugins.install')}</button>{/if}</div>
     {/each}</div>
+  {:else if activeTab==='mcp'&&onAddMcp}
+    <p>{$t('mcp.addHelp')}</p>
+    <textarea class="mcp-input" rows="9" spellcheck="false" placeholder={sample} aria-label={$t('mcp.addTitle')} bind:value={mcpText}></textarea>
+    {#if mcpDetected?.kind==='mcp-single'}<label class="mcp-name"><span>{$t('mcp.serverName')}</span><input bind:value={mcpName} placeholder="my-server"/></label>{/if}
+    {#if dialogMessage}<p class="dialog-message" class:error={dialogError} role={dialogError?'alert':'status'}>{dialogMessage}</p>{/if}
+    <footer><label class="secondary import-plugin">{$t('mcp.chooseFile')}<input type="file" accept=".json,application/json" disabled={dialogBusy} onchange={importFile}/></label><button class="primary" disabled={dialogBusy||!mcpText.trim()} onclick={()=>void submitMcp()}>{#if dialogBusy}<RefreshCw size={14}/>{:else}<Plus size={14}/>{/if}{$t('mcp.save')}</button></footer>
+    <details><summary>{$t('features.addPluginHelp')}</summary><pre>{sample}</pre><button class="secondary" onclick={()=>copy(sample)}><Copy size={14}/>{$t('features.copyExample')}</button> <button class="secondary" disabled={loading} onclick={()=>{addDialog.close();onRefresh()}}><RefreshCw size={14}/>{$t('features.refreshDiscovery')}</button></details>
   {:else}
   <p>{$t(activeTab==='skills'?'features.addSkillHelp':activeTab==='hooks'?'features.addHookHelp':'features.addPluginHelp')}</p>
   <code class="discovery-path">{activeTab==='skills'?'skills / .agents/skills / .claude/skills':activeTab==='hooks'?'.claude/settings.json / .codex/hooks.json':'.mcp.json / .codex/config.toml'}</code>
@@ -165,5 +200,5 @@
 .add-tabs{display:inline-flex;gap:2px;padding:3px;margin:4px 0 12px;border-radius:999px;border:1px solid var(--color-border);background:var(--surface-2,var(--color-surface))}
 .add-tabs button{height:28px;padding:0 14px;border:0;border-radius:999px;background:transparent;color:var(--color-text-muted);font-size:12.5px;cursor:pointer}.add-tabs button.active{background:var(--card-bg);color:var(--color-text);box-shadow:0 1px 3px rgb(0 0 0 / .12)}
 .add-list{display:grid;gap:10px;margin-top:12px}.add-row{display:flex;align-items:center;gap:12px;padding:12px;border:1px solid var(--color-border);border-radius:12px}.add-row>div{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}.add-row small{font-size:12px;color:var(--color-text-muted)}
-.import-plugin{display:inline-flex;align-items:center;cursor:pointer;padding:8px 12px;border:1px solid var(--color-border);border-radius:8px}.import-plugin input{display:none}
+.import-plugin{display:inline-flex!important;align-items:center;justify-content:center!important;cursor:pointer;padding:8px 14px!important;border:1px solid var(--color-border);border-radius:20px;width:max-content}.import-plugin.busy{opacity:.6;pointer-events:none}.import-plugin input{display:none}.dialog-message{font-size:12px!important;padding:8px 12px;border-radius:8px;background:var(--surface-hover);overflow-wrap:anywhere}.dialog-message.error{color:var(--danger)}.mcp-input{width:100%;font:12px ui-monospace,monospace;padding:10px;border:1px solid var(--color-border);border-radius:10px;background:var(--surface-1);color:var(--color-text);resize:vertical}.mcp-name input{flex:1;padding:7px 10px;border:1px solid var(--color-border);border-radius:8px;background:var(--surface-1);color:var(--color-text)}
 </style>

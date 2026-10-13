@@ -35,14 +35,24 @@
 
 ## 进度
 
-- [ ] A registry 改为内置 import + 容错 + 错误显示
-- [ ] B/C Tauri CSP 与 plugin-frame
-- [ ] D 导入支持 MCP JSON，对话框内错误
-- [ ] E 已添加清单清理
-- [ ] F Rust 主动连线
-- [ ] G 新增 MCP 服务器（前端 + Rust + Node）
-- [ ] 测试：`pnpm test`、`pnpm check`、`cargo check --no-default-features --lib`、Node Agent 浏览器实测（模拟 Tauri CSP 头）
+- [x] A registry 改为内置 import + 容错 + 错误显示（`src/lib/plugins/registry.ts`，localStorage key 改 `ctmcp-app-plugins-v2`，新增 `pluginError`、`validatePluginPackage`）
+- [x] B/C Tauri CSP 与 plugin-frame（`tauri.conf.json` 的 `connect-src 'self'`、`frame-ancestors 'self'`；`plugin-frame.js` 建立样式并回报 `loaded`/`error`）
+- [x] 插件面板不再空白：`PluginFrame.svelte` 追踪状态（loading/loaded/ready/error，12 秒逾时），`PluginSlot.svelte` 显示「载入中 / 未添加（一键添加并打开）/ 载入失败 + 原因」
+- [x] D 导入支持 MCP JSON，对话框内显示成功/错误（`src/lib/plugins/mcp-import.ts::detectImport`，`FeatureCatalog.svelte::importValue`）
+- [x] E 已添加清单清理（内置插件不再自动添加）
+- [x] F Rust 主动连线（`external_mcp::connect_enabled`，25 秒上限；工作区未运行时 error=`workspace-not-running`，UI 翻成 `mcp.notRunning`）；MCP 详情未连线时有「重新连线」按钮
+- [x] G 新增 MCP 服务器：对话框「MCP 服务器」分页可贴 JSON 或选文件 → 写入目前项目 `.mcp.json` → 自动打开 MCP 总开关并启用新服务器。后端 Rust `add_workspace_mcp_servers`（`commands/workspace_features.rs::merge_mcp_json`）、Node `POST /admin/api/workspaces/{id}/extensions/mcp`（`management/mcpJson.ts`）
+- [x] SeedLibrary：CodeRabbit 卡片只打开浮层，不再把方法切到不存在的 `rabbit` 分页
+- [x] 测试：`pnpm test`（2 个失败是本分支原本就有的：`chat-message-actions`、`node-agent-ui-parity`，与本修改无关）、`pnpm check` 0 错误、`cargo check --no-default-features --lib` 通过、新增单元测试 `tests/mcp-import.test.mjs`、`packages/node-agent/test/mcpJson.test.mjs`、Rust `mcp_json_tests`
+- [ ] 浏览器实测（模拟 Tauri CSP 头）与真实 Windows Tauri 安装包实测 —— 尚未完成
 - [ ] PR
+
+## 已知限制 / 后续
+
+- `add_workspace_mcp_servers` 写入的是第一个（或指定的）项目文件夹的 `.mcp.json`；使用者级 `~/.claude.json` 不会被改动。
+- 若 `.mcp.json` 已存在但不是合法 JSON，会拒绝写入并显示错误，不会覆盖。
+- 前端 `UI` 的「重新连线」其实是重新拉一次 inventory；Rust 端会对已启用但未连上的服务器重试连线。
+- `tests/node-agent-ui-parity.test.mjs` 与 `tests/chat-message-actions.test.mjs` 在基底分支本来就失败，未处理。
 
 ## 验证方式（给接手者）
 

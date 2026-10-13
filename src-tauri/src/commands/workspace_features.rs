@@ -207,3 +207,49 @@ pub fn set_workspace_extension_enabled(
             .collect(),
     })
 }
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServersAddResult {
+    ok: bool,
+    workspace_id: String,
+    folder_id: String,
+    path: String,
+    names: Vec<String>,
+}
+
+#[tauri::command(async)]
+pub fn add_workspace_mcp_servers(
+    state: State<'_, AppState>,
+    workspace_id: String,
+    folder_id: String,
+    servers: serde_json::Map<String, serde_json::Value>,
+) -> AppResult<McpServersAddResult> {
+    let folders = state.with_workspaces(|store| {
+        store
+            .get(&workspace_id)
+            .map(|profile| profile.folders.clone())
+            .ok_or_else(|| AppError::Message(format!("workspace not found: {workspace_id}")))
+    })?;
+    let folder = folders
+        .iter()
+        .find(|folder| folder_id.trim().is_empty() || folder.id == folder_id)
+        .ok_or_else(|| AppError::Message("Add a project folder to this workspace first.".into()))?;
+    let root = std::path::PathBuf::from(&folder.path);
+    if !root.is_dir() {
+        return Err(AppError::Message(format!(
+            "project folder does not exist: {}",
+            folder.path
+        )));
+    }
+    let names =
+        crate::workspace_features::mcp_json::merge_mcp_json(&root.join(".mcp.json"), &servers)
+            .map_err(AppError::Message)?;
+    Ok(McpServersAddResult {
+        ok: true,
+        workspace_id,
+        folder_id: folder.id.clone(),
+        path: ".mcp.json".into(),
+        names,
+    })
+}

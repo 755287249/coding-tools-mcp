@@ -27,26 +27,26 @@
     "security": {
       "csp": {
         "default-src": "'self' customprotocol: asset:",
-        "connect-src": "ipc: http://ipc.localhost",
+        "connect-src": "'self' ipc: http://ipc.localhost",
         "font-src": "'self' data:",
         "img-src": "'self' asset: http://asset.localhost blob: data:",
         "script-src": "'self' blob:",
         "style-src": "'unsafe-inline' 'self'",
         "object-src": "'none'",
         "base-uri": "'self'",
-        "frame-ancestors": "'none'",
+        "frame-ancestors": "'self'",
         "frame-src": "'self' chatpreview: http://chatpreview.localhost https://chatpreview.localhost"
       },
       "devCsp": {
         "default-src": "'self' customprotocol: asset:",
-        "connect-src": "ipc: http://ipc.localhost http://localhost:1420 ws://localhost:1420",
+        "connect-src": "'self' ipc: http://ipc.localhost http://localhost:1420 ws://localhost:1420",
         "font-src": "'self' data:",
         "img-src": "'self' asset: http://asset.localhost blob: data:",
         "script-src": "'self' blob:",
         "style-src": "'unsafe-inline' 'self'",
         "object-src": "'none'",
         "base-uri": "'self'",
-        "frame-ancestors": "'none'",
+        "frame-ancestors": "'self'",
         "frame-src": "'self' chatpreview: http://chatpreview.localhost https://chatpreview.localhost"
       }
     }

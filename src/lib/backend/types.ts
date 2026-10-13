@@ -332,6 +332,15 @@ export interface ExtensionMasterToggleResult {
   appliedImmediately?: string[];
 }
 
+export interface McpServersAddResult {
+  ok: true;
+  workspaceId: string;
+  folderId: string;
+  /** Project-relative file the servers were written to (always `.mcp.json`). */
+  path: string;
+  names: string[];
+}
+
 export interface WorkspaceFeatureBackend {
   skills(workspaceId: string, signal?: AbortSignal): Promise<SkillInventoryPayload>;
   setSkillsActive(workspaceId: string, active: boolean): Promise<SkillMasterToggleResult>;
@@ -348,6 +357,12 @@ export interface WorkspaceFeatureBackend {
     key: string,
     enabled: boolean,
   ): Promise<ExtensionToggleResult>;
+  /** Merges servers into `<folder>/.mcp.json` (`mcpServers`), creating the file when missing. */
+  addMcpServers(
+    workspaceId: string,
+    folderId: string,
+    servers: Record<string, Record<string, unknown>>,
+  ): Promise<McpServersAddResult>;
 }
 
 export interface AgentBackend {

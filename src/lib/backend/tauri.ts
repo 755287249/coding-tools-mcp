@@ -197,6 +197,8 @@ export function createTauriBackend(deps: TauriBackendDeps): FrontendBackend {
           extensionKey,
           enabled,
         }),
+      addMcpServers: (workspaceId, folderId, servers) =>
+        invoke("add_workspace_mcp_servers", { workspaceId, folderId, servers }),
     },
   };
 }

@@ -51,6 +51,7 @@ pub use workspace::{
     open_shared_workspace, open_workspace_directory, remove_workspace_folder, update_workspace,
 };
 pub use workspace_features::{
-    get_workspace_extensions, get_workspace_skills, set_workspace_extension_active,
-    set_workspace_extension_enabled, set_workspace_skill_enabled, set_workspace_skills_active,
+    add_workspace_mcp_servers, get_workspace_extensions, get_workspace_skills,
+    set_workspace_extension_active, set_workspace_extension_enabled, set_workspace_skill_enabled,
+    set_workspace_skills_active,
 };
