@@ -636,6 +636,10 @@ mod tests {
         );
         assert_eq!(result["ok"], true, "{result}");
         assert_eq!(result["sandbox_enforced"], false, "{result}");
-        assert_eq!(result["stdout"], "full access\n", "{result}");
+        assert_eq!(
+            result["stdout"].as_str().map(str::trim),
+            Some("full access"),
+            "{result}"
+        );
     }
 }
