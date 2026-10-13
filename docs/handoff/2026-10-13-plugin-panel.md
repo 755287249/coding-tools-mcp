@@ -75,3 +75,9 @@
 | 插件英文、白底 | 插件没用 context.locale/theme | `index.ts` 加中/繁/英文字与深浅色 CSS 变量；`PluginFrame.svelte` 在 `lang`/`data-theme` 变化时重发 context |
 
 实测：用使用者提供的账号以 Node 直接跑 `auth.ts::login`（`/var/tmp/crtest/run.mjs` 作法：fetch redirect:'manual' 当 http），修复前 422 失败，修复后「Logged in · 100 min」。
+
+## 第三轮（v0.1.152）：Windows 上报 `error sending request for url (https://github.com/login/oauth/authorize?...)`
+
+- 原因：插件的 HTTP 请求由 Rust `plugin_http`（reqwest 0.12）发出。Cargo.toml 里 reqwest 用了 `default-features = false`，没有 `system-proxy` 功能。这时 reqwest 在 Windows 只读 `HTTPS_PROXY` 环境变量，不读 Windows 系统代理（hyper-util `client-proxy-system`）。浏览器手动登录走系统代理所以成功；插件直连 github.com，连接失败。app.coderabbit.ai 直连可用，所以第一步成功、到 GitHub 才失败。
+- 修复：reqwest 加 `system-proxy` 功能；连接失败/超时自动重试 2 次；错误信息带上底层原因（如 `tcp connect error`、`operation timed out`）；插件对网络错误加提示「连不上 GitHub。请检查网络或代理后重试」。
+- 验证：`/var/tmp/rproxy`（照抄 plugin_http 的 reqwest 设定的独立 CLI）+ `auth.ts::login` 实际登录成功；设定无效代理时能复现同类错误并显示底层原因。上一轮只用 Node fetch 测试，没覆盖 Rust 通道，这是漏测。

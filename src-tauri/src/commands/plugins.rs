@@ -76,6 +76,22 @@ async fn public_url(raw: &str) -> AppResult<(reqwest::Url, Vec<std::net::SocketA
     Ok((url, addresses))
 }
 
+/// `reqwest` hides the real cause ("connection reset", "timed out", TLS) in
+/// the source chain; include it so users can see why a request failed.
+fn error_chain(error: &dyn std::error::Error) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        if !message.contains(&text) {
+            message.push_str(": ");
+            message.push_str(&text);
+        }
+        source = cause.source();
+    }
+    message
+}
+
 #[derive(Deserialize)]
 pub struct PluginHttpRequest {
     url: String,
@@ -142,10 +158,25 @@ pub async fn plugin_http(request: PluginHttpRequest) -> AppResult<Value> {
             builder = builder.body(body);
         }
     }
-    let response = builder
-        .send()
-        .await
-        .map_err(|e| AppError::Message(e.to_string()))?;
+    // Retry connection failures (nothing was sent yet), common on unstable
+    // networks to github.com. Other errors are returned with their cause chain.
+    let mut attempt = 0;
+    let response = loop {
+        let Some(request) = builder.try_clone() else {
+            break builder
+                .send()
+                .await
+                .map_err(|e| AppError::Message(error_chain(&e)))?;
+        };
+        match request.send().await {
+            Ok(response) => break response,
+            Err(error) if attempt < 2 && (error.is_connect() || error.is_timeout()) => {
+                attempt += 1;
+                tokio::time::sleep(Duration::from_millis(800 * attempt)).await;
+            }
+            Err(error) => return Err(AppError::Message(error_chain(&error))),
+        }
+    };
     let status = response.status().as_u16();
     let mut headers = serde_json::Map::new();
     for name in response.headers().keys() {
