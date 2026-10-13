@@ -84,10 +84,23 @@
 
 新增回归测试明确验证：旧项目种子在新项目全局清单中可见，能分配新项目对话，并保存目标项目 ID。gateway 测试验证项目工具读取目标项目文件。
 
+## 后续审查修复（c685176 之后）
+
+- 全局 Node runtime 会显式登记全部可路由项目；非全局项目 runtime 会清空共享项目发现，因此 per-project seed endpoint 不能跨项目分配。
+- Node 跨项目分配在进程级串行化外，还会在写入前锁定并重新读取目标对话；源注册表只在目标持久化 claim 成功后记录 assignment。
+- Node 与 Rust 的 `begin` 路径会将带空 `workspace_folder_id` 的旧活跃 assignment 迁移为源项目 folder ID 并持久化，再路由工具调用。
+- 完全授权仍然固定关闭命令沙箱；项目 gateway 的逻辑 scope 不得重新启用 AppContainer。
+- Rust 与 Node 在跨项目 claim 前都会锁定并重新读取目标对话，避免覆盖目标项目中的并发更新。
+- Rust per-project listener 和 Node per-project endpoint 只扫描本项目。只有 global connection 可以跨项目分配和路由。
+- gateway 回归测试确认逻辑项目边界仍生效，但 `exec_command` 不再重新启用 AppContainer。
+
+审查曾把关闭工作区边界、敏感输出保护和环境保护列为高安全风险。本次没有缩小这项授权，因为用户明确选择对全部新旧工作空间固定使用 `dangerous + advanced` 完全授权。该行为只适合用户指定的测试电脑，发布前应再次确认产品范围。
+
 ## 未完成事项
 
 - 尚未在真实 Windows 机器运行 AppContainer/Git UI 端到端验证。
 - 尚未用真实的 27 个用户种子数据执行迁移验证。
+- 浏览器预览只到达“Sign in to desktop”页面。当前环境也缺少 `glib-2.0.pc`，因此无法完成真实 ChatPanel 视觉验证。
 - Node Agent UI CSP 的既有检查仍失败，与本次修改无关。
 
 ## 回滚说明

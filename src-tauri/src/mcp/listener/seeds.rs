@@ -309,7 +309,14 @@ async fn execute(
                 return Err("Arguments must be an object".into());
             }
             if name == "seed_connect" {
-                let mut status = seeds::poll(&root, seed_id, token).map_err(|e| e.message())?;
+                let mut status = seeds::poll_scoped(
+                    &root,
+                    seed_id,
+                    token,
+                    folder_id,
+                    state.workspace_id == crate::data::GLOBAL_MCP_ID,
+                )
+                .map_err(|e| e.message())?;
                 status["registered"] = json!(status["status"] != "retired");
                 status["seed_id"] = json!(seed_id);
                 status["workspace_folder_id"] = json!(folder_id);
@@ -339,7 +346,14 @@ async fn execute(
                     .as_u64()
                     .filter(|n| *n <= 25000)
                     .ok_or("timeout_ms must be 0–25000")?;
-                let status = seeds::poll(&root, seed_id, token).map_err(|e| e.message())?;
+                let status = seeds::poll_scoped(
+                    &root,
+                    seed_id,
+                    token,
+                    folder_id,
+                    state.workspace_id == crate::data::GLOBAL_MCP_ID,
+                )
+                .map_err(|e| e.message())?;
                 if status["status"] == "retired" {
                     return Ok(Some(wrapped(
                         json!({"status":"retired","registered":false,"instruction":"Seed retired. Stop waiting and do not switch identities."}),
@@ -413,16 +427,24 @@ async fn execute(
                 let _guard = WaitGuard(key);
                 let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout);
                 loop {
-                    let result = seeds::poll(&root, seed_id, token).map_err(|e| e.message())?;
+                    let result = seeds::poll_scoped(
+                        &root,
+                        seed_id,
+                        token,
+                        folder_id,
+                        state.workspace_id == crate::data::GLOBAL_MCP_ID,
+                    )
+                    .map_err(|e| e.message())?;
                     if result["status"] != "idle" || tokio::time::Instant::now() >= deadline {
                         if chat_wait && result["status"] == "assigned" {
-                            let binding = seeds::begin(
+                            let binding = seeds::begin_for_folder(
                                 &root,
                                 seed_id,
                                 token,
                                 "chat_open",
                                 &args,
                                 &body["id"].to_string(),
+                                folder_id,
                             )
                             .map_err(|e| e.message())?;
                             let routed_id = binding["workspace_folder_id"]
@@ -478,8 +500,16 @@ async fn execute(
                     .as_str()
                     .map(str::to_owned)
                     .unwrap_or_else(|| body["id"].to_string());
-                let binding = seeds::begin(&root, seed_id, token, name, &args, &request_id)
-                    .map_err(|e| e.message())?;
+                let binding = seeds::begin_for_folder(
+                    &root,
+                    seed_id,
+                    token,
+                    name,
+                    &args,
+                    &request_id,
+                    folder_id,
+                )
+                .map_err(|e| e.message())?;
                 if auto_open {
                     args.as_object_mut().unwrap().remove("timeout_ms");
                 }
@@ -1080,8 +1110,7 @@ mod tests {
         );
         let rerouted=rpc(token.clone(),"tools/call",json!({"name":"read_file","arguments":{"path":"sample.txt","workspace_folder_id":"other"}}),6).await.unwrap().json::<Value>().await.unwrap();
         assert_eq!(
-            rerouted["result"]["structuredContent"]["content"],
-            "seed project",
+            rerouted["result"]["structuredContent"]["content"], "seed project",
             "{rerouted}"
         );
         ui(json!({"action":"seed_retire","seed_id":seed["seed_id"]}));

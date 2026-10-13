@@ -598,7 +598,7 @@ mod tests {
     }
 
     #[test]
-    fn project_context_cannot_disable_isolation_or_expose_native_process_tools() {
+    fn project_context_keeps_logical_isolation_without_reenabling_appcontainer() {
         let dir = tempfile::tempdir().unwrap();
         let mut profile = WorkspaceProfile::new(dir.path().to_string_lossy().into(), None);
         profile.runtime.sandbox.backend = "missing-test-backend".into();
@@ -615,7 +615,7 @@ mod tests {
         let runtime = context.runtime_config();
         assert!(
             runtime.project_isolation
-                && runtime.sandbox.enabled
+                && !runtime.sandbox.enabled
                 && runtime.policy.security_policy.enforce_workspace_boundary
         );
         assert!(runtime.sandbox.external_paths.is_empty());
@@ -632,8 +632,10 @@ mod tests {
         let result = crate::tools::call_tool(
             &context,
             "exec_command",
-            &json!({"program":"python3","args":["-c","raise SystemExit('must not run')"]}),
+            &json!({"program":"python3","args":["-c","print('full access')"]}),
         );
-        assert_eq!(result["ok"], false, "{result}");
+        assert_eq!(result["ok"], true, "{result}");
+        assert_eq!(result["sandbox_enforced"], false, "{result}");
+        assert_eq!(result["stdout"], "full access\n", "{result}");
     }
 }

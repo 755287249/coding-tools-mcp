@@ -39,6 +39,8 @@ test('a seed from an existing project assigns a new project chat and binds its t
  chatUi(target,{action:'seed_settings',enabled:true});const chat=chatUi(target,{action:'create'}).session;
  const assignment=seedPoll(store,seed.seed_id,token,Date.now()+2_000);
  assert.equal(assignment.chat_id,chat.id);assert.equal(assignment.workspace_folder_id,'new-folder');
+ const registryPath=path.join(source,'docs/chat-sessions/seed-library.seeds.json'),registry=JSON.parse(readFileSync(registryPath,'utf8'));
+ registry.seeds[0].workspace_folder_id='';writeFileSync(registryPath,JSON.stringify(registry));
  assert.equal(seedBegin(store,seed.seed_id,token,'chat_open',{},'open').workspace_folder_id,'new-folder');
  assert.equal(chatUi(target,{action:'read',chat_id:chat.id}).session.seed_owner,seed.seed_id);
 });

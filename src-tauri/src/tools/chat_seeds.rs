@@ -1119,6 +1119,24 @@ fn created_unlocked(root: &Path, sid: &str, ticket: &str, task: &str) -> Result<
 pub fn poll(root: &Path, sid: &str, token: &str) -> Result<Value> {
     poll_at(root, sid, token, now())
 }
+pub fn poll_scoped(
+    root: &Path,
+    sid: &str,
+    token: &str,
+    folder_id: &str,
+    global: bool,
+) -> Result<Value> {
+    let _assignment = ASSIGNMENT_LOCK
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|_| err("Seed assignment lock unavailable"))?;
+    let roots = if global {
+        workspace_roots(root)
+    } else {
+        vec![(folder_id.to_string(), root.to_path_buf())]
+    };
+    poll_at_in_roots(root, sid, token, now(), &roots)
+}
 fn workspace_roots(root: &Path) -> Vec<(String, PathBuf)> {
     crate::data::DataStore::read_file(|data| Ok(data.profiles.clone()))
         .ok()
@@ -1326,6 +1344,27 @@ fn poll_at_in_roots(
             } else if !chat["attachment_id"].as_str().unwrap_or("").is_empty() {
                 continue;
             }
+            // Only lock a target after the cheap snapshot filters select it.
+            // A busy target is not fatal; another candidate can still serve.
+            let _target_lock = if chat_root != root {
+                match lock(&chat_root) {
+                    Ok(guard) => Some(guard),
+                    Err(_) => continue,
+                }
+            } else {
+                None
+            };
+            let Ok(fresh) = load(&chat_root, id(&chat["id"])?) else {
+                continue;
+            };
+            if !eligible(&fresh)
+                || !matches(&data.seeds[index], &parse_filter(&fresh["seed_filter"])?)
+                || fresh["seed_owner"] != chat["seed_owner"]
+                || fresh["attachment_id"] != chat["attachment_id"]
+            {
+                continue;
+            }
+            chat = fresh;
             write(root, &data)?;
             let attachment = uuid::Uuid::new_v4().to_string();
             let generation = chat["seed_generation"].as_u64().unwrap_or(0) + 1;
@@ -1367,15 +1406,45 @@ pub fn begin(
     args: &Value,
     request: &str,
 ) -> Result<Value> {
+    begin_scoped(root, sid, token, name, args, request, None)
+}
+pub fn begin_for_folder(
+    root: &Path,
+    sid: &str,
+    token: &str,
+    name: &str,
+    args: &Value,
+    request: &str,
+    folder_id: &str,
+) -> Result<Value> {
+    begin_scoped(root, sid, token, name, args, request, Some(folder_id))
+}
+fn begin_scoped(
+    root: &Path,
+    sid: &str,
+    token: &str,
+    name: &str,
+    args: &Value,
+    request: &str,
+    folder_id: Option<&str>,
+) -> Result<Value> {
     let _lock = lock(root)?;
     let mut data = read(root)?;
     let index = authorized(&data, sid, token, now())?;
-    let s = &mut data.seeds[index];
-    if s.chat_id.is_empty() {
+    if data.seeds[index].chat_id.is_empty() {
         return Err(err("Seed is not assigned; use seed_wait"));
     }
-    let target = assignment_root(&workspace_roots(root), &s.workspace_folder_id)
-        .unwrap_or_else(|| root.to_path_buf());
+    let roots = workspace_roots(root);
+    if data.seeds[index].workspace_folder_id.is_empty() {
+        // Pre-global assignments always belonged to the registry's project.
+        data.seeds[index].workspace_folder_id = folder_id
+            .map(str::to_owned)
+            .unwrap_or_else(|| source_folder_id(root, &roots));
+        write(root, &data)?;
+    }
+    let s = &mut data.seeds[index];
+    let target =
+        assignment_root(&roots, &s.workspace_folder_id).unwrap_or_else(|| root.to_path_buf());
     let chat = load(&target, &s.chat_id)?;
     if chat["closed"] == true
         || chat["seed_auto"] != true
@@ -1503,20 +1572,62 @@ mod tests {
         );
         let mut global = read(target.path()).unwrap();
         global.seeds.extend(read(source.path()).unwrap().seeds);
-        assert!(inventory(&global, &json!({"action":"seed_list"}), time)["counts"]["ready"]
-            .as_u64()
-            .unwrap()
-            > 0);
+        assert!(
+            inventory(&global, &json!({"action":"seed_list"}), time)["counts"]["ready"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
 
         let chat = super::super::ui(target.path(), &json!({"action":"create"})).unwrap()["session"]
             .clone();
+        assert_eq!(
+            poll_at_in_roots(
+                source.path(),
+                sid,
+                &tokens[0],
+                time + 1_001,
+                &[("old-folder".to_string(), source.path().to_path_buf())],
+            )
+            .unwrap()["status"],
+            "idle"
+        );
         let assigned =
-            poll_at_in_roots(source.path(), sid, &tokens[0], time + 1_001, &roots).unwrap();
+            poll_at_in_roots(source.path(), sid, &tokens[0], time + 2_002, &roots).unwrap();
         assert_eq!(assigned["chat_id"], chat["id"]);
         assert_eq!(assigned["workspace_folder_id"], "new-folder");
         assert_eq!(
             load(target.path(), chat["id"].as_str().unwrap()).unwrap()["seed_owner"],
             sid
+        );
+    }
+
+    #[test]
+    fn begin_migrates_legacy_assignment_to_listener_folder() {
+        let (root, batch, tokens) = fixture();
+        let chat =
+            super::super::ui(root.path(), &json!({"action":"create"})).unwrap()["session"].clone();
+        let sid = batch[0]["seed_id"].as_str().unwrap();
+        let assignment = poll(root.path(), sid, &tokens[0]).unwrap();
+        assert_eq!(assignment["chat_id"], chat["id"]);
+        let mut data = read(root.path()).unwrap();
+        data.seeds[0].workspace_folder_id.clear();
+        write(root.path(), &data).unwrap();
+
+        let binding = begin_for_folder(
+            root.path(),
+            sid,
+            &tokens[0],
+            "chat_open",
+            &json!({}),
+            "legacy-open",
+            "listener-folder",
+        )
+        .unwrap();
+        assert_eq!(binding["workspace_folder_id"], "listener-folder");
+        assert_eq!(
+            read(root.path()).unwrap().seeds[0].workspace_folder_id,
+            "listener-folder"
         );
     }
 

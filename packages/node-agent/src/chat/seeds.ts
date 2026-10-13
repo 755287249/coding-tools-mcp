@@ -340,9 +340,15 @@ function seedPollUnlocked(store:SeedStore,id:string,token:string,now=Date.now())
           if(!old.retired_at&&(now-old.last_seen<=SEED_REPLACE_MS||chat.lease_until>now))continue;
           if(!old.retired_at)retirement(old,'activity_timeout',now);
         } else if(chat.attachment_id)continue; // Never take over a manually connected AI.
-        saveSeeds(store,data); // Revoke old identity before writing the new owner.
-        const attachment=randomUUID();chat.seed_owner=s.id;chat.seed_generation=(chat.seed_generation??0)+1;chat.attachment_id=attachment;chat.lease_until=0;chat.seed_pending=true;chat.agent_name=`Seed-${s.id.slice(0,8)}`;chat.updated_at=now;
-        project.store.save(chat);s.chat_id=chat.id;s.attachment_id=attachment;s.generation=chat.seed_generation;s.workspace_folder_id=project.id;s.standby=false;s.reason='';dirty=true;scans.delete(key);break;
+        // Re-read while holding the target folder lock. The process-wide guard
+        // serializes competing registries; this durable lock fences writers in
+        // another process before the source registry records its claim.
+        saveSeeds(store,data); // Persist any replaced owner's retirement before the new claim.
+        const claim=()=>{const fresh=project.store.read(chat.id);if(!eligibleChat(fresh)||(fresh.seed_owner??'')!==(chat.seed_owner??'')||(fresh.attachment_id??'')!==(chat.attachment_id??''))return undefined;const attachment=randomUUID();fresh.seed_owner=s.id;fresh.seed_generation=(fresh.seed_generation??0)+1;fresh.attachment_id=attachment;fresh.lease_until=0;fresh.seed_pending=true;fresh.agent_name=`Seed-${s.id.slice(0,8)}`;fresh.updated_at=now;project.store.save(fresh);return {attachment,generation:fresh.seed_generation};};
+        const claimed=project.store.path(FILE)===store.path(FILE)?claim():project.store.locked(claim);
+        if(!claimed)continue;
+        saveSeeds(store,data); // Persist source ownership after the target claim.
+        s.chat_id=chat.id;s.attachment_id=claimed.attachment;s.generation=claimed.generation;s.workspace_folder_id=project.id;s.standby=false;s.reason='';dirty=true;scans.delete(key);break;
       }
     }
     if(dirty)saveSeeds(store,data);
@@ -354,7 +360,9 @@ export function seedBegin(store:SeedStore,id:string,token:string,name:string,arg
   return store.locked(()=>{
     const data=readSeeds(store),s=authorized(data,id,token,Date.now());
     if(!s.chat_id)throw Error('Seed is not assigned; use seed_wait');
-    const target=s.workspace_folder_id?store.projects().find(project=>project.id===s.workspace_folder_id):undefined;if(!target)throw Error('Assigned project is unavailable');
+    const target=s.workspace_folder_id?store.projects().find(project=>project.id===s.workspace_folder_id):store.projects().find(project=>existsSync(project.store.path('docs/chat-sessions/'+s.chat_id+'.json')));
+    if(!target)throw Error('Assigned project is unavailable');
+    if(!s.workspace_folder_id){s.workspace_folder_id=target.id;saveSeeds(store,data);}
     const chat=target.store.read(s.chat_id);
     if(chat.closed||!chat.seed_auto||chat.seed_owner!==s.id||chat.attachment_id!==s.attachment_id)throw Error('Seed assignment replaced or paused');
     if(chat.seed_pending&&name!=='chat_open')throw Error('Confirm assignment with chat_open before project work');

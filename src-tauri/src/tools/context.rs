@@ -180,8 +180,7 @@ impl SharedRuntimeToolConfig {
         if isolated {
             next.project_isolation = true;
             next.policy.security_policy.enforce_workspace_boundary = true;
-            next.policy.sandbox_enabled = true;
-            next.sandbox.enabled = true;
+            next.policy.sandbox_enabled = next.sandbox.enabled;
             next.sandbox.external_paths.clear();
         }
         *current = next;
@@ -194,8 +193,7 @@ impl SharedRuntimeToolConfig {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         config.project_isolation = true;
         config.policy.security_policy.enforce_workspace_boundary = true;
-        config.policy.sandbox_enabled = true;
-        config.sandbox.enabled = true;
+        config.policy.sandbox_enabled = config.sandbox.enabled;
         config.sandbox.external_paths.clear();
     }
 

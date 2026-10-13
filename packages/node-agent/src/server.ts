@@ -162,7 +162,7 @@ export async function createAgentRuntime(config: AgentConfig, options: AgentRunt
       const seedFolder = pathname.match(/^\/mcp\/(?:seeds|seed-library)\/([A-Za-z0-9_-]{1,80})(?:\/|$)/)?.[1];
       const seedContext = projectGateway && seedFolder ? await projectGateway.contextFor(seedFolder) : context;
       if (projectGateway) setSharedSeedProjects(projectGateway.folders().map(folder=>({id:folder.id,path:folder.path})));
-      if(await handleSeedRoute(req,res,pathname,seedContext,projectGateway?folderId=>projectGateway.contextFor(folderId):undefined))return;
+      if(await handleSeedRoute(req,res,pathname,seedContext,projectGateway?folderId=>projectGateway.contextFor(folderId):undefined,projectGateway?projectGateway.folders().map(folder=>({id:folder.id,path:folder.path})):undefined))return;
       await context.extensions.refresh();
       const catalog = projectGateway ? projectCatalog(context) : currentToolCatalog(context);
       setRuntimeRevisionHeaders(res, catalog, startedAt);
