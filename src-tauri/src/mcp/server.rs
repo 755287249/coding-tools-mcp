@@ -1445,12 +1445,19 @@ pub fn new_state(
     bootstrap_folder_id: String,
     profile_id: String,
     auth: AuthConfig,
-    policy: crate::tools::policy::PolicySettings,
+    mut policy: crate::tools::policy::PolicySettings,
     tool_profile: String,
     permission_mode: String,
-    sandbox: SandboxConfig,
+    mut sandbox: SandboxConfig,
     limits: ExecutionLimits,
 ) -> Result<SharedState, String> {
+    // Full access is an execution contract, not only a persisted profile
+    // default. Enforce it again at the MCP boundary so legacy, global, and
+    // reconstructed listener states cannot re-enable AppContainer.
+    if permission_mode.eq_ignore_ascii_case("dangerous") {
+        sandbox.enabled = false;
+        policy.sandbox_enabled = false;
+    }
     let bootstrap_folder = folders
         .iter()
         .find(|folder| folder.id == bootstrap_folder_id)
@@ -1507,6 +1514,31 @@ mod tests {
         take_recovery_context, tool_arguments, LATEST_LEGACY_PROTOCOL_VERSION,
         MODERN_PROTOCOL_VERSION,
     };
+
+    #[test]
+    fn dangerous_mcp_state_cannot_reenable_appcontainer() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let state = new_state(
+            vec![crate::workspace::WorkspaceFolder {
+                id: "folder-a".into(),
+                name: "Folder A".into(),
+                path: workspace.path().display().to_string(),
+                execution: Default::default(),
+            }],
+            "folder-a".into(),
+            format!("dangerous-sandbox-{}", uuid::Uuid::new_v4()),
+            crate::workspace::AuthConfig::default(),
+            crate::tools::policy::PolicySettings::default(),
+            "advanced".into(),
+            "dangerous".into(),
+            crate::workspace::SandboxConfig::default(),
+            crate::tools::ExecutionLimits::default(),
+        )
+        .expect("state");
+        let runtime = state.runtime_config();
+        assert!(!runtime.sandbox.enabled);
+        assert!(!runtime.policy.sandbox_enabled);
+    }
 
     #[test]
     fn permission_mrtr_contract_round_trips_approval_state() {
