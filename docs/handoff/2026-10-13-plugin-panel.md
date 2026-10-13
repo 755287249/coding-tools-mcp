@@ -45,6 +45,7 @@
 - [x] SeedLibrary：CodeRabbit 卡片只打开浮层，不再把方法切到不存在的 `rabbit` 分页
 - [x] 测试：`pnpm test`（2 个失败是本分支原本就有的：`chat-message-actions`、`node-agent-ui-parity`，与本修改无关）、`pnpm check` 0 错误、`cargo check --no-default-features --lib` 通过、新增单元测试 `tests/mcp-import.test.mjs`、`packages/node-agent/test/mcpJson.test.mjs`、Rust `mcp_json_tests`
 - [ ] 浏览器实测（模拟 Tauri CSP 头）与真实 Windows Tauri 安装包实测 —— 尚未完成
+- [ ] 发布 v0.1.150 供本机测试（见下方记录）
 - [ ] PR：令牌没有 Pull requests 权限，无法自动建立。手动建立：https://github.com/755287249/coding-tools-mcp/compare/vorflux/fix-cloudflared-cwd-and-rollback...vorflux/plugin-panel-fix
 
 ## 已知限制 / 后续
