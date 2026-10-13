@@ -93,6 +93,13 @@ impl RuntimeToolConfig {
             policy.security_policy = SecurityPolicy::legacy(&permission_mode, &tool_profile);
         }
         policy.permission_mode = permission_mode.clone();
+        let mut sandbox = sandbox;
+        // Full access never prepares AppContainer, whatever path built or
+        // updated this runtime config (listener start, hub sync, hot apply).
+        if permission_mode.eq_ignore_ascii_case("dangerous") {
+            sandbox.enabled = false;
+            policy.sandbox_enabled = false;
+        }
         let effective_profile = if policy.explicit_security_policy {
             crate::tools::registry::resolve_tool_profile(
                 policy.security_policy.compatibility_tool_profile(),

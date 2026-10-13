@@ -148,7 +148,9 @@ pub(super) fn migrate(data: &mut AppData) -> Result<bool, String> {
 }
 
 pub(super) fn enforce_project_isolation(profile: &mut WorkspaceProfile) {
-    profile.runtime.sandbox.enabled = true;
+    // Project isolation is logical (workspace boundary). Full access never
+    // prepares AppContainer, so it must not turn the OS sandbox back on.
+    profile.runtime.sandbox.enabled = false;
     profile.runtime.sandbox.external_paths.clear();
     let mut policy =
         crate::tools::policy::PolicySettings::from_runtime(&profile.runtime).security_policy;
@@ -179,6 +181,23 @@ pub(super) fn validate_project_update(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn project_isolation_never_enables_appcontainer() {
+        let mut profile =
+            crate::workspace::WorkspaceProfile::new("C:/workspace/isolated".into(), None);
+        profile.runtime.sandbox.enabled = true;
+        super::enforce_project_isolation(&mut profile);
+        assert!(!profile.runtime.sandbox.enabled);
+        assert!(
+            profile
+                .runtime
+                .security_policy
+                .as_ref()
+                .unwrap()
+                .enforce_workspace_boundary
+        );
+    }
+
     use super::*;
     #[test]
     fn migrates_connection_secrets_and_preserves_folder_identity_and_policy() {

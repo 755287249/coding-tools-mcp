@@ -1538,6 +1538,17 @@ mod tests {
         let runtime = state.runtime_config();
         assert!(!runtime.sandbox.enabled);
         assert!(!runtime.policy.sandbox_enabled);
+
+        // Hot apply and project isolation must not turn AppContainer back on.
+        let mut hot = crate::workspace::RuntimeConfig::default();
+        hot.permission_mode = "dangerous".into();
+        hot.sandbox.enabled = true;
+        hot.sandbox.backend = "appcontainer".into();
+        state.shared_runtime_config().update_from_runtime(&hot);
+        state.shared_runtime_config().require_project_isolation();
+        let runtime = state.runtime_config();
+        assert!(!runtime.sandbox.enabled);
+        assert!(!runtime.policy.sandbox_enabled);
     }
 
     #[test]

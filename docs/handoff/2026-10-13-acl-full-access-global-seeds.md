@@ -129,3 +129,19 @@
 2. 继续更新本文档中的复选框和验证结果。
 3. 修改 seed 分配前先检查 Rust 与 Node Agent 对等实现。
 4. 不要从 `main` 重新开始；`main` 缺少本次问题涉及的大部分功能。
+
+## 2026-10-13 复查（v0.1.154 之后）
+
+- `v0.1.153` 用户实测仍报 AppContainer ACL 超时；`v0.1.154` 在 `mcp::server::new_state` 强制关闭沙箱。
+- 复查发现 `new_state` 之外仍有可重新启用 AppContainer 的路径：
+  - `data::connection::enforce_project_isolation` 会设 `sandbox.enabled = true`（全局连接迁移、包导入）。
+  - `DataStore::load` 在规范化之后才执行 `sync_shared_live_store`，共享文件与 `mcp_connection` 未规范化；全局配置更新也未规范化。
+  - 网关 `projects()` 直接读取原始数据文件。
+  - Hub 热应用 `sync_preflighted` 经 `update_from_runtime` 绕过 `new_state`。
+- 修复（提交 `fix: keep AppContainer off on every runtime config path`）：
+  - `RuntimeToolConfig::normalized` 在 `dangerous` 下强制 `sandbox.enabled=false`，覆盖所有构造与热更新路径。
+  - `enforce_project_isolation` 只保留逻辑边界，不再开启沙箱。
+  - 加载、全局更新、包导入、网关读取均调用 `normalize_sandbox()`。
+- 验证：Rust `cargo test --lib --no-default-features` 731 通过、0 失败。
+- 未覆盖：Node Agent 的 AppContainer 后端仍由其自身配置控制（默认关闭）；桌面版报错来自 Rust 路径。
+- 待办：推送该提交并发布 `v0.1.155`，再请用户在 Windows 实测。

@@ -63,7 +63,14 @@ pub(crate) async fn stop_project(id: Option<&str>) {
 const SCOPE_FIELDS: &[&str] = &["workspace_folder_id", "chat_id", "attachment_id"];
 const INSTRUCTIONS: &str="This is the global MCP connection. Projects have fixed directories. Call chat_open with the supplied chat_id and workspace_folder_id. For EVERY subsequent tool call include the returned attachment_id, chat_id and workspace_folder_id; for prompts/resources place these in params._meta. A client session header is not authorization. No project switch is allowed for an attachment. Commands require an OS sandbox; run Git and formatters via exec_command. Follow the full local-chat Skill.";
 fn projects() -> Result<Vec<WorkspaceProfile>, String> {
-    crate::data::DataStore::read_file(|data| Ok(data.profiles.clone())).map_err(|e| e.to_string())
+    let mut profiles = crate::data::DataStore::read_file(|data| Ok(data.profiles.clone()))
+        .map_err(|e| e.to_string())?;
+    // The raw file can hold profiles written by older builds or shared live
+    // stores. Normalize at read time so routed projects always run unsandboxed.
+    for profile in &mut profiles {
+        profile.normalize_sandbox();
+    }
+    Ok(profiles)
 }
 pub(crate) fn folders() -> Result<Value, String> {
     let profiles = projects()?;

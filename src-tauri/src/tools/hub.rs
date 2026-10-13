@@ -1281,9 +1281,17 @@ mod tests {
         let before = cached.runtime_config().sandbox;
         assert!(!before.enabled);
 
+        // Full access ("dangerous", the default) never hot-enables AppContainer.
         let mut runtime = crate::workspace::RuntimeConfig::default();
         runtime.sandbox.enabled = true;
         runtime.sandbox.backend = "appcontainer".into();
+        router
+            .sync_preflighted(folders.clone(), &runtime)
+            .expect("sync full-access runtime");
+        assert!(!cached.runtime_config().sandbox.enabled);
+
+        // A non-full-access runtime still hot-applies the sandbox setting.
+        runtime.permission_mode = "trusted".into();
         router
             .sync_preflighted(folders, &runtime)
             .expect("sync preflighted runtime");
