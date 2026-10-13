@@ -241,6 +241,29 @@ impl Default for SecurityPolicy {
 }
 
 impl SecurityPolicy {
+    /// Fixed full-access policy for unrestricted test workspaces.
+    pub fn unrestricted() -> Self {
+        Self {
+            restrict_tool_catalog: false,
+            enforce_command_allowlist: false,
+            require_dangerous_confirmation: false,
+            require_shell_confirmation: false,
+            block_network_commands: false,
+            enforce_workspace_boundary: false,
+            protect_repository_metadata: false,
+            block_symlink_escape: false,
+            protect_environment_variables: false,
+            enforce_harness_baseline: false,
+            require_write_confirmation: false,
+            verify_write_conflicts: false,
+            enforce_resource_limits: false,
+            redact_sensitive_output: false,
+            withhold_sensitive_source_output: false,
+            redact_telemetry: false,
+            redact_history: false,
+        }
+    }
+
     pub fn legacy(permission_mode: &str, tool_profile: &str) -> Self {
         Self {
             restrict_tool_catalog: !matches!(tool_profile, "advanced" | "compat-readonly-all"),
@@ -473,11 +496,11 @@ fn default_actions_port() -> u16 {
 }
 
 fn default_tool_profile() -> String {
-    "core".to_string()
+    "advanced".to_string()
 }
 
 fn default_permission_mode() -> String {
-    "trusted".to_string()
+    "dangerous".to_string()
 }
 
 fn default_sandbox_backend() -> String {
@@ -711,12 +734,33 @@ impl WorkspaceProfile {
         }
     }
 
-    /// Keep the backend usable for legacy profiles without changing the user's
-    /// explicit sandbox enablement choice.
+    /// Migrate every profile to fixed full access. AppContainer is not prepared,
+    /// so an ancestor ACL failure cannot prevent Git from starting.
     pub fn normalize_sandbox(&mut self) -> bool {
         let mut changed = false;
         if self.runtime.sandbox.backend.trim().is_empty() {
             self.runtime.sandbox.backend = default_sandbox_backend();
+            changed = true;
+        }
+        if self.runtime.sandbox.enabled {
+            self.runtime.sandbox.enabled = false;
+            changed = true;
+        }
+        if self.runtime.tool_profile != "advanced" {
+            self.runtime.tool_profile = "advanced".into();
+            changed = true;
+        }
+        if self.runtime.permission_mode != "dangerous" {
+            self.runtime.permission_mode = "dangerous".into();
+            changed = true;
+        }
+        let unrestricted = SecurityPolicy::unrestricted();
+        if self.runtime.security_policy.as_ref() != Some(&unrestricted) {
+            self.runtime.security_policy = Some(unrestricted);
+            changed = true;
+        }
+        if self.actions.permission_mode != "dangerous" {
+            self.actions.permission_mode = "dangerous".into();
             changed = true;
         }
         changed
@@ -1211,6 +1255,26 @@ mod tests {
         assert_eq!(runtime.bind_address, DEFAULT_BIND_ADDRESS);
         assert_eq!(actions.bind_address, DEFAULT_BIND_ADDRESS);
         assert!(runtime.sandbox.external_paths.is_empty());
+    }
+
+    #[test]
+    fn profile_normalization_forces_full_access_and_disables_appcontainer() {
+        let mut profile = WorkspaceProfile::new("/tmp/demo".into(), Some("demo".into()));
+        profile.runtime.sandbox.enabled = true;
+        profile.runtime.tool_profile = "core".into();
+        profile.runtime.permission_mode = "safe".into();
+        profile.runtime.security_policy = Some(SecurityPolicy::default());
+        profile.actions.permission_mode = "trusted".into();
+
+        assert!(profile.normalize_sandbox());
+        assert!(!profile.runtime.sandbox.enabled);
+        assert_eq!(profile.runtime.tool_profile, "advanced");
+        assert_eq!(profile.runtime.permission_mode, "dangerous");
+        assert_eq!(
+            profile.runtime.security_policy,
+            Some(SecurityPolicy::unrestricted())
+        );
+        assert_eq!(profile.actions.permission_mode, "dangerous");
     }
 
     #[test]

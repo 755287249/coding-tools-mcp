@@ -2,7 +2,7 @@ import { mkdir } from 'node:fs/promises';
 import { GLOBAL_MCP_ID } from './projectIsolation.js';
 import { ProjectGateway, projectCatalog } from './server/projectGateway.js';
 import {enforceProjectConfiguration} from './projectIsolation.js';
-import {runSchedules} from './chat/store.js';
+import {runSchedules, setSharedSeedProjects} from './chat/store.js';
 import {handleSeedRoute,ROBOTS_TXT} from './server/routes/seeds.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
@@ -125,6 +125,7 @@ export interface AgentRuntimeOptions {
 export async function createAgentRuntime(config: AgentConfig, options: AgentRuntimeOptions = {}): Promise<AgentRuntime> {
   const context = await createToolContext(config, {projectIsolation:options.projectIsolation});
   const projectGateway = config.globalConnection ? new ProjectGateway(() => [...(options.runtimeRegistry?.entries() ?? [])].filter(([id]) => id !== GLOBAL_MCP_ID).map(([,record])=>record.context)) : undefined;
+  if (projectGateway) setSharedSeedProjects(projectGateway.folders().map(folder=>({id:folder.id,path:folder.path})));
   context.resolveSecret = options.secretResolver;
   const oauth = new OAuthRuntime(config.oauth, Date.now, options.persistOAuthPassword);
   const startedAt = Date.now();
@@ -160,7 +161,8 @@ export async function createAgentRuntime(config: AgentConfig, options: AgentRunt
       }
       const seedFolder = pathname.match(/^\/mcp\/(?:seeds|seed-library)\/([A-Za-z0-9_-]{1,80})(?:\/|$)/)?.[1];
       const seedContext = projectGateway && seedFolder ? await projectGateway.contextFor(seedFolder) : context;
-      if(await handleSeedRoute(req,res,pathname,seedContext))return;
+      if (projectGateway) setSharedSeedProjects(projectGateway.folders().map(folder=>({id:folder.id,path:folder.path})));
+      if(await handleSeedRoute(req,res,pathname,seedContext,projectGateway?folderId=>projectGateway.contextFor(folderId):undefined))return;
       await context.extensions.refresh();
       const catalog = projectGateway ? projectCatalog(context) : currentToolCatalog(context);
       setRuntimeRevisionHeaders(res, catalog, startedAt);

@@ -29,6 +29,9 @@ fn seen(s: &Seed) -> u64 {
 }
 static SCANS: OnceLock<Mutex<std::collections::HashMap<(PathBuf, String, String, String), u64>>> =
     OnceLock::new();
+/// Cross-registry claims share one process-wide critical section. Per-root file
+/// locks remain in place for durable writes.
+static ASSIGNMENT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 const FILE: &str = "docs/chat-sessions/seed-library.seeds.json";
 pub const LIBRARY_LIMIT: usize = 10000;
 const REGISTRY_BYTES: usize = 32 * 1024 * 1024;
@@ -67,6 +70,10 @@ pub struct Seed {
     pub chat_id: String,
     pub attachment_id: String,
     pub generation: u64,
+    /// Configured project folder selected for this assignment.  The seed's
+    /// credentials and registry remain at the originating root.
+    #[serde(default)]
+    pub workspace_folder_id: String,
     pub inflight: Vec<String>,
     pub operations: Vec<String>,
     /// A still-valid AI that left a conversation (disconnect or switch) and
@@ -77,7 +84,7 @@ pub struct Seed {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub bound_chat: String,
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Library {
     #[serde(default)]
     pairing_hash: String,
@@ -582,6 +589,7 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
                     chat_id: String::new(),
                     attachment_id: String::new(),
                     generation: 0,
+                    workspace_folder_id: String::new(),
                     inflight: vec![],
                     operations: vec![],
                     standby: args["_standby"] == true,
@@ -756,6 +764,17 @@ pub fn ui(root: &Path, args: &Value) -> Result<Value> {
         }
         "seed_list" => (),
         _ => return Err(err("Unknown seed action")),
+    }
+    if args["action"] == "seed_list" {
+        let mut global = data.clone();
+        for (_, project_root) in workspace_roots(root) {
+            if project_root != root {
+                if let Ok(other) = read(&project_root) {
+                    global.seeds.extend(other.seeds);
+                }
+            }
+        }
+        return Ok(inventory(&global, args, time));
     }
     Ok(inventory(&data, args, time))
 }
@@ -1100,7 +1119,52 @@ fn created_unlocked(root: &Path, sid: &str, ticket: &str, task: &str) -> Result<
 pub fn poll(root: &Path, sid: &str, token: &str) -> Result<Value> {
     poll_at(root, sid, token, now())
 }
+fn workspace_roots(root: &Path) -> Vec<(String, PathBuf)> {
+    crate::data::DataStore::read_file(|data| Ok(data.profiles.clone()))
+        .ok()
+        .map(|profiles| {
+            profiles
+                .into_iter()
+                .flat_map(|profile| {
+                    profile
+                        .folders
+                        .into_iter()
+                        .map(|folder| (folder.id, PathBuf::from(folder.path)))
+                })
+                .filter(|(_, path)| path.is_dir())
+                .collect()
+        })
+        .filter(|roots: &Vec<_>| !roots.is_empty())
+        .unwrap_or_else(|| vec![(root.display().to_string(), root.to_path_buf())])
+}
+fn source_folder_id(root: &Path, roots: &[(String, PathBuf)]) -> String {
+    let canonical = root.canonicalize().ok();
+    roots
+        .iter()
+        .find_map(|(id, path)| (path.canonicalize().ok() == canonical).then_some(id))
+        .cloned()
+        .unwrap_or_else(|| root.display().to_string())
+}
+fn assignment_root(roots: &[(String, PathBuf)], folder_id: &str) -> Option<PathBuf> {
+    roots
+        .iter()
+        .find_map(|(id, path)| (id == folder_id).then_some(path.clone()))
+}
 fn poll_at(root: &Path, sid: &str, token: &str, time: u64) -> Result<Value> {
+    let _assignment = ASSIGNMENT_LOCK
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|_| err("Seed assignment lock unavailable"))?;
+    let roots = workspace_roots(root);
+    poll_at_in_roots(root, sid, token, time, &roots)
+}
+fn poll_at_in_roots(
+    root: &Path,
+    sid: &str,
+    token: &str,
+    time: u64,
+    roots: &[(String, PathBuf)],
+) -> Result<Value> {
     let _lock = lock(root)?;
     let mut data = read(root)?;
     let index = authorized(&data, sid, token, time)?;
@@ -1141,19 +1205,34 @@ fn poll_at(root: &Path, sid: &str, token: &str, time: u64) -> Result<Value> {
     }
     let mut chats = vec![];
     let own_chat = data.seeds[index].chat_id.clone();
+    if !own_chat.is_empty() && data.seeds[index].workspace_folder_id.is_empty() {
+        // Active pre-global assignments belonged to their source folder.
+        data.seeds[index].workspace_folder_id = source_folder_id(root, roots);
+        dirty = true;
+    }
     let mut chat_ids = vec![];
     if !own_chat.is_empty() {
-        if safe(root, &format!("{DIR}/{own_chat}.json"))?.exists() {
-            chat_ids.push(own_chat);
+        let assigned_root = assignment_root(roots, &data.seeds[index].workspace_folder_id)
+            .unwrap_or_else(|| root.to_path_buf());
+        if safe(&assigned_root, &format!("{DIR}/{own_chat}.json"))?.exists() {
+            chat_ids.push((
+                data.seeds[index].workspace_folder_id.clone(),
+                assigned_root,
+                own_chat,
+            ));
         }
     } else {
-        for entry in fs::read_dir(safe(root, DIR)?).map_err(io)? {
-            let filename = entry.map_err(io)?.file_name().to_string_lossy().to_string();
-            if let Some(cid) = filename
-                .strip_suffix(".json")
-                .filter(|cid| id(&json!(cid)).is_ok())
-            {
-                chat_ids.push(cid.to_owned());
+        for (folder_id, project_root) in roots.iter().cloned() {
+            if let Ok(entries) = fs::read_dir(safe(&project_root, DIR)?) {
+                for entry in entries {
+                    let filename = entry.map_err(io)?.file_name().to_string_lossy().to_string();
+                    if let Some(cid) = filename
+                        .strip_suffix(".json")
+                        .filter(|cid| id(&json!(cid)).is_ok())
+                    {
+                        chat_ids.push((folder_id.clone(), project_root.clone(), cid.to_owned()));
+                    }
+                }
             }
         }
     }
@@ -1163,8 +1242,8 @@ fn poll_at(root: &Path, sid: &str, token: &str, time: u64) -> Result<Value> {
         .enumerate()
         .map(|(i, s)| (s.id.clone(), i))
         .collect();
-    for cid in chat_ids {
-        let chat = load(root, &cid)?;
+    for (folder_id, chat_root, cid) in chat_ids {
+        let chat = load(&chat_root, &cid)?;
         if let Some(owner) = chat["seed_owner"]
             .as_str()
             .filter(|_| {
@@ -1183,18 +1262,20 @@ fn poll_at(root: &Path, sid: &str, token: &str, time: u64) -> Result<Value> {
             if owner.chat_id != cid
                 || owner.attachment_id != attachment
                 || owner.generation != generation
+                || owner.workspace_folder_id != folder_id
             {
                 dirty = true;
             }
             owner.chat_id = cid;
             owner.attachment_id = chat["attachment_id"].as_str().unwrap_or("").into();
             owner.generation = chat["seed_generation"].as_u64().unwrap_or(1);
+            owner.workspace_folder_id = folder_id.clone();
         }
-        chats.push(chat);
+        chats.push((folder_id, chat_root, chat));
     }
     if !data.seeds[index].chat_id.is_empty() {
         let seed = &data.seeds[index];
-        let valid = chats.iter().any(|chat| {
+        let valid = chats.iter().any(|(_, _, chat)| {
             chat["id"] == seed.chat_id
                 && chat["closed"] != true
                 && chat["seed_auto"] == true
@@ -1208,8 +1289,8 @@ fn poll_at(root: &Path, sid: &str, token: &str, time: u64) -> Result<Value> {
         }
     }
     if data.seeds[index].chat_id.is_empty() {
-        chats.sort_by_key(|chat| chat["created_at"].as_u64().unwrap_or(0));
-        for mut chat in chats {
+        chats.sort_by_key(|(_, _, chat)| chat["created_at"].as_u64().unwrap_or(0));
+        for (folder_id, chat_root, mut chat) in chats {
             // The library switch only governs automatic assignment. A pool the
             // user explicitly chose for a chat is always served.
             if !data.enabled && chat["seed_explicit"] != true {
@@ -1255,11 +1336,12 @@ fn poll_at(root: &Path, sid: &str, token: &str, time: u64) -> Result<Value> {
             chat["seed_pending"] = json!(true);
             chat["agent_name"] = json!(format!("Seed-{}", sid.chars().take(8).collect::<String>()));
             chat["updated_at"] = json!(time);
-            save(root, &chat)?;
+            save(&chat_root, &chat)?;
             let s = &mut data.seeds[index];
             s.chat_id = id(&chat["id"])?.into();
             s.attachment_id = attachment;
             s.generation = generation;
+            s.workspace_folder_id = folder_id;
             s.standby = false;
             s.reason.clear();
             dirty = true;
@@ -1274,7 +1356,7 @@ fn poll_at(root: &Path, sid: &str, token: &str, time: u64) -> Result<Value> {
     Ok(if s.chat_id.is_empty() {
         json!({"status":"idle","instruction":"Make one new independent wait (chat_wait or seed_wait, timeout_ms:25000). Idle is normal. The user writes in the app at any time; idle only means no new message yet, so just wait again. Respect host execution limits."})
     } else {
-        json!({"status":"assigned","needs_open":load(root, &s.chat_id)?["seed_pending"] == true,"chat_id":s.chat_id,"attachment_id":s.attachment_id,"generation":s.generation,"instruction":"Call chat_open with this chat_id and attachment_id. Read the complete returned skill and history. Preserve the existing pending message, plan and user constraints; inspect files and prior operation results before resuming. Work through this MCP workspace. Do not replay completed actions or use an old host sandbox as the project source."})
+        json!({"status":"assigned","needs_open":load(&assignment_root(roots,&s.workspace_folder_id).unwrap_or_else(||root.to_path_buf()), &s.chat_id).map(|chat|chat["seed_pending"] == true).unwrap_or(false),"chat_id":s.chat_id,"attachment_id":s.attachment_id,"workspace_folder_id":s.workspace_folder_id,"generation":s.generation,"instruction":"Call chat_open with this chat_id and attachment_id. Read the complete returned skill and history. Preserve the existing pending message, plan and user constraints; inspect files and prior operation results before resuming. Work through this MCP workspace. Do not replay completed actions or use an old host sandbox as the project source."})
     })
 }
 pub fn begin(
@@ -1292,7 +1374,9 @@ pub fn begin(
     if s.chat_id.is_empty() {
         return Err(err("Seed is not assigned; use seed_wait"));
     }
-    let chat = load(root, &s.chat_id)?;
+    let target = assignment_root(&workspace_roots(root), &s.workspace_folder_id)
+        .unwrap_or_else(|| root.to_path_buf());
+    let chat = load(&target, &s.chat_id)?;
     if chat["closed"] == true
         || chat["seed_auto"] != true
         || chat["seed_owner"] != s.id
@@ -1341,7 +1425,7 @@ pub fn begin(
         s.inflight.push(call_id.clone());
     }
     s.last_seen = now();
-    let result = json!({"chat_id":s.chat_id,"attachment_id":s.attachment_id,"call_id":call_id});
+    let result = json!({"chat_id":s.chat_id,"attachment_id":s.attachment_id,"workspace_folder_id":s.workspace_folder_id,"call_id":call_id});
     write(root, &data)?;
     Ok(result)
 }
@@ -1396,6 +1480,46 @@ mod tests {
             .collect();
         (root, batch, tokens)
     }
+
+    #[test]
+    fn existing_project_seed_is_visible_and_assigns_a_new_project() {
+        let (source, batch, tokens) = fixture();
+        let target = tempfile::tempdir().unwrap();
+        super::super::ui(
+            target.path(),
+            &json!({"action":"seed_settings","enabled":true}),
+        )
+        .unwrap();
+        let roots = vec![
+            ("old-folder".to_string(), source.path().to_path_buf()),
+            ("new-folder".to_string(), target.path().to_path_buf()),
+        ];
+        let sid = batch[0]["seed_id"].as_str().unwrap();
+        let time = now();
+
+        assert_eq!(
+            poll_at_in_roots(source.path(), sid, &tokens[0], time, &roots).unwrap()["status"],
+            "idle"
+        );
+        let mut global = read(target.path()).unwrap();
+        global.seeds.extend(read(source.path()).unwrap().seeds);
+        assert!(inventory(&global, &json!({"action":"seed_list"}), time)["counts"]["ready"]
+            .as_u64()
+            .unwrap()
+            > 0);
+
+        let chat = super::super::ui(target.path(), &json!({"action":"create"})).unwrap()["session"]
+            .clone();
+        let assigned =
+            poll_at_in_roots(source.path(), sid, &tokens[0], time + 1_001, &roots).unwrap();
+        assert_eq!(assigned["chat_id"], chat["id"]);
+        assert_eq!(assigned["workspace_folder_id"], "new-folder");
+        assert_eq!(
+            load(target.path(), chat["id"].as_str().unwrap()).unwrap()["seed_owner"],
+            sid
+        );
+    }
+
     #[test]
     fn workspace_release_preserves_pool_and_fences_old_assignment() {
         let (root, batch, tokens) = fixture();

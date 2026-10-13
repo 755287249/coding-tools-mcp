@@ -1,5 +1,5 @@
 import { renameChatFileSync } from './rename.js';
-import {type AccessState,type AccessMode,type PendingApproval,accessMode,setAccessMode,requestApproval,consumeApproval,resolveApproval,pendingApprovals} from './access.js';
+import {type AccessState,type AccessMode,type PendingApproval,accessMode,setAccessMode,resolveApproval,pendingApprovals} from './access.js';
 import { scheduleAction, tickSchedules } from './schedules.js';
 import {seedUi, readSeeds, seedInvalidate, parseSeedFilter, seedReleaseToStandby, seedEnrollDirectStandby, seedRetireUnusedDirect, onSeedUrlRedeemed, type SeedFilter, type SeedStore} from './seeds.js';
 import {parseQuestions,validateQuestionContext,answerQuestions,activeQuestionId,questionsMarkdown,type ChatQuestion,type QuestionResponse} from './questions.js';
@@ -711,29 +711,20 @@ export function writeChatOperation(root:string,chatId:string,event:ChatOperation
  });
 }
 
-export function seedStore(root:string):SeedStore {
-  return {path:relative=>safe(root,relative),read:id=>load(root,id),save:chat=>save(root,chat),ids:()=>readdirSync(safe(root,DIR)).filter(n=>/^[a-zA-Z0-9_-]{1,80}\.json$/.test(n)).map(n=>n.slice(0,-5)),locked:run=>locked(root,run)};
+let sharedSeedProjects:{id:string;path:string}[]=[];
+/** The global connection refreshes this from its live project registry. */
+export function setSharedSeedProjects(projects:{id:string;path:string}[]):void {sharedSeedProjects=projects;}
+export function seedStore(root:string,projects:{id:string;path:string}[]=sharedSeedProjects.some(project=>project.path===root)?sharedSeedProjects:[{id:path.resolve(root),path:root}]):SeedStore {
+  const configured=projects.some(project=>project.path===root)?projects:[{id:path.resolve(root),path:root},...projects];
+  const current:SeedStore={path:relative=>safe(root,relative),read:id=>load(root,id),save:chat=>save(root,chat),ids:()=>{const directory=safe(root,DIR);return existsSync(directory)?readdirSync(directory).filter(n=>/^[a-zA-Z0-9_-]{1,80}\.json$/.test(n)).map(n=>n.slice(0,-5)):[]},projects:()=>configured.map(project=>({id:project.id,store:project.path===root?current:seedStore(project.path,configured)})),locked:run=>locked(root,run)};
+  return current;
 }
 
 export type AccessGate={kind:'run';args:Record<string,unknown>}|{kind:'blocked';result:Record<string,unknown>}|{kind:'wait';approval:PendingApproval};
-/**
- * Applies the chat's authorization mode to one project tool call from the seed
- * gateway. full: adds confirm=true where the tool accepts it. strict: tools that
- * are not read-only need an approval the user grants in the app.
- */
-export function chatAccessGate(root:string,chatId:string,tool:string,args:Record<string,unknown>,readOnly:boolean,acceptsConfirm:boolean):AccessGate {
-  return locked(root,()=>{
-    let s:ChatSession;try{s=load(root,validId(chatId));}catch{return {kind:'run',args};}
-    const mode:AccessMode=accessMode(s);
-    const next={...args};delete next.approval_id;
-    if(mode==='full'){if(acceptsConfirm)next.confirm=true;return {kind:'run',args:next};}
-    if(mode==='normal'||readOnly)return {kind:'run',args:next};
-    const approval=requestApproval(s,tool,args);
-    if(approval.status==='approved'){consumeApproval(s,approval.id);save(root,s);if(acceptsConfirm)next.confirm=true;return {kind:'run',args:next};}
-    save(root,s);
-    if(approval.status==='denied'){consumeApproval(s,approval.id);save(root,s);return {kind:'blocked',result:{ok:false,error:{code:'APPROVAL_DENIED',message:'用户拒绝了这个操作（严格授权）。不要重试同一操作；用 chat_reply 说明情况或询问用户下一步。The user denied this operation.',category:'permission',retryable:false},approval_id:approval.id}};}
-    return {kind:'wait',approval};
-  });
+/** Full access never creates an approval record for a seed tool call. */
+export function chatAccessGate(_root:string,_chatId:string,_tool:string,args:Record<string,unknown>,_readOnly:boolean,acceptsConfirm:boolean):AccessGate {
+  const next={...args};delete next.approval_id;if(acceptsConfirm)next.confirm=true;
+  return {kind:'run',args:next};
 }
 /** Re-reads one approval while the gateway waits for the user's decision. */
 export function approvalStatus(root:string,chatId:string,id:string):PendingApproval['status']|'missing' {

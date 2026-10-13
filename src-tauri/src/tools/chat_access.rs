@@ -1,17 +1,11 @@
-//! Per-chat authorization mode chosen in the composer (完全/一般/严格授权).
-//! Mirrors `packages/node-agent/src/chat/access.ts`.
-//! - full:   operations inside the project are approved automatically;
-//! - normal: default; the project's guarded approval flow is unchanged;
-//! - strict: every tool that is not read-only needs the user's approval in the
-//!   app (approval card) before it runs.
-//!
-//! Enforced by the seed gateway, which both [接入AI] URLs and seeds use.
+//! Fixed full-access authorization for every conversation.
+//! Mirrors `packages/node-agent/src/chat/access.ts`. The seed gateway always
+//! auto-confirms supported project operations.
 use super::{err, load, lock, now, save, Result};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
-pub(crate) const MODES: [&str; 3] = ["full", "normal", "strict"];
 const APPROVAL_TTL_MS: u64 = 30 * 60_000;
 const MAX_APPROVALS: usize = 20;
 const IGNORED: [&str; 6] = [
@@ -23,18 +17,12 @@ const IGNORED: [&str; 6] = [
     "operation_id",
 ];
 
-pub(crate) fn mode(s: &Value) -> &'static str {
-    match s["access_mode"].as_str() {
-        Some("full") => "full",
-        Some("strict") => "strict",
-        _ => "normal",
-    }
+pub(crate) fn mode(_s: &Value) -> &'static str {
+    "full"
 }
-pub(super) fn set_mode(s: &mut Value, mode: &Value) -> Result<()> {
-    let Some(mode) = mode.as_str().filter(|m| MODES.contains(m)) else {
-        return Err(err("Invalid access mode"));
-    };
-    s["access_mode"] = json!(mode);
+pub(super) fn set_mode(s: &mut Value, _mode: &Value) -> Result<()> {
+    s["access_mode"] = json!("full");
+    s["approvals"] = json!([]);
     Ok(())
 }
 fn canonical(value: &Value) -> String {
@@ -164,17 +152,8 @@ pub(super) fn resolve(s: &mut Value, args: &Value) -> Result<()> {
     }
     Ok(())
 }
-pub(super) fn pending(s: &Value) -> Value {
-    let at = now();
-    Value::Array(
-        s["approvals"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|a| a["status"] == "pending" && fresh(a, at))
-            .cloned()
-            .collect(),
-    )
+pub(super) fn pending(_s: &Value) -> Value {
+    Value::Array(Vec::new())
 }
 pub(crate) enum Gate {
     Run(Value),
@@ -270,14 +249,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn approvals_are_bound_to_the_exact_call_and_single_use() {
-        // resolve() checks expiry against the real clock.
+    fn every_legacy_mode_is_migrated_to_full_access() {
         let t0 = now();
-        let mut s = json!({"id":"c"});
-        assert_eq!(mode(&s), "normal");
-        assert!(set_mode(&mut s, &json!("root")).is_err());
+        let mut s = json!({"id":"c","access_mode":"strict","approvals":[{"status":"pending"}]});
+        assert_eq!(mode(&s), "full");
         set_mode(&mut s, &json!("strict")).unwrap();
-        assert_eq!(mode(&s), "strict");
+        assert_eq!(s["access_mode"], "full");
+        assert_eq!(pending(&s), json!([]));
         let args = json!({"path":"a.txt","content":"x"});
         let first = request(&mut s, "write_file", &args, t0);
         let again = request(&mut s, "write_file", &args, t0 + 1);

@@ -1,23 +1,14 @@
 import {createHash, randomUUID} from 'node:crypto';
-/**
- * Per-chat authorization mode chosen in the composer:
- * - full:   operations inside the project are approved automatically;
- * - normal: low-risk operations run, high-risk ones follow the project's
- *           guarded approval flow (default, unchanged behavior);
- * - strict: every operation that is not read-only needs the user's approval
- *           in the app (approval card) before it runs.
- * Enforced by the seed gateway, which both [接入AI] URLs and seeds use.
- */
-export type AccessMode='full'|'normal'|'strict';
-export const ACCESS_MODES:readonly AccessMode[]=['full','normal','strict'];
+/** Fixed full access for both direct AI connections and seed assignments. */
+export type AccessMode='full';
 export interface PendingApproval {id:string;tool:string;summary:string;args_hash:string;created_at:number;status:'pending'|'approved'|'denied';resolved_at?:number}
 export interface AccessState {access_mode?:AccessMode;approvals?:PendingApproval[]}
 export const APPROVAL_TTL_MS=30*60_000;
 const MAX_APPROVALS=20;
-export function accessMode(s:AccessState):AccessMode {return ACCESS_MODES.includes(s.access_mode as AccessMode)?s.access_mode as AccessMode:'normal';}
-export function setAccessMode(s:AccessState,mode:unknown):void {
-  if(!ACCESS_MODES.includes(mode as AccessMode))throw new Error('Invalid access mode');
-  s.access_mode=mode as AccessMode;
+export function accessMode(_s:AccessState):AccessMode {return 'full';}
+export function setAccessMode(s:AccessState,_mode:unknown):void {
+  s.access_mode='full';
+  s.approvals=[];
 }
 function stable(value:unknown):unknown {
   if(Array.isArray(value))return value.map(stable);
@@ -56,6 +47,6 @@ export function resolveApproval(s:AccessState,id:unknown,approve:unknown,now=Dat
   if(found.status==='pending'){found.status=approve?'approved':'denied';found.resolved_at=now;}
   return found;
 }
-export function pendingApprovals(s:AccessState,now=Date.now()):PendingApproval[] {
-  return (s.approvals??[]).filter(a=>a.status==='pending'&&now-a.created_at<APPROVAL_TTL_MS);
+export function pendingApprovals(_s:AccessState,_now=Date.now()):PendingApproval[] {
+  return [];
 }

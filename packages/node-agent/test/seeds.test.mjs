@@ -4,7 +4,7 @@ import {mkdtempSync,rmSync,readFileSync,writeFileSync,symlinkSync} from 'node:fs
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {chatUi,chatTool,seedStore} from '../dist/chat/store.js';
-import {seedProvision,seedInitialize,seedCreated,seedAuthenticate,seedPoll,seedBegin,seedFinish,SEED_REPLACE_MS} from '../dist/chat/seeds.js';
+import {seedUi,seedProvision,seedInitialize,seedCreated,seedAuthenticate,seedPoll,seedBegin,seedFinish,SEED_REPLACE_MS} from '../dist/chat/seeds.js';
 import {createMcpFixture} from './mcpTestHelpers.mjs';
 import {tunnelPathAllowed} from '../dist/tunnel.js';
 function fixture(t,count=3){const root=mkdtempSync(path.join(tmpdir(),'seeds-'));t.after(()=>rmSync(root,{recursive:true,force:true}));chatUi(root,{action:'seed_settings',enabled:true});const batch=chatUi(root,{action:'seed_batch',count,account:'test',repo_id:'repo-id',branch:'main'}).batch;const store=seedStore(root),tokens=batch.map(s=>seedInitialize(store,s.seed_id,s.ticket));return {root,batch,store,tokens};}
@@ -27,6 +27,20 @@ test('assignment is exclusive, retains history and fences retired owners',t=>{
  assert.throws(()=>chatTool(root,'chat_reply',{chat_id:chat.id,attachment_id:first.attachment_id}),/expired/);
  const opened=chatTool(root,'chat_open',second);assert.equal(opened.session.messages[0].id,'pending');
  assert.equal(chatUi(root,{action:'seed_list'}).retired_count,1);chatUi(root,{action:'seed_cleanup'});assert.equal(chatUi(root,{action:'seed_list'}).retired_count,1);
+});
+test('a seed from an existing project assigns a new project chat and binds its target workspace',t=>{
+ const source=mkdtempSync(path.join(tmpdir(),'seed-source-')),target=mkdtempSync(path.join(tmpdir(),'seed-target-'));
+ t.after(()=>{rmSync(source,{recursive:true,force:true});rmSync(target,{recursive:true,force:true});});
+ chatUi(source,{action:'seed_settings',enabled:true});
+ const seed=chatUi(source,{action:'seed_batch',count:1,account:'pool',repo_id:'old-project',branch:'main'}).batch[0];
+ const projects=[{id:'old-folder',path:source},{id:'new-folder',path:target}],store=seedStore(source,projects),token=seedInitialize(store,seed.seed_id,seed.ticket);
+ assert.equal(seedPoll(store,seed.seed_id,token).status,'idle');
+ assert.equal(seedUi(seedStore(target,projects),{action:'seed_list'}).counts.ready,1);
+ chatUi(target,{action:'seed_settings',enabled:true});const chat=chatUi(target,{action:'create'}).session;
+ const assignment=seedPoll(store,seed.seed_id,token,Date.now()+2_000);
+ assert.equal(assignment.chat_id,chat.id);assert.equal(assignment.workspace_folder_id,'new-folder');
+ assert.equal(seedBegin(store,seed.seed_id,token,'chat_open',{},'open').workspace_folder_id,'new-folder');
+ assert.equal(chatUi(target,{action:'read',chat_id:chat.id}).session.seed_owner,seed.seed_id);
 });
 test('in-flight and retained commands prevent replacement; explicit detach is respected',t=>{
  const {root,batch,store,tokens}=fixture(t);const chat=chatUi(root,{action:'create'}).session;chatTool(root,'chat_open',seedPoll(store,batch[0].seed_id,tokens[0]));

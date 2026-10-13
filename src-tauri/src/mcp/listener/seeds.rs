@@ -308,10 +308,6 @@ async fn execute(
             if !args.is_object() {
                 return Err("Arguments must be an object".into());
             }
-            if args.get("workspace_folder_id").is_some() && args["workspace_folder_id"] != folder_id
-            {
-                return Err("Seed workspace mismatch".into());
-            }
             if name == "seed_connect" {
                 let mut status = seeds::poll(&root, seed_id, token).map_err(|e| e.message())?;
                 status["registered"] = json!(status["status"] != "retired");
@@ -429,8 +425,17 @@ async fn execute(
                                 &body["id"].to_string(),
                             )
                             .map_err(|e| e.message())?;
-                            let open_args = json!({"chat_id":binding["chat_id"],"attachment_id":binding["attachment_id"],"workspace_folder_id":folder_id});
-                            let response = handle_request_async(state.mcp.clone(),json!({"jsonrpc":"2.0","id":body["id"],"method":"tools/call","params":{"name":"chat_open","arguments":open_args,"_meta":{"openai/session":format!("seed:{seed_id}")}}})).await;
+                            let routed_id = binding["workspace_folder_id"]
+                                .as_str()
+                                .ok_or("Assigned project is unavailable")?;
+                            let target_id = if routed_id == root.to_string_lossy() {
+                                folder_id
+                            } else {
+                                routed_id
+                            };
+                            let target_state = super::gateway::project_state(&state, target_id)?;
+                            let open_args = json!({"chat_id":binding["chat_id"],"attachment_id":binding["attachment_id"],"workspace_folder_id":target_id});
+                            let response = handle_request_async(target_state.mcp.clone(),json!({"jsonrpc":"2.0","id":body["id"],"method":"tools/call","params":{"name":"chat_open","arguments":open_args,"_meta":{"openai/session":format!("seed:{seed_id}")}}})).await;
                             let mut actual = response["result"]["structuredContent"].clone();
                             seeds::finish(
                                 &root,
@@ -445,7 +450,7 @@ async fn execute(
                             }
                             actual["status"] = json!("assigned");
                             actual["chat_id"] = binding["chat_id"].clone();
-                            actual["workspace_folder_id"] = json!(folder_id);
+                            actual["workspace_folder_id"] = json!(target_id);
                             break wrapped(actual);
                         }
                         let mut result = result;
@@ -469,11 +474,6 @@ async fn execute(
                 if !seed_tool_allowed(name) {
                     return Err("Tool not available to seeds".into());
                 }
-                if args.get("workspace_folder_id").is_some()
-                    && args["workspace_folder_id"] != folder_id
-                {
-                    return Err("Seed workspace mismatch".into());
-                }
                 let request_id = body["id"]
                     .as_str()
                     .map(str::to_owned)
@@ -483,7 +483,16 @@ async fn execute(
                 if auto_open {
                     args.as_object_mut().unwrap().remove("timeout_ms");
                 }
-                args["workspace_folder_id"] = json!(folder_id);
+                let routed_id = binding["workspace_folder_id"]
+                    .as_str()
+                    .ok_or("Assigned project is unavailable")?;
+                let target_id = if routed_id == root.to_string_lossy() {
+                    folder_id
+                } else {
+                    routed_id
+                };
+                let target_state = super::gateway::project_state(&state, target_id)?;
+                args["workspace_folder_id"] = json!(target_id);
                 if name.starts_with("chat_")
                     || matches!(name, "set_todos" | "update_plan" | "report_progress")
                 {
@@ -510,7 +519,17 @@ async fn execute(
                         .filter(|c| !c.is_empty())
                         .map(str::to_owned)
                     {
-                        match apply_access_mode(&root, &chat_id, name, &args).await {
+                        let target_root =
+                            crate::tools::hub::list_workspace_folders(&target_state.mcp, None)
+                                ["folders"]
+                                .as_array()
+                                .and_then(|folders| {
+                                    folders.iter().find(|folder| folder["id"] == target_id)
+                                })
+                                .and_then(|folder| folder["path"].as_str())
+                                .map(std::path::PathBuf::from)
+                                .ok_or("Assigned project is unavailable")?;
+                        match apply_access_mode(&target_root, &chat_id, name, &args).await {
                             Ok(next) => args = next,
                             Err(blocked) => {
                                 seeds::finish(
@@ -526,7 +545,7 @@ async fn execute(
                         }
                     }
                 }
-                let response=handle_request_async(state.mcp,json!({"jsonrpc":"2.0","id":body["id"],"method":"tools/call","params":{"name":name,"arguments":args,"_meta":{"openai/session":format!("seed:{seed_id}")}}})).await;
+                let response=handle_request_async(target_state.mcp,json!({"jsonrpc":"2.0","id":body["id"],"method":"tools/call","params":{"name":name,"arguments":args,"_meta":{"openai/session":format!("seed:{seed_id}")}}})).await;
                 let actual = response["result"]["structuredContent"].clone();
                 seeds::finish(
                     &root,
@@ -546,7 +565,7 @@ async fn execute(
                     let mut actual = actual;
                     actual["status"] = json!("assigned");
                     actual["chat_id"] = binding["chat_id"].clone();
-                    actual["workspace_folder_id"] = json!(folder_id);
+                    actual["workspace_folder_id"] = json!(target_id);
                     wrapped(actual)
                 } else {
                     response["result"].clone()
@@ -1059,8 +1078,12 @@ mod tests {
             result["result"]["structuredContent"]["content"], "seed project",
             "{result}"
         );
-        let denied=rpc(token.clone(),"tools/call",json!({"name":"read_file","arguments":{"path":"sample.txt","workspace_folder_id":"other"}}),6).await.unwrap().json::<Value>().await.unwrap();
-        assert!(denied.get("error").is_some());
+        let rerouted=rpc(token.clone(),"tools/call",json!({"name":"read_file","arguments":{"path":"sample.txt","workspace_folder_id":"other"}}),6).await.unwrap().json::<Value>().await.unwrap();
+        assert_eq!(
+            rerouted["result"]["structuredContent"]["content"],
+            "seed project",
+            "{rerouted}"
+        );
         ui(json!({"action":"seed_retire","seed_id":seed["seed_id"]}));
         let denied = rpc(
             token,

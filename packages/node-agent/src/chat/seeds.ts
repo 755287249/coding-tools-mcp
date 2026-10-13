@@ -7,6 +7,8 @@ export interface SeedStore {
   read(id:string):ChatSession;
   save(chat:ChatSession):void;
   ids():string[];
+  /** Every currently configured project. The owning registry remains this store. */
+  projects():{id:string;store:SeedStore}[];
   locked<T>(run:()=>T):T;
 }
 export interface Seed {
@@ -21,6 +23,8 @@ export interface Seed {
   standby?:boolean;
   /** Direct-connect URL for one chat ([接入AI]): assigned only to that chat. */
   bound_chat?:string;
+  /** Project selected when this seed was assigned from the shared inventory. */
+  workspace_folder_id?:string;
 }
 interface Library {version:1;enabled:boolean;seeds:Seed[];pairing_hash?:string}
 const FILE='docs/chat-sessions/seed-library.seeds.json';
@@ -31,6 +35,7 @@ const exchanges=new Map<string,{token:string;expires:number}>();
 let urlRedeemedHook:((key:string)=>void)|undefined;
 export function onSeedUrlRedeemed(hook:(key:string)=>void):void {urlRedeemedHook=hook;}
 const scans=new Map<string,number>();
+let assigning=false;
 export function seedInvalidate(store:SeedStore):void {const base=store.path(FILE)+'\0';for(const key of scans.keys())if(key.startsWith(base))scans.delete(key);}
 export const SEED_SUSPECT_MS=600_000, SEED_REPLACE_MS=720_000, SEED_ONLINE_MS=60_000;
 /** Last authenticated request per seed, in memory only (the registry last_seen is written at most once a minute).
@@ -242,6 +247,10 @@ export function seedUi(store:SeedStore,args:Record<string,unknown>):Record<strin
     if(explicit&&chat.attachment_id)throw Error('Disconnect the current AI before choosing a seed pool');
     chat.seed_auto=true;if(explicit){chat.seed_filter=parseSeedFilter(args.seed_filter);chat.seed_explicit=true;chat.seed_direct=false;}chat.updated_at=now;store.save(chat);seedInvalidate(store);
   } else if(args.action!=='seed_list')throw Error('Unknown seed action');
+  if(args.action==='seed_list'){
+    const libraries=store.projects().map(project=>readSeeds(project.store));
+    return inventory({...data,seeds:libraries.flatMap(library=>library.seeds)},args,now);
+  }
   return inventory(data,args,now);
 }
 /** The browser capability can inspect capacity and provision seeds, never invoke project tools. */
@@ -297,6 +306,10 @@ function createdUnlocked(store:SeedStore,id:string,ticket:string,taskId:string):
 }
 export function seedAuthenticate(store:SeedStore,id:string,token:string):void {store.locked(()=>{authorized(readSeeds(store),id,token,Date.now());});}
 export function seedPoll(store:SeedStore,id:string,token:string,now=Date.now()):Record<string,unknown> {
+  if(assigning)throw Error('Seed assignment is in progress; retry');
+  assigning=true;try{return seedPollUnlocked(store,id,token,now);}finally{assigning=false;}
+}
+function seedPollUnlocked(store:SeedStore,id:string,token:string,now=Date.now()):Record<string,unknown> {
   return store.locked(()=>{
     const data=readSeeds(store),s=authorized(data,id,token,now),wasReady=s.ready;
     let dirty=!s.ready;if(now-s.last_seen>=60000){s.last_seen=now;dirty=true;}s.ready=true;
@@ -307,11 +320,15 @@ export function seedPoll(store:SeedStore,id:string,token:string,now=Date.now()):
     }
     if(!s.chat_id){if(scans.size>1024)for(const [key,time] of scans)if(now-time>60000)scans.delete(key);scans.set(key,now);}
     // Reconcile interrupted registry saves using the authoritative chat owner.
-    const chats=s.chat_id?(existsSync(store.path('docs/chat-sessions/'+s.chat_id+'.json'))?[store.read(s.chat_id)]:[]):store.ids().map(id=>store.read(id)),byId=new Map(data.seeds.map(s=>[s.id,s]));
-    for(const chat of chats){if(chat.seed_owner&&chat.seed_auto&&chat.attachment_id){const owner=byId.get(chat.seed_owner);if(owner&&!owner.retired_at){const generation=chat.seed_generation??1;if(owner.chat_id!==chat.id||owner.attachment_id!==chat.attachment_id||owner.generation!==generation)dirty=true;owner.chat_id=chat.id;owner.attachment_id=chat.attachment_id;owner.generation=generation;}}}
-    if(s.chat_id){const chat=chats.find(c=>c.id===s.chat_id);if(!chat||chat.closed||!chat.seed_auto||chat.seed_owner!==s.id||chat.attachment_id!==s.attachment_id){retirement(s,'conversation_detached',now);saveSeeds(store,data);return {status:'retired'};}}
+    const discovered=store.projects(),projects=discovered.length===1?[{...discovered[0],store}]:discovered,assignedProject=s.workspace_folder_id?projects.find(project=>project.id===s.workspace_folder_id):projects.find(project=>existsSync(project.store.path('docs/chat-sessions/'+s.chat_id+'.json')));
+    const chats=s.chat_id
+      ? (assignedProject&&existsSync(assignedProject.store.path('docs/chat-sessions/'+s.chat_id+'.json'))?[{project:assignedProject,chat:assignedProject.store.read(s.chat_id)}]:[])
+      : projects.flatMap(project=>project.store.ids().map(id=>({project,chat:project.store.read(id)})));
+    const byId=new Map(data.seeds.map(s=>[s.id,s]));
+    for(const {project,chat} of chats){if(chat.seed_owner&&chat.seed_auto&&chat.attachment_id){const owner=byId.get(chat.seed_owner);if(owner&&!owner.retired_at){const generation=chat.seed_generation??1;if(owner.chat_id!==chat.id||owner.attachment_id!==chat.attachment_id||owner.generation!==generation||owner.workspace_folder_id!==project.id)dirty=true;owner.chat_id=chat.id;owner.attachment_id=chat.attachment_id;owner.generation=generation;owner.workspace_folder_id=project.id;}}}
+    if(s.chat_id){const entry=chats.find(item=>item.chat.id===s.chat_id);const chat=entry?.chat;if(!chat||chat.closed||!chat.seed_auto||chat.seed_owner!==s.id||chat.attachment_id!==s.attachment_id){retirement(s,'conversation_detached',now);saveSeeds(store,data);return {status:'retired'};}}
     if(!s.chat_id){
-      for(const chat of chats.sort((a,b)=>a.created_at-b.created_at)){
+      for(const {project,chat} of chats.sort((a,b)=>a.chat.created_at-b.chat.created_at)){
         // The library switch only governs automatic assignment; an explicitly chosen pool is always served.
         if(!data.enabled&&chat.seed_explicit!==true)continue;
         // A direct-connect seed serves only its own chat.
@@ -325,18 +342,20 @@ export function seedPoll(store:SeedStore,id:string,token:string,now=Date.now()):
         } else if(chat.attachment_id)continue; // Never take over a manually connected AI.
         saveSeeds(store,data); // Revoke old identity before writing the new owner.
         const attachment=randomUUID();chat.seed_owner=s.id;chat.seed_generation=(chat.seed_generation??0)+1;chat.attachment_id=attachment;chat.lease_until=0;chat.seed_pending=true;chat.agent_name=`Seed-${s.id.slice(0,8)}`;chat.updated_at=now;
-        store.save(chat);s.chat_id=chat.id;s.attachment_id=attachment;s.generation=chat.seed_generation;s.standby=false;s.reason='';dirty=true;scans.delete(key);break;
+        project.store.save(chat);s.chat_id=chat.id;s.attachment_id=attachment;s.generation=chat.seed_generation;s.workspace_folder_id=project.id;s.standby=false;s.reason='';dirty=true;scans.delete(key);break;
       }
     }
     if(dirty)saveSeeds(store,data);
-    return s.chat_id?{status:'assigned',needs_open:store.read(s.chat_id).seed_pending===true,chat_id:s.chat_id,attachment_id:s.attachment_id,generation:s.generation,instruction:'Call chat_open with this chat_id and attachment_id. Read the complete returned skill and history. Preserve the existing pending message, plan and user constraints; inspect files and prior operation results before resuming. Work through this MCP workspace. Do not replay completed actions or use an old host sandbox as the project source.'}:{status:'idle',instruction:'Make one new independent wait (chat_wait or seed_wait, timeout_ms:25000). Idle is normal. The user writes in the app at any time; idle only means no new message yet, so just wait again. Respect host execution limits.'};
+    const target=s.workspace_folder_id?projects.find(project=>project.id===s.workspace_folder_id):undefined;
+    return s.chat_id&&target?{status:'assigned',needs_open:target.store.read(s.chat_id).seed_pending===true,chat_id:s.chat_id,attachment_id:s.attachment_id,workspace_folder_id:target.id,generation:s.generation,instruction:'Call chat_open with this chat_id and attachment_id. Read the complete returned skill and history. Preserve the existing pending message, plan and user constraints; inspect files and prior operation results before resuming. Work through this MCP workspace. Do not replay completed actions or use an old host sandbox as the project source.'}:{status:'idle',instruction:'Make one new independent wait (chat_wait or seed_wait, timeout_ms:25000). Idle is normal. The user writes in the app at any time; idle only means no new message yet, so just wait again. Respect host execution limits.'};
   });
 }
-export function seedBegin(store:SeedStore,id:string,token:string,name:string,args:Record<string,unknown>,requestId:string):{chat_id:string;attachment_id:string;call_id:string} {
+export function seedBegin(store:SeedStore,id:string,token:string,name:string,args:Record<string,unknown>,requestId:string):{chat_id:string;attachment_id:string;workspace_folder_id:string;call_id:string} {
   return store.locked(()=>{
     const data=readSeeds(store),s=authorized(data,id,token,Date.now());
     if(!s.chat_id)throw Error('Seed is not assigned; use seed_wait');
-    const chat=store.read(s.chat_id);
+    const target=s.workspace_folder_id?store.projects().find(project=>project.id===s.workspace_folder_id):undefined;if(!target)throw Error('Assigned project is unavailable');
+    const chat=target.store.read(s.chat_id);
     if(chat.closed||!chat.seed_auto||chat.seed_owner!==s.id||chat.attachment_id!==s.attachment_id)throw Error('Seed assignment replaced or paused');
     if(chat.seed_pending&&name!=='chat_open')throw Error('Confirm assignment with chat_open before project work');
     if(args.chat_id!==undefined&&args.chat_id!==s.chat_id)throw Error('Seed may only access its assigned chat');
@@ -344,7 +363,7 @@ export function seedBegin(store:SeedStore,id:string,token:string,name:string,arg
     if(['wait_command','send_input','kill_session','read_output'].includes(name)&&!s.operations.includes(String(args.session_id)))throw Error('Process does not belong to this seed');
     const call_id=hash(requestId);if(s.inflight.includes(call_id))throw Error('Request already in flight; do not repeat it');
     if(s.inflight.length>=4)throw Error('Too many seed requests in flight');
-    if(['exec_command','apply_patch','edit','edit_file','write_file','file_ops','format_files','send_input','kill_session'].includes(name))s.inflight.push(call_id);s.last_seen=Date.now();saveSeeds(store,data);return {chat_id:s.chat_id,attachment_id:s.attachment_id,call_id};
+    if(['exec_command','apply_patch','edit','edit_file','write_file','file_ops','format_files','send_input','kill_session'].includes(name))s.inflight.push(call_id);s.last_seen=Date.now();saveSeeds(store,data);return {chat_id:s.chat_id,attachment_id:s.attachment_id,workspace_folder_id:target.id,call_id};
   });
 }
 export function seedFinish(store:SeedStore,id:string,callId:string,name:string,args:Record<string,unknown>,result:Record<string,unknown>):void {
