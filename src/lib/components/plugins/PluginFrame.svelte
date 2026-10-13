@@ -14,7 +14,9 @@
   const status=$derived($pluginStatus[id]?.state??'loading');
   let lastStop=0;
   // A frame that never reports back is almost always blocked by a security policy; say so instead of staying blank.
-  onMount(()=>{setPluginStatus(id,{state:'loading'});const timer=setTimeout(()=>{if(($pluginStatus[id]?.state??'loading')==='loading')setPluginStatus(id,{state:'error',error:translate('plugins.frameTimeout')})},12000);return()=>clearTimeout(timer)});
+  onMount(()=>{setPluginStatus(id,{state:'loading'});const timer=setTimeout(()=>{if(($pluginStatus[id]?.state??'loading')==='loading')setPluginStatus(id,{state:'error',error:translate('plugins.frameTimeout')})},12000);// Re-send context when the client language or theme changes so plugins can follow it.
+    const observer=new MutationObserver(()=>{if(($pluginStatus[id]?.state)==='ready')sendEvent('context',context())});observer.observe(document.documentElement,{attributes:true,attributeFilter:['lang','data-theme']});
+    return()=>{clearTimeout(timer);observer.disconnect()}});
   function frameMessage(type:string,error?:string){const current=$pluginStatus[id]?.state;if(type==='error'){if(current!=='ready')setPluginStatus(id,{state:'error',error:String(error??'Plugin error')});}else if(type==='loaded'){if(current!=='error'&&current!=='ready')setPluginStatus(id,{state:'loaded'});}}
   $effect(()=>{const value=$pluginStop;if(value!==lastStop){lastStop=value;if($pluginProgress?.pluginId===id)sendEvent('stop',null)}});
   $effect(()=>{slot?.workspaceId;slot?.folderId;if(slot)sendEvent('context',context())});

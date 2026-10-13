@@ -61,3 +61,17 @@
 - 类型检查：`pnpm check`。
 - Rust（Linux 无 GUI）：`cargo check --manifest-path src-tauri/Cargo.toml --no-default-features --lib`。
 - 模拟桌面 CSP：启动 Node Agent，在它前面加一个代理把 `.html` 回应的 CSP 换成 `tauri.conf.json` 的 `csp`，用浏览器打开看插件 iframe 是否显示。
+
+## 第二轮（v0.1.151）：CodeRabbit 登录失败 + 插件不跟随客户端
+
+使用者回报（v0.1.150）：插件面板能打开了，但 ① 插件是英文、颜色不跟客户端；② 登录卡在「Waiting for the GitHub verification email…」或报「GitHub did not complete CodeRabbit authorization」，手动登录正常。
+
+| 问题 | 原因 | 修复（`plugins/coderabbit/src/`） |
+|---|---|---|
+| 提交验证码后 HTTP 422，最后报 did not complete authorization | GitHub verified-device 页面有两个 form（验证 + 重新发送），旧 `fields()` 把所有 input 合并，`authenticity_token` 被「重新发送」表单的覆盖 | `auth.ts::fields(html, action)` 只读指定 action 的 form；新增单元测试 |
+| 可能用到旧验证码 | 只用 `received_at >= 开始-30s` 判断 | 登录前先记下最新邮件 `message_id`，只接受新邮件；验证码被拒会再等下一封（最多 2 次）；轮询改 5 秒 |
+| 首次授权的账号拿不到 code | 未处理 GitHub「Authorize CodeRabbit」同意页 | authorize 回 200 时提交 `/login/oauth/authorize` 表单（authorize=1） |
+| 错误不清楚 | — | 密码错误、两步验证、各步骤 HTTP 状态都写进错误信息 |
+| 插件英文、白底 | 插件没用 context.locale/theme | `index.ts` 加中/繁/英文字与深浅色 CSS 变量；`PluginFrame.svelte` 在 `lang`/`data-theme` 变化时重发 context |
+
+实测：用使用者提供的账号以 Node 直接跑 `auth.ts::login`（`/var/tmp/crtest/run.mjs` 作法：fetch redirect:'manual' 当 http），修复前 422 失败，修复后「Logged in · 100 min」。

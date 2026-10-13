@@ -111,3 +111,11 @@ test('GitHub device flow and starter repository use the REST API with a random c
   assert.match(Buffer.from(JSON.parse(put.body).content, 'base64').toString(), /def [a-z]+_[a-z]+\(/);
   assert.match(randomSource(() => 0).content, /VALUES = \[0,0,0,0,0,0,0,0\]/);
 });
+
+test('GitHub form fields come from the submitted form only (verified-device + resend forms)', async () => {
+  const { fields } = await import('../plugins/coderabbit/src/auth.ts');
+  const html = '<form action="/sessions/verified-device" method="post"><input type="hidden" name="authenticity_token" value="A1" /><input name="otp" value=""></form><form action="/sessions/verified-device/resend"><input type="hidden" name="authenticity_token" value="B2" /></form>';
+  assert.deepEqual(fields(html, '/sessions/verified-device'), { authenticity_token: 'A1', otp: '' });
+  assert.deepEqual(fields(html, '/sessions/verified-device/resend'), { authenticity_token: 'B2' });
+  assert.deepEqual(fields(html, '/missing'), {});
+});
