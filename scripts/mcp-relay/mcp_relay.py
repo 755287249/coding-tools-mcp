@@ -60,7 +60,7 @@ try:
     from mcp.shared._httpx_utils import create_mcp_http_client
     from mcp.shared.exceptions import MCPDeprecationWarning, MCPError
 except ImportError as e:  # pragma: no cover
-    sys.stderr.write(f"[relay] 缺少依赖: {e}\n请运行:  pip install --quiet --target {os.path.join(HERE, 'vendor')} mcp\n")
+    sys.stderr.write(f"[relay] 缺少依赖: {e}\n请运行:  python -m pip install --target {os.path.join(HERE, 'vendor')} -r {os.path.join(HERE, 'requirements.txt')}\n")
     sys.exit(2)
 
 warnings.simplefilter("ignore", MCPDeprecationWarning)
@@ -242,7 +242,7 @@ def apply_overrides(cfg: Config, args: argparse.Namespace) -> Config:
     else:
         parsed = urlsplit(cfg.url)
         if parsed.scheme not in ("http", "https") or not parsed.netloc:
-            raise SystemExit("远程 MCP 需要有效的 http/https url；请设置 MCP_URL 或修改连接配置文件")
+            raise SystemExit("缺少 MCP 地址：请设置环境变量 MCP_URL（需要时再设 MCP_TOKEN），或修改 mcp-connection.json")
     for key, value in cfg.headers.items():
         if "\n" in str(key) or "\r" in str(key) or "\n" in str(value) or "\r" in str(value):
             raise SystemExit("headers 不允许换行")

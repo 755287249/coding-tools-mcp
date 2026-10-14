@@ -9,6 +9,8 @@
 | 仅提示词 | `PROMPT-NATIVE.md` | Agent 原生支持远程 MCP |
 | 附件 + 提示词 | `PROMPT.md` + `mcp_relay.py` + `mcp-connection.json` + `requirements.txt` | Agent 有沙盒和终端，需要稳定保活 |
 
+两份提示词都只有几行；安装依赖、缺少地址、长任务等提示都由脚本输出给 Agent。
+
 只想把项目分享给网页 AI（不接入对话）时，在应用左侧项目列表中点击项目右侧的分享按钮，复制生成的提示词。
 
 ## 为什么 Agent 会"超时"

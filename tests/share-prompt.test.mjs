@@ -16,13 +16,12 @@ test('share prompt targets one folder without chat tools', () => {
     assert.match(text, /https:\/\/mcp\.example\.test\/mcp/);
     assert.match(text, /Authorization: Bearer synthetic-token/);
     assert.match(text, /switch_workspace_folder/);
-    assert.match(text, /initialize → notifications\/initialized → tools\/list/);
-    assert.match(text, /404/);
+    assert.match(text, /initialize/);
     assert.match(text, /User-Agent: Coding-Tools-MCP\/1\.0/);
     assert.doesNotMatch(text, /chat_open|chat_wait|seed_/);
     const line = text.split('\n').find(item => item.includes('"folder_id"'));
-    assert.deepEqual(JSON.parse(line.slice(line.indexOf('{'))), { folder_id: 'folder-"1\n', name: 'Docs' });
-    assert.ok(text.length < 1000, `${locale} share prompt should stay short`);
+    assert.deepEqual(JSON.parse(line.slice(line.indexOf('{'), line.lastIndexOf('}') + 1)), { folder_id: 'folder-"1\n' });
+    assert.ok(text.length < (locale.startsWith('zh') ? 260 : 380), `${locale} share prompt should stay short`);
   }
 });
 
@@ -31,14 +30,14 @@ test('access mode changes only the permission rule', () => {
   const full = buildSharePrompt({ ...base, access: 'full' }, 'zh-CN');
   assert.match(readonly, /只读/);
   assert.match(readonly, /read_file/);
-  assert.doesNotMatch(readonly, /执行命令。删除/);
-  assert.match(full, /读写文件和执行命令/);
-  assert.match(full, /先询问我/);
+  assert.doesNotMatch(readonly, /可读写/);
+  assert.match(full, /可读写/);
+  assert.match(full, /先问我/);
 });
 
 test('oauth and no-auth connections render the right credential line', () => {
   const oauth = buildSharePrompt({ ...base, authType: 'oauth', clientId: 'client-1', password: 'pw-1', bearerToken: '' }, 'en');
-  assert.match(oauth, /Client ID: client-1/);
+  assert.match(oauth, /Client ID client-1/);
   assert.match(oauth, /pw-1/);
   assert.match(oauth, /PKCE/);
   assert.doesNotMatch(oauth, /Bearer synthetic/);
