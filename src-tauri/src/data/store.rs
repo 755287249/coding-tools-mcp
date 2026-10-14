@@ -80,7 +80,16 @@ impl DataStore {
                 || canonical_changed
                 || changed
         });
-        let shared_changed = sync_shared_live_store(&mut data)?;
+        let mut shared_changed = sync_shared_live_store(&mut data)?;
+        // Shared live files and the global connection bypass the loop above.
+        // Normalize them as well so no stored source can re-enable AppContainer.
+        for profile in data
+            .profiles
+            .iter_mut()
+            .chain(data.mcp_connection.iter_mut())
+        {
+            shared_changed |= profile.normalize_sandbox();
+        }
         let store = Self { data };
         if !existed_before || imported > 0 || normalized || shared_changed {
             store.persist_unlocked()?;
@@ -478,6 +487,7 @@ impl DataStore {
             profile.folders.clear();
             profile.active_folder_id.clear();
             profile.normalize_bind_addresses();
+            profile.normalize_sandbox();
             profile
                 .validate_bind_addresses()
                 .map_err(AppError::Message)?;
@@ -1286,6 +1296,7 @@ pub fn import_workspace_pack_into_data(
     if data.mcp_connection.is_some() {
         super::connection::enforce_project_isolation(&mut profile);
     }
+    profile.normalize_sandbox();
     let resources = data
         .profiles
         .iter()

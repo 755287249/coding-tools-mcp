@@ -93,6 +93,13 @@ impl RuntimeToolConfig {
             policy.security_policy = SecurityPolicy::legacy(&permission_mode, &tool_profile);
         }
         policy.permission_mode = permission_mode.clone();
+        let mut sandbox = sandbox;
+        // Full access never prepares AppContainer, whatever path built or
+        // updated this runtime config (listener start, hub sync, hot apply).
+        if permission_mode.eq_ignore_ascii_case("dangerous") {
+            sandbox.enabled = false;
+            policy.sandbox_enabled = false;
+        }
         let effective_profile = if policy.explicit_security_policy {
             crate::tools::registry::resolve_tool_profile(
                 policy.security_policy.compatibility_tool_profile(),
@@ -179,9 +186,9 @@ impl SharedRuntimeToolConfig {
             RuntimeToolConfig::normalized(policy, tool_profile, permission_mode, sandbox);
         if isolated {
             next.project_isolation = true;
-            next.policy.security_policy.enforce_workspace_boundary = true;
-            next.policy.sandbox_enabled = true;
-            next.sandbox.enabled = true;
+            next.policy.security_policy.enforce_workspace_boundary =
+                !next.permission_mode.eq_ignore_ascii_case("dangerous");
+            next.policy.sandbox_enabled = next.sandbox.enabled;
             next.sandbox.external_paths.clear();
         }
         *current = next;
@@ -193,9 +200,10 @@ impl SharedRuntimeToolConfig {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         config.project_isolation = true;
-        config.policy.security_policy.enforce_workspace_boundary = true;
-        config.policy.sandbox_enabled = true;
-        config.sandbox.enabled = true;
+        // Full access keeps project routing but lifts the path boundary.
+        config.policy.security_policy.enforce_workspace_boundary =
+            !config.permission_mode.eq_ignore_ascii_case("dangerous");
+        config.policy.sandbox_enabled = config.sandbox.enabled;
         config.sandbox.external_paths.clear();
     }
 

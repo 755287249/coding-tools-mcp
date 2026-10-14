@@ -68,10 +68,11 @@ pub(crate) fn prewarm_sandbox_backend(
     ctx: &ToolContext,
     config: &SandboxConfig,
 ) -> Result<(), WorkspaceError> {
-    if !config.enabled {
+    let permission_mode = ctx.runtime_config().permission_mode;
+    if !config.enabled || permission_mode.eq_ignore_ascii_case("dangerous") {
         return Ok(());
     }
-    let boundary = CommandExecutionBoundary::from_config(config, &ctx.workspace)?;
+    let boundary = CommandExecutionBoundary::from_config(config, &permission_mode, &ctx.workspace)?;
     let _ = boundary.prepare_backend(config, ctx)?;
     Ok(())
 }
@@ -91,7 +92,11 @@ pub async fn exec_command_async_with_runtime(
     runtime_config: RuntimeToolConfig,
 ) -> Result<Value, WorkspaceError> {
     let request = resolve_exec_request(ctx, args, &runtime_config)?;
-    let boundary = CommandExecutionBoundary::from_config(&runtime_config.sandbox, &ctx.workspace)?;
+    let boundary = CommandExecutionBoundary::from_config(
+        &runtime_config.sandbox,
+        &runtime_config.permission_mode,
+        &ctx.workspace,
+    )?;
     let test_runner_capability = if runtime_config.sandbox.enabled {
         None
     } else {
@@ -236,7 +241,11 @@ pub fn exec_health_check(ctx: &ToolContext) -> Result<Value, WorkspaceError> {
                 json!({"cmd": r#"sh -c "printf exec-health; printf exec-health-stderr >&2""#})
             }
         };
-    let boundary = CommandExecutionBoundary::from_config(&runtime.sandbox, &ctx.workspace)?;
+    let boundary = CommandExecutionBoundary::from_config(
+        &runtime.sandbox,
+        &runtime.permission_mode,
+        &ctx.workspace,
+    )?;
     let spec = resolve_exec_spec_for_target(
         &probe_args,
         &cwd,

@@ -1,7 +1,11 @@
 # Seed library v1
 
-The desktop and Node agent own a per-folder registry. Browser provisioning is a
-replaceable adapter. A seed serves at most one local conversation during its
+The global seed inventory discovers retained registries across configured project
+folders. A seed keeps its originating registry and credentials, but may be assigned
+to an eligible conversation in any configured project. The assignment records the
+target folder identity and every subsequent tool call is routed to that target;
+the seed URL itself never grants access to a different project. Browser provisioning
+is a replaceable adapter. A seed serves at most one local conversation during its
 lifetime; replacement retains the local conversation and all durable history.
 
 ## Contract

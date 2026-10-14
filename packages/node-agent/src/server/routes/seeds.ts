@@ -35,7 +35,7 @@ const PROJECT_TOOLS=new Set<string>(projectScopedToolNames);
 function seedToolAllowed(name:string):boolean {return name!=='switch_workspace_folder'&&(SEED_TOOLS.has(name)||PROJECT_TOOLS.has(name));}
 const SUPPORTED_PROTOCOLS=['2024-11-05','2025-03-26','2025-06-18'];
 function wrapped(result:unknown){return {content:[{type:'text',text:JSON.stringify(result)}],structuredContent:result,isError:false};}
-export async function handleSeedRoute(req:IncomingMessage,res:ServerResponse,pathname:string,context:ToolContext):Promise<boolean>{
+export async function handleSeedRoute(req:IncomingMessage,res:ServerResponse,pathname:string,context:ToolContext,resolveProject?: (folderId:string)=>Promise<ToolContext>,seedProjects?:{id:string;path:string}[]):Promise<boolean>{
   // Webhook form: the pairing token is the last path segment, so one URL is the
   // whole capability. The older Bearer-header form was removed in 0.1.147.
   const pairing=pathname.match(/^\/mcp\/seed-library\/([A-Za-z0-9_-]{1,80})\/([a-f0-9]{64})$/);
@@ -48,7 +48,7 @@ export async function handleSeedRoute(req:IncomingMessage,res:ServerResponse,pat
     try{
       const body=await readRequestBody(req,16384);
       const args=JSON.parse(body.toString());if(!args||Array.isArray(args)||typeof args!=='object')throw Error('Invalid pairing request');
-      const result=seedProvision(seedStore(folder.path),pairing[2],args);
+      const result=seedProvision(seedStore(folder.path,seedProjects??[{id:folder.id,path:folder.path}]),pairing[2],args);
       sendJson(res,200,{...result,workspace_folder_id:folder.id});
     }catch(error){sendJson(res,400,{error:error instanceof Error?error.message:'Pairing request failed'});}
     return true;
@@ -58,7 +58,7 @@ export async function handleSeedRoute(req:IncomingMessage,res:ServerResponse,pat
   const match=pathname.match(/^\/mcp\/seeds\/([A-Za-z0-9_-]{1,80})\/([A-Za-z0-9_-]{1,80})$/);if(!match)return false;
   res.setHeader('cache-control','no-store');
   const folder=context.config.folders.find(f=>f.id===match[1]);if(!folder){sendJson(res,404,{error:'Seed unavailable'});return true;}
-  const store=seedStore(folder.path),urlMode=/^[a-f0-9]{64}$/.test(match[2]);
+  const store=seedStore(folder.path,seedProjects??[{id:folder.id,path:folder.path}]),urlMode=/^[a-f0-9]{64}$/.test(match[2]);
   let seedId=match[2],token=String(req.headers.authorization??'').replace(/^Bearer /,'');
   if(req.method==='GET'){
     if(req.headers.accept==='text/event-stream'){res.setHeader('allow','POST');sendJson(res,405,{error:'SSE stream not provided; use POST'});return true;}
@@ -96,7 +96,6 @@ export async function handleSeedRoute(req:IncomingMessage,res:ServerResponse,pat
       let name=String(params.name??'');
       const rawArgs=params.arguments??{};if(!rawArgs||typeof rawArgs!=='object'||Array.isArray(rawArgs))throw Error('Arguments must be an object');
       const args={...(rawArgs as JsonObject)};
-      if(args.workspace_folder_id!==undefined&&args.workspace_folder_id!==folder.id)throw Error('Seed workspace mismatch');
       if(name==='seed_connect'){
         const status=seedPoll(store,seedId,token);
         sendJson(res,200,{jsonrpc:'2.0',id,result:wrapped({...status,registered:status.status!=='retired',seed_id:seedId,workspace_folder_id:folder.id,workspace:folder,skill:seedConnectSkill,instruction:'Read skill.text, then immediately chat_wait(timeout_ms:25000). Keep calling chat_wait one at a time until assigned. The user writes in the app at any time; idle only means no new message yet, so just wait again.'})});return true;
@@ -117,32 +116,37 @@ export async function handleSeedRoute(req:IncomingMessage,res:ServerResponse,pat
         const key=folder.path+':'+seedId;if(waitKey!==key){if(waiting.has(key))throw Error('A seed_wait is already active');waiting.add(key);}
         try{const deadline=Date.now()+timeout;let status;do{status=seedPoll(store,seedId,token);if(status.status!=='idle'||Date.now()>=deadline)break;await sleep(Math.min(5000,Math.max(0,deadline-Date.now())));}while(true);if(chatWait&&status.status==='assigned'){
           const binding=seedBegin(store,seedId,token,'chat_open',args,String(id));
-          const openArgs={chat_id:binding.chat_id,attachment_id:binding.attachment_id,workspace_folder_id:folder.id};
-          const opened=await callTool(context,'chat_open',openArgs,{'openai/session':`seed:${seedId}`});
+          const target=resolveProject?await resolveProject(String(binding.workspace_folder_id)):context;
+          const targetFolder=resolveProject?target.config.folders.find(item=>item.id===binding.workspace_folder_id):folder;
+          if(!targetFolder)throw Error('Assigned project is unavailable');
+          const openArgs={chat_id:binding.chat_id,attachment_id:binding.attachment_id,workspace_folder_id:targetFolder.id};
+          const opened=await callTool(target,'chat_open',openArgs,{'openai/session':`seed:${seedId}`});
           seedFinish(store,seedId,binding.call_id,'chat_open',openArgs,opened);
           if(opened.ok!==true)throw Error('Could not open assigned chat; retry chat_wait');
-          result=wrapped({...opened,status:'assigned',chat_id:binding.chat_id,workspace_folder_id:folder.id});
+          result=wrapped({...opened,status:'assigned',chat_id:binding.chat_id,workspace_folder_id:targetFolder.id});
         }else result=wrapped(chatWait?{...status,registered:status.status!=='retired',instruction:status.status==='retired'?'Seed retired. Stop waiting and do not switch identities.':'Immediately call chat_wait(timeout_ms:25000) again. Idle is normal. The user writes in the app at any time; idle only means no new message yet, so just wait again.'}:status);}finally{waiting.delete(key);}
       }else{
         if(!seedToolAllowed(name)||!catalog.names.includes(name))throw Error('Tool not available to seeds');
-        if(args.workspace_folder_id!==undefined&&args.workspace_folder_id!==folder.id)throw Error('Seed workspace mismatch');
         if(name==='read_output'&&!args.session_id)throw Error('Session ID required');
         const binding=seedBegin(store,seedId,token,name,args,String(id));
         if(autoOpen)delete args.timeout_ms;
-        args.workspace_folder_id=folder.id;
+        const target=resolveProject?await resolveProject(String(binding.workspace_folder_id)):context;
+        const targetFolder=resolveProject?target.config.folders.find(item=>item.id===binding.workspace_folder_id):folder;
+        if(!targetFolder)throw Error('Assigned project is unavailable');
+        args.workspace_folder_id=targetFolder.id;
         if(name.startsWith('chat_')||['set_todos','update_plan','report_progress'].includes(name)){args.chat_id=binding.chat_id;args.attachment_id=binding.attachment_id;}
         if(name==='exec_command'&&!args.operation_id)args.operation_id=`seed-${seedId}-${binding.call_id.slice(0,20)}`;
         // The chat's authorization mode (完全/一般/严格) applies to project tools.
         if(!name.startsWith('chat_')&&!['set_todos','update_plan','report_progress'].includes(name)&&binding.chat_id){
-          const gated=await applyAccessMode(folder.path,String(binding.chat_id),name,args,catalog.tools);
+          const gated=await applyAccessMode(targetFolder.path,String(binding.chat_id),name,args,currentToolCatalog(target).tools);
           if(gated.blocked){seedFinish(store,seedId,binding.call_id,name,args,gated.blocked);sendJson(res,200,{jsonrpc:'2.0',id,result:wrapped(gated.blocked)});return true;}
           for(const k of Object.keys(args))delete args[k];Object.assign(args,gated.args);
         }
-        let actual:JsonObject={__unknown:true};const lifecycle=new McpToolCallLifecycle(context,req,res);
+        let actual:JsonObject={__unknown:true};const lifecycle=new McpToolCallLifecycle(target,req,res);
         try{
           const request={jsonrpc:'2.0',id,method,params:{name,arguments:args,_meta:{'openai/session':`seed:${seedId}`}}};
-          result=await dispatchMcpMethod({catalog,context,method,req,request,protocolVersion:'2025-03-26',startedAt:Date.now(),processLifecycle:lifecycle.process});
-          actual=((result as JsonObject).structuredContent??{}) as JsonObject;if(autoOpen&&actual.ok===true)result=wrapped({...actual,status:'assigned',chat_id:binding.chat_id,workspace_folder_id:folder.id});lifecycle.complete();
+          result=await dispatchMcpMethod({catalog:currentToolCatalog(target),context:target,method,req,request,protocolVersion:'2025-03-26',startedAt:Date.now(),processLifecycle:lifecycle.process});
+          actual=((result as JsonObject).structuredContent??{}) as JsonObject;if(autoOpen&&actual.ok===true)result=wrapped({...actual,status:'assigned',chat_id:binding.chat_id,workspace_folder_id:targetFolder.id});lifecycle.complete();
         }catch(e){lifecycle.abort();throw e;}finally{lifecycle.dispose();seedFinish(store,seedId,binding.call_id,name,args,actual);}
       }
     }else throw Error('Method not available to seeds');

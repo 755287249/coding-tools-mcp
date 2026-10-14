@@ -63,7 +63,14 @@ pub(crate) async fn stop_project(id: Option<&str>) {
 const SCOPE_FIELDS: &[&str] = &["workspace_folder_id", "chat_id", "attachment_id"];
 const INSTRUCTIONS: &str="This is the global MCP connection. Projects have fixed directories. Call chat_open with the supplied chat_id and workspace_folder_id. For EVERY subsequent tool call include the returned attachment_id, chat_id and workspace_folder_id; for prompts/resources place these in params._meta. A client session header is not authorization. No project switch is allowed for an attachment. Commands require an OS sandbox; run Git and formatters via exec_command. Follow the full local-chat Skill.";
 fn projects() -> Result<Vec<WorkspaceProfile>, String> {
-    crate::data::DataStore::read_file(|data| Ok(data.profiles.clone())).map_err(|e| e.to_string())
+    let mut profiles = crate::data::DataStore::read_file(|data| Ok(data.profiles.clone()))
+        .map_err(|e| e.to_string())?;
+    // The raw file can hold profiles written by older builds or shared live
+    // stores. Normalize at read time so routed projects always run unsandboxed.
+    for profile in &mut profiles {
+        profile.normalize_sandbox();
+    }
+    Ok(profiles)
 }
 pub(crate) fn folders() -> Result<Value, String> {
     let profiles = projects()?;
@@ -174,7 +181,10 @@ fn project_context_for_epoch(
             ),
         )?;
         context.shared_runtime_config().require_project_isolation();
-        crate::workspace_features::require_project_isolation(&profile.id);
+        // Full access keeps project hooks and extension MCP servers enabled.
+        if !runtime.permission_mode.eq_ignore_ascii_case("dangerous") {
+            crate::workspace_features::require_project_isolation(&profile.id);
+        }
         cache.insert(profile.id.clone(), (fingerprint, context.clone()));
         context
     };
@@ -182,22 +192,37 @@ fn project_context_for_epoch(
 }
 fn scoped_catalog(state: &SharedState) -> Value {
     let runtime = state.runtime_config();
-    let tools = scoped_tools(if state.profile_id == crate::data::GLOBAL_MCP_ID {
+    let profile = if state.profile_id == crate::data::GLOBAL_MCP_ID {
         "advanced"
     } else {
         &runtime.tool_profile
-    });
+    };
+    // Full access exposes every tool through the gateway, not only the
+    // project-scoped subset.
+    let tools = if full_access(&runtime) {
+        scoped_tools_with(profile, true)
+    } else {
+        scoped_tools(profile)
+    };
     let material = serde_json::to_vec(&tools).unwrap_or_default();
     use sha2::{Digest, Sha256};
     json!({"tools":tools,"toolsetRevision":format!("{:x}",Sha256::digest(material))})
 }
+fn full_access(runtime: &crate::tools::context::RuntimeToolConfig) -> bool {
+    runtime.permission_mode.eq_ignore_ascii_case("dangerous")
+}
 pub(crate) fn scoped_tools(profile: &str) -> Vec<Value> {
+    scoped_tools_with(profile, false)
+}
+fn scoped_tools_with(profile: &str, all: bool) -> Vec<Value> {
     let mut tools = crate::tools::list_tools_for_profile(profile);
-    tools.retain(|tool| {
-        tool["name"]
-            .as_str()
-            .is_some_and(crate::tools::project_scope::allowed)
-    });
+    if !all {
+        tools.retain(|tool| {
+            tool["name"]
+                .as_str()
+                .is_some_and(crate::tools::project_scope::allowed)
+        });
+    }
     for tool in &mut tools {
         let name = tool["name"].as_str().unwrap_or("").to_string();
         for field in SCOPE_FIELDS {
@@ -299,7 +324,9 @@ async fn post_with_projects(
         );
     }
     if method == "tools/call" {
-        if !crate::tools::project_scope::allowed(&name) {
+        if !full_access(&routed.mcp.runtime_config())
+            && !crate::tools::project_scope::allowed(&name)
+        {
             return fail(
                 id,
                 "Use exec_command inside the project sandbox for this operation".into(),
@@ -598,7 +625,7 @@ mod tests {
     }
 
     #[test]
-    fn project_context_cannot_disable_isolation_or_expose_native_process_tools() {
+    fn project_context_keeps_logical_isolation_without_reenabling_appcontainer() {
         let dir = tempfile::tempdir().unwrap();
         let mut profile = WorkspaceProfile::new(dir.path().to_string_lossy().into(), None);
         profile.runtime.sandbox.backend = "missing-test-backend".into();
@@ -613,27 +640,50 @@ mod tests {
             .shared_runtime_config()
             .update_from_runtime(&profile.runtime);
         let runtime = context.runtime_config();
+        // Full access: routing isolation only, no boundary, every tool exposed.
         assert!(
             runtime.project_isolation
-                && runtime.sandbox.enabled
-                && runtime.policy.security_policy.enforce_workspace_boundary
+                && !runtime.sandbox.enabled
+                && !runtime.policy.security_policy.enforce_workspace_boundary
         );
         assert!(runtime.sandbox.external_paths.is_empty());
-        let catalog = scoped_catalog(&context);
-        assert!(!catalog["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|t| t["name"] == "git_status" || t["name"] == "format_files"));
-        assert_eq!(
+        let has_git = |c: &Value| {
+            c["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["name"] == "git_status")
+        };
+        assert!(has_git(&scoped_catalog(&context)));
+        assert_ne!(
             crate::tools::call_tool(&context, "git_status", &json!({}))["error"]["code"],
             "PROJECT_ISOLATION_REQUIRED"
         );
         let result = crate::tools::call_tool(
             &context,
             "exec_command",
-            &json!({"program":"python3","args":["-c","raise SystemExit('must not run')"]}),
+            &json!({"program":"python3","args":["-c","print('full access')"]}),
         );
-        assert_eq!(result["ok"], false, "{result}");
+        assert_eq!(result["ok"], true, "{result}");
+        assert_eq!(result["sandbox_enforced"], false, "{result}");
+        assert_eq!(
+            result["stdout"].as_str().map(str::trim),
+            Some("full access"),
+            "{result}"
+        );
+
+        // A restricted mode keeps the project-scoped boundary and catalog.
+        let mut restricted = profile.runtime.clone();
+        restricted.permission_mode = "trusted".into();
+        context
+            .shared_runtime_config()
+            .update_from_runtime(&restricted);
+        let runtime = context.runtime_config();
+        assert!(runtime.policy.security_policy.enforce_workspace_boundary);
+        assert!(!has_git(&scoped_catalog(&context)));
+        assert_eq!(
+            crate::tools::call_tool(&context, "git_status", &json!({}))["error"]["code"],
+            "PROJECT_ISOLATION_REQUIRED"
+        );
     }
 }

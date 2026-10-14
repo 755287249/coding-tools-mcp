@@ -312,9 +312,11 @@ pub(super) fn run(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceErr
     }
 
     let mut warnings = Vec::new();
-    if !dry_run && security.verify_write_conflicts {
-        for (path, expected) in &versions {
-            verify_file_version(ws, path, expected.as_deref())?;
+    if !dry_run {
+        if security.verify_write_conflicts {
+            for (path, expected) in &versions {
+                verify_file_version(ws, path, expected.as_deref())?;
+            }
         }
         let backups = commit_staged_bytes(ws, &staged)?;
         let mut created_dirs = Vec::new();
