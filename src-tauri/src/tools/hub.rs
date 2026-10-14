@@ -534,7 +534,11 @@ impl HubRouter {
         }
         validate_unique_folder_paths(folders)?;
         let current_sandbox = self.config.runtime_config.snapshot().sandbox;
-        if !runtime.sandbox.enabled || current_sandbox == runtime.sandbox {
+        // Full access never prepares AppContainer, so it must not prewarm it either.
+        if !runtime.sandbox.enabled
+            || runtime.permission_mode.eq_ignore_ascii_case("dangerous")
+            || current_sandbox == runtime.sandbox
+        {
             return Ok(());
         }
         // Prewarm only folders that already own a live ToolContext. Inactive folders
@@ -1410,6 +1414,7 @@ mod tests {
             .expect("live context");
 
         let mut runtime = crate::workspace::RuntimeConfig::default();
+        runtime.permission_mode = "trusted".into();
         runtime.sandbox.enabled = true;
         runtime.sandbox.backend = "missing-backend".into();
         let error = router
@@ -1442,6 +1447,7 @@ mod tests {
         let before = cached.runtime_config().sandbox;
 
         let mut runtime = crate::workspace::RuntimeConfig::default();
+        runtime.permission_mode = "trusted".into();
         runtime.sandbox.enabled = true;
         runtime.sandbox.backend = "unknown-hot-toggle-backend".into();
         assert!(router.preflight(&folders, &runtime).is_err());

@@ -145,3 +145,14 @@
 - 验证：Rust `cargo test --lib --no-default-features` 731 通过、0 失败。
 - 未覆盖：Node Agent 的 AppContainer 后端仍由其自身配置控制（默认关闭）；桌面版报错来自 Rust 路径。
 - 待办：推送该提交并发布 `v0.1.155`，再请用户在 Windows 实测。
+
+## 2026-10-14 复查（用户用 v0.1.154 实测仍超时）
+
+- 用户实测：`exec_command` 仍在 `C:\Users\belly` 上执行 AppContainer ACL 辅助程序，15 秒超时，`SANDBOX_ANCESTOR_GRANT_FAILED`。
+- 新发现的路径：Hub `preflight` 在保存设置时用原始 `runtime.sandbox` 预热 AppContainer，不检查权限模式。
+- 新增修复：
+  - `CommandExecutionBoundary::from_config` 增加 `permission_mode` 参数；`dangerous` 时始终为 `PolicyOnly`（最后一道防线，即使配置仍写着 sandbox enabled）。
+  - `prewarm_sandbox_backend` 与 Hub `preflight` 在 `dangerous` 下直接跳过。
+  - 新测试 `full_access_never_selects_appcontainer_boundary`。
+- 验证：`cargo test --lib --no-default-features` 732 通过、0 失败。
+- 待办：推送并发布 `v0.1.155`。手动 `icacls` 授权不再需要。

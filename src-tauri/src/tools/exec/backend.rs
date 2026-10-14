@@ -33,9 +33,12 @@ pub(super) enum CommandExecutionBoundary {
 impl CommandExecutionBoundary {
     pub(super) fn from_config(
         config: &SandboxConfig,
+        permission_mode: &str,
         workspace: &Workspace,
     ) -> Result<Self, WorkspaceError> {
-        if !config.enabled {
+        // Last line of defense: full access never starts an OS sandbox, even if
+        // a stale or reconstructed config still says the sandbox is enabled.
+        if !config.enabled || permission_mode.eq_ignore_ascii_case("dangerous") {
             return Ok(Self::PolicyOnly);
         }
         ensure_execution_available(config, workspace)?;
@@ -169,7 +172,24 @@ mod tests {
             ..SandboxConfig::default()
         };
         assert_eq!(
-            CommandExecutionBoundary::from_config(&config, &workspace).expect("boundary"),
+            CommandExecutionBoundary::from_config(&config, "trusted", &workspace)
+                .expect("boundary"),
+            CommandExecutionBoundary::PolicyOnly
+        );
+    }
+
+    #[test]
+    fn full_access_never_selects_appcontainer_boundary() {
+        let root = tempfile::tempdir().expect("workspace");
+        let workspace = Workspace::new(root.path().to_path_buf()).expect("workspace model");
+        let config = SandboxConfig {
+            enabled: true,
+            backend: "appcontainer".into(),
+            ..SandboxConfig::default()
+        };
+        assert_eq!(
+            CommandExecutionBoundary::from_config(&config, "dangerous", &workspace)
+                .expect("boundary"),
             CommandExecutionBoundary::PolicyOnly
         );
     }
@@ -185,7 +205,8 @@ mod tests {
             ..SandboxConfig::default()
         };
         assert_eq!(
-            CommandExecutionBoundary::from_config(&config, &workspace).expect("boundary"),
+            CommandExecutionBoundary::from_config(&config, "trusted", &workspace)
+                .expect("boundary"),
             CommandExecutionBoundary::Sandbox {
                 backend_id: "appcontainer".into()
             }
@@ -204,8 +225,8 @@ mod tests {
             backend: "appcontainer".into(),
             ..SandboxConfig::default()
         };
-        let boundary =
-            CommandExecutionBoundary::from_config(&config, &ctx.workspace).expect("boundary");
+        let boundary = CommandExecutionBoundary::from_config(&config, "trusted", &ctx.workspace)
+            .expect("boundary");
         let first = boundary
             .prepare_backend(&config, &ctx)
             .expect("first prepare");
@@ -238,7 +259,8 @@ mod tests {
             .options
             .insert("appcontainer.network".into(), "internet".into());
         let boundary =
-            CommandExecutionBoundary::from_config(&first_config, &ctx.workspace).expect("boundary");
+            CommandExecutionBoundary::from_config(&first_config, "trusted", &ctx.workspace)
+                .expect("boundary");
         let first = boundary
             .prepare_backend(&first_config, &ctx)
             .expect("first prepare");
