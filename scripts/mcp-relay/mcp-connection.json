@@ -1,0 +1,22 @@
+{
+  "url": "${MCP_URL}",
+  "token": "${MCP_TOKEN}",
+  "headers": {},
+  "transport": "auto",
+  "timeout": 60,
+  "connect_timeout": 15,
+  "legacy": false,
+  "keep_session": false,
+  "mode": "daemon",
+  "command": "",
+  "args": [],
+  "env": {},
+  "cwd": null,
+  "state_file": ".mcp-relay-state.json",
+  "ping_interval": 25,
+  "ping_timeout": 10,
+  "ping_failures": 3,
+  "reconnect_max_delay": 30,
+  "max_wait": 240,
+  "job_timeout": 3600
+}
