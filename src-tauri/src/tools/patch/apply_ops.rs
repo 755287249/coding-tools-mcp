@@ -194,9 +194,11 @@ pub(super) fn run_patch(ctx: &ToolContext, args: &Value) -> Result<Value, Worksp
     let files_modified = affected_paths(&affected, "update");
     let files_deleted = affected_paths(&affected, "delete");
 
-    if !dry_run && security.verify_write_conflicts {
-        for (path, expected) in &preflight_versions {
-            verify_file_version(ws, path, expected.as_deref())?;
+    if !dry_run {
+        if security.verify_write_conflicts {
+            for (path, expected) in &preflight_versions {
+                verify_file_version(ws, path, expected.as_deref())?;
+            }
         }
         let _transaction_backups = commit_staged(ws, &staged)?;
         let change_id = Uuid::new_v4().simple().to_string();

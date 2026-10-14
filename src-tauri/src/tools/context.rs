@@ -186,7 +186,8 @@ impl SharedRuntimeToolConfig {
             RuntimeToolConfig::normalized(policy, tool_profile, permission_mode, sandbox);
         if isolated {
             next.project_isolation = true;
-            next.policy.security_policy.enforce_workspace_boundary = true;
+            next.policy.security_policy.enforce_workspace_boundary =
+                !next.permission_mode.eq_ignore_ascii_case("dangerous");
             next.policy.sandbox_enabled = next.sandbox.enabled;
             next.sandbox.external_paths.clear();
         }
@@ -199,7 +200,9 @@ impl SharedRuntimeToolConfig {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         config.project_isolation = true;
-        config.policy.security_policy.enforce_workspace_boundary = true;
+        // Full access keeps project routing but lifts the path boundary.
+        config.policy.security_policy.enforce_workspace_boundary =
+            !config.permission_mode.eq_ignore_ascii_case("dangerous");
         config.policy.sandbox_enabled = config.sandbox.enabled;
         config.sandbox.external_paths.clear();
     }

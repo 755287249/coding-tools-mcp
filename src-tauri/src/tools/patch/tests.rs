@@ -712,3 +712,40 @@ fn file_ops_directory_delete_refuses_root_git_and_overlapping_operations() {
     assert!(root.join("build/out.txt").is_file());
     assert!(!root.join("build/new.txt").exists());
 }
+
+#[test]
+fn writes_persist_when_conflict_verification_is_disabled() {
+    // Regression: full access disables verify_write_conflicts, and writes used
+    // to report applied=true without saving anything.
+    let (workspace, _harness, context) = context_with_file();
+    let mut runtime = crate::workspace::RuntimeConfig::default();
+    runtime.security_policy = Some(crate::workspace::SecurityPolicy::unrestricted());
+    context
+        .shared_runtime_config()
+        .update_from_runtime(&runtime);
+    assert!(
+        !context
+            .runtime_config()
+            .policy
+            .security_policy
+            .verify_write_conflicts
+    );
+
+    let created = file_ops(
+        &context,
+        &json!({"operations":[{"type":"create","path":"probe.txt","content":"ok\n"}]}),
+    )
+    .expect("file_ops");
+    assert_eq!(created["applied"], true, "{created}");
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("probe.txt")).expect("saved"),
+        "ok\n"
+    );
+
+    let patched = apply_patch(&context, &patch()).expect("apply_patch");
+    assert_eq!(patched["applied"], true, "{patched}");
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("main.rs")).expect("main"),
+        "new\n"
+    );
+}

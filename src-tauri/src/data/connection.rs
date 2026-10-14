@@ -154,7 +154,10 @@ pub(super) fn enforce_project_isolation(profile: &mut WorkspaceProfile) {
     profile.runtime.sandbox.external_paths.clear();
     let mut policy =
         crate::tools::policy::PolicySettings::from_runtime(&profile.runtime).security_policy;
-    policy.enforce_workspace_boundary = true;
+    policy.enforce_workspace_boundary = !profile
+        .runtime
+        .permission_mode
+        .eq_ignore_ascii_case("dangerous");
     profile.runtime.security_policy = Some(policy);
 }
 
@@ -186,16 +189,21 @@ mod tests {
         let mut profile =
             crate::workspace::WorkspaceProfile::new("C:/workspace/isolated".into(), None);
         profile.runtime.sandbox.enabled = true;
+        profile.runtime.permission_mode = "dangerous".into();
         super::enforce_project_isolation(&mut profile);
         assert!(!profile.runtime.sandbox.enabled);
-        assert!(
-            profile
-                .runtime
+        let boundary = |p: &crate::workspace::WorkspaceProfile| {
+            p.runtime
                 .security_policy
                 .as_ref()
                 .unwrap()
                 .enforce_workspace_boundary
-        );
+        };
+        // Full access lifts the path boundary; restricted modes keep it.
+        assert!(!boundary(&profile));
+        profile.runtime.permission_mode = "trusted".into();
+        super::enforce_project_isolation(&mut profile);
+        assert!(boundary(&profile));
     }
 
     use super::*;

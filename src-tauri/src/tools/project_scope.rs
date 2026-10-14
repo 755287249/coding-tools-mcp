@@ -52,7 +52,12 @@ pub(crate) fn denied(ctx: &super::ToolContext, name: &str) -> Option<serde_json:
             "permission",
         ));
     }
-    (ctx.runtime_config().project_isolation && !allowed(name)).then(||super::workspace::tool_err_code(
+    let runtime = ctx.runtime_config();
+    // Full access exposes every tool, including Git and formatters.
+    (runtime.project_isolation
+        && !runtime.permission_mode.eq_ignore_ascii_case("dangerous")
+        && !allowed(name))
+    .then(||super::workspace::tool_err_code(
         "PROJECT_ISOLATION_REQUIRED",
         "This operation has no project sandbox. Use exec_command inside the project's OS sandbox for Git, formatters and other programs.","permission"))
 }

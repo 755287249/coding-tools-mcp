@@ -150,7 +150,7 @@ fn read_resource(
 async fn list_tools_dynamic(state: &SharedState) -> Value {
     let runtime = state.runtime_config();
     let mut tools = list_tools_for_profile(&runtime.tool_profile);
-    if runtime.project_isolation {
+    if runtime.project_isolation && !runtime.permission_mode.eq_ignore_ascii_case("dangerous") {
         tools.retain(|tool| {
             tool["name"]
                 .as_str()

@@ -197,8 +197,11 @@ pub(super) fn run_file(ctx: &ToolContext, args: &Value) -> Result<Value, Workspa
         Value::Null
     };
     let plan_finished = Instant::now();
-    if !dry_run && security.verify_write_conflicts {
-        verify_file_version(ws, &resolved.display, Some(&before_sha256))?;
+    // Saving must never depend on the optional conflict check.
+    if !dry_run {
+        if security.verify_write_conflicts {
+            verify_file_version(ws, &resolved.display, Some(&before_sha256))?;
+        }
         let mut staged = HashMap::new();
         staged.insert(resolved.display.clone(), Some(updated));
         let _transaction_backups = commit_staged(ws, &staged)?;
@@ -448,9 +451,11 @@ pub(super) fn run_many(ctx: &ToolContext, args: &Value) -> Result<Value, Workspa
 
     let preflight_finished = Instant::now();
 
-    if !dry_run && security.verify_write_conflicts {
-        for (path, expected) in &versions {
-            verify_file_version(ws, path, expected.as_deref())?;
+    if !dry_run {
+        if security.verify_write_conflicts {
+            for (path, expected) in &versions {
+                verify_file_version(ws, path, expected.as_deref())?;
+            }
         }
         let _backups = commit_staged(ws, &staged)?;
     }

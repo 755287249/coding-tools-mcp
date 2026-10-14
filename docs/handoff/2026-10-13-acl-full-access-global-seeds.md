@@ -156,3 +156,17 @@
   - 新测试 `full_access_never_selects_appcontainer_boundary`。
 - 验证：`cargo test --lib --no-default-features` 732 通过、0 失败。
 - 待办：推送并发布 `v0.1.155`。手动 `icacls` 授权不再需要。
+
+## 2026-10-14 v0.1.155 实测：命令可用，写入丢失与边界拒绝（v0.1.156 修复）
+
+- 用户实测 `v0.1.155`：`node --version` 正常，无 `SANDBOX_ANCESTOR_GRANT_FAILED`。
+- 问题 1：`file_ops` 返回 `applied=true`，文件却不存在。
+  - 根因：`apply_patch`、`edit`、`edit_many`、`file_ops` 仅在 `verify_write_conflicts=true` 时才提交写入。`SecurityPolicy::unrestricted()` 把它设为 `false`，于是只返回成功、不落盘。
+  - 修复：写入只受 `dry_run` 控制；版本冲突检查仅在开关打开时执行。回归测试 `writes_persist_when_conflict_verification_is_disabled`。
+- 问题 2：PowerShell 写入工作区内绝对路径被 `WORKSPACE_PATH_PROTECTED` 拒绝。
+  - 根因：项目隔离强制 `enforce_workspace_boundary=true`；关闭沙箱后，`command_contains_external_path` 把任何 `C:/` 绝对路径都视为外部路径。
+  - 修复：`dangerous` 下项目隔离只保留路由，不再开启路径边界（`context.rs`、`connection.rs`）。
+- 问题 3（同类）：项目隔离隐藏 Git、格式化等工具，并关闭项目钩子与扩展 MCP。
+  - 修复：`dangerous` 下网关与 `tools/list` 暴露全部工具，`project_scope::denied` 放行，不再调用 `workspace_features::require_project_isolation`。
+- 受限模式（如 `trusted`）保留原有边界与工具范围，有测试覆盖。
+- 验证：`cargo test --lib --no-default-features` 733 通过、0 失败。
