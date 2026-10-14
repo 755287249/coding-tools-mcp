@@ -54,9 +54,9 @@ test('invalid endpoints and missing folders are rejected', () => {
 });
 
 test('public endpoint detection rejects loopback and private hosts', () => {
-  for (const url of ['http://127.0.0.1:8765/mcp', 'http://localhost/mcp', 'http://192.168.1.2/mcp', 'http://10.0.0.1/mcp', 'http://172.20.0.1/mcp', 'http://[::1]/mcp', 'http://box.local/mcp', 'bad'])
+  for (const url of ['http://127.0.0.1:8765/mcp', 'http://localhost/mcp', 'http://192.168.1.2/mcp', 'http://10.0.0.1/mcp', 'http://172.20.0.1/mcp', 'http://[::1]/mcp', 'http://box.local/mcp', 'http://[::]/mcp', 'http://[::ffff:127.0.0.1]/mcp', 'http://[fd00::1]/mcp', 'http://[fe80::1]/mcp', 'bad'])
     assert.equal(isPublicEndpoint(url), false, url);
-  for (const url of ['https://mcp.example.test/mcp', 'https://abc.trycloudflare.com/mcp', 'http://8.8.8.8/mcp'])
+  for (const url of ['https://mcp.example.test/mcp', 'https://abc.trycloudflare.com/mcp', 'http://8.8.8.8/mcp', 'http://[2001:db8::1]/mcp'])
     assert.equal(isPublicEndpoint(url), true, url);
 });
 
@@ -66,4 +66,11 @@ test('project navigator places the share button before the details menu', () => 
   const info = source.indexOf('class="project-info-trigger"');
   assert.ok(share > 0 && share < info);
   assert.match(source, /<ShareWorkspaceDialog workspace=\{sharedProfile\}/);
+});
+
+test('share dialog selects a real folder and refuses stopped or credential-less runtimes', () => {
+  const source = read('../src/lib/components/chat/ShareWorkspaceDialog.svelte');
+  assert.match(source, /folderId = \$state\(untrack\(\(\) => workspaceFolders\(workspace\)\[0\]\?\.id/);
+  assert.match(source, /status\.state !== 'running'/);
+  assert.match(source, /share\.missingAuth/);
 });

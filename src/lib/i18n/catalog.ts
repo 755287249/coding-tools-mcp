@@ -344,6 +344,7 @@ export const MESSAGES = {
   "share.fullHelp": ["Read, write and run commands. The AI must ask before high-impact actions.", "可讀寫和執行命令。高影響操作前需先詢問。", "可读写和执行命令。高影响操作前需先询问。", "読み書きとコマンド実行。影響の大きい操作は事前に確認します。"],
   "share.prompt": ["Share prompt", "分享提示詞", "分享提示词", "共有プロンプト"],
   "share.noEndpoint": ["The global MCP service is not running. Start it, then try again.", "全域 MCP 服務未啟動。請先啟動再重試。", "全局 MCP 服务未启动。请先启动再重试。", "グローバル MCP サービスが停止しています。起動してから再試行してください。"],
+  "share.missingAuth": ["The global MCP credential is missing. Set it in connection settings, then try again.", "全域 MCP 憑證缺失。請在連線設定中設定後重試。", "全局 MCP 凭据缺失。请在连接设置中配置后重试。", "グローバル MCP 認証情報がありません。接続設定で設定してから再試行してください。"],
   "share.localOnly": ["This address is local only. A web AI cannot reach it. Enable a public tunnel first.", "此位址僅限本機，網頁 AI 無法存取。請先啟用公開隧道。", "此地址仅限本机，网页 AI 无法访问。请先启用公开隧道。", "このアドレスはローカル専用で、Web AI からは接続できません。先に公開トンネルを有効にしてください。"],
   "share.credentialWarning": ["The prompt contains the global MCP credential. Anyone with it can use all projects until you regenerate the credential.", "提示詞包含全域 MCP 憑證。取得者可存取所有專案，直到你重新產生憑證。", "提示词包含全局 MCP 凭据。获得者可访问所有项目，直到你重新生成凭据。", "プロンプトにはグローバル MCP 認証情報が含まれます。認証情報を再生成するまで、取得者は全プロジェクトにアクセスできます。"],
   "workspace.removeConfirm": ["Remove workspace “{name}” from this client?", "從此用戶端移除工作區「{name}」？", "从此客户端移除工作区“{name}”？", "このクライアントから「{name}」を削除しますか？"],

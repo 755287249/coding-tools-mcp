@@ -88,9 +88,13 @@ export function buildSharePrompt(info: ShareInfo, locale: Locale): string {
 export function isPublicEndpoint(endpoint: string): boolean {
   let host: string;
   try { host = new URL(endpoint).hostname.toLowerCase(); } catch { return false; }
-  if (host === "localhost" || host.endsWith(".localhost") || host === "[::1]" || host.endsWith(".local")) return false;
+  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local")) return false;
+  if (host.startsWith("[")) {
+    // Conservative: only global unicast IPv6 (2000::/3) is public; ::, ::1, mapped IPv4, ULA and link-local are not.
+    return /^\[[23][0-9a-f]{0,3}:/.test(host);
+  }
   const v4 = host.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
-  if (!v4) return !host.startsWith("[fc") && !host.startsWith("[fd") && !host.startsWith("[fe80");
+  if (!v4) return true;
   const [a, b] = [Number(v4[1]), Number(v4[2])];
   return !(a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127));
 }

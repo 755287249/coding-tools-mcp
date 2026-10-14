@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { getMcpConnection, getRuntimeStatus } from '$lib/api/workspaces';
   import { getBackend, loadMcpAuthSecrets } from '$lib/backend';
   import { copyText } from '$lib/browser-tools';
@@ -13,7 +13,8 @@
   let { workspace, onClose }: { workspace: WorkspaceProfile; onClose: () => void } = $props();
   let dialog: HTMLDialogElement;
   const folders = $derived(workspaceFolders(workspace));
-  let folderId = $state('');
+  // The dialog is opened per project, so the first folder is a stable default.
+  let folderId = $state(untrack(() => workspaceFolders(workspace)[0]?.id ?? ''));
   let access = $state<ShareAccess>('readonly');
   let connection = $state<{endpoint:string;authType:string;clientId:string;password:string;bearerToken:string}|null>(null);
   let loading = $state(true), error = $state(''), copied = $state(false);
@@ -34,9 +35,11 @@
         const transport = await getMcpConnection();
         const status = await getRuntimeStatus(transport.id);
         const endpoint = status.publicEndpoint || status.localEndpoint;
-        if (!endpoint) throw Error($t('share.noEndpoint'));
+        if (status.state !== 'running' || !endpoint) throw Error($t('share.noEndpoint'));
         const secrets = await loadMcpAuthSecrets(getBackend(), transport.id, transport.auth);
-        if (alive) connection = { endpoint, authType: transport.auth.type, clientId: secrets.oauth_client_id || transport.auth.oauth_client_id || '', password: secrets.oauth_password ?? '', bearerToken: secrets.bearer_token ?? '' };
+        const next = { endpoint, authType: transport.auth.type, clientId: secrets.oauth_client_id || transport.auth.oauth_client_id || '', password: secrets.oauth_password ?? '', bearerToken: secrets.bearer_token ?? '' };
+        if ((next.authType === 'bearer' && !next.bearerToken) || (next.authType === 'oauth' && (!next.clientId || !next.password))) throw Error($t('share.missingAuth'));
+        if (alive) connection = next;
       } catch (cause) { if (alive) error = cause instanceof Error ? cause.message : String(cause); }
       finally { if (alive) loading = false; }
     })();
