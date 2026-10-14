@@ -16,11 +16,13 @@ test('share prompt targets one folder without chat tools', () => {
     assert.match(text, /https:\/\/mcp\.example\.test\/mcp/);
     assert.match(text, /Authorization: Bearer synthetic-token/);
     assert.match(text, /switch_workspace_folder/);
+    assert.match(text, /initialize → notifications\/initialized → tools\/list/);
+    assert.match(text, /404/);
     assert.match(text, /User-Agent: Coding-Tools-MCP\/1\.0/);
     assert.doesNotMatch(text, /chat_open|chat_wait|seed_/);
     const line = text.split('\n').find(item => item.includes('"folder_id"'));
     assert.deepEqual(JSON.parse(line.slice(line.indexOf('{'))), { folder_id: 'folder-"1\n', name: 'Docs' });
-    assert.ok(text.length < 700, `${locale} share prompt should stay short`);
+    assert.ok(text.length < 1000, `${locale} share prompt should stay short`);
   }
 });
 
