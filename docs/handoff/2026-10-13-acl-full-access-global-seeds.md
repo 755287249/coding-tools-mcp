@@ -170,3 +170,26 @@
   - 修复：`dangerous` 下网关与 `tools/list` 暴露全部工具，`project_scope::denied` 放行，不再调用 `workspace_features::require_project_isolation`。
 - 受限模式（如 `trusted`）保留原有边界与工具范围，有测试覆盖。
 - 验证：`cargo test --lib --no-default-features` 733 通过、0 失败。
+
+## 2026-10-14 完全访问权限复查（v0.1.157）
+
+逐项检查 `SecurityPolicy::unrestricted()` 下仍生效的限制：
+
+| 限制 | 完全访问下状态 |
+| --- | --- |
+| AppContainer 沙箱 / ACL 授权 | 关闭（执行边界、预热、配置构造三层强制） |
+| 命令白名单、危险命令确认、shell 确认、网络命令拦截 | 关闭 |
+| 工作区边界（命令写外部路径、`filesystem_scope=host`、绝对 `workdir`） | 关闭 |
+| 项目隔离隐藏工具、关闭钩子与扩展 MCP | 关闭（仅保留路由） |
+| 写入确认、冲突校验、资源上限、输出脱敏、环境变量保护 | 关闭；写入始终落盘 |
+| `.git/.github` 删除保护（命令） | 关闭 |
+| 工具档位 | `advanced`（全部工具） |
+
+v0.1.157 新修复：文件工具（`read_file`、`file_ops`、`edit` 等）原来拒绝所有绝对路径。现在完全访问下，指向工作区内部的绝对路径会自动转为相对路径。测试 `full_access_accepts_absolute_paths_inside_the_workspace`。
+
+仍保留的设计限制：
+- 文件工具只能操作当前工作区；工作区外文件用 `exec_command` 加 `filesystem_scope="host"`。
+- 文件工具不写 `.git/.github`（`PROTECTED_PATH`）；用 Git 工具或命令。
+- `shell="none"` 不支持 `&&`、重定向等语法；需指定 `shell`（`powershell`/`cmd`/`sh`）。
+
+验证：`cargo test --lib --no-default-features` 734 通过、0 失败。

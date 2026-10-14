@@ -1178,8 +1178,83 @@ fn apply_default_cwd<'a>(ctx: &ToolContext, name: &str, args: &'a Value) -> Cow<
         }
         _ => {}
     }
+    if !security.enforce_workspace_boundary {
+        relativize_workspace_paths(ctx.workspace.root(), &mut effective, false);
+    }
     apply_security_defaults(&security, name, &mut effective);
     Cow::Owned(effective)
+}
+
+/// File-tool argument keys that carry workspace paths.
+const PATH_KEYS: &[&str] = &["path", "paths", "destination", "repo_path"];
+
+/// Full access: accept absolute paths that point inside the workspace by
+/// rewriting them to workspace-relative paths. Paths outside the workspace are
+/// left unchanged; file tools still reject them, and `exec_command` with
+/// `filesystem_scope="host"` reaches them instead.
+fn relativize_workspace_paths(root: &Path, value: &mut Value, path_key: bool) {
+    match value {
+        Value::String(raw) if path_key => {
+            if let Some(relative) = workspace_relative(root, raw) {
+                *raw = relative;
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                relativize_workspace_paths(root, item, path_key);
+            }
+        }
+        Value::Object(map) => {
+            for (key, item) in map.iter_mut() {
+                relativize_workspace_paths(root, item, PATH_KEYS.contains(&key.as_str()));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn workspace_relative(root: &Path, raw: &str) -> Option<String> {
+    let bytes = raw.as_bytes();
+    let drive = bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic();
+    if !(drive || raw.starts_with('/') || raw.starts_with('\\')) {
+        return None;
+    }
+    let to_relative = |rest: &Path| {
+        let text = rest.to_string_lossy().replace('\\', "/");
+        if text.is_empty() {
+            ".".to_string()
+        } else {
+            text
+        }
+    };
+    if let Ok(canonical) = Path::new(raw).canonicalize() {
+        if let Ok(rest) = canonical.strip_prefix(root) {
+            return Some(to_relative(rest));
+        }
+    }
+    // The target may not exist yet (new file). Compare text with the
+    // verbatim prefix removed, case-insensitively on Windows.
+    let normalize = |text: &str| {
+        let text = text.trim_start_matches(r"\\?\").replace('\\', "/");
+        text.trim_end_matches('/').to_string()
+    };
+    let root_text = normalize(&root.to_string_lossy());
+    let path_text = normalize(raw);
+    let same = |a: &str, b: &str| {
+        if cfg!(windows) {
+            a.eq_ignore_ascii_case(b)
+        } else {
+            a == b
+        }
+    };
+    if same(&path_text, &root_text) {
+        return Some(".".into());
+    }
+    let prefix = path_text.get(..root_text.len())?;
+    let rest = path_text.get(root_text.len()..)?;
+    (same(prefix, &root_text) && rest.starts_with('/'))
+        .then(|| rest.trim_start_matches('/').to_string())
+        .filter(|rest| !rest.split('/').any(|part| part == ".."))
 }
 
 fn apply_security_defaults(
@@ -1579,6 +1654,44 @@ mod tests {
 
     use crate::tools::parallel_stats::ParallelPairStats;
     use crate::tools::ToolContext;
+
+    #[test]
+    fn full_access_accepts_absolute_paths_inside_the_workspace() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let harness = tempfile::tempdir().expect("harness");
+        std::fs::create_dir(workspace.path().join("artifacts")).expect("dir");
+        let ctx =
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .expect("context");
+        let mut runtime = crate::workspace::RuntimeConfig::default();
+        runtime.security_policy = Some(crate::workspace::SecurityPolicy::unrestricted());
+        ctx.shared_runtime_config().update_from_runtime(&runtime);
+
+        let root = ctx.workspace.root().to_path_buf();
+        let target = root.join("artifacts").join("probe.txt");
+        let created = call_tool(
+            &ctx,
+            "file_ops",
+            &json!({"operations":[{"type":"create","path":target.to_string_lossy(),"content":"ok"}]}),
+        );
+        assert_eq!(created["ok"], true, "{created}");
+        assert_eq!(std::fs::read_to_string(&target).expect("saved"), "ok");
+        let read = call_tool(
+            &ctx,
+            "read_file",
+            &json!({"path": target.to_string_lossy()}),
+        );
+        assert_eq!(read["ok"], true, "{read}");
+
+        // Paths outside the workspace stay rejected for file tools.
+        let outside = harness.path().join("x.txt");
+        let denied = call_tool(
+            &ctx,
+            "read_file",
+            &json!({"path": outside.to_string_lossy()}),
+        );
+        assert_eq!(denied["ok"], false, "{denied}");
+    }
 
     use super::{
         apply_default_cwd, begin_tracked_call, call_tool, call_tool_async, canary_sample_key,

@@ -75,7 +75,7 @@ impl WorkspaceError {
     pub fn absolute_path_denied() -> Self {
         Self::Tool {
             code: "ABSOLUTE_PATH_DENIED",
-            message: "Absolute paths are denied.".into(),
+            message: "Absolute paths outside the workspace are denied for file tools. Use a workspace-relative path, or exec_command with filesystem_scope=\"host\" for files outside the workspace.".into(),
             category: "security",
             retryable: false,
         }
@@ -84,7 +84,7 @@ impl WorkspaceError {
     pub fn path_outside_workspace() -> Self {
         Self::Tool {
             code: "PATH_OUTSIDE_WORKSPACE",
-            message: "Path escapes the configured workspace.".into(),
+            message: "Path escapes the configured workspace. Use exec_command with filesystem_scope=\"host\" for files outside the workspace.".into(),
             category: "security",
             retryable: false,
         }
@@ -546,7 +546,10 @@ fn mcp_result_summary(tool_name: &str, structured: &Value, is_error: bool) -> St
             .to_string();
     }
     // Chat guidance must also reach clients that render only MCP text content.
-    if matches!(tool_name, "chat_open" | "chat_wait" | "chat_reply" | "chat_close") {
+    if matches!(
+        tool_name,
+        "chat_open" | "chat_wait" | "chat_reply" | "chat_close"
+    ) {
         if let Some(instruction) = structured.get("instruction").and_then(Value::as_str) {
             return instruction.to_string();
         }
