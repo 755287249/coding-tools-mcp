@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {readFileSync,writeFileSync} from 'node:fs';
+import {readFileSync,writeFileSync,renameSync,existsSync,mkdtempSync,rmSync} from 'node:fs';
+import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {chatUi} from '../dist/chat/store.js';
 import {shareToolAllowed} from '../dist/server/routes/share.js';
@@ -13,7 +14,8 @@ test('share link URL connects without headers, binds the project and enforces re
   assert.equal(chatUi(f.root,{action:'share_status'}).enabled,false);
   const created=chatUi(f.root,{action:'share_create',access:'readonly'});
   assert.match(created.url_key,/^[a-f0-9]{64}$/);
-  assert.ok(!readFileSync(path.join(f.root,'docs/chat-sessions/share-link.json'),'utf8').includes(created.url_key),'only the hash is stored');
+  assert.ok(!readFileSync(path.join(f.root,'docs/chat-sessions/project.share.json'),'utf8').includes(created.url_key),'only the hash is stored');
+  assert.deepEqual(chatUi(f.root,{action:'list'}).sessions,[],'the share file is not a chat');
   const url=`${f.endpoint}/share/repo/${created.url_key}`;let seq=0;
   const rpc=async(method,params={},target=url,notification=false)=>{const r=await fetch(target,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',...(notification?{}:{id:++seq}),method,params})});return r.status===202?{accepted:true}:r.json();};
   const init=await rpc('initialize',{protocolVersion:'2025-03-26',capabilities:{},clientInfo:{name:'t',version:'1'}});
@@ -50,4 +52,15 @@ test('tunnel forwards share URLs only with a full key',()=>{
   assert.equal(tunnelPathAllowed(config,`/mcp/share/repo/${'a'.repeat(64)}`),true);
   assert.equal(tunnelPathAllowed(config,'/mcp/share/repo/short'),false);
   assert.equal(tunnelPathAllowed(config,`/mcp/share/repo/${'a'.repeat(64)}/extra`),false);
+});
+
+test('v0.1.158 share-link.json no longer breaks the chat list and is migrated',t=>{
+  const root=mkdtempSync(path.join(tmpdir(),'share-legacy-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
+  const chat=chatUi(root,{action:'create'}).session;
+  chatUi(root,{action:'share_create',access:'full'});
+  const dir=path.join(root,'docs/chat-sessions');
+  renameSync(path.join(dir,'project.share.json'),path.join(dir,'share-link.json'));
+  assert.deepEqual(chatUi(root,{action:'list'}).sessions.map(s=>s.id),[chat.id]);
+  assert.ok(!existsSync(path.join(dir,'share-link.json')));
+  assert.equal(chatUi(root,{action:'share_status'}).access,'full');
 });

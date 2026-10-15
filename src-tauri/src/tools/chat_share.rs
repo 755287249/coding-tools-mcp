@@ -5,7 +5,11 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{fs, path::Path};
 
-const FILE: &str = "share-link.json";
+// The extra dot keeps the name outside the chat ID pattern (`<id>.json`), so chat
+// listing never treats it as an archive; like `seed-library.seeds.json`.
+const FILE: &str = "project.share.json";
+/// v0.1.158 stored the link as `share-link.json`, which the chat list read as a chat.
+pub const LEGACY_STEM: &str = "share-link";
 pub const ACCESS_READONLY: &str = "readonly";
 pub const ACCESS_FULL: &str = "full";
 
@@ -24,7 +28,31 @@ pub fn valid_key(key: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+/// Moves the v0.1.158 file out of the chat ID namespace. Best effort and idempotent.
+pub fn migrate_legacy(root: &Path) {
+    let Ok(legacy) = safe(root, &format!("{DIR}/{LEGACY_STEM}.json")) else {
+        return;
+    };
+    let Ok(bytes) = fs::read(&legacy) else { return };
+    let is_share = serde_json::from_slice::<Value>(&bytes).is_ok_and(|v| {
+        v["version"] == 1 && v["key_hash"].is_string() && v.get("messages").is_none()
+    });
+    if !is_share {
+        return;
+    }
+    match file(root) {
+        Ok(target) if !target.exists() => {
+            let _ = fs::rename(&legacy, &target);
+        }
+        Ok(_) => {
+            let _ = fs::remove_file(&legacy);
+        }
+        Err(_) => (),
+    }
+}
+
 fn read(root: &Path) -> Result<Option<Value>> {
+    migrate_legacy(root);
     match fs::read(file(root)?) {
         Ok(bytes) if bytes.len() <= 4096 => {
             let value: Value =
@@ -140,5 +168,23 @@ mod tests {
         assert!(authenticate(root, key2).is_err());
         assert!(authenticate(root, "zz").is_err());
         assert!(ui(root, &json!({"action":"share_create","access":"admin"})).is_err());
+    }
+
+    #[test]
+    fn legacy_file_moves_out_of_the_chat_namespace_and_chats_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let key = ui(root, &json!({"action":"share_create","access":"full"})).unwrap()["url_key"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let target = file(root).unwrap();
+        let legacy = root.join(DIR).join(format!("{LEGACY_STEM}.json"));
+        fs::rename(&target, &legacy).unwrap();
+        // The chat list must not fail on the legacy file, and it moves it away.
+        let listed = crate::tools::chat::ui(root, &json!({"action":"list"})).unwrap();
+        assert_eq!(listed["sessions"], json!([]));
+        assert!(!legacy.exists() && target.exists());
+        assert_eq!(authenticate(root, &key).unwrap(), "full");
     }
 }

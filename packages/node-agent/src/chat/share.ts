@@ -1,17 +1,28 @@
 // Project share link: one URL carries both the credential and the project.
 // Mirrors src-tauri/src/tools/chat_share.rs; the file format is shared.
 import {createHash,randomBytes,timingSafeEqual} from 'node:crypto';
-import {mkdirSync,readFileSync,renameSync,rmSync,statSync,writeFileSync} from 'node:fs';
+import {existsSync,mkdirSync,readFileSync,renameSync,rmSync,statSync,writeFileSync} from 'node:fs';
 import path from 'node:path';
 
 export type ShareAccess='readonly'|'full';
-export interface ShareStore {file:string}
+export interface ShareStore {file:string;legacy:string}
+/** v0.1.158 stored the link as `share-link.json`, which the chat list read as a chat. */
+export const LEGACY_SHARE_STEM='share-link';
 interface ShareRecord {version:1;key_hash:string;access:ShareAccess;created_at:number}
 
 const digest=(key:string)=>createHash('sha256').update(key).digest('hex');
 export const validShareKey=(key:string)=>/^[a-f0-9]{64}$/.test(key);
 
+/** Moves the v0.1.158 file out of the chat ID namespace. Best effort and idempotent. */
+export function migrateLegacyShare(store:ShareStore):void {
+  try{
+    const value=JSON.parse(readFileSync(store.legacy,'utf8'));
+    if(value?.version!==1||typeof value.key_hash!=='string'||'messages' in value)return;
+    if(existsSync(store.file))rmSync(store.legacy,{force:true});else renameSync(store.legacy,store.file);
+  }catch{/* missing or not a share file */}
+}
 function read(store:ShareStore):ShareRecord|undefined {
+  migrateLegacyShare(store);
   let size:number;
   try{size=statSync(store.file).size;}catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return undefined;throw error;}
   if(size>4096)throw Error('Invalid share link file');

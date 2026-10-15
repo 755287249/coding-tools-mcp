@@ -824,6 +824,7 @@ fn ui_unlocked(root: &Path, args: &Value) -> Result<Value> {
         return discussion::action(root, args, None);
     }
     if action == "list" {
+        share::migrate_legacy(root);
         let mut sessions = Vec::new();
         let entries = match fs::read_dir(safe(root, DIR)?) {
             Ok(entries) => entries,
@@ -838,7 +839,7 @@ fn ui_unlocked(root: &Path, args: &Value) -> Result<Value> {
                 continue;
             }
             let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-            if id(&json!(stem)).is_err() {
+            if id(&json!(stem)).is_err() || stem == share::LEGACY_STEM {
                 continue;
             }
             let Some(snapshot) = load_snapshot(root, stem)? else {

@@ -1,4 +1,4 @@
-import {shareUi,type ShareStore} from './share.js';
+import {shareUi,migrateLegacyShare,LEGACY_SHARE_STEM,type ShareStore} from './share.js';
 import { renameChatFileSync } from './rename.js';
 import {type AccessState,type AccessMode,type PendingApproval,accessMode,setAccessMode,resolveApproval,pendingApprovals} from './access.js';
 import { scheduleAction, tickSchedules } from './schedules.js';
@@ -302,13 +302,14 @@ function chatUiUnlocked(root:string,args:Record<string,unknown>):Record<string,u
     if(String(action).startsWith('share_'))return shareUi(shareStore(root),args);
     if(String(action).startsWith('discussion_'))return discussionAction(discussionStore(root),args);
     if (action === 'list') {
+      migrateLegacyShare(shareStore(root));
       let names: string[];
       try { names = readdirSync(safe(root, DIR)); }
       catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { sessions: [] };
         throw error;
       }
-      const sessions = names.filter(n => /^[a-zA-Z0-9_-]{1,80}\.json$/.test(n)).flatMap(n => {
+      const sessions = names.filter(n => /^[a-zA-Z0-9_-]{1,80}\.json$/.test(n) && n !== `${LEGACY_SHARE_STEM}.json`).flatMap(n => {
         let snapshot: ChatSession;
         try { snapshot = load(root, n.slice(0, -5)); }
         catch (error) {
@@ -716,7 +717,8 @@ export function writeChatOperation(root:string,chatId:string,event:ChatOperation
 let sharedSeedProjects:{id:string;path:string}[]=[];
 /** The global connection refreshes this from its live project registry. */
 export function setSharedSeedProjects(projects:{id:string;path:string}[]):void {sharedSeedProjects=projects;}
-export function shareStore(root:string):ShareStore {return {file:safe(root,`${DIR}/share-link.json`)};}
+// The extra dot keeps the name outside the chat ID pattern, like seed-library.seeds.json.
+export function shareStore(root:string):ShareStore {return {file:safe(root,`${DIR}/project.share.json`),legacy:safe(root,`${DIR}/${LEGACY_SHARE_STEM}.json`)};}
 export function seedStore(root:string,projects:{id:string;path:string}[]=sharedSeedProjects.some(project=>project.path===root)?sharedSeedProjects:[{id:path.resolve(root),path:root}]):SeedStore {
   const configured=projects.some(project=>project.path===root)?projects:[{id:path.resolve(root),path:root},...projects];
   const current:SeedStore={path:relative=>safe(root,relative),read:id=>load(root,id),save:chat=>save(root,chat),ids:()=>{const directory=safe(root,DIR);return existsSync(directory)?readdirSync(directory).filter(n=>/^[a-zA-Z0-9_-]{1,80}\.json$/.test(n)).map(n=>n.slice(0,-5)):[]},projects:()=>configured.map(project=>({id:project.id,store:project.path===root?current:seedStore(project.path,configured)})),locked:run=>locked(root,run)};
