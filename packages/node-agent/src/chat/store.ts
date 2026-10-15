@@ -1,4 +1,5 @@
 import {shareUi,migrateLegacyShare,LEGACY_SHARE_STEM,type ShareStore} from './share.js';
+import {controlUi,stopNotice,acknowledge,lateReply,redact,stopped,LATE_RECALLED_INSTRUCTION,LATE_INTERRUPTED_INSTRUCTION} from './control.js';
 import { renameChatFileSync } from './rename.js';
 import {type AccessState,type AccessMode,type PendingApproval,accessMode,setAccessMode,resolveApproval,pendingApprovals} from './access.js';
 import { scheduleAction, tickSchedules } from './schedules.js';
@@ -23,7 +24,7 @@ import { resolveChatPath } from './reveal.js';
 // The on-disk v1 contract is shared with tools/chat.rs. Never persist waiting=true.
 export interface ChatFile { label?: string; local_reference?: boolean; id: string; name: string; path: string; mime: string; size: number; sha256: string }
 export interface ToolEvent { name: string; status: 'running' | 'completed' | 'failed'; input?: string; output?: string; output_truncated?: boolean }
-export interface ChatMessage { questions?:ChatQuestion[];question_answer?:QuestionResponse;question_response?:QuestionResponse;questions_active?:boolean; discussion?:{hidden?:boolean;id:string;post_id:string;source_chat_id:string;purpose:string}; received_by?:string[]; agent_id?:string;agent_name?:string;recipient_ids?:string[];agent_plans?:{agent_id:string;plan:ChatTaskPlan}[]; task_plan?:ChatTaskPlan; kind?: 'connection_request' | 'assignment'; awaiting_user?: boolean; received_at?: number; attachments?: ChatFile[]; tool_event?: ToolEvent; id: string; role: 'user' | 'assistant'; text: string; created_at: number; reply_to?: string; final?: boolean }
+export interface ChatMessage { questions?:ChatQuestion[];question_answer?:QuestionResponse;question_response?:QuestionResponse;questions_active?:boolean; discussion?:{hidden?:boolean;id:string;post_id:string;source_chat_id:string;purpose:string}; received_by?:string[]; agent_id?:string;agent_name?:string;recipient_ids?:string[];agent_plans?:{agent_id:string;plan:ChatTaskPlan}[]; task_plan?:ChatTaskPlan; kind?: 'connection_request' | 'assignment'; recalled_at?: number; interrupted_at?: number; interrupt_reason?: string; stop_acknowledged_at?: number; awaiting_user?: boolean; received_at?: number; attachments?: ChatFile[]; tool_event?: ToolEvent; id: string; role: 'user' | 'assistant'; text: string; created_at: number; reply_to?: string; final?: boolean }
 export interface ChatSession extends AccessState {terminal_attachment_hashes?:string[];seed_filter?:SeedFilter;seed_auto?:boolean;seed_explicit?:boolean;seed_direct?:boolean;seed_pending?:boolean;seed_owner?:string;seed_generation?:number;pending_pairing?:string; note?:string; title_agent_name?:string; work_member?:ChatMember; mode?:'work'|'group';members?:ChatMember[];agent_name?:string; pinned?: boolean; archived?: boolean; queue?: ChatMessage[]; queue_mode?: 'merge' | 'split'; queue_receipts?: Record<string,string>; title_custom?: boolean; files?: ChatFile[]; version: 1|2; id: string; title: string; created_at: number; updated_at: number; closed: boolean; messages: ChatMessage[]; attachment_id: string; lease_until: number }
 const DIR = 'docs/chat-sessions';
 const ASSET_DIR = 'mcp-assistant/chat-assets';
@@ -102,7 +103,8 @@ function writeHistoryPage(root: string, chatId: string, digest: string, bytes: B
   try { renameSync(temporary, target); } finally { rmSync(temporary, {force:true}); }
 }
 function agentView(root: string, s: ChatSession, args: Record<string, unknown>) {
-  return agentContext(view(root, s), pending(s, args.attachment_id)?.id);
+  const visible=view(root, s);
+  return agentContext({...visible,messages:visible.messages.map(m=>redact(m))}, pending(s, args.attachment_id)?.id);
 }
 function userMessageState(s: ChatSession, message: ChatMessage): string {
   const replies = s.messages.filter(reply => reply.role === 'assistant' && reply.reply_to === message.id);
@@ -117,7 +119,7 @@ function userMessageState(s: ChatSession, message: ChatMessage): string {
 }
 export function chatMarkdown(session: ChatSession): string {
   const s=visibleSession(session);
-  return `# ${s.title}\n\nSession: ${s.id}\n\n${s.note ? `备注：${s.note}\n\n` : ''}` + group.groupMarkdown(s) + s.messages.map(m => `## ${m.kind === 'connection_request' ? '接入请求' : m.role === 'user' ? '你' : m.final === false ? 'AI · 进度' : 'AI'} · ${m.created_at}\n\n${m.tool_event ? `Tool (AI reported): ${m.tool_event.name} · ${m.tool_event.status}\n\n` : ''}${m.text}\n${questionsMarkdown(m)}${group.groupMarkdown(s,m)}${chatPlanMarkdown(m.task_plan)}${m.role === 'user' ? `\n${userMessageState(s, m)}\n` : ''}${m.role === 'assistant' ? `\nReply state: ${m.awaiting_user ? 'awaiting_user' : m.final === false ? 'supplementing' : 'complete'}\n` : ''}${m.tool_event?.input ? `\nInput:\n${m.tool_event.input}\n` : ''}${m.tool_event?.output ? `\nOutput:\n${m.tool_event.output}\n` : ''}${m.tool_event?.output_truncated ? '\nOutput truncated\n' : ''}${(m.attachments ?? []).map(f => `\nAttachment: ${f.name} (${f.size} bytes)\nPath: ${f.path}\n${f.label ? `Reference: @${f.label}\n` : ''}`).join('')}`).join('\n') + queuedMarkdown(s);
+  return `# ${s.title}\n\nSession: ${s.id}\n\n${s.note ? `备注：${s.note}\n\n` : ''}` + group.groupMarkdown(s) + s.messages.map(original => redact(original)).map(m => `## ${m.kind === 'connection_request' ? '接入请求' : m.role === 'user' ? '你' : m.final === false ? 'AI · 进度' : 'AI'} · ${m.created_at}\n\n${m.tool_event ? `Tool (AI reported): ${m.tool_event.name} · ${m.tool_event.status}\n\n` : ''}${m.text}\n${questionsMarkdown(m)}${group.groupMarkdown(s,m)}${chatPlanMarkdown(m.task_plan)}${m.role === 'user' ? `\n${userMessageState(s, m)}\n` : ''}${m.role === 'assistant' ? `\nReply state: ${m.awaiting_user ? 'awaiting_user' : m.final === false ? 'supplementing' : 'complete'}\n` : ''}${m.tool_event?.input ? `\nInput:\n${m.tool_event.input}\n` : ''}${m.tool_event?.output ? `\nOutput:\n${m.tool_event.output}\n` : ''}${m.tool_event?.output_truncated ? '\nOutput truncated\n' : ''}${(m.attachments ?? []).map(f => `\nAttachment: ${f.name} (${f.size} bytes)\nPath: ${f.path}\n${f.label ? `Reference: @${f.label}\n` : ''}`).join('')}`).join('\n') + queuedMarkdown(s);
 }
 function save(root: string, s: ChatSession): void {
   const stored = packHistory(s, (digest, bytes) => writeHistoryPage(root, s.id, digest, bytes));
@@ -160,7 +162,7 @@ function locked<T>(root: string, callback: () => T): T {
 function key(root: string, id: string): string { return `${realpathSync(root)}:${id}`; }
 function pending(s: ChatSession, attachment?:unknown,waiting=false): ChatMessage | undefined {
   if(group.grouped(s))return group.groupPending(s,attachment?group.memberFor(s,attachment).id:undefined,waiting);
-  return s.messages.find(m => m.role === 'user' && !s.messages.some(r => r.role === 'assistant' && r.reply_to === m.id && r.final));
+  return s.messages.find(m => m.role === 'user' && !stopped(m) && !s.messages.some(r => r.role === 'assistant' && r.reply_to === m.id && r.final));
 }
 function view(root: string, session: ChatSession) {
   const s=visibleSession(session);
@@ -383,6 +385,8 @@ function chatUiUnlocked(root:string,args:Record<string,unknown>):Record<string,u
         Object.defineProperty(s.queue_receipts??={},id,{value:queuedFingerprint(message.text,message.attachments??[]),enumerable:true,writable:true,configurable:true});
         s.queue!.splice(index,1);s.updated_at=Date.now();save(root,s);
       }
+    } else if(action==='recall'||action==='interrupt'||action==='jump_queue'){
+      controlUi(s,String(action),action==='interrupt'?undefined:validId(args.message_id),{grouped:group.grouped,pending:x=>pending(x),fingerprint:(t,a)=>queuedFingerprint(t,a??[])});save(root,s);
     } else if(action==='set_access_mode'){setAccessMode(s,args.mode);s.updated_at=Date.now();save(root,s);}
     else if(action==='resolve_approval'){resolveApproval(s,args.approval_id,args.approve);save(root,s);}
     else if(action==='set_queue_mode'){if(args.mode!=='merge'&&args.mode!=='split')throw new Error('Invalid queue mode');s.queue_mode=args.mode;save(root,s);}
@@ -503,7 +507,10 @@ export function chatTool(root: string, name: string, args: Record<string, unknow
     }
     if(name==='chat_discuss')return discussionAction(discussionStore(root),args,s);
     if (name === 'chat_reply') {
-      const id = validId(args.message_id); const replyTo = validId(args.reply_to); const content = text(args.text,32000,true);
+      const id = validId(args.message_id); const replyTo = validId(args.reply_to);
+      const late=lateReply(s,replyTo);
+      if(late==='recalled'){acknowledge(s);group.renew(s,args.attachment_id);save(root,s);return {ok:true,persisted:false,status:'recalled',message_id:id,instruction:LATE_RECALLED_INSTRUCTION};}
+      const content = text(args.text,32000,true);
       const attachments = messageFiles(s, args.attachment_ids);
       const final = args.final !== false; const tool_event = toolEvent(args.tool_event, final);
       if (args.awaiting_user !== undefined && typeof args.awaiting_user !== 'boolean') throw new Error('awaiting_user must be a boolean');
@@ -519,13 +526,16 @@ export function chatTool(root: string, name: string, args: Record<string, unknow
         if (JSON.stringify(parseQuestions(existing.questions))!==JSON.stringify(questions) || JSON.stringify(existing.attachments ?? []) !== JSON.stringify(attachments) || existing.role !== 'assistant' || existing.text !== content || existing.reply_to !== replyTo || existing.final !== final || (existing.awaiting_user === true) !== awaiting_user || JSON.stringify(existing.tool_event ?? undefined) !== JSON.stringify(tool_event)) throw new Error('Message ID conflicts with an existing reply');
       } else {
         group.validateFinal(s,args);
-        if (pending(s,args.attachment_id)?.id !== replyTo) throw new Error('Reply must address the oldest unanswered user message');
+        if (!late && pending(s,args.attachment_id)?.id !== replyTo) throw new Error('Reply must address the oldest unanswered user message');
         s.messages.push({ ...identity, id, role: 'assistant', text: content, reply_to: replyTo, final, awaiting_user, tool_event, attachments, questions, created_at: Date.now() }); s.updated_at = Date.now();
       }
-      group.renew(s,args.attachment_id); save(root, s); return { ok: true, persisted: true, message_id: id, instruction: final ? CHAT_FINAL_INSTRUCTION : CHAT_PROGRESS_INSTRUCTION };
+      acknowledge(s); group.renew(s,args.attachment_id); save(root, s);
+      if(late)return {ok:true,persisted:true,status:'interrupted',message_id:id,instruction:LATE_INTERRUPTED_INSTRUCTION};
+      return { ok: true, persisted: true, message_id: id, instruction: final ? CHAT_FINAL_INSTRUCTION : CHAT_PROGRESS_INSTRUCTION };
     }
     if (name === 'chat_close') { if(group.grouped(s)&&group.memberFor(s,args.attachment_id).role!=='coordinator')throw new Error('Only the coordinator can close the group');recordTerminalAttachments(s); s.closed = true; s.attachment_id = ''; s.lease_until = 0; save(root, s); return { ok: true, status: 'closed', instruction: CHAT_CLOSED_INSTRUCTION }; }
     if (name === 'chat_wait') {
+      acknowledge(s);
       publishQueued(s);
       group.renew(s,args.attachment_id);
       const message = pending(s,args.attachment_id,true);
@@ -720,6 +730,10 @@ let sharedSeedProjects:{id:string;path:string}[]=[];
 /** The global connection refreshes this from its live project registry. */
 export function setSharedSeedProjects(projects:{id:string;path:string}[]):void {sharedSeedProjects=projects;}
 // The extra dot keeps the name outside the chat ID pattern, like seed-library.seeds.json.
+/** Gateway check before a project tool call from the chat's AI. */
+export function chatStopNotice(root:string,chatId:string):Record<string,unknown>|undefined {
+  try{const s=load(root,validId(chatId));return stopNotice(s,group.grouped(s));}catch{return undefined;}
+}
 export function shareStore(root:string):ShareStore {return {file:safe(root,`${DIR}/project.share.json`),legacy:safe(root,`${DIR}/${LEGACY_SHARE_STEM}.json`)};}
 export function seedStore(root:string,projects:{id:string;path:string}[]=sharedSeedProjects.some(project=>project.path===root)?sharedSeedProjects:[{id:path.resolve(root),path:root}]):SeedStore {
   const configured=projects.some(project=>project.path===root)?projects:[{id:path.resolve(root),path:root},...projects];

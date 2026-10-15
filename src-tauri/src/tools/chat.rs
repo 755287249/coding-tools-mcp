@@ -21,6 +21,8 @@ pub(crate) mod schedules;
 pub(crate) mod seeds;
 #[path = "chat_share.rs"]
 pub(crate) mod share;
+#[path = "chat_control.rs"]
+pub(crate) mod control;
 use super::workspace::WorkspaceError;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -251,6 +253,9 @@ pub fn markdown(s: &Value) -> String {
     out.push_str(&group::markdown(s, None));
     if let Some(messages) = s["messages"].as_array() {
         for m in messages {
+            let mut m = m.clone();
+            control::redact(&mut m);
+            let m = &m;
             let role = if m["kind"] == "connection_request" {
                 "接入请求"
             } else if m["role"] == "user" {
@@ -410,6 +415,7 @@ fn pending(s: &Value) -> Option<Value> {
         .iter()
         .find(|m| {
             m["role"] == "user"
+                && !control::stopped(m)
                 && !messages.iter().any(|r| {
                     r["role"] == "assistant" && r["reply_to"] == m["id"] && r["final"] == true
                 })
@@ -1081,6 +1087,10 @@ fn ui_unlocked(root: &Path, args: &Value) -> Result<Value> {
                 save(root, &s)?;
             }
         }
+        "recall" | "interrupt" | "jump_queue" => {
+            control::ui(&mut s, action, args)?;
+            save(root, &s)?;
+        }
         "set_access_mode" => {
             access::set_mode(&mut s, &args["mode"])?;
             s["updated_at"] = json!(now());
@@ -1484,6 +1494,13 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
                 return Err(err("Message ID conflicts with a queued delivery"));
             }
             let reply_to = id(&args["reply_to"])?;
+            let late = control::late_reply(&s, reply_to);
+            if matches!(late, Some(control::LateReply::Recalled)) {
+                control::acknowledge(&mut s);
+                group::renew(&mut s, args)?;
+                save(root, &s)?;
+                return Ok(json!({"ok":true,"persisted":false,"status":"recalled","message_id":message_id,"instruction":control::LATE_RECALLED_INSTRUCTION}));
+            }
             let content = message_text(&args["text"], 32000)?;
             let attachments = message_files(&s, args.get("attachment_ids"))?;
             let final_reply = args["final"] != false;
@@ -1522,7 +1539,9 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
                 }
             } else {
                 group::validate_final(&s, args)?;
-                if delivery(&s, args, false)?.map(|m| m["id"].clone()) != Some(json!(reply_to)) {
+                if late.is_none()
+                    && delivery(&s, args, false)?.map(|m| m["id"].clone()) != Some(json!(reply_to))
+                {
                     return Err(err("Reply must address the oldest unanswered user message"));
                 }
                 let mut reply = json!({"id":message_id,"role":"assistant","text":content,"reply_to":reply_to,"final":final_reply,"awaiting_user":awaiting_user,"tool_event":event,"attachments":attachments,"created_at":now()});
@@ -1536,8 +1555,12 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
                 s["messages"].as_array_mut().unwrap().push(reply);
                 s["updated_at"] = json!(now());
             }
+            control::acknowledge(&mut s);
             group::renew(&mut s, args)?;
             save(root, &s)?;
+            if late.is_some() {
+                return Ok(json!({"ok":true,"persisted":true,"status":"interrupted","message_id":message_id,"instruction":control::LATE_INTERRUPTED_INSTRUCTION}));
+            }
             Ok(
                 json!({"ok":true,"persisted":true,"message_id":message_id,"instruction":if final_reply {CHAT_FINAL_INSTRUCTION}else{CHAT_PROGRESS_INSTRUCTION}}),
             )
@@ -1554,6 +1577,7 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
             Ok(json!({"ok":true,"status":"closed","instruction":CHAT_CLOSED_INSTRUCTION}))
         }
         "chat_wait" => {
+            control::acknowledge(&mut s);
             publish_queued(&mut s);
             group::renew(&mut s, args)?;
             if let Some(message) = delivery(&s, args, true)? {
