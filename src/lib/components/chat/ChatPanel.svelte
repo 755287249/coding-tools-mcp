@@ -4,6 +4,7 @@
   import PresenceDot from './PresenceDot.svelte';
   import SeedStart from './SeedStart.svelte';
   import SeedLoading from './SeedLoading.svelte';
+  import { connectPhase } from '$lib/chat/connect-progress';
   import {seedRequest,type SeedFilter,type SeedTicket} from '$lib/api/seeds';
   import {directConnectPrompt} from '$lib/chat/seed-enrollment';
   import {pairingAddress} from '$lib/chat/seed-pairing';
@@ -208,7 +209,10 @@
   let queueElement=$state<HTMLDivElement>(),queueExpanded=$state(false);
   let runtimeState=$state('');
   $effect(()=>{const ws=workspaceId;runtimeState='';if(!ws)return;let stopped=false;const stop=startVisiblePolling(async()=>{try{const value=await getRuntimeStatus(ws);if(!stopped)runtimeState=value.state;}catch{if(!stopped)runtimeState='';}},()=>4000);return()=>{stopped=true;stop()}});
-  const queueNotice=$derived(!workspaceId||!folderId?'':runtimeState&&runtimeState!=='running'?'chat.enableMcp':needsAi?(seedStartPending?'':detail?.seed_auto&&!detail?.seed_direct?'seeds.loading':'chat.connectAi'):'');
+  // Accurate pairing phase: an attached AI that has not answered the greeting is still connecting.
+  const phase=$derived(connectPhase(detail));
+  const connectingNow=$derived(phase==='waiting_ai'||phase==='greeting');
+  const queueNotice=$derived(!workspaceId||!folderId?'':runtimeState&&runtimeState!=='running'?'chat.enableMcp':connectingNow?'chat.connectingNotice':needsAi?(seedStartPending?'':detail?.seed_auto&&!detail?.seed_direct?'seeds.loading':'chat.connectAi'):'');
   function collapseQueue(){queueElement?.querySelectorAll('details[open]').forEach(item=>(item as HTMLDetailsElement).open=false);queueExpanded=false;}
 
   async function toggleQueueMode() {
@@ -250,7 +254,6 @@
     disconnectDialog?.close(); disconnectAt = 0; await detach();
   }
   let guide = $state(false);
-  let connectDialog = $state<HTMLDialogElement>();
   let connectionPrompt = $state('');
   let connectionError = $state('');
   let connectionLoading = $state(false);
@@ -275,9 +278,10 @@
       ? {id:detail.connection_id,name:detail.agent_name??'AI'} : undefined);
   const connectionComplete = $derived(pairing==='success');
   $effect(()=>{if(guide && connectionScope===currentScope && connectionComplete)guide=false;});
+  // The connect guide is an inline panel (not a modal), so the user can keep working.
+  const guideVisible = $derived(guide && connectionScope === currentScope);
   $effect(() => {
-    if (guide && connectionScope === currentScope) connectDialog?.showModal();
-    else untrack(() => { connectDialog?.close(); guide = false; connectionPrompt = ''; connectionError = ''; connectionRequest = ''; connectionRetry = ''; promptSequence++; });
+    if (!guideVisible) untrack(() => { guide = false; connectionPrompt = ''; connectionError = ''; connectionRequest = ''; connectionRetry = ''; promptSequence++; });
   });
   $effect(() => {
     const requested = connectRequested, chat = requestedChatId, folder = requestedFolderId;
@@ -781,10 +785,20 @@
     try { await copyText(connectionPrompt); copied = true; revealPrompt=false; }
     catch { connectionError = $t('chat.42'); }
   }
+  let transcriptCopied = $state(false);
+  async function copyTranscript() {
+    const text = transcriptMarkdown(); if (!text) return;
+    try { await copyText(text); transcriptCopied = true; setTimeout(() => transcriptCopied = false, 2000); }
+    catch (e) { error = String(e); }
+  }
   async function download() {
-    if (!detail) return;
-    const text = `# ${detail.title}\n\nSession: ${detail.id}\n\n` + messages.map(m => { const receipt = chatUserState(detail, m.id); return `## ${m.role === 'user' ? $t('chat.26') : m.agent_name??detail?.agent_name??'AI'} · ${new Date(m.created_at).toLocaleString()}\n\n${m.tool_event ? `Tool (AI reported): ${m.tool_event.name} · ${m.tool_event.status}\n\n` : ''}${m.text}\n${questionsMarkdown(m)}${taskPlanMarkdown(m.task_plan)}${(m.agent_plans??[]).map(p=>'\nAgent: '+(detail?.members?.find(a=>a.id===p.agent_id)?.name??p.agent_id)+'\n'+taskPlanMarkdown(p.plan)).join('')}${m.recipient_ids?.length?'\nRecipients: '+m.recipient_ids.map(id=>detail?.members?.find(a=>a.id===id)?.name??id).join(', ')+'\n':''}${receipt ? `\n${$t('chat.84')}：${$t(receipt.read ? 'chat.79' : 'chat.80')} · ${$t(USER_MESSAGE_STATUS_KEYS[receipt.status])}\n` : ''}${m.role === 'assistant' ? `\nReply state: ${m.awaiting_user ? 'awaiting_user' : m.final === false ? 'supplementing' : 'complete'}\n` : ''}${m.tool_event?.input ? `\nInput:\n${m.tool_event.input}\n` : ''}${m.tool_event?.output ? `\nOutput:\n${m.tool_event.output}\n` : ''}${m.tool_event?.output_truncated ? '\nOutput truncated\n' : ''}${(m.attachments ?? []).map(f => `\nAttachment: ${f.name} (${f.size} bytes)\nPath: ${f.path}\nReference: @${f.label ?? f.name}\n`).join('')}`; }).join('\n');
+    const text = transcriptMarkdown(); if (!text || !detail) return;
     try{await saveFile(new Blob([text],{type:'text/markdown;charset=utf-8'}),`chat-${detail.id}.md`)}catch(e){error=String(e)}
+  }
+  function transcriptMarkdown(): string {
+    if (!detail) return '';
+    const text = `# ${detail.title}\n\nSession: ${detail.id}\n\n` + messages.map(m => { const receipt = chatUserState(detail, m.id); return `## ${m.role === 'user' ? $t('chat.26') : m.agent_name??detail?.agent_name??'AI'} · ${new Date(m.created_at).toLocaleString()}\n\n${m.tool_event ? `Tool (AI reported): ${m.tool_event.name} · ${m.tool_event.status}\n\n` : ''}${m.text}\n${questionsMarkdown(m)}${taskPlanMarkdown(m.task_plan)}${(m.agent_plans??[]).map(p=>'\nAgent: '+(detail?.members?.find(a=>a.id===p.agent_id)?.name??p.agent_id)+'\n'+taskPlanMarkdown(p.plan)).join('')}${m.recipient_ids?.length?'\nRecipients: '+m.recipient_ids.map(id=>detail?.members?.find(a=>a.id===id)?.name??id).join(', ')+'\n':''}${receipt ? `\n${$t('chat.84')}：${$t(receipt.read ? 'chat.79' : 'chat.80')} · ${$t(USER_MESSAGE_STATUS_KEYS[receipt.status])}\n` : ''}${m.role === 'assistant' ? `\nReply state: ${m.awaiting_user ? 'awaiting_user' : m.final === false ? 'supplementing' : 'complete'}\n` : ''}${m.tool_event?.input ? `\nInput:\n${m.tool_event.input}\n` : ''}${m.tool_event?.output ? `\nOutput:\n${m.tool_event.output}\n` : ''}${m.tool_event?.output_truncated ? '\nOutput truncated\n' : ''}${(m.attachments ?? []).map(f => `\nAttachment: ${f.name} (${f.size} bytes)\nPath: ${f.path}\nReference: @${f.label ?? f.name}\n`).join('')}`; }).join('\n');
+    return text;
   }
   $effect(()=>{
     if(!externalNavigation||!mobileHeader)return;
@@ -845,6 +859,8 @@
         {#if workspaceId&&folderId&&mode==='work'&&!selected&&startNew}
           <SeedStart {workspaceId} {folderId} onEnabled={value=>seedStartPending=value} onChoose={filter=>create(true,filter)}/>
         {:else if detail?.seed_auto&&!detail.seed_direct&&needsAi}<SeedLoading/>
+        {:else if guideVisible}{@render connectPanel()}
+        {:else if connectingNow||phase==='failed'}{@render connectStatus()}
         {:else if workspaceId&&folderId&&mode==='work'&&selected&&aiKind==='none'&&!detail?.closed}
           <SeedStart {workspaceId} {folderId} onChoose={chooseSeedPool}/>
         {:else}<h2>{$t(!workspaceId||!folderId?'chat.selectFolder':mode==='group'?'chat.inviteTitle':needsAi?'chat.connectTitle':'seeds.connectedReady')}</h2>{/if}
@@ -854,6 +870,7 @@
     <ChatOutline {messages} activeId={activeMessage} onSelect={jumpToMessage}/>
     </div>
     <footer class="composer-area">
+      {#if guideVisible&&messages.length}{@render connectPanel()}{/if}
       {#if mode==='work'&&selected&&messages.length&&aiKind==='none'&&!detail?.closed&&!(detail?.seed_auto&&!detail?.seed_direct)}<div class="connect-bar" role="status"><span>{$t('chat.noAiBar')}</span><button type="button" disabled={busy||!folderId} onclick={switchToDirect}>{$t('seeds.startDirect')}</button><button type="button" disabled={busy||!folderId} onclick={openSeedPicker}>{$t('shell.seeds')}</button></div>{/if}
       {#if queueNotice}<p class="queue-notice" role="status">{$t(queueNotice)}{#if detail?.queued_messages?.length} · {$t('chat.queuedRetained')}{/if}</p>{/if}
       {#if detail?.queued_messages?.length}<div class="outbox" class:expanded={queueExpanded} aria-label={$t('chat.outbox')}>
@@ -878,7 +895,7 @@
       {#if workspacePicker}{@render workspacePicker()}{/if}
       <ComposerTools {workspaceId} {folderId} disabled={busy||!!detail?.closed} selectedFolderName={selectedFolder?.name??''} onOpenChange={value=>toolsOpen=value} onBeforeNavigate={persistDraft} onSelectFolder={selectProject} onAttach={attachLibraryFile} onChooseLocal={()=>fileInput.click()} onReference={()=>referenceOpen=!referenceOpen} {onPlugins}/>
 
-    </div>{#if mode==='group'}<ChatMembers members={detail?.members??[]} busy={busy||memberBusy||!!detail?.closed} onMention={mentionAgent} onConnect={openConnection} onChange={memberAction}/>{/if}{#if draftStorageError}<p class="draft-warning" role="status">{$t("chat.94")}</p>{/if}{#if messageBytes(draft)>32000}<p class="draft-warning" role="alert">{$t('chat.tooLong')} ({messageBytes(draft)} / 32000)</p>{/if}<div class="composer-hint">{$t("chat.18")} <span>{detail?.archive_path ?? $t('chat.34')}</span></div></footer>
+    </div>{#if mode==='group'}<ChatMembers members={detail?.members??[]} busy={busy||memberBusy||!!detail?.closed} onMention={mentionAgent} onConnect={openConnection} onChange={memberAction}/>{/if}{#if draftStorageError}<p class="draft-warning" role="status">{$t("chat.94")}</p>{/if}{#if messageBytes(draft)>32000}<p class="draft-warning" role="alert">{$t('chat.tooLong')} ({messageBytes(draft)} / 32000)</p>{/if}<div class="composer-hint">{$t("chat.18")} {#if detail?.archive_path}<button type="button" class="archive-copy" title={$t('chat.copyTranscript')} aria-label={$t('chat.copyTranscript')} onclick={copyTranscript}>{transcriptCopied?$t('chat.transcriptCopied'):detail.archive_path}</button>{:else}<span>{$t('chat.34')}</span>{/if}</div></footer>
     </div>
   </div>
   {#if !tasksOpen&&onOpenTasks}<button type="button" class="task-edge-tab" title={$t('chat.openTasks')} aria-label={$t('chat.openTasks')} onclick={onOpenTasks}><ChevronLeft size={16}/></button>{/if}
@@ -906,14 +923,15 @@
   </div>
 </MobileSheet>{/if}
 <input class="file-input" type="file" accept="image/*" multiple bind:this={photoInput} onchange={()=>{const files=Array.from(photoInput.files??[]);photoInput.value='';void uploadFiles(files)}} aria-label={$t('mobile.photos')}/>
-<dialog class="connect-dialog" bind:this={connectDialog} onclose={() => { guide = false; connectionPrompt = ''; }}>
-  <header><h2>{$t(mode==='group'?'chat.inviteGroup':'chat.connectWork')}</h2><button aria-label={$t('Close')} onclick={()=>guide=false}><X size={18}/></button></header>
+{#snippet connectPanel()}
+<section class="connect-dialog connect-panel" aria-label={$t(mode==='group'?'chat.inviteGroup':'chat.connectWork')}>
+  <header><h2>{$t(mode==='group'?'chat.inviteGroup':'chat.connectWork')}</h2><button aria-label={$t('chat.collapseConnect')} title={$t('chat.collapseConnect')} onclick={()=>guide=false}><X size={18}/></button></header>
   <p>{$t('chat.sendInstruction')}</p>
   {#if copied || intentReceived || connectionPeer}
     <div class="pairing-progress" role="status" aria-live="polite">
       <span class="pairing-orbit" class:active={intentReceived||!!connectionPeer} aria-hidden="true"><i></i></span>
       <strong>{connectionPeer?$t('chat.waitGreeting'):intentReceived?$t('chat.preparingConnection'):$t('chat.waitingProbe')}</strong>
-      <span>{$t('chat.pairingHint')}</span>
+      <span>{$t(connectionPeer?'chat.connectGreetingHelp':'chat.connectWaitingAiHelp')}</span>
     </div>
   {/if}
   <button class="prompt-disclosure" type="button" aria-expanded={revealPrompt} onclick={()=>revealPrompt=!revealPrompt}>{$t(revealPrompt?'chat.hidePrompt':'chat.showPrompt')}</button>
@@ -924,10 +942,24 @@
   <div class="connection-buttons">
     {#if !connectionComplete}<button class="action-primary" onclick={copyPrompt} disabled={connectionLoading || connectionSending || !connectionPrompt}>{#if copied}<Check size={14}/>{:else}<Copy size={14}/>{/if}{copied ? $t('chat.25') : $t('chat.24')}</button>{/if}
     {#if connectionError || pairing==='failed' || (intentExpired && !connectionPeer)}<button onclick={openConnection} disabled={connectionLoading || connectionSending}>{$t('shell.resume')}</button>{/if}
-    <button onclick={()=>guide=false}>{$t(connectionComplete?'chat.showConversation':'chat.backConversation')}</button>
+    <button onclick={()=>guide=false}>{$t('chat.collapseConnect')}</button>
   </div>
   {#if connectionError}<p class="connection-error" role="alert">{connectionError}</p>{/if}
-</dialog>
+</section>
+{/snippet}
+{#snippet connectStatus()}
+<div class="connect-status" role="status" aria-live="polite">
+  {#if phase==='failed'}
+    <h2>{$t('chat.connectFailedTitle')}</h2>
+    <button type="button" class="action-primary" disabled={busy||!folderId} onclick={openConnection}>{$t('chat.connectWork')}</button>
+  {:else}
+    <span class="pairing-orbit" class:active={phase==='greeting'} aria-hidden="true"><i></i></span>
+    <h2>{$t(phase==='greeting'?'chat.connectGreeting':'chat.connectWaitingAi')}</h2>
+    <p>{$t(phase==='greeting'?'chat.connectGreetingHelp':'chat.connectWaitingAiHelp')}</p>
+    {#if phase==='waiting_ai'}<button type="button" class="prompt-disclosure" disabled={busy||!folderId} onclick={openConnection}>{$t('chat.reopenConnect')}</button>{/if}
+  {/if}
+</div>
+{/snippet}
 <dialog class="disconnect-dialog" bind:this={disconnectDialog} onclose={()=>disconnectAt=0}>
   <h2>{$t('chat.88')}</h2><p>{$t('shell.disconnectNotice')}</p>
   <div><button onclick={()=>disconnectDialog?.close()}>{$t('Cancel')}</button><button class="confirm-disconnect" disabled={disconnectSeconds>0 || busy} onclick={confirmDisconnect}>{$t('chat.88')}{disconnectSeconds>0 ? ` (${disconnectSeconds})` : ''}</button></div>
@@ -974,7 +1006,15 @@
 
 .chat-header{flex:none;min-height:60px;gap:12px}.chat-header .chat-heading{min-width:0;flex:1;gap:12px;flex-wrap:nowrap}.chat-heading strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.status{white-space:nowrap}.header-actions{flex-wrap:nowrap;gap:14px}.connection-actions{display:flex;border:1px solid var(--color-border);border-radius:9px;overflow:hidden}.connection-actions button{padding:7px 13px}.connection-actions button+button{border-left:1px solid var(--color-border)}.connection-actions button:hover:enabled{background:var(--color-border)}
 .landing .feed-frame{flex:0 0 auto;margin-top:auto}.landing .empty-state{padding:20px 16px 24px}.landing .empty-state h2{margin:0;font-size:30px;font-weight:500}.landing .composer-area{margin-bottom:auto;padding-top:0;padding-bottom:60px}.landing .bottom-control,.landing .composer-hint{display:none}.landing .message-feed{padding:0;overflow:visible}.composer-area{background:var(--main-content-bg)}.composer-area textarea{color:var(--color-text)}
-.connect-dialog{margin:auto;width:min(560px,calc(100vw - 32px));max-height:calc(100dvh - 32px);overflow:auto;padding:24px;border:1px solid var(--color-border);border-radius:18px;background:var(--color-bg);color:var(--color-text);box-shadow:0 20px 80px #0007}.connect-dialog::backdrop{background:#0007;backdrop-filter:blur(5px)}.connect-dialog header{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px}.connect-dialog h2{font-size:17px;font-weight:600}.connect-dialog p{font-size:13px;line-height:1.7;margin:12px 0}.connection-prompt{width:100%;height:220px;resize:vertical;padding:12px;border:1px solid var(--color-border);border-radius:10px;background:var(--card-bg);font:11px/1.7 monospace;color:var(--color-text)}.connection-buttons{display:flex;justify-content:space-between;gap:12px;margin-top:18px}.connection-buttons button{display:flex;align-items:center;gap:7px;padding:9px 14px;border:1px solid var(--border-strong);border-radius:8px;background:var(--surface-3);color:var(--color-text)}.connection-buttons button.action-primary{order:2;background:var(--action);border-color:var(--action-border);color:var(--action-text);font-weight:600}.connection-buttons button.action-primary:not(:disabled):hover{background:var(--action-hover)}.pairing-hint{color:var(--color-text-muted)}.connection-error{color:var(--danger);overflow-wrap:anywhere}
+.connect-dialog{margin:auto;width:min(560px,calc(100vw - 32px));max-height:calc(100dvh - 32px);overflow:auto;padding:24px;border:1px solid var(--color-border);border-radius:18px;background:var(--color-bg);color:var(--color-text);box-shadow:0 20px 80px #0007}.connect-dialog::backdrop{background:#0007;backdrop-filter:blur(5px)}
+.connect-panel{display:block;position:static;margin:0 auto 12px;max-height:none;box-shadow:0 6px 24px #0001;text-align:left}
+.empty-state .connect-panel{margin-top:8px}
+.connect-status{display:flex;flex-direction:column;align-items:center;gap:10px}
+.connect-status h2{font-size:22px!important;letter-spacing:0!important;margin:6px 0!important}
+.connect-status p{font-size:12px;line-height:1.7;color:var(--color-text-muted);max-width:440px;margin:0}
+.archive-copy{all:unset;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:50%;text-decoration:underline dotted;text-underline-offset:2px}
+.archive-copy:hover{color:var(--color-text)}
+.archive-copy:focus-visible{outline:2px solid var(--primary);outline-offset:2px;border-radius:3px}.connect-dialog header{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px}.connect-dialog h2{font-size:17px;font-weight:600}.connect-dialog p{font-size:13px;line-height:1.7;margin:12px 0}.connection-prompt{width:100%;height:220px;resize:vertical;padding:12px;border:1px solid var(--color-border);border-radius:10px;background:var(--card-bg);font:11px/1.7 monospace;color:var(--color-text)}.connection-buttons{display:flex;justify-content:space-between;gap:12px;margin-top:18px}.connection-buttons button{display:flex;align-items:center;gap:7px;padding:9px 14px;border:1px solid var(--border-strong);border-radius:8px;background:var(--surface-3);color:var(--color-text)}.connection-buttons button.action-primary{order:2;background:var(--action);border-color:var(--action-border);color:var(--action-text);font-weight:600}.connection-buttons button.action-primary:not(:disabled):hover{background:var(--action-hover)}.pairing-hint{color:var(--color-text-muted)}.connection-error{color:var(--danger);overflow-wrap:anywhere}
 @media(max-width:700px){.chat-header,.external-navigation .chat-header{padding:12px}.chat-header .chat-heading{flex-direction:column;align-items:flex-start;gap:3px}.chat-heading strong{max-width:100%}.header-actions{gap:8px}.connection-actions button{padding:6px 8px}.landing .composer-area{padding-bottom:35px}}
 
 .composer-input{position:relative}.mention-input{position:relative;min-width:0;flex:1;display:block}.mention-input textarea,.draft-highlight{grid-area:1/1;width:100%;box-sizing:border-box;padding:0;border:0;font:13px/1.7 system-ui;letter-spacing:normal;white-space:pre-wrap;overflow-wrap:break-word;tab-size:8}.draft-highlight{position:absolute;inset:0;height:100%;pointer-events:none;overflow:hidden;color:var(--color-text);max-height:100%;min-height:62px}.mention-input textarea{position:relative;z-index:1;color:transparent!important;caret-color:var(--color-text);background:transparent;resize:none}.attachment-mention{color:var(--chat-link);background:#397ddd22;border-radius:3px}.mention-choices{position:absolute;bottom:calc(100% + 10px);left:0;z-index:15;width:min(340px,100%);max-height:220px;overflow:auto;border:1px solid var(--color-border);border-radius:12px;background:var(--surface-2);box-shadow:0 12px 32px #0007;padding:5px}.mention-choices button{display:flex;align-items:center;gap:12px;width:100%;text-align:left;padding:9px;border-radius:7px;font-size:12px}.mention-choices button.active,.mention-choices button:hover{background:var(--color-border)}.mention-choices strong{color:var(--chat-link);white-space:nowrap}.mention-choices span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--color-text-secondary)}.draft-files{margin-bottom:10px;flex-wrap:nowrap;overflow-x:auto;padding:4px 2px;max-height:150px}

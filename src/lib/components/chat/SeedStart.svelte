@@ -8,7 +8,7 @@
   // The choice is always shown (pools with 0 ready are greyed). `onEnabled` reports the
   // library's automatic-assignment switch, which only matters for chats without a choice.
   let {workspaceId,folderId,onChoose,onEnabled=()=>{},showManual=true}:{workspaceId:string;folderId:string;onChoose:(filter:SeedFilter|null)=>Promise<boolean>;onEnabled?:(enabled:boolean)=>void;showManual?:boolean}=$props();
-  let groups=$state<PoolSeedGroup[]>([]),loading=$state(true),choosing=$state(false),error=$state('');
+  let groups=$state<PoolSeedGroup[]>([]),loading=$state(true),choosing=$state(false),choosingDirect=$state(false),error=$state('');
   let mode=$state<PoolMode>('prefix'),more=$state(false),source=$state(''),search=$state(''),page=$state(0),dialog:HTMLDialogElement;
   let version=0;
   const modes=[{id:'prefix' as const,key:'seeds.byPrefix' as const,icon:Layers},{id:'account' as const,key:'seeds.byAccount' as const,icon:UserRound},{id:'source' as const,key:'seeds.bySource' as const,icon:Boxes}];
@@ -23,7 +23,7 @@
   function category(value:PoolMode){mode=value;page=0;search='';source='';}
   function browse(){search='';source='';page=0;more=true;}
   async function choose(filter:SeedFilter|null){
-    if(choosing)return;const generation=version;more=false;choosing=true;error='';
+    if(choosing)return;const generation=version;more=false;choosing=true;choosingDirect=filter===null;error='';
     try{if(!await onChoose(filter)&&generation===version)choosing=false;}
     catch(e){if(generation===version){error=String(e);choosing=false;}}
   }
@@ -49,7 +49,8 @@
     <ArrowUpRight class="pool-arrow" size={16}/>
   </button>
 {/snippet}
-{#if loading||choosing}<SeedLoading/>
+{#if choosing}<SeedLoading variant={choosingDirect?'direct':'seed'}/>
+{:else if loading}<SeedLoading variant="list"/>
 {:else if showManual}
   <!-- New conversation: two entry cards. Pool categories and the standby pool live in the library dialog. -->
   <section class="seed-choice start" aria-label={$t('seeds.startTitle')}>

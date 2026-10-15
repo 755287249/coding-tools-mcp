@@ -64,3 +64,11 @@ test('v0.1.158 share-link.json no longer breaks the chat list and is migrated',t
   assert.ok(!existsSync(path.join(dir,'share-link.json')));
   assert.equal(chatUi(root,{action:'share_status'}).access,'full');
 });
+
+test('list reports connecting until the greeting arrives',t=>{
+  const root=mkdtempSync(path.join(tmpdir(),'connecting-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
+  const chat=chatUi(root,{action:'create',seed_manual:true}).session;
+  assert.equal(chatUi(root,{action:'list'}).sessions[0].connecting,false);
+  chatUi(root,{action:'request_connection',chat_id:chat.id,message_id:'pair-1'});
+  assert.equal(chatUi(root,{action:'list'}).sessions[0].connecting,true);
+});

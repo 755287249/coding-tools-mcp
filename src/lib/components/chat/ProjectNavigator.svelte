@@ -15,6 +15,7 @@
   import WorkspaceRemoveDialog from '$lib/components/WorkspaceRemoveDialog.svelte';
   import ShareWorkspaceDialog from './ShareWorkspaceDialog.svelte';
   import Share2 from '@lucide/svelte/icons/share-2';
+  import { connectPhase, connectRowKey, trackConnectRows, justConnected, clearJustConnected } from '$lib/chat/connect-progress';
   import { getBackend } from '$lib/backend';
   let removingWorkspace = $state<{id:string;name:string}|null>(null);
   let sharingWorkspace = $state('');
@@ -129,6 +130,12 @@
   const groups = $derived($workspaces.flatMap(workspace => workspaceFolders(workspace).map(folder => ({workspace, folder, key: scope(workspace.id, folder.id)}))));
   const activeId=$derived($page.url.searchParams.get('panel')==='discussions'&&$page.url.searchParams.get('discussion')?'discussion:'+$page.url.searchParams.get('discussion'):$page.url.searchParams.get('chat'));
   const recentItems = $derived(groups.flatMap(group => ($navigation[group.key] ?? []).filter(chat => !chat.archived && (recentFilter==='all' || (chat.mode??'work')===recentFilter)).map(chat => ({group, chat}))).sort((a,b) => recentConversationOrder(a.chat,b.chat)).slice(0,40));
+  // Pairing progress for every listed chat, so the user can work elsewhere while an AI connects.
+  $effect(()=>{
+    const rows=Object.entries($navigation).flatMap(([scope,chats])=>{let ws='',folder='';try{[ws,folder]=JSON.parse(scope);}catch{return [];}return chats.filter(chat=>!chat.discussionId).map(chat=>({key:connectRowKey(ws,folder,chat.id),session:chat}));});
+    trackConnectRows(rows);
+  });
+  $effect(()=>{const ws=$page.params.id,folder=$page.url.searchParams.get('folder');if(ws&&folder&&activeId&&$justConnected[connectRowKey(ws,folder,activeId)])clearJustConnected(connectRowKey(ws,folder,activeId));});
   const presenceLabels = { online:'chat.98', offline:'chat.22', working:'chat.70', error:'chat.71', closed:'chat.21', queued:'chat.81', awaiting_user:'chat.73' } as const;
   onMount(() => { try { const value=JSON.parse(localStorage.getItem('ctmcp-project-collapse') ?? '{}'); if(value && typeof value==='object' && !Array.isArray(value)) collapsed=value;
     const pref=JSON.parse(localStorage.getItem('ctmcp-nav-sections')??'{}'); projectsExpanded=pref.projects===true;recentExpanded=pref.recent!==false;
@@ -232,16 +239,27 @@
   {@const active=$page.params.id===ws && $page.url.searchParams.get('folder')===folder && activeId===chat.id}
   {@const presence=sessionPresence(chat)}
   {@const newCount=unread(ws,folder,chat)}
-  <div class="tree-chat" class:active class:archived-row={chat.archived} data-presence={presence} data-row-source={source}>
+  {@const phase=chat.discussionId?'none':connectPhase(chat)}
+  {@const connected=!!$justConnected[connectRowKey(ws,folder,chat.id)]&&!active}
+  <div class="tree-chat" class:active class:connecting={phase==='waiting_ai'||phase==='greeting'} class:just-connected={connected} class:archived-row={chat.archived} data-presence={presence} data-row-source={source}>
     {#if rename===key}
       <form onsubmit={event=>{event.preventDefault();void renameChat(ws,folder,chat)}}><input bind:this={renameInput} aria-label={$t(editingNote?'chat.note':'chat.86')} bind:value={title} maxlength="240" disabled={saving} onkeydown={event=>{if(event.key==='Escape')rename=''}}/><button disabled={saving||(!editingNote&&!title.trim())}>{$t('Save')}</button></form>
     {:else}
-      <button class="chat-link" onclick={()=>open(ws,folder,chat.id)} aria-current={active?'page':undefined} title={`${chat.title} · ${$t(presenceLabels[presence])}`}><PresenceDot state={presence} label={$t(presenceLabels[presence])} group={chat.mode==='group'}/><span>{chat.title}{#if chat.note}<span class="conversation-note" title={chat.note}>{chat.note}</span>{/if}{#if showProject}<small>{$workspaces.find(item=>item.id===ws)?.name}</small>{/if}</span><em class="chat-mode-tag">#{$t(chat.mode==='group'?'chat.group':'chat.work')}</em>{#if newCount}<b class="unread-count" aria-label={`${$t('chat.90')}: ${newCount}`}>{newCount>99?'99+':newCount}</b>{/if}</button>
+      <button class="chat-link" onclick={()=>open(ws,folder,chat.id)} aria-current={active?'page':undefined} title={`${chat.title} · ${$t(presenceLabels[presence])}`}><PresenceDot state={presence} label={$t(presenceLabels[presence])} group={chat.mode==='group'}/><span>{chat.title}{#if chat.note}<span class="conversation-note" title={chat.note}>{chat.note}</span>{/if}{#if showProject}<small>{$workspaces.find(item=>item.id===ws)?.name}</small>{/if}</span><em class="chat-mode-tag">#{$t(chat.mode==='group'?'chat.group':'chat.work')}</em>{#if phase==='waiting_ai'||phase==='greeting'}<b class="connect-tag" role="status">{$t(phase==='greeting'?'chat.rowGreeting':'chat.rowConnecting')}</b>{:else if connected}<b class="connect-tag done" role="status">{$t('chat.rowConnected')}</b>{/if}{#if newCount}<b class="unread-count" aria-label={`${$t('chat.90')}: ${newCount}`}>{newCount>99?'99+':newCount}</b>{/if}</button>{#if phase==='waiting_ai'||phase==='greeting'}<span class="connect-track" aria-hidden="true"><i></i></span>{/if}
       <div class="chat-row-actions"><button title={$t('chat.conversationActions')} aria-label={`${$t('chat.conversationActions')}: ${chat.title}`} onclick={event=>showChatMenu(ws,folder,chat,source,event)}><Ellipsis size={15}/></button><button class:pinned={chat.pinned} disabled={!!pinSaving} title={$t(chat.pinned?'chat.unpin':'chat.pin')} aria-label={`${$t(chat.pinned?'chat.unpin':'chat.pin')}: ${chat.title}`} onclick={()=>togglePin(ws,folder,chat)}><Pin size={14} class={chat.pinned?'pin-icon is-pinned':'pin-icon'}/></button></div>
     {/if}
   </div>
 {/snippet}
 <style>
+.tree-chat{position:relative}
+.connect-tag{flex:none;font-size:11px;font-weight:600;line-height:18px;padding:0 7px;border-radius:9px;color:var(--primary);background:color-mix(in srgb,var(--primary) 12%,transparent)}
+.connect-tag.done{color:var(--success);background:color-mix(in srgb,var(--success) 14%,transparent)}
+.tree-chat.connecting{background:color-mix(in srgb,var(--primary) 6%,transparent)}
+.tree-chat.just-connected{background:color-mix(in srgb,var(--success) 10%,transparent);box-shadow:inset 3px 0 0 var(--success)}
+.connect-track{position:absolute;left:10px;right:10px;bottom:2px;height:2px;border-radius:2px;overflow:hidden;background:color-mix(in srgb,var(--primary) 15%,transparent)}
+.connect-track i{position:absolute;inset:0 auto 0 0;width:35%;border-radius:2px;background:var(--primary);animation:connect-slide 1.4s ease-in-out infinite}
+@keyframes connect-slide{0%{transform:translateX(-100%)}100%{transform:translateX(290%)}}
+@media(prefers-reduced-motion:reduce){.connect-track i{animation:none;width:100%;opacity:.6}}
 .conversation-note{font-size:11px;font-weight:400;color:var(--color-text-muted);margin-left:7px}
 
 .recent-section{margin-top:18px}.recent-actions{display:flex;gap:2px}.recent-actions button{width:26px;height:26px;justify-content:center}.recent-actions .filtered{color:var(--primary);background:var(--surface-hover)}.recent-heading{padding-bottom:4px}.section-heading :global(.collapsed-chevron){transform:rotate(-90deg)}

@@ -493,7 +493,7 @@ version = "0.1.0"
 
 [[package]]
 name = "coding-tools-mcp-desktop"
-version = "0.1.159"
+version = "0.1.160"
 dependencies = [
  "aes-gcm",
  "axum",

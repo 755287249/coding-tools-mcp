@@ -171,7 +171,9 @@ function view(root: string, session: ChatSession) {
   const latestUser=s.messages.filter(m=>m.role==='user').at(-1);
   const awaiting_user=!message && !!latestUser && s.messages.some(m=>m.role==='assistant'&&m.reply_to===latestUser.id&&m.final&&m.awaiting_user);
   const last_message_at=s.messages.reduce((latest,m)=>Math.max(latest,m.created_at),s.created_at);
-  return { seed_filter:s.seed_filter,seed_auto:s.seed_auto,seed_direct:s.seed_direct===true,seed_owner:s.seed_owner,seed_generation:s.seed_generation,last_message_at, awaiting_user, mode:s.mode??'work',members,agent_name:s.agent_name, pinned:s.pinned===true, archived:s.archived===true, work_state, id: s.id, title: s.title, note:s.note??'', created_at: s.created_at, updated_at: s.updated_at, closed: s.closed, messages: s.messages, assistant_message_count: s.messages.filter(m => m.role === 'assistant').length,
+  // True while the AI has not yet answered the pairing greeting (see Rust view()).
+  const connecting=!s.closed&&!group.grouped(s)&&message?.kind==='connection_request';
+  return { connecting, seed_filter:s.seed_filter,seed_auto:s.seed_auto,seed_direct:s.seed_direct===true,seed_owner:s.seed_owner,seed_generation:s.seed_generation,last_message_at, awaiting_user, mode:s.mode??'work',members,agent_name:s.agent_name, pinned:s.pinned===true, archived:s.archived===true, work_state, id: s.id, title: s.title, note:s.note??'', created_at: s.created_at, updated_at: s.updated_at, closed: s.closed, messages: s.messages, assistant_message_count: s.messages.filter(m => m.role === 'assistant').length,
     status: s.closed ? 'closed' : group.grouped(s)?presence:waiters.has(key(root, s.id)+':'+s.attachment_id) ? 'waiting' : s.lease_until > Date.now() ? 'connected' : 'offline',
     archive_path: `${DIR}/${s.id}.md` };
 }

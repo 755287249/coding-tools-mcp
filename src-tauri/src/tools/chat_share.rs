@@ -187,4 +187,16 @@ mod tests {
         assert!(!legacy.exists() && target.exists());
         assert_eq!(authenticate(root, &key).unwrap(), "full");
     }
+
+    #[test]
+    fn list_reports_connecting_until_the_greeting_arrives() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let ui = |args: Value| crate::tools::chat::ui(root, &args).unwrap();
+        let chat = ui(json!({"action":"create","seed_manual":true}))["session"]["id"].clone();
+        let row = || ui(json!({"action":"list"}))["sessions"][0].clone();
+        assert_eq!(row()["connecting"], false);
+        ui(json!({"action":"request_connection","chat_id":chat,"message_id":"pair-1"}));
+        assert_eq!(row()["connecting"], true);
+    }
 }

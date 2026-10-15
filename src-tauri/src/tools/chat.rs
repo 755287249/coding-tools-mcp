@@ -469,6 +469,12 @@ fn view(root: &Path, s: &Value) -> Result<Value> {
     o.remove("queue");
     o.remove("queue_receipts");
     o.insert("status".into(), json!(status));
+    // True while the AI has not yet answered the pairing greeting; the sidebar shows
+    // progress from this instead of treating an attached-but-silent AI as connected.
+    let connecting = s["closed"] != true
+        && !group::grouped(s)
+        && pending(s).is_some_and(|m| m["kind"] == "connection_request");
+    o.insert("connecting".into(), json!(connecting));
     let work_state = if s["closed"] == true {
         None
     } else {
