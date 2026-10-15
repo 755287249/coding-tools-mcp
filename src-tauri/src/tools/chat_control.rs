@@ -31,9 +31,12 @@ fn answered(s: &Value, message_id: &Value) -> bool {
 }
 
 /// UI actions: `recall`, `interrupt`, `jump_queue`. The caller saves the session.
-pub(super) fn ui(s: &mut Value, action: &str, args: &Value) -> Result<()> {
+/// Returns the recalled message (text and attachments) so the UI restores exactly
+/// what was withdrawn, including a merged queue publication.
+pub(super) fn ui(s: &mut Value, action: &str, args: &Value) -> Result<Value> {
     ensure_work_chat(s)?;
     let time = now();
+    let mut recalled = Value::Null;
     match action {
         "recall" => {
             let message_id = json!(id(&args["message_id"])?);
@@ -58,6 +61,7 @@ pub(super) fn ui(s: &mut Value, action: &str, args: &Value) -> Result<()> {
                             .map(Vec::as_slice)
                             .unwrap_or(&[])
                     ));
+                recalled = json!({"text":message["text"],"attachments":message["attachments"]});
                 s["queue"].as_array_mut().unwrap().remove(index);
             } else {
                 let already = answered(s, &message_id);
@@ -74,6 +78,7 @@ pub(super) fn ui(s: &mut Value, action: &str, args: &Value) -> Result<()> {
                 if message["recalled_at"].is_null() {
                     message["recalled_at"] = json!(time);
                 }
+                recalled = json!({"text":message["text"],"attachments":message["attachments"]});
                 let text = message["text"].as_str().unwrap_or("").to_owned();
                 reset_derived_title(s, &text);
             }
@@ -83,7 +88,16 @@ pub(super) fn ui(s: &mut Value, action: &str, args: &Value) -> Result<()> {
             if current["kind"] == "connection_request" {
                 return Err(err("Wait until the AI has connected"));
             }
+            // Act only on the task the user saw, and only once the AI has it.
+            if args.get("message_id").is_some_and(|v| !v.is_null()) && current["id"] != args["message_id"] {
+                return Err(err("The task changed; refresh and try again"));
+            }
+            if current["received_at"].as_u64().is_none() {
+                return Err(err("The AI has not picked up this message yet; recall it instead"));
+            }
             mark_interrupted(s, &current["id"], REASON_PAUSE, time);
+            // "Wait a moment": hold queued messages until the user sends or jumps one.
+            s["queue_paused"] = json!(true);
         }
         "jump_queue" => {
             let message_id = json!(id(&args["message_id"])?);
@@ -94,19 +108,41 @@ pub(super) fn ui(s: &mut Value, action: &str, args: &Value) -> Result<()> {
             if s["queue"][index].get("discussion").is_some() {
                 return Err(err("Collaboration deliveries cannot jump the queue"));
             }
-            if let Some(current) = pending(s) {
-                if current["kind"] == "connection_request" {
+            let mut message = s["queue"].as_array_mut().unwrap().remove(index);
+            message["created_at"] = json!(time);
+            s.as_object_mut().unwrap().remove("queue_paused");
+            match pending(s) {
+                Some(current) if current["kind"] == "connection_request" => {
                     return Err(err("Wait until the AI has connected"));
                 }
-                mark_interrupted(s, &current["id"], REASON_CORRECTION, time);
+                // The AI is working on it: stop that task, the correction goes next.
+                Some(current) if current["received_at"].as_u64().is_some() => {
+                    mark_interrupted(s, &current["id"], REASON_CORRECTION, time);
+                    s["messages"].as_array_mut().unwrap().push(message);
+                }
+                // Not picked up yet: simply deliver the correction first.
+                Some(current) => {
+                    let messages = s["messages"].as_array_mut().unwrap();
+                    let at = messages.iter().position(|m| m["id"] == current["id"]).unwrap_or(messages.len());
+                    messages.insert(at, message);
+                }
+                None => s["messages"].as_array_mut().unwrap().push(message),
             }
-            let message = s["queue"].as_array_mut().unwrap().remove(index);
-            s["messages"].as_array_mut().unwrap().push(message);
         }
         _ => return Err(err("Unknown chat action")),
     }
     s["updated_at"] = json!(time);
-    Ok(())
+    Ok(recalled)
+}
+
+/// Pause holds the queue; a new send or a jump releases it.
+pub(super) fn queue_paused(s: &Value) -> bool {
+    s["queue_paused"] == true
+}
+pub(super) fn release_queue(s: &mut Value) {
+    if let Some(map) = s.as_object_mut() {
+        map.remove("queue_paused");
+    }
 }
 
 /// A title taken from the recalled text would still show it; restore the default.
@@ -198,17 +234,16 @@ pub(super) enum LateReply {
     Interrupted,
 }
 pub(super) fn late_reply(s: &Value, reply_to: &str) -> Option<LateReply> {
-    let m = s["messages"]
-        .as_array()?
-        .iter()
-        .find(|m| m["id"] == reply_to && m["role"] == "user")?;
+    let messages = s["messages"].as_array()?;
+    let m = messages.iter().find(|m| m["id"] == reply_to && m["role"] == "user")?;
     if m["recalled_at"].as_u64().is_some() {
-        Some(LateReply::Recalled)
-    } else if m["interrupted_at"].as_u64().is_some() {
-        Some(LateReply::Interrupted)
-    } else {
-        None
+        return Some(LateReply::Recalled);
     }
+    // Only the most recently stopped task the AI received may get a closing status reply.
+    let latest = messages.iter().rev().find(|m| {
+        m["role"] == "user" && m["received_at"].as_u64().is_some() && m["interrupted_at"].as_u64().is_some()
+    })?;
+    (latest["id"] == reply_to).then_some(LateReply::Interrupted)
 }
 
 pub(super) const LATE_RECALLED_INSTRUCTION: &str = "The user recalled this message; the reply was not saved. Do not continue that work. Call chat_wait now for the next message.";
@@ -355,6 +390,54 @@ mod tests {
             tool(root, "chat_wait", &args).unwrap()["message"]["id"],
             "q1"
         );
+    }
+
+    #[test]
+    fn pause_holds_the_queue_until_the_user_sends_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let (chat, args) = setup(root);
+        send(root, &chat, "m1", "task");
+        tool(root, "chat_wait", &args).unwrap();
+        send(root, &chat, "q1", "queued");
+        assert!(chat_ui(root, &json!({"action":"interrupt","chat_id":chat,"message_id":"other"})).is_err());
+        chat_ui(root, &json!({"action":"interrupt","chat_id":chat,"message_id":"m1"})).unwrap();
+        assert_eq!(tool(root, "chat_wait", &args).unwrap()["status"], "idle");
+        send(root, &chat, "m2", "go on");
+        assert_eq!(tool(root, "chat_wait", &args).unwrap()["message"]["id"], "q1");
+    }
+
+    #[test]
+    fn interrupt_needs_a_picked_up_task_and_recall_returns_merged_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let (chat, args) = setup(root);
+        send(root, &chat, "m1", "first");
+        assert!(chat_ui(root, &json!({"action":"interrupt","chat_id":chat})).is_err());
+        tool(root, "chat_wait", &args).unwrap();
+        send(root, &chat, "q1", "a");
+        send(root, &chat, "q2", "b");
+        tool(root, "chat_reply", &json!({"chat_id":chat,"attachment_id":args["attachment_id"],"message_id":"r1","reply_to":"m1","text":"ok","final":true})).unwrap();
+        tool(root, "chat_wait", &args).unwrap();
+        let out = chat_ui(root, &json!({"action":"recall","chat_id":chat,"message_id":"q1"})).unwrap();
+        let text = out["recalled"]["text"].as_str().unwrap();
+        assert!(text.contains('a') && text.contains('b'), "{text}");
+    }
+
+    #[test]
+    fn recalled_answer_keeps_the_question_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let (chat, args) = setup(root);
+        send(root, &chat, "m1", "task");
+        tool(root, "chat_wait", &args).unwrap();
+        tool(root, "chat_reply", &json!({"chat_id":chat,"attachment_id":args["attachment_id"],"message_id":"r1","reply_to":"m1","text":"which?","final":true,"awaiting_user":true})).unwrap();
+        send(root, &chat, "m2", "answer");
+        send(root, &chat, "q1", "unrelated");
+        chat_ui(root, &json!({"action":"recall","chat_id":chat,"message_id":"m2"})).unwrap();
+        let s = super::super::load(root, chat.as_str().unwrap()).unwrap();
+        assert!(super::super::awaiting_confirmation(&s));
+        assert_eq!(tool(root, "chat_wait", &args).unwrap()["status"], "idle");
     }
 
     #[test]

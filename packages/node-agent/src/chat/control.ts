@@ -27,8 +27,9 @@ function resetDerivedTitle(s:ChatSession,text:string){
   if(!s.title_custom&&!s.title_agent_name&&s.title===derived)s.title='新对话';
 }
 
-/** UI actions `recall`, `interrupt`, `jump_queue`; the caller saves the session. */
-export function controlUi(s:ChatSession,action:string,messageId:string|undefined,h:ControlHelpers):void {
+/** UI actions `recall`, `interrupt`, `jump_queue`; the caller saves the session. Returns the recalled text. */
+export function controlUi(s:ChatSession,action:string,messageId:string|undefined,h:ControlHelpers):{text:string;attachments?:ChatMessage['attachments']}|null {
+  let recalled:{text:string;attachments?:ChatMessage['attachments']}|null=null;
   if(s.closed)throw Error('Conversation is closed');
   if(h.grouped(s))throw Error('Recall and pause are only available in work chats');
   const time=Date.now();
@@ -38,6 +39,7 @@ export function controlUi(s:ChatSession,action:string,messageId:string|undefined
       const message=s.queue![index];
       if(message.discussion)throw Error('Collaboration deliveries cannot be recalled');
       Object.defineProperty(s.queue_receipts??={},messageId!,{value:h.fingerprint(message.text,message.attachments??[]),enumerable:true,writable:true,configurable:true});
+      recalled={text:message.text,attachments:message.attachments};
       s.queue!.splice(index,1);
     }else{
       const message=s.messages.find(m=>m.id===messageId) as Message|undefined;
@@ -45,25 +47,31 @@ export function controlUi(s:ChatSession,action:string,messageId:string|undefined
       if(message.role!=='user'||message.kind==='connection_request')throw Error('Only your own messages can be recalled');
       if(answered(s,message.id))throw Error('The AI already answered this message');
       message.recalled_at??=time;
+      recalled={text:message.text,attachments:message.attachments};
       resetDerivedTitle(s,message.text);
     }
   }else if(action==='interrupt'){
     const current=h.pending(s);
     if(!current)throw Error('No task is in progress');
     if(current.kind==='connection_request')throw Error('Wait until the AI has connected');
+    if(messageId!==undefined&&current.id!==messageId)throw Error('The task changed; refresh and try again');
+    if(typeof current.received_at!=='number')throw Error('The AI has not picked up this message yet; recall it instead');
     markInterrupted(s,current.id,REASON_PAUSE,time);
+    s.queue_paused=true;
   }else if(action==='jump_queue'){
     const index=s.queue?.findIndex(m=>m.id===messageId)??-1;
     if(index<0)throw Error('Message is no longer queued');
     if(s.queue![index].discussion)throw Error('Collaboration deliveries cannot jump the queue');
     const current=h.pending(s);
-    if(current){
-      if(current.kind==='connection_request')throw Error('Wait until the AI has connected');
-      markInterrupted(s,current.id,REASON_CORRECTION,time);
-    }
-    s.messages.push(s.queue!.splice(index,1)[0]);
+    if(current?.kind==='connection_request')throw Error('Wait until the AI has connected');
+    const message={...s.queue!.splice(index,1)[0],created_at:time};
+    delete s.queue_paused;
+    if(current&&typeof current.received_at==='number'){markInterrupted(s,current.id,REASON_CORRECTION,time);s.messages.push(message);}
+    else if(current)s.messages.splice(s.messages.indexOf(current),0,message);
+    else s.messages.push(message);
   }else throw Error('Unknown chat action');
   s.updated_at=time;
+  return recalled;
 }
 
 /** The stopped message the AI may still be working on, as a tool error result. */
@@ -88,7 +96,10 @@ export function acknowledge(s:ChatSession):void {
 export function lateReply(s:ChatSession,replyTo:string):'recalled'|'interrupted'|undefined {
   const m=s.messages.find(item=>item.id===replyTo&&item.role==='user') as Message|undefined;
   if(!m)return undefined;
-  return typeof m.recalled_at==='number'?'recalled':typeof m.interrupted_at==='number'?'interrupted':undefined;
+  if(typeof m.recalled_at==='number')return 'recalled';
+  // Only the most recently stopped task the AI received may get a closing status reply.
+  const latest=[...s.messages].reverse().find(item=>{const x=item as Message;return x.role==='user'&&typeof x.received_at==='number'&&typeof x.interrupted_at==='number';});
+  return latest?.id===replyTo?'interrupted':undefined;
 }
 
 /** Recalled text never reaches the model, in excerpts or archives. */

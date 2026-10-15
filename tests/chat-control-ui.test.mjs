@@ -25,7 +25,7 @@ test('recalled and paused messages are no longer pending work', () => {
 test('chat panel offers recall, pause, jump queue and a not-delivered badge', () => {
   const panel = read('../src/lib/components/chat/ChatPanel.svelte');
   assert.match(panel, /onclick=\{\(\)=>control\('recall',m\)\}/);
-  assert.match(panel, /class="send-button pause-button"[^>]*onclick=\{\(\)=>control\('interrupt'\)\}/);
+  assert.match(panel, /class="send-button pause-button"[^>]*onclick=\{\(\)=>control\('interrupt',currentTask\)\}/);
   assert.match(panel, /onclick=\{\(\)=>control\('jump_queue',item\)\}/);
   assert.match(panel, /class="undelivered"/);
   assert.match(panel, /const canPause = \$derived\(mode === 'work' && pendingState === 'processing' && !draft\.trim\(\) && !attachments\.length/);

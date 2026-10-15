@@ -25,7 +25,7 @@ import { resolveChatPath } from './reveal.js';
 export interface ChatFile { label?: string; local_reference?: boolean; id: string; name: string; path: string; mime: string; size: number; sha256: string }
 export interface ToolEvent { name: string; status: 'running' | 'completed' | 'failed'; input?: string; output?: string; output_truncated?: boolean }
 export interface ChatMessage { questions?:ChatQuestion[];question_answer?:QuestionResponse;question_response?:QuestionResponse;questions_active?:boolean; discussion?:{hidden?:boolean;id:string;post_id:string;source_chat_id:string;purpose:string}; received_by?:string[]; agent_id?:string;agent_name?:string;recipient_ids?:string[];agent_plans?:{agent_id:string;plan:ChatTaskPlan}[]; task_plan?:ChatTaskPlan; kind?: 'connection_request' | 'assignment'; recalled_at?: number; interrupted_at?: number; interrupt_reason?: string; stop_acknowledged_at?: number; awaiting_user?: boolean; received_at?: number; attachments?: ChatFile[]; tool_event?: ToolEvent; id: string; role: 'user' | 'assistant'; text: string; created_at: number; reply_to?: string; final?: boolean }
-export interface ChatSession extends AccessState {terminal_attachment_hashes?:string[];seed_filter?:SeedFilter;seed_auto?:boolean;seed_explicit?:boolean;seed_direct?:boolean;seed_pending?:boolean;seed_owner?:string;seed_generation?:number;pending_pairing?:string; note?:string; title_agent_name?:string; work_member?:ChatMember; mode?:'work'|'group';members?:ChatMember[];agent_name?:string; pinned?: boolean; archived?: boolean; queue?: ChatMessage[]; queue_mode?: 'merge' | 'split'; queue_receipts?: Record<string,string>; title_custom?: boolean; files?: ChatFile[]; version: 1|2; id: string; title: string; created_at: number; updated_at: number; closed: boolean; messages: ChatMessage[]; attachment_id: string; lease_until: number }
+export interface ChatSession extends AccessState {queue_paused?:boolean;terminal_attachment_hashes?:string[];seed_filter?:SeedFilter;seed_auto?:boolean;seed_explicit?:boolean;seed_direct?:boolean;seed_pending?:boolean;seed_owner?:string;seed_generation?:number;pending_pairing?:string; note?:string; title_agent_name?:string; work_member?:ChatMember; mode?:'work'|'group';members?:ChatMember[];agent_name?:string; pinned?: boolean; archived?: boolean; queue?: ChatMessage[]; queue_mode?: 'merge' | 'split'; queue_receipts?: Record<string,string>; title_custom?: boolean; files?: ChatFile[]; version: 1|2; id: string; title: string; created_at: number; updated_at: number; closed: boolean; messages: ChatMessage[]; attachment_id: string; lease_until: number }
 const DIR = 'docs/chat-sessions';
 const ASSET_DIR = 'mcp-assistant/chat-assets';
 const ARTIFACT_DIR = 'mcp-assistant/artifacts/';
@@ -175,7 +175,7 @@ function view(root: string, session: ChatSession) {
   const last_message_at=s.messages.reduce((latest,m)=>Math.max(latest,m.created_at),s.created_at);
   // True while the AI has not yet answered the pairing greeting (see Rust view()).
   const connecting=!s.closed&&!group.grouped(s)&&message?.kind==='connection_request';
-  return { connecting, seed_filter:s.seed_filter,seed_auto:s.seed_auto,seed_direct:s.seed_direct===true,seed_owner:s.seed_owner,seed_generation:s.seed_generation,last_message_at, awaiting_user, mode:s.mode??'work',members,agent_name:s.agent_name, pinned:s.pinned===true, archived:s.archived===true, work_state, id: s.id, title: s.title, note:s.note??'', created_at: s.created_at, updated_at: s.updated_at, closed: s.closed, messages: s.messages, assistant_message_count: s.messages.filter(m => m.role === 'assistant').length,
+  return { connecting, queue_paused:s.queue_paused===true, seed_filter:s.seed_filter,seed_auto:s.seed_auto,seed_direct:s.seed_direct===true,seed_owner:s.seed_owner,seed_generation:s.seed_generation,last_message_at, awaiting_user, mode:s.mode??'work',members,agent_name:s.agent_name, pinned:s.pinned===true, archived:s.archived===true, work_state, id: s.id, title: s.title, note:s.note??'', created_at: s.created_at, updated_at: s.updated_at, closed: s.closed, messages: s.messages, assistant_message_count: s.messages.filter(m => m.role === 'assistant').length,
     status: s.closed ? 'closed' : group.grouped(s)?presence:waiters.has(key(root, s.id)+':'+s.attachment_id) ? 'waiting' : s.lease_until > Date.now() ? 'connected' : 'offline',
     archive_path: `${DIR}/${s.id}.md` };
 }
@@ -374,7 +374,7 @@ function chatUiUnlocked(root:string,args:Record<string,unknown>):Record<string,u
       if(receipt){if(receipt!==queuedFingerprint(content,attachments))throw new Error('Message ID conflicts with a queued delivery');save(root,s);return {session:localView(root,s)};}
       const existing = [...s.messages,...(s.queue??[])].find(m => m.id === id);
       if (existing && (existing.role !== 'user' || existing.kind === 'connection_request' || existing.text !== content || JSON.stringify(existing.attachments ?? []) !== JSON.stringify(attachments))) throw new Error('Message ID conflicts with an existing message');
-      if (!existing) { if (!s.messages.some(m => m.role === 'user' && m.kind !== 'connection_request') && !s.title_custom && !s.title_agent_name) s.title = [...content.replace(/\s+/g, ' ')].slice(0, 36).join(''); const message:ChatMessage={ id, role: 'user', text: content, attachments, created_at: Date.now() };group.targetUser(s,message);if(!awaitingConfirmation(s)&&(pending(s)||s.queue?.length))(s.queue??=[]).push(message);else s.messages.push(message); s.updated_at = Date.now(); }
+      if (!existing) { if (!s.messages.some(m => m.role === 'user' && m.kind !== 'connection_request') && !s.title_custom && !s.title_agent_name) s.title = [...content.replace(/\s+/g, ' ')].slice(0, 36).join(''); const message:ChatMessage={ id, role: 'user', text: content, attachments, created_at: Date.now() };delete s.queue_paused;group.targetUser(s,message);if(!awaitingConfirmation(s)&&(pending(s)||s.queue?.length))(s.queue??=[]).push(message);else s.messages.push(message); s.updated_at = Date.now(); }
       save(root, s);
     } else if(action==='cancel_queued'){
       const id=validId(args.message_id),index=s.queue?.findIndex(message=>message.id===id)??-1;
@@ -386,7 +386,8 @@ function chatUiUnlocked(root:string,args:Record<string,unknown>):Record<string,u
         s.queue!.splice(index,1);s.updated_at=Date.now();save(root,s);
       }
     } else if(action==='recall'||action==='interrupt'||action==='jump_queue'){
-      controlUi(s,String(action),action==='interrupt'?undefined:validId(args.message_id),{grouped:group.grouped,pending:x=>pending(x),fingerprint:(t,a)=>queuedFingerprint(t,a??[])});save(root,s);
+      const recalled=controlUi(s,String(action),args.message_id===undefined||args.message_id===null?undefined:validId(args.message_id),{grouped:group.grouped,pending:x=>pending(x),fingerprint:(t,a)=>queuedFingerprint(t,a??[])});save(root,s);
+      return {session:localView(root,s),recalled};
     } else if(action==='set_access_mode'){setAccessMode(s,args.mode);s.updated_at=Date.now();save(root,s);}
     else if(action==='resolve_approval'){resolveApproval(s,args.approval_id,args.approve);save(root,s);}
     else if(action==='set_queue_mode'){if(args.mode!=='merge'&&args.mode!=='split')throw new Error('Invalid queue mode');s.queue_mode=args.mode;save(root,s);}
@@ -508,6 +509,7 @@ export function chatTool(root: string, name: string, args: Record<string, unknow
     if(name==='chat_discuss')return discussionAction(discussionStore(root),args,s);
     if (name === 'chat_reply') {
       const id = validId(args.message_id); const replyTo = validId(args.reply_to);
+      if (Object.hasOwn(s.queue_receipts??{},id)) throw new Error('Message ID conflicts with a queued delivery');
       const late=lateReply(s,replyTo);
       if(late==='recalled'){acknowledge(s);group.renew(s,args.attachment_id);save(root,s);return {ok:true,persisted:false,status:'recalled',message_id:id,instruction:LATE_RECALLED_INSTRUCTION};}
       const content = text(args.text,32000,true);
@@ -515,7 +517,7 @@ export function chatTool(root: string, name: string, args: Record<string, unknow
       const final = args.final !== false; const tool_event = toolEvent(args.tool_event, final);
       if (args.awaiting_user !== undefined && typeof args.awaiting_user !== 'boolean') throw new Error('awaiting_user must be a boolean');
       if (Object.hasOwn(s.queue_receipts??{},id)) throw new Error('Message ID conflicts with a queued delivery');
-      const awaiting_user = args.awaiting_user === true;
+      const awaiting_user = args.awaiting_user === true && !late;
       if (awaiting_user && !final) throw new Error('awaiting_user requires final=true');
       const questions=parseQuestions(args.questions);
       if(questions)validateQuestionContext(s,replyTo,final,awaiting_user);
@@ -570,7 +572,7 @@ export async function chatWait(root: string, args: Record<string, unknown>, sign
       if (moved) return moved;
       owned(s, args.attachment_id);
       const message = pending(s,args.attachment_id,true);
-      if (message || (s.queue?.length && !pending(s) && !awaitingConfirmation(s))) return chatTool(root, 'chat_wait', args);
+      if (message || (s.queue?.length && !pending(s) && !awaitingConfirmation(s) && !s.queue_paused)) return chatTool(root, 'chat_wait', args);
       await sleep(Math.min(250, end - Date.now()), undefined, { signal });
     }
     return { ok: true, status: 'idle', instruction: CHAT_IDLE_INSTRUCTION };
@@ -656,7 +658,7 @@ function readAttachmentChunk(root: string, s: ChatSession, args: Record<string, 
 
 function awaitingConfirmation(session: ChatSession): boolean {
   const s=visibleSession(session);
-  for(let i=s.messages.length-1;i>=0;i--){const m=s.messages[i];if(m.role==='user')return false;if(m.role==='assistant'&&m.final===true)return m.awaiting_user===true;}
+  for(let i=s.messages.length-1;i>=0;i--){const m=s.messages[i];if(m.role==='user'&&typeof m.recalled_at==='number')continue;if(m.role==='user')return false;if(m.role==='assistant'&&m.final===true)return m.awaiting_user===true;}
   return false;
 }
 function queuedFingerprint(content: string, attachments: ChatFile[]): string {
@@ -664,7 +666,7 @@ function queuedFingerprint(content: string, attachments: ChatFile[]): string {
 }
 function localView(root: string, session: ChatSession) {const s=visibleSession(session);const ops=readChatOperations(root,s.id);const visibleIds=new Set(s.messages.map(m=>m.id));ops.operations=ops.operations?.filter(op=>visibleIds.has(op.reply_to));const activeQuestion=activeQuestionId(s);return {...view(root,s),messages:s.messages.map(m=>m.questions?{...m,questions_active:m.id===activeQuestion}:m),pairing:pairingStatus(root,s.id),connection_id:s.attachment_id?createHash('sha256').update(s.attachment_id).digest('hex').slice(0,12):undefined,...ops,queued_messages:s.queue ?? [],queue_mode:s.queue_mode ?? (group.grouped(s)?'split':'merge'),access_mode:accessMode(s),pending_approvals:pendingApprovals(s)};}
 function publishQueued(s: ChatSession): void {
-  if(pending(s)||awaitingConfirmation(s)||!s.queue?.length)return;
+  if(pending(s)||awaitingConfirmation(s)||s.queue_paused||!s.queue?.length)return;
   const boundary=s.queue.findIndex(m=>!!m.discussion);
   const count=s.queue[0].discussion?1:(s.queue_mode ?? (group.grouped(s)?'split':'merge'))==='split'?1:boundary<0?s.queue.length:boundary;
   const items=s.queue.splice(0,count);

@@ -131,6 +131,7 @@ export const MESSAGES = {
   "chat.undeliveredShort": ["Not delivered", "未送達", "未送达", "未配信"],
   "chat.pauseTask": ["Pause: ask the AI to wait (stays connected)", "暫停：讓 AI 稍等（不中斷連線）", "暂停：让 AI 稍等（不断开连接）", "一時停止：AI に待ってもらう（接続は維持）"],
   "chat.jumpQueue": ["Jump the queue: interrupt the current task and send this now", "插隊：打斷目前任務，優先傳送這條", "插队：打断当前任务，优先发送这条", "割り込み：現在の作業を止めて今すぐ送信"],
+  "chat.queuePaused": ["Paused. Queued messages are kept; send a new message or jump one to continue.", "已暫停，排隊訊息已保留；傳送新訊息或點插隊即可繼續。", "已暂停，排队消息已保留；发送新消息或点插队即可继续。", "一時停止中です。キューのメッセージは保持されます。新しいメッセージを送るか割り込みで再開します。"],
   "chat.recallQueued": ["Recall and edit", "撤回並編輯", "撤回并编辑", "取り消して編集"],
   "seeds.connectedReady": ["AI is connected. What would you like to do?", "AI 已連線，你想完成什麼？", "AI 已连接，你想完成什么？", "AI が接続されました。何をしますか？"],
   "seeds.source": ["Source", "來源", "来源", "接続元"],

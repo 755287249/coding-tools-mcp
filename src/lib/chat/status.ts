@@ -33,7 +33,7 @@ export function pendingChatState(session: ChatSession | null): 'queued' | 'proce
   const messages = session.messages ?? [];
   const pending = messages.find(message => message.role === 'user' && !messageAnswered(session,message.id));
   if (!pending) {
-    const latestUser = messages.filter(message => message.role === 'user').at(-1);
+    const latestUser = messages.filter(message => message.role === 'user' && typeof message.recalled_at !== 'number').at(-1);
     return latestUser && chatUserState(session, latestUser.id)?.status === 'awaiting_user' ? 'awaiting_user' : null;
   }
   const accepted = !!pending.received_at || messages.some(reply => reply.role === 'assistant' && reply.reply_to === pending.id);

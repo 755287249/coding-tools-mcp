@@ -21,7 +21,7 @@
   const task=$derived(currentChatTask(session,requestId||undefined));
   const steps=$derived(task?.plan?.todos??[]);
   const done=$derived(steps.filter(t=>t.status==='completed').length);
-  const labels={queued:'chat.81',processing:'chat.82',awaiting_user:'chat.73',completed:'Completed',closed:'chat.4',interrupted:'chat.71'} as const;
+  const labels={queued:'chat.81',processing:'chat.82',awaiting_user:'chat.73',completed:'Completed',closed:'chat.4',interrupted:'chat.71',recalled:'chat.recalled'} as const;
   let panel=$state<HTMLElement>();let maxWidth=$state(700);
   let drag:{x:number;width:number;id:number}|null=null;
   function setWidth(value:number){width=Math.max(Math.min(280,maxWidth),Math.min(maxWidth,value));}

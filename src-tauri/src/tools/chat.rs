@@ -1043,6 +1043,8 @@ fn ui_unlocked(root: &Path, args: &Value) -> Result<Value> {
                         .collect::<String>());
                 }
                 let mut message = json!({"id":message_id,"role":"user","text":content,"attachments":attachments,"created_at":now()});
+                // A genuinely new message after a pause releases the held queue.
+                control::release_queue(&mut s);
                 group::target_user(&s, &mut message);
                 if !awaiting_confirmation(&s)
                     && (pending(&s).is_some()
@@ -1088,8 +1090,9 @@ fn ui_unlocked(root: &Path, args: &Value) -> Result<Value> {
             }
         }
         "recall" | "interrupt" | "jump_queue" => {
-            control::ui(&mut s, action, args)?;
+            let recalled = control::ui(&mut s, action, args)?;
             save(root, &s)?;
+            return Ok(json!({"session":local_view(root,&s)?,"recalled":recalled}));
         }
         "set_access_mode" => {
             access::set_mode(&mut s, &args["mode"])?;
@@ -1507,7 +1510,8 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
             if args.get("awaiting_user").is_some_and(|v| !v.is_boolean()) {
                 return Err(err("awaiting_user must be a boolean"));
             }
-            let awaiting_user = args["awaiting_user"] == true;
+            // A closing status reply to a stopped task must not hold the queue.
+            let awaiting_user = args["awaiting_user"] == true && late.is_none();
             if awaiting_user && !final_reply {
                 return Err(err("awaiting_user requires final=true"));
             }
@@ -1667,7 +1671,8 @@ pub async fn wait(root: &Path, args: &Value) -> Result<Value> {
         if delivery(&s, args, true)?.is_some()
             || (pending(&s).is_none()
                 && s["queue"].as_array().is_some_and(|q| !q.is_empty())
-                && !awaiting_confirmation(&s))
+                && !awaiting_confirmation(&s)
+                && !control::queue_paused(&s))
         {
             return tool(root, "chat_wait", args);
         }
@@ -1897,6 +1902,9 @@ fn awaiting_confirmation(s: &Value) -> bool {
     let s = &visible;
     if let Some(messages) = s["messages"].as_array() {
         for m in messages.iter().rev() {
+            if m["role"] == "user" && m["recalled_at"].as_u64().is_some() {
+                continue;
+            }
             if m["role"] == "user" {
                 return false;
             }
@@ -1963,7 +1971,7 @@ fn local_view(root: &Path, s: &Value) -> Result<Value> {
     Ok(result)
 }
 fn publish_queued(s: &mut Value) {
-    if pending(s).is_some() || awaiting_confirmation(s) {
+    if pending(s).is_some() || awaiting_confirmation(s) || control::queue_paused(s) {
         return;
     }
     let split =

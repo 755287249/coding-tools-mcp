@@ -64,3 +64,34 @@ test('answered messages cannot be recalled or paused',t=>{
   assert.throws(()=>chatUi(root,{action:'recall',chat_id:chat,message_id:'m1'}));
   assert.throws(()=>chatUi(root,{action:'interrupt',chat_id:chat}));
 });
+
+test('pause holds the queue until the user sends again',t=>{
+  const {root,chat,args}=setup(t);
+  send(root,chat,'m1','task');chatTool(root,'chat_wait',args);
+  send(root,chat,'q1','queued');
+  assert.throws(()=>chatUi(root,{action:'interrupt',chat_id:chat,message_id:'other'}));
+  chatUi(root,{action:'interrupt',chat_id:chat,message_id:'m1'});
+  assert.equal(chatTool(root,'chat_wait',args).status,'idle');
+  send(root,chat,'m2','go on');
+  assert.equal(chatTool(root,'chat_wait',args).message.id,'q1');
+});
+
+test('interrupt needs a picked-up task and recall returns merged text',t=>{
+  const {root,chat,args}=setup(t);
+  send(root,chat,'m1','first');
+  assert.throws(()=>chatUi(root,{action:'interrupt',chat_id:chat}));
+  chatTool(root,'chat_wait',args);
+  send(root,chat,'q1','a');send(root,chat,'q2','b');
+  reply(root,args,'r1','m1','ok');chatTool(root,'chat_wait',args);
+  const out=chatUi(root,{action:'recall',chat_id:chat,message_id:'q1'});
+  assert.ok(out.recalled.text.includes('a')&&out.recalled.text.includes('b'),out.recalled.text);
+});
+
+test('a recalled answer keeps the question open',t=>{
+  const {root,chat,args}=setup(t);
+  send(root,chat,'m1','task');chatTool(root,'chat_wait',args);
+  chatTool(root,'chat_reply',{...args,message_id:'r1',reply_to:'m1',text:'which?',final:true,awaiting_user:true});
+  send(root,chat,'m2','answer');send(root,chat,'q1','unrelated');
+  chatUi(root,{action:'recall',chat_id:chat,message_id:'m2'});
+  assert.equal(chatTool(root,'chat_wait',args).status,'idle');
+});

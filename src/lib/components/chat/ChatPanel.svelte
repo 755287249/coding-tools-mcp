@@ -216,7 +216,7 @@
   // Accurate pairing phase: an attached AI that has not answered the greeting is still connecting.
   const phase=$derived(connectPhase(detail));
   const connectingNow=$derived(phase==='waiting_ai'||phase==='greeting');
-  const queueNotice=$derived(!workspaceId||!folderId?'':runtimeState&&runtimeState!=='running'?'chat.enableMcp':connectingNow?'chat.connectingNotice':needsAi?(seedStartPending?'':detail?.seed_auto&&!detail?.seed_direct?'seeds.loading':'chat.connectAi'):'');
+  const queueNotice=$derived(!workspaceId||!folderId?'':runtimeState&&runtimeState!=='running'?'chat.enableMcp':connectingNow?'chat.connectingNotice':detail?.queue_paused&&detail?.queued_messages?.length?'chat.queuePaused':needsAi?(seedStartPending?'':detail?.seed_auto&&!detail?.seed_direct?'seeds.loading':'chat.connectAi'):'');
   function collapseQueue(){queueElement?.querySelectorAll('details[open]').forEach(item=>(item as HTMLDetailsElement).open=false);queueExpanded=false;}
 
   async function toggleQueueMode() {
@@ -249,10 +249,13 @@
     if (!canRecall(m) || m.received_at || detail?.messages?.some(r => r.role === 'assistant' && r.reply_to === m.id)) return false;
     return (!aiOnline && !connectingNow) || clock - m.created_at > 60_000;
   }
-  function restoreDraft(m: ChatMessage) {
+  /** Restores exactly what the server withdrew (a merged queue publication included). */
+  function restoreDraft(m: {text: string; attachments?: ChatFile[] | null}) {
     const text = m.text === '📎' && m.attachments?.length ? '' : m.text;
     draft = draft.trim() ? `${text}\n\n${draft}` : text;
     attachments = [...attachments, ...(m.attachments ?? []).filter(file => !attachments.some(item => item.id === file.id))];
+    // A fresh id: re-sending the old id would replay the recalled message.
+    retry = null;
     persistDraft();
   }
   async function control(action: 'recall' | 'interrupt' | 'jump_queue', message?: ChatMessage) {
@@ -263,7 +266,7 @@
       const result = await localChat(ws, folder, { action, chat_id: chat, message_id: message?.id });
       if (scope !== currentScope) return;
       readSequence++; detail = result.session ?? detail;
-      if (action === 'recall' && message) restoreDraft(message);
+      if (action === 'recall') restoreDraft(result.recalled ?? message ?? {text: ''});
     } catch (e) { if (scope === currentScope) error = String(e); }
     finally { controlBusy = ''; }
   }
@@ -441,6 +444,7 @@
   }
   const pendingState = $derived(pendingChatState(detail));
   const hasSupplement = $derived(messages.some(m=>m.role==='assistant'&&!m.tool_event&&chatReplyState(detail,m.id)==='supplementing'));
+  const currentTask = $derived(detail?.messages?.find(m => m.role === 'user' && !m.kind && !messageAnswered(detail, m.id)));
   const canPause = $derived(mode === 'work' && pendingState === 'processing' && !draft.trim() && !attachments.length && !detail?.closed && !connectingNow);
   const footerState = $derived(pendingState==='processing'&&hasSupplement?'supplementing':pendingState);
   const footerLabel = $derived(footerState==='supplementing'?$t('chat.72'):footerState==='awaiting_user'?$t('chat.73'):footerState==='processing'?$t('chat.70'):footerState==='interrupted'?$t('chat.71'):$t('chat.29'));
@@ -927,7 +931,7 @@
   </div>
   {#if mentionHistoryExpanded && mentionGroups.history.length}<div role="group" aria-label={$t('chat.historyAttachments')}><p class="mention-section-title">{$t('chat.historyAttachments')}</p>{#each mentionGroups.history as file,i (file.id)}{@render mentionOption(file,mentionGroups.current.length+i)}{/each}</div>
   {:else if hasMoreMentions}<button type="button" class="mention-more" role="option" aria-selected={mentionIndex===choices.length} class:active={mentionIndex===choices.length} onpointerdown={event=>event.preventDefault()} onclick={()=>mentionHistoryExpanded=true}>{$t('chat.moreAttachments')} ({mentionGroups.history.length})<ChevronDown size={14}/></button>{/if}
-</div>{/if}</div><input class="file-input" type="file" multiple bind:this={fileInput} onchange={() => uploadFiles(fileInput.files)} aria-label={$t('chat.50')}/><div class="composer-toolbar"><span class="attach-trigger" role="group" onpointerenter={()=>tonguePointer=true} onpointerleave={()=>tonguePointer=false} onfocusin={()=>tongueFocused=true} onfocusout={()=>tongueFocused=false}><button class="attach-button" type="button" disabled={busy || !folderId || detail?.closed} title={$t('chat.51')} aria-label={$t('chat.50')} onclick={attachClick}><Plus size={19}/></button></span><div>{#if canPause}<button type="button" class="send-button pause-button" title={$t("chat.pauseTask")} aria-label={$t("chat.pauseTask")} disabled={!!controlBusy} onclick={()=>control('interrupt')}><Pause size={16}/></button>{:else}<button class="send-button" aria-label={$t("chat.41")} disabled={messageBytes(draft)>32000 || busy || (!!selected && !detail) || (!draft.trim() && !attachments.length) || !folderId || detail?.closed}><ArrowUp size={18}/></button>{/if}</div></div></form><div class="composer-tongue" class:revealed={tongueVisible} inert={!tongueVisible} role="group" aria-label={$t('chat.project')} onpointerenter={()=>tonguePointer=true} onpointerleave={()=>tonguePointer=false} onfocusin={()=>tongueFocused=true} onfocusout={()=>tongueFocused=false}>
+</div>{/if}</div><input class="file-input" type="file" multiple bind:this={fileInput} onchange={() => uploadFiles(fileInput.files)} aria-label={$t('chat.50')}/><div class="composer-toolbar"><span class="attach-trigger" role="group" onpointerenter={()=>tonguePointer=true} onpointerleave={()=>tonguePointer=false} onfocusin={()=>tongueFocused=true} onfocusout={()=>tongueFocused=false}><button class="attach-button" type="button" disabled={busy || !folderId || detail?.closed} title={$t('chat.51')} aria-label={$t('chat.50')} onclick={attachClick}><Plus size={19}/></button></span><div>{#if canPause}<button type="button" class="send-button pause-button" title={$t("chat.pauseTask")} aria-label={$t("chat.pauseTask")} disabled={!!controlBusy} onclick={()=>control('interrupt',currentTask)}><Pause size={16}/></button>{:else}<button class="send-button" aria-label={$t("chat.41")} disabled={messageBytes(draft)>32000 || busy || (!!selected && !detail) || (!draft.trim() && !attachments.length) || !folderId || detail?.closed}><ArrowUp size={18}/></button>{/if}</div></div></form><div class="composer-tongue" class:revealed={tongueVisible} inert={!tongueVisible} role="group" aria-label={$t('chat.project')} onpointerenter={()=>tonguePointer=true} onpointerleave={()=>tonguePointer=false} onfocusin={()=>tongueFocused=true} onfocusout={()=>tongueFocused=false}>
       {#if workspacePicker}{@render workspacePicker()}{/if}
       <ComposerTools {workspaceId} {folderId} disabled={busy||!!detail?.closed} selectedFolderName={selectedFolder?.name??''} onOpenChange={value=>toolsOpen=value} onBeforeNavigate={persistDraft} onSelectFolder={selectProject} onAttach={attachLibraryFile} onChooseLocal={()=>fileInput.click()} onReference={()=>referenceOpen=!referenceOpen} {onPlugins}/>
 
