@@ -64,6 +64,10 @@ fn service_routes_for_prefix(prefix: &str) -> Router<ListenerState> {
             get(super::seeds::get_action),
         )
         .route(
+            &prefixed_route(prefix, "/mcp/share/{folder_id}/{key}"),
+            post(super::share::post).get(super::share::get),
+        )
+        .route(
             &prefixed_route(prefix, "/mcp/seed-library/{folder_id}"),
             post(super::seeds::provision_removed),
         )

@@ -140,6 +140,9 @@ pub(super) fn agent_view(root: &Path, s: &Value, args: &Value) -> Result<Value> 
     let mut shortened = false;
     let messages: Vec<_> = all.iter().enumerate().filter(|(i,m)| *i >= total.saturating_sub(12) || m["id"] == pending_id)
         .map(|(_,m)| {
+            let mut redacted = m.clone();
+            super::control::redact(&mut redacted);
+            let m = &redacted;
             if serde_json::to_vec(m).map_or(usize::MAX, |b| b.len()) <= 4096 { return m.clone(); }
             shortened = true;
             let mut row = json!({"text":excerpt(m["text"].as_str().unwrap_or(""),3000),"context_excerpt":true});

@@ -1,6 +1,6 @@
 import type {ChatSession,ChatTaskPlan} from '../api/chat';
 import {chatUserState,messageAnswered} from './status';
-export type ChatTaskStatus='queued'|'processing'|'awaiting_user'|'completed'|'closed'|'interrupted';
+export type ChatTaskStatus='queued'|'processing'|'awaiting_user'|'completed'|'closed'|'interrupted'|'recalled';
 /** Only messages delivered to this exact chat contribute; no workspace-wide feed. */
 export function currentChatTask(session:ChatSession|null,requestId?:string) {
  const messages=session?.messages??[];

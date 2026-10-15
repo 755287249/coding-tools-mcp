@@ -6,7 +6,7 @@ import {sendJson} from '../../oauth.js';
 import {readRequestBody} from '../http.js';
 import {currentToolCatalog} from '../catalog.js';
 import {dispatchMcpMethod} from '../mcp/dispatcher.js';
-import {seedStore,standbyHandoff,chatAccessGate,approvalStatus} from '../../chat/store.js';
+import {seedStore,standbyHandoff,chatAccessGate,approvalStatus,chatStopNotice} from '../../chat/store.js';
 import {readOnlyTools} from '../../catalog.js';
 import {seedUrl,seedProvision,seedInitialize,seedAuthenticate,seedCreated,seedPoll,seedBegin,seedFinish,seedPendingProcesses,seedProcessSettled} from '../../chat/seeds.js';
 import {seedConnectSkill,localChatSkill} from '../../rustCatalog.generated.js';
@@ -138,6 +138,9 @@ export async function handleSeedRoute(req:IncomingMessage,res:ServerResponse,pat
         if(name==='exec_command'&&!args.operation_id)args.operation_id=`seed-${seedId}-${binding.call_id.slice(0,20)}`;
         // The chat's authorization mode (完全/一般/严格) applies to project tools.
         if(!name.startsWith('chat_')&&!['set_todos','update_plan','report_progress'].includes(name)&&binding.chat_id){
+          // Recall/pause/correction: the next project tool call tells the AI to stop.
+          const notice=chatStopNotice(targetFolder.path,String(binding.chat_id));
+          if(notice){seedFinish(store,seedId,binding.call_id,name,args,notice);sendJson(res,200,{jsonrpc:'2.0',id,result:{...wrapped(notice),isError:true}});return true;}
           const gated=await applyAccessMode(targetFolder.path,String(binding.chat_id),name,args,currentToolCatalog(target).tools);
           if(gated.blocked){seedFinish(store,seedId,binding.call_id,name,args,gated.blocked);sendJson(res,200,{jsonrpc:'2.0',id,result:wrapped(gated.blocked)});return true;}
           for(const k of Object.keys(args))delete args[k];Object.assign(args,gated.args);

@@ -4,6 +4,7 @@ import { ProjectGateway, projectCatalog } from './server/projectGateway.js';
 import {enforceProjectConfiguration} from './projectIsolation.js';
 import {runSchedules, setSharedSeedProjects} from './chat/store.js';
 import {handleSeedRoute,ROBOTS_TXT} from './server/routes/seeds.js';
+import {handleShareRoute} from './server/routes/share.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import path from 'node:path';
@@ -159,9 +160,10 @@ export async function createAgentRuntime(config: AgentConfig, options: AgentRunt
         const accepted=typeof ticket==='string'&&markPairing(ticket,(projectGateway?.folders() ?? context.config.folders).map(f=>f.path));
         sendJson(res,accepted?202:404,accepted?{status:'preparing',authenticated:false}:{error:'pairing_unavailable'});return;
       }
-      const seedFolder = pathname.match(/^\/mcp\/(?:seeds|seed-library)\/([A-Za-z0-9_-]{1,80})(?:\/|$)/)?.[1];
+      const seedFolder = pathname.match(/^\/mcp\/(?:seeds|seed-library|share)\/([A-Za-z0-9_-]{1,80})(?:\/|$)/)?.[1];
       const seedContext = projectGateway && seedFolder ? await projectGateway.contextFor(seedFolder) : context;
       if (projectGateway) setSharedSeedProjects(projectGateway.folders().map(folder=>({id:folder.id,path:folder.path})));
+      if(await handleShareRoute(req,res,pathname,seedContext))return;
       if(await handleSeedRoute(req,res,pathname,seedContext,projectGateway?folderId=>projectGateway.contextFor(folderId):undefined,projectGateway?projectGateway.folders().map(folder=>({id:folder.id,path:folder.path})):undefined))return;
       await context.extensions.refresh();
       const catalog = projectGateway ? projectCatalog(context) : currentToolCatalog(context);

@@ -19,6 +19,10 @@ mod questions;
 pub(crate) mod schedules;
 #[path = "chat_seeds.rs"]
 pub(crate) mod seeds;
+#[path = "chat_share.rs"]
+pub(crate) mod share;
+#[path = "chat_control.rs"]
+pub(crate) mod control;
 use super::workspace::WorkspaceError;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -249,6 +253,9 @@ pub fn markdown(s: &Value) -> String {
     out.push_str(&group::markdown(s, None));
     if let Some(messages) = s["messages"].as_array() {
         for m in messages {
+            let mut m = m.clone();
+            control::redact(&mut m);
+            let m = &m;
             let role = if m["kind"] == "connection_request" {
                 "接入请求"
             } else if m["role"] == "user" {
@@ -408,6 +415,7 @@ fn pending(s: &Value) -> Option<Value> {
         .iter()
         .find(|m| {
             m["role"] == "user"
+                && !control::stopped(m)
                 && !messages.iter().any(|r| {
                     r["role"] == "assistant" && r["reply_to"] == m["id"] && r["final"] == true
                 })
@@ -467,6 +475,12 @@ fn view(root: &Path, s: &Value) -> Result<Value> {
     o.remove("queue");
     o.remove("queue_receipts");
     o.insert("status".into(), json!(status));
+    // True while the AI has not yet answered the pairing greeting; the sidebar shows
+    // progress from this instead of treating an attached-but-silent AI as connected.
+    let connecting = s["closed"] != true
+        && !group::grouped(s)
+        && pending(s).is_some_and(|m| m["kind"] == "connection_request");
+    o.insert("connecting".into(), json!(connecting));
     let work_state = if s["closed"] == true {
         None
     } else {
@@ -815,10 +829,14 @@ fn ui_unlocked(root: &Path, args: &Value) -> Result<Value> {
     if action.starts_with("seed_") {
         return seeds::ui(root, args);
     }
+    if action.starts_with("share_") {
+        return share::ui(root, args);
+    }
     if action.starts_with("discussion_") {
         return discussion::action(root, args, None);
     }
     if action == "list" {
+        share::migrate_legacy(root);
         let mut sessions = Vec::new();
         let entries = match fs::read_dir(safe(root, DIR)?) {
             Ok(entries) => entries,
@@ -833,7 +851,7 @@ fn ui_unlocked(root: &Path, args: &Value) -> Result<Value> {
                 continue;
             }
             let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-            if id(&json!(stem)).is_err() {
+            if id(&json!(stem)).is_err() || stem == share::LEGACY_STEM {
                 continue;
             }
             let Some(snapshot) = load_snapshot(root, stem)? else {
@@ -1025,6 +1043,8 @@ fn ui_unlocked(root: &Path, args: &Value) -> Result<Value> {
                         .collect::<String>());
                 }
                 let mut message = json!({"id":message_id,"role":"user","text":content,"attachments":attachments,"created_at":now()});
+                // A genuinely new message after a pause releases the held queue.
+                control::release_queue(&mut s);
                 group::target_user(&s, &mut message);
                 if !awaiting_confirmation(&s)
                     && (pending(&s).is_some()
@@ -1068,6 +1088,11 @@ fn ui_unlocked(root: &Path, args: &Value) -> Result<Value> {
                 s["updated_at"] = json!(now());
                 save(root, &s)?;
             }
+        }
+        "recall" | "interrupt" | "jump_queue" => {
+            let recalled = control::ui(&mut s, action, args)?;
+            save(root, &s)?;
+            return Ok(json!({"session":local_view(root,&s)?,"recalled":recalled}));
         }
         "set_access_mode" => {
             access::set_mode(&mut s, &args["mode"])?;
@@ -1472,13 +1497,21 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
                 return Err(err("Message ID conflicts with a queued delivery"));
             }
             let reply_to = id(&args["reply_to"])?;
+            let late = control::late_reply(&s, reply_to);
+            if matches!(late, Some(control::LateReply::Recalled)) {
+                control::acknowledge(&mut s);
+                group::renew(&mut s, args)?;
+                save(root, &s)?;
+                return Ok(json!({"ok":true,"persisted":false,"status":"recalled","message_id":message_id,"instruction":control::LATE_RECALLED_INSTRUCTION}));
+            }
             let content = message_text(&args["text"], 32000)?;
             let attachments = message_files(&s, args.get("attachment_ids"))?;
             let final_reply = args["final"] != false;
             if args.get("awaiting_user").is_some_and(|v| !v.is_boolean()) {
                 return Err(err("awaiting_user must be a boolean"));
             }
-            let awaiting_user = args["awaiting_user"] == true;
+            // A closing status reply to a stopped task must not hold the queue.
+            let awaiting_user = args["awaiting_user"] == true && late.is_none();
             if awaiting_user && !final_reply {
                 return Err(err("awaiting_user requires final=true"));
             }
@@ -1510,7 +1543,9 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
                 }
             } else {
                 group::validate_final(&s, args)?;
-                if delivery(&s, args, false)?.map(|m| m["id"].clone()) != Some(json!(reply_to)) {
+                if late.is_none()
+                    && delivery(&s, args, false)?.map(|m| m["id"].clone()) != Some(json!(reply_to))
+                {
                     return Err(err("Reply must address the oldest unanswered user message"));
                 }
                 let mut reply = json!({"id":message_id,"role":"assistant","text":content,"reply_to":reply_to,"final":final_reply,"awaiting_user":awaiting_user,"tool_event":event,"attachments":attachments,"created_at":now()});
@@ -1524,8 +1559,12 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
                 s["messages"].as_array_mut().unwrap().push(reply);
                 s["updated_at"] = json!(now());
             }
+            control::acknowledge(&mut s);
             group::renew(&mut s, args)?;
             save(root, &s)?;
+            if late.is_some() {
+                return Ok(json!({"ok":true,"persisted":true,"status":"interrupted","message_id":message_id,"instruction":control::LATE_INTERRUPTED_INSTRUCTION}));
+            }
             Ok(
                 json!({"ok":true,"persisted":true,"message_id":message_id,"instruction":if final_reply {CHAT_FINAL_INSTRUCTION}else{CHAT_PROGRESS_INSTRUCTION}}),
             )
@@ -1542,6 +1581,7 @@ pub fn tool(root: &Path, name: &str, args: &Value) -> Result<Value> {
             Ok(json!({"ok":true,"status":"closed","instruction":CHAT_CLOSED_INSTRUCTION}))
         }
         "chat_wait" => {
+            control::acknowledge(&mut s);
             publish_queued(&mut s);
             group::renew(&mut s, args)?;
             if let Some(message) = delivery(&s, args, true)? {
@@ -1631,7 +1671,8 @@ pub async fn wait(root: &Path, args: &Value) -> Result<Value> {
         if delivery(&s, args, true)?.is_some()
             || (pending(&s).is_none()
                 && s["queue"].as_array().is_some_and(|q| !q.is_empty())
-                && !awaiting_confirmation(&s))
+                && !awaiting_confirmation(&s)
+                && !control::queue_paused(&s))
         {
             return tool(root, "chat_wait", args);
         }
@@ -1861,6 +1902,9 @@ fn awaiting_confirmation(s: &Value) -> bool {
     let s = &visible;
     if let Some(messages) = s["messages"].as_array() {
         for m in messages.iter().rev() {
+            if m["role"] == "user" && m["recalled_at"].as_u64().is_some() {
+                continue;
+            }
             if m["role"] == "user" {
                 return false;
             }
@@ -1927,7 +1971,7 @@ fn local_view(root: &Path, s: &Value) -> Result<Value> {
     Ok(result)
 }
 fn publish_queued(s: &mut Value) {
-    if pending(s).is_some() || awaiting_confirmation(s) {
+    if pending(s).is_some() || awaiting_confirmation(s) || control::queue_paused(s) {
         return;
     }
     let split =

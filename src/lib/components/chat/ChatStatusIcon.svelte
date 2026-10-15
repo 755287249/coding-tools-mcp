@@ -9,12 +9,13 @@
   import LoaderCircle from '@lucide/svelte/icons/loader-circle';
   import Square from '@lucide/svelte/icons/square';
   import Pause from '@lucide/svelte/icons/pause';
+  import Undo2 from '@lucide/svelte/icons/undo-2';
   const icons = {
     unread: Circle, read: CheckCheck, queued: Clock,
     processing: LoaderCircle, supplementing: LoaderCircle, running: LoaderCircle,
     awaiting_user: CircleHelp, answered: Check, replied: CircleCheck,
     complete: CircleCheck, completed: CircleCheck, failed: CircleX,
-    closed: Square, interrupted: Pause,
+    closed: Square, interrupted: Pause, recalled: Undo2,
   };
   let { state, label, animate=true }: {animate?:boolean;state: keyof typeof icons; label: string} = $props();
   const Icon = $derived(icons[state]);

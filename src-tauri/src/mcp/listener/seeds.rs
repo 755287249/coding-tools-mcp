@@ -559,6 +559,22 @@ async fn execute(
                                 .and_then(|folder| folder["path"].as_str())
                                 .map(std::path::PathBuf::from)
                                 .ok_or("Assigned project is unavailable")?;
+                        // Recall/pause/correction: the next project tool call tells the AI to stop.
+                        if let Some(notice) =
+                            crate::tools::chat::control::stop_notice_at(&target_root, &chat_id)
+                        {
+                            seeds::finish(
+                                &root,
+                                seed_id,
+                                binding["call_id"].as_str().unwrap_or(""),
+                                &args,
+                                &notice,
+                            )
+                            .map_err(|e| e.message())?;
+                            let mut result = wrapped(notice);
+                            result["isError"] = json!(true);
+                            return Ok(Some(result));
+                        }
                         match apply_access_mode(&target_root, &chat_id, name, &args).await {
                             Ok(next) => args = next,
                             Err(blocked) => {

@@ -20,6 +20,8 @@ description: 通过 Coding Tools MCP 接入指定本地会话，持续接收消�
 
 - 用户在工作中发送的新消息可能保留在本地待发送队列。当前消息最终确认后实际调用 chat_wait，服务端才按“合/分”设置发布下一条；不要猜测或提前处理尚未投递的队列。awaiting_user=true 会暂停队列，先等待用户确认回复。
 
+- 用户可以撤回、暂停或插队纠正。工具返回 `category=user_control`（`USER_RECALLED`、`USER_PAUSED`、`USER_CORRECTION`）时立即停止当前工作，不要重试被拦截的工具；暂停或纠正时可先用一条简短 `chat_reply(final=true)` 说明停在哪里，撤回时不要回复；然后马上实际调用 `chat_wait`。这不是断开，继续使用原 attachment_id。`chat_reply` 返回 `status=recalled` 或 `status=interrupted` 时同样直接 `chat_wait`。
+
 ## 每次独立短等待
 
 - **一次外层工具调用只发起一次 `chat_wait`，收到结果就返回模型。** 下一次等待由下一次独立工具调用发起。不要在一条 Bash/Python/JS 命令、工具包装器或自动重试器里写“等 N 分钟”的轮询大循环；日志或心跳输出不会延长宿主的固定执行期限。
