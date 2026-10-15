@@ -311,6 +311,8 @@ export function tunnelPathAllowed(config: AgentConfig, pathname: string): boolea
   const scoped = (suffix: string) => `${prefix}${suffix}` || suffix;
   const seedSuffix=pathname.startsWith(scoped('/mcp/seeds/'))?pathname.slice(scoped('/mcp/seeds/').length):'';
   if(/^[A-Za-z0-9_-]{1,80}\/[A-Za-z0-9_-]{1,80}$/.test(seedSuffix))return true;
+  const shareSuffix=pathname.startsWith(scoped('/mcp/share/'))?pathname.slice(scoped('/mcp/share/').length):'';
+  if(/^[A-Za-z0-9_-]{1,80}\/[a-f0-9]{64}$/.test(shareSuffix))return true;
   const librarySuffix=pathname.startsWith(scoped('/mcp/seed-library/'))?pathname.slice(scoped('/mcp/seed-library/').length):'';
   if(/^[A-Za-z0-9_-]{1,80}(\/[a-f0-9]{64})?$/.test(librarySuffix))return true;
   return new Set([

@@ -638,6 +638,8 @@ impl Observability {
         let safe_path = path.split('?').next().unwrap_or(path);
         let safe_path = if let Some((prefix, _)) = safe_path.split_once("/mcp/seeds/") {
             format!("{prefix}/mcp/seeds/[REDACTED]")
+        } else if let Some((prefix, _)) = safe_path.split_once("/mcp/share/") {
+            format!("{prefix}/mcp/share/[REDACTED]")
         } else {
             safe_path.to_owned()
         };
@@ -841,6 +843,9 @@ mod tests {
             "mcp",
         );
         request.finish(200);
+        telemetry
+            .begin_request("share", "POST", &format!("/clients/test/mcp/share/folder/{secret}"), "client", "mcp")
+            .finish(200);
         let logs = telemetry.logs(LogFilter {
             limit: 100,
             ..Default::default()

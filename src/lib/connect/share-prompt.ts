@@ -1,64 +1,35 @@
 import type { Locale } from "$lib/i18n";
-import { MANUAL_OAUTH_REDIRECT_URI } from "./prompt";
 
 export type ShareAccess = "full" | "readonly";
 
-export interface ShareInfo {
-  endpoint: string;
-  authType: string;
-  clientId: string;
-  password: string;
-  bearerToken: string;
-  folderId: string;
-  folderName: string;
-  access: ShareAccess;
-}
-
 /**
- * Same style as the chat seed prompt: one short paragraph, connect first.
- * The server's initialize instructions carry the detailed rules.
+ * Same wording as the chat seed prompt. The share URL carries the credential and the
+ * server binds the project and access mode, so the prompt mentions neither.
  */
 const TEXT = {
-  en: {
-    intro: (url: string) => `Connect to my tools ${url} .`,
-    bearer: (token: string) => `Header: Authorization: Bearer ${token}.`,
-    oauth: (id: string, password: string) => `OAuth: Client ID ${id}, password ${password}, S256 PKCE, redirect_uri=${MANUAL_OAUTH_REDIRECT_URI}.`,
-    body: (args: string) => `Quickly connect to this sandbox's MCP (URL), then call switch_workspace_folder ${args}. Learn the rules and the available tools, and get ready for the next operations. The tools are inside the MCP, not in your client. Use them once connected, then wait for my message.`,
-    readonly: "Read-only: only read and search files.",
-  },
-  "zh-CN": {
-    intro: (url: string) => `请连接我的工具 ${url} 。`,
-    bearer: (token: string) => `请求头 Authorization: Bearer ${token} 。`,
-    oauth: (id: string, password: string) => `OAuth：Client ID ${id}，密码 ${password}，S256 PKCE，redirect_uri=${MANUAL_OAUTH_REDIRECT_URI} 。`,
-    body: (args: string) => `快速连接这个 sandbox 的 MCP（URL），连上后调用 switch_workspace_folder ${args}，明确使用规则，熟悉可用工具，做好处理接下来一系列操作的准备。工具在 MCP 内部，而非你的客户端内部，连上后使用，然后等待信息。`,
-    readonly: "只读：只读取和搜索文件。",
-  },
-  "zh-TW": {
-    intro: (url: string) => `請連接我的工具 ${url} 。`,
-    bearer: (token: string) => `請求標頭 Authorization: Bearer ${token} 。`,
-    oauth: (id: string, password: string) => `OAuth：Client ID ${id}，密碼 ${password}，S256 PKCE，redirect_uri=${MANUAL_OAUTH_REDIRECT_URI} 。`,
-    body: (args: string) => `快速連接這個 sandbox 的 MCP（URL），連上後呼叫 switch_workspace_folder ${args}，明確使用規則，熟悉可用工具，做好處理接下來一系列操作的準備。工具在 MCP 內部，而非你的用戶端內部，連上後使用，然後等待訊息。`,
-    readonly: "唯讀：只讀取和搜尋檔案。",
-  },
+  en: (url: string) => `Connect to my tools ${url} . Quickly connect to this sandbox's MCP (URL), learn the usage rules and the available tools, and get ready for the next operations. The tools are inside the MCP, not in your client. Use them once connected, then wait for my message.`,
+  "zh-CN": (url: string) => `请连接我的工具 ${url} 。快速连接这个 sandbox 的 MCP（URL），明确使用规则，熟悉可用工具，做好处理接下来一系列操作的准备。工具在 MCP 内部，而非你的客户端内部，连上后使用，然后等待信息。`,
+  "zh-TW": (url: string) => `請連接我的工具 ${url} 。快速連接這個 sandbox 的 MCP（URL），明確使用規則，熟悉可用工具，做好處理接下來一系列操作的準備。工具在 MCP 內部，而非你的用戶端內部，連上後使用，然後等待訊息。`,
 } as const;
 
-function language(locale: Locale): keyof typeof TEXT {
-  return locale === "zh-CN" || locale === "zh-TW" ? locale : "en";
+export function buildSharePrompt(url: string, locale: Locale): string {
+  const language = locale === "zh-CN" || locale === "zh-TW" ? locale : "en";
+  return TEXT[language](url);
 }
 
-/** Short prompt that lets an external web AI use one project without joining a chat. */
-export function buildSharePrompt(info: ShareInfo, locale: Locale): string {
+/** `<endpoint ending in /mcp>/share/<folder>/<key>`; the key is the only credential. */
+export function shareUrl(endpoint: string, folderId: string, key: string): string {
   let url: URL;
-  try { url = new URL(info.endpoint); } catch { throw Error("Invalid MCP endpoint"); }
-  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) throw Error("Invalid MCP endpoint");
-  if (!info.folderId) throw Error("Missing project folder");
-  const text = TEXT[language(locale)];
-  const parts: string[] = [text.intro(url.toString())];
-  if (info.authType === "bearer" && info.bearerToken) parts.push(text.bearer(info.bearerToken));
-  else if (info.authType === "oauth") parts.push(text.oauth(info.clientId, info.password));
-  parts.push(text.body(JSON.stringify({ folder_id: info.folderId })));
-  if (info.access === "readonly") parts.push(text.readonly);
-  return parts.join(language(locale) === "en" ? " " : "");
+  try { url = new URL(endpoint.trim()); } catch { throw Error("Invalid MCP endpoint"); }
+  const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) throw Error("Use HTTPS or a loopback MCP endpoint");
+  if (url.username || url.password || url.search || url.hash) throw Error("Invalid MCP endpoint");
+  const base = url.pathname.replace(/\/$/, "");
+  if (!base.endsWith("/mcp")) throw Error("Invalid MCP endpoint");
+  if (!/^[A-Za-z0-9_-]{1,80}$/.test(folderId)) throw Error("Invalid project folder");
+  if (!/^[a-f0-9]{64}$/.test(key)) throw Error("Invalid share key");
+  url.pathname = `${base}/share/${folderId}/${key}`;
+  return url.toString();
 }
 
 /** A web AI on another machine cannot open a loopback or private address. */

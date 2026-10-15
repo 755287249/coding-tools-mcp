@@ -5,49 +5,32 @@ import ts from 'typescript';
 
 const moduleUrl = source => 'data:text/javascript;base64,' + Buffer.from(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText).toString('base64');
 const read = path => readFileSync(new URL(path, import.meta.url), 'utf8');
-const prompt = moduleUrl(read('../src/lib/connect/prompt.ts'));
-const { buildSharePrompt, isPublicEndpoint } = await import(moduleUrl(read('../src/lib/connect/share-prompt.ts').replace('"./prompt"', JSON.stringify(prompt))));
+const { buildSharePrompt, shareUrl, isPublicEndpoint } = await import(moduleUrl(read('../src/lib/connect/share-prompt.ts')));
+const key = 'a'.repeat(64);
 
-const base = { endpoint: 'https://mcp.example.test/mcp', authType: 'bearer', clientId: '', password: '', bearerToken: 'synthetic-token', folderId: 'folder-"1\n', folderName: 'Docs', access: 'readonly' };
-
-test('share prompt targets one folder without chat tools', () => {
+test('share prompt is the original seed sentence with only the share URL', () => {
+  const url = shareUrl('https://x.trycloudflare.com/mcp', 'folder-1', key);
+  assert.equal(url, `https://x.trycloudflare.com/mcp/share/folder-1/${key}`);
+  assert.equal(buildSharePrompt(url, 'zh-CN'), `请连接我的工具 ${url} 。快速连接这个 sandbox 的 MCP（URL），明确使用规则，熟悉可用工具，做好处理接下来一系列操作的准备。工具在 MCP 内部，而非你的客户端内部，连上后使用，然后等待信息。`);
   for (const locale of ['en', 'zh-CN', 'zh-TW', 'ja']) {
-    const text = buildSharePrompt(base, locale);
-    assert.match(text, /https:\/\/mcp\.example\.test\/mcp/);
-    assert.match(text, /Authorization: Bearer synthetic-token/);
-    assert.match(text, /switch_workspace_folder/);
-    assert.doesNotMatch(text, /chat_open|chat_wait|seed_/);
-    const start = text.indexOf('{"folder_id"');
-    const end = text.indexOf('}', start + 14) + 1;
-    assert.deepEqual(JSON.parse(text.slice(start, end)), { folder_id: 'folder-"1\n' });
-    assert.ok(text.length < (locale.startsWith('zh') ? 280 : 480), `${locale} share prompt should stay short`);
+    const text = buildSharePrompt(url, locale);
+    assert.ok(text.includes(url));
+    assert.doesNotMatch(text, /Authorization|Bearer|OAuth|switch_workspace_folder|folder_id|只读|Read-only/);
   }
 });
 
-test('access mode changes only the permission rule', () => {
-  const readonly = buildSharePrompt(base, 'zh-CN');
-  const full = buildSharePrompt({ ...base, access: 'full' }, 'zh-CN');
-  assert.match(readonly, /只读/);
-  assert.doesNotMatch(full, /只读/);
-  assert.match(full, /^请连接我的工具 https:/);
-  assert.match(full, /工具在 MCP 内部，而非你的客户端内部/);
-});
-
-test('oauth and no-auth connections render the right credential line', () => {
-  const oauth = buildSharePrompt({ ...base, authType: 'oauth', clientId: 'client-1', password: 'pw-1', bearerToken: '' }, 'en');
-  assert.match(oauth, /Client ID client-1/);
-  assert.match(oauth, /pw-1/);
-  assert.match(oauth, /PKCE/);
-  assert.doesNotMatch(oauth, /Bearer synthetic/);
-  const none = buildSharePrompt({ ...base, authType: 'none', bearerToken: '' }, 'en');
-  assert.doesNotMatch(none, /Authorization|OAuth/);
-});
-
-test('invalid endpoints and missing folders are rejected', () => {
-  assert.throws(() => buildSharePrompt({ ...base, endpoint: 'not a url' }, 'en'));
-  assert.throws(() => buildSharePrompt({ ...base, endpoint: 'ftp://x.test/mcp' }, 'en'));
-  assert.throws(() => buildSharePrompt({ ...base, endpoint: 'https://user:pw@x.test/mcp' }, 'en'));
-  assert.throws(() => buildSharePrompt({ ...base, folderId: '' }, 'en'));
+test('share URL keeps a configured path prefix and rejects unsafe input', () => {
+  assert.equal(shareUrl('https://host.test/clients/a/mcp/', 'f', key), `https://host.test/clients/a/mcp/share/f/${key}`);
+  assert.equal(shareUrl('http://127.0.0.1:8765/mcp', 'f', key), `http://127.0.0.1:8765/mcp/share/f/${key}`);
+  for (const [endpoint, folder, value] of [
+    ['http://host.test/mcp', 'f', key],
+    ['https://host.test/other', 'f', key],
+    ['https://user:pw@host.test/mcp', 'f', key],
+    ['https://host.test/mcp?x=1', 'f', key],
+    ['https://host.test/mcp', '../x', key],
+    ['https://host.test/mcp', 'f', 'short'],
+    ['not a url', 'f', key],
+  ]) assert.throws(() => shareUrl(endpoint, folder, value), `${endpoint} ${folder} ${value}`);
 });
 
 test('public endpoint detection rejects loopback and private hosts', () => {
@@ -65,9 +48,10 @@ test('project navigator places the share button before the details menu', () => 
   assert.match(source, /<ShareWorkspaceDialog workspace=\{sharedProfile\}/);
 });
 
-test('share dialog selects a real folder and refuses stopped or credential-less runtimes', () => {
+test('share dialog uses server share links, not the global credential', () => {
   const source = read('../src/lib/components/chat/ShareWorkspaceDialog.svelte');
-  assert.match(source, /folderId = \$state\(untrack\(\(\) => workspaceFolders\(workspace\)\[0\]\?\.id/);
-  assert.match(source, /status\.state !== 'running'/);
-  assert.match(source, /share\.missingAuth/);
+  assert.match(source, /action: 'share_create', access/);
+  assert.match(source, /action: 'share_revoke'/);
+  assert.match(source, /runtime\.state !== 'running'/);
+  assert.doesNotMatch(source, /loadMcpAuthSecrets|bearer_token|oauth_password/);
 });

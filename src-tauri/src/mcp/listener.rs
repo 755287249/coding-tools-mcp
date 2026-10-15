@@ -2,6 +2,7 @@ pub(crate) mod gateway;
 mod lifecycle;
 mod routes;
 mod seeds;
+mod share;
 
 use std::convert::Infallible;
 use std::future::Future;

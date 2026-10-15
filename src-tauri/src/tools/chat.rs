@@ -19,6 +19,8 @@ mod questions;
 pub(crate) mod schedules;
 #[path = "chat_seeds.rs"]
 pub(crate) mod seeds;
+#[path = "chat_share.rs"]
+pub(crate) mod share;
 use super::workspace::WorkspaceError;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -814,6 +816,9 @@ fn ui_unlocked(root: &Path, args: &Value) -> Result<Value> {
     }
     if action.starts_with("seed_") {
         return seeds::ui(root, args);
+    }
+    if action.starts_with("share_") {
+        return share::ui(root, args);
     }
     if action.starts_with("discussion_") {
         return discussion::action(root, args, None);
